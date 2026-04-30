@@ -615,6 +615,23 @@ impl MemoryServer {
         let secrets = load_unlocked_api_key_secrets(self)?;
         Ok(self.llm.set_provider_secrets(secrets))
     }
+
+    /// Clone the foundry maintenance sender so external supervisors
+    /// (e.g. the multi-DB FoundryScheduler) can re-inject jobs into the
+    /// same in-process worker that handles enrichment-driven enqueues.
+    pub(crate) fn foundry_tx_clone(&self) -> mpsc::Sender<FoundryMaintenanceItem> {
+        self.foundry_tx.clone()
+    }
+
+    /// Path to this server's global memory DB (canonicalized at boot).
+    pub(crate) fn global_db_path_buf(&self) -> PathBuf {
+        (*self.global_db_path).clone()
+    }
+
+    /// Path to this server's project memory DB, when one is bound.
+    pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
+        self.project_db_path.as_ref().map(|p| (**p).clone())
+    }
 }
 
 // Enrichment batcher methods are in enrichment.rs

@@ -2435,10 +2435,20 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| "<unknown>".to_string())
             );
         } else {
+            // PR-4: previously this branch *disabled* the auto-detected
+            // project DB to avoid mixed project context. With the multi-DB
+            // FoundryScheduler in place, all manifest DBs receive foundry
+            // coverage equally, so we keep the auto-detected project but
+            // surface a clear warning so the operator knows the daemon's
+            // bound project follows whichever cwd it was launched from.
             eprintln!(
-                "Daemon mode: auto-detected project DB disabled to avoid mixed project context. Use --project-db PATH to opt into single-project daemon mode."
+                "Daemon mode: auto-detected project DB {} retained (multi-DB scheduler is active). \
+                 Use --project-db PATH to pin a specific project, or unset to run global-only.",
+                project_db_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string())
             );
-            project_db_path = None;
         }
     }
 
@@ -2847,6 +2857,50 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // In daemon mode, project DB auto-detection is disabled above to avoid
         // mixed project context. Users can still opt into single-project mode
         // via explicit --project-db.
+
+        // PR-4 singleton enforcement: acquire ~/.tachi/daemon.lock (flock +
+        // PID file) before binding the HTTP port so a duplicate daemon
+        // fails fast with a clear error instead of racing the first one
+        // for DB writes. The guard is held for the whole daemon lifetime
+        // and Drop releases the flock + unlinks the file.
+        let lock_path = app_home.join("daemon.lock");
+        let _daemon_lock = match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
+            Ok(g) => {
+                eprintln!(
+                    "[daemon] acquired singleton lock at {} (pid {})",
+                    lock_path.display(),
+                    std::process::id()
+                );
+                g
+            }
+            Err(e) => {
+                eprintln!(
+                    "[daemon] refusing to start: another tachi daemon already holds {} ({e})",
+                    lock_path.display()
+                );
+                return Err(format!("tachi daemon singleton lock unavailable: {e}").into());
+            }
+        };
+
+        // PR-4 multi-DB scheduler: periodically scan ~/.tachi/manifest.json
+        // and run a per-DB safety-net poll against foundry_jobs. Re-injects
+        // pending jobs into the existing foundry_tx mpsc channel for
+        // routable scopes (own global/project + named projects), counts
+        // orphans for unroutable manifest entries (dark DBs).
+        let manifest_path = app_home.join("manifest.json");
+        let scheduler = crate::foundry_scheduler::FoundryScheduler::start(
+            manifest_path.clone(),
+            server.foundry_tx_clone(),
+            server.global_db_path_buf(),
+            server.project_db_path_buf(),
+        );
+        eprintln!(
+            "[daemon] foundry scheduler started (manifest={})",
+            manifest_path.display()
+        );
+        // Hold scheduler for the whole daemon lifetime; Drop cancels
+        // the manifest watcher + per-DB workers.
+        let _scheduler = scheduler;
 
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
