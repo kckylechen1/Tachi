@@ -751,8 +751,8 @@ fn daemon_owns_db(db_path: &Path) -> bool {
         Err(_) => return false,
     };
     let abs_str = abs.to_string_lossy().to_string();
-    // -F n: machine-readable, only print name field. -t: pids only with file.
-    // Using -- to terminate options before the path argument.
+    // Using `--` to terminate options before the path argument so paths
+    // beginning with `-` are treated literally.
     let output = Command::new("lsof").arg("--").arg(&abs_str).output();
     match output {
         Ok(o) if o.status.success() => {
@@ -782,9 +782,9 @@ fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
     let entries = fs::read_dir(dir).ok()?;
     for ent in entries.flatten() {
         let name = ent.file_name().to_string_lossy().to_string();
-        // Only the main .db (not its -wal/-shm sidecars) — those go away
-        // together with the parent below.
-        if name.starts_with(&prefix) && name.ends_with(suffix) && !name.ends_with("-wal") && !name.ends_with("-shm") {
+        // `ends_with(".db")` already excludes `.db-wal` / `.db-shm` sidecars
+        // — those go away together with their parent below.
+        if name.starts_with(&prefix) && name.ends_with(suffix) {
             if let Ok(meta) = ent.metadata() {
                 if let Ok(mtime) = meta.modified() {
                     copies.push((mtime, ent.path()));
@@ -803,13 +803,9 @@ fn gc_old_checkpoint_copies(src_path: &Path, keep: usize) -> Option<String> {
         if let Err(e) = fs::remove_file(path) {
             errs.push(format!("rm {}: {e}", path.display()));
         }
-        // Sidecars (best-effort).
-        let mut wal = path.as_os_str().to_owned();
-        wal.push("-wal");
-        let _ = fs::remove_file(PathBuf::from(wal));
-        let mut shm = path.as_os_str().to_owned();
-        shm.push("-shm");
-        let _ = fs::remove_file(PathBuf::from(shm));
+        // Sidecars (best-effort). Reuse the existing `sidecar` helper.
+        let _ = fs::remove_file(sidecar(path, "-wal"));
+        let _ = fs::remove_file(sidecar(path, "-shm"));
     }
     if errs.is_empty() {
         None
