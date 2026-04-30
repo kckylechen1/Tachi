@@ -28,7 +28,7 @@ pub(super) struct FoundryWorkerStats {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct FoundryMaintenanceItem {
+pub(crate) struct FoundryMaintenanceItem {
     pub job: memory_core::FoundryJobSpec,
     pub target_db: DbScope,
     pub named_project: Option<String>,

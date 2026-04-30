@@ -18,6 +18,7 @@ mod doctor_ops;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
+mod foundry_scheduler;
 mod ghost_ops;
 mod graph_state_ops;
 mod handoff_ops;
