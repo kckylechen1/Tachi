@@ -11,6 +11,7 @@ mod clawdoctor;
 mod cli;
 mod cli_client;
 mod copilot_ops;
+mod daemon_lock;
 mod dlq_ops;
 mod doctor;
 mod doctor_ops;
