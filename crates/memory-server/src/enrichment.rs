@@ -189,7 +189,8 @@ impl MemoryServer {
 
                             let path_prefix_owned = match item.foundry_path_prefix.clone() {
                                 Some(p) => p,
-                                None => derive_path_prefix(self, item).unwrap_or_else(|| "/".to_string()),
+                                None => derive_path_prefix(self, item)
+                                    .unwrap_or_else(|| "/".to_string()),
                             };
 
                             if let Err(err) = enqueue_foundry_capture_maintenance(
@@ -235,21 +236,22 @@ fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<St
     let entry = if let Some(name) = item.named_project.as_deref() {
         server.with_named_project_store_read(name, lookup).ok()?
     } else {
-        server.with_store_for_scope_read(item.target_db, lookup).ok()?
+        server
+            .with_store_for_scope_read(item.target_db, lookup)
+            .ok()?
     }?;
     let path = entry.path;
-    if path.is_empty() || path == "/" {
+    if path.is_empty() {
         return Some("/".to_string());
     }
-    // Take the path up to and including the last '/'; foundry path prefixes
-    // are directory-shaped, not file-shaped.
-    if let Some(idx) = path.rfind('/') {
-        if idx == 0 {
-            Some("/".to_string())
-        } else {
-            Some(path[..idx].to_string())
-        }
+
+    let parent = std::path::Path::new(&path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .unwrap_or("");
+    if parent.is_empty() || parent == "." {
+        Some("/".to_string())
     } else {
-        Some(path)
+        Some(parent.to_string())
     }
 }

@@ -8,10 +8,7 @@ use serde_json::json;
 use crate::daemon_lock::DaemonLock;
 use crate::manifest::Manifest;
 
-use super::{
-    backup_db,
-    inventory::resolve_one,
-};
+use super::{backup_db, inventory::resolve_one};
 
 pub async fn run_vacuum_cli(
     db: &str,
@@ -27,7 +24,9 @@ pub async fn run_vacuum_cli(
     let manifest = Manifest::load_or_empty(&manifest_path);
     let entry = match resolve_one(&manifest, db) {
         Some(e) => e,
-        None => return Err(format!("--db '{db}' did not resolve to exactly one manifest DB").into()),
+        None => {
+            return Err(format!("--db '{db}' did not resolve to exactly one manifest DB").into())
+        }
     };
     let path = std::path::PathBuf::from(&entry.path);
 

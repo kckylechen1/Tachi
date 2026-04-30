@@ -21,7 +21,7 @@ use crate::manifest::Manifest;
 
 use super::{
     inventory::{label_for, resolve_one, select_dbs},
-    DbContext, Finding, RepairError, RepairRule, RuleReport,
+    DbContext, Finding, RepairError, RepairExit, RepairRule, RuleReport,
 };
 
 pub struct QuarantineSweep;
@@ -39,13 +39,11 @@ impl RepairRule for QuarantineSweep {
 
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut r = RuleReport::new(self.id(), self.name(), ctx.label.clone());
-        let n: i64 = ctx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE path LIKE '/_quarantine/%'",
-                [],
-                |row| row.get(0),
-            )?;
+        let n: i64 = ctx.conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE path LIKE '/_quarantine/%'",
+            [],
+            |row| row.get(0),
+        )?;
         if n > 0 {
             // Group by expected_db for visibility.
             let mut stmt = ctx.conn.prepare(
@@ -76,7 +74,8 @@ impl RepairRule for QuarantineSweep {
         let mut r = self.dry_run(ctx)?;
         if !r.findings.is_empty() {
             r.errors.push(
-                "use `tachi repair quarantine restore-all --to-db <label> --apply` or `purge`".into(),
+                "use `tachi repair quarantine restore-all --to-db <label> --apply` or `purge`"
+                    .into(),
             );
         }
         Ok(r)
@@ -137,10 +136,7 @@ fn collect_quarantined(manifest: &Manifest) -> Result<Vec<QRow>, Box<dyn std::er
     Ok(out)
 }
 
-pub fn cmd_list(
-    manifest: &Manifest,
-    json_out: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn cmd_list(manifest: &Manifest, json_out: bool) -> Result<(), Box<dyn std::error::Error>> {
     let rows = collect_quarantined(manifest)?;
     if json_out {
         let body = json!({
@@ -159,7 +155,10 @@ pub fn cmd_list(
         return Ok(());
     }
     if rows.is_empty() {
-        println!("[OK] no quarantined rows found across {} manifest DB(s).", manifest.dbs.len());
+        println!(
+            "[OK] no quarantined rows found across {} manifest DB(s).",
+            manifest.dbs.len()
+        );
         return Ok(());
     }
     println!("Quarantined rows: {}", rows.len());
@@ -210,8 +209,8 @@ pub fn cmd_restore(
         }
         return Ok(());
     }
-    let conn = Connection::open(&target.db_path)?;
-    let tx = conn.unchecked_transaction()?;
+    let mut conn = Connection::open(&target.db_path)?;
+    let tx = conn.transaction()?;
     tx.execute(
         "UPDATE memories
          SET path = ?1,
@@ -219,10 +218,12 @@ pub fn cmd_restore(
          WHERE id = ?2",
         params![target.original_path, id],
     )?;
-    let _ = tx.execute(
+    if let Err(e) = tx.execute(
         "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
         params![target.original_path, id],
-    );
+    ) {
+        eprintln!("warning: failed to update FTS for restored quarantine row {id}: {e}");
+    }
     tx.commit()?;
     if json_out {
         println!("{}", serde_json::to_string_pretty(&action)?);
@@ -244,10 +245,9 @@ pub fn cmd_restore_all(
     let dest_entry = match resolve_one(manifest, to_db) {
         Some(e) => e,
         None => {
-            return Err(format!(
-                "destination '{to_db}' did not resolve to a unique manifest DB"
+            return Err(
+                format!("destination '{to_db}' did not resolve to a unique manifest DB").into(),
             )
-            .into())
         }
     };
     let dest_canonical = std::fs::canonicalize(&dest_entry.path)
@@ -278,11 +278,13 @@ pub fn cmd_restore_all(
     if moves.is_empty() {
         let msg = format!(
             "[OK] no quarantined rows match expected_db={} (resolved={})",
-            to_db,
-            dest_canonical
+            to_db, dest_canonical
         );
         if json_out {
-            println!("{}", json!({"moved": 0, "dest": dest_entry.path, "apply": apply, "note": msg}));
+            println!(
+                "{}",
+                json!({"moved": 0, "dest": dest_entry.path, "apply": apply, "note": msg})
+            );
         } else {
             println!("{msg}");
         }
@@ -323,7 +325,7 @@ pub fn cmd_restore_all(
     }
 
     // ── apply ──
-    let dest_conn = Connection::open(&dest_entry.path)?;
+    let mut dest_conn = Connection::open(&dest_entry.path)?;
     let mut moved = 0usize;
     let mut errors: Vec<String> = Vec::new();
 
@@ -335,7 +337,7 @@ pub fn cmd_restore_all(
     }
 
     for (src_path, group) in by_src {
-        let src_conn = match Connection::open(&src_path) {
+        let mut src_conn = match Connection::open(&src_path) {
             Ok(c) => c,
             Err(e) => {
                 errors.push(format!("open src {}: {e}", src_path.display()));
@@ -343,7 +345,7 @@ pub fn cmd_restore_all(
             }
         };
         for q in group {
-            if let Err(e) = move_one(&src_conn, &dest_conn, q) {
+            if let Err(e) = move_one(&mut src_conn, &mut dest_conn, q) {
                 errors.push(format!("move {}: {e}", q.id));
             } else {
                 moved += 1;
@@ -369,18 +371,18 @@ pub fn cmd_restore_all(
         }
     }
     if !errors.is_empty() {
-        std::process::exit(2);
+        return Err(Box::new(RepairExit::new(2)));
     }
     Ok(())
 }
 
 /// Cross-DB physical move of one quarantined row.
 /// Strategy: SELECT FROM source → INSERT into dest → verify → DELETE source.
-/// On any failure, dest insert and source delete are both rolled back via
-/// per-DB transactions.
+/// This is intentionally loss-safe, not cross-DB atomic: a crash after the
+/// destination commit but before the source delete can duplicate a row.
 fn move_one(
-    src_conn: &Connection,
-    dest_conn: &Connection,
+    src_conn: &mut Connection,
+    dest_conn: &mut Connection,
     q: &QRow,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Pull all known columns from the source row. Use a flexible approach:
@@ -401,10 +403,7 @@ fn move_one(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let select_sql = format!(
-        "SELECT {} FROM memories WHERE id = ?1",
-        col_list
-    );
+    let select_sql = format!("SELECT {} FROM memories WHERE id = ?1", col_list);
     let mut stmt = src_conn.prepare(&select_sql)?;
     let values: Vec<rusqlite::types::Value> = stmt.query_row([&q.id], |row| {
         let mut v = Vec::with_capacity(cols.len());
@@ -413,6 +412,7 @@ fn move_one(
         }
         Ok(v)
     })?;
+    drop(stmt);
 
     // Restore original_path and strip the quarantine block from metadata BEFORE insert.
     let mut values = values;
@@ -434,7 +434,7 @@ fn move_one(
     }
 
     // Dest transaction: insert + verify count.
-    let dest_tx = dest_conn.unchecked_transaction()?;
+    let dest_tx = dest_conn.transaction()?;
     let insert_sql = format!(
         "INSERT INTO memories ({}) VALUES ({})",
         col_list, placeholders
@@ -446,9 +446,18 @@ fn move_one(
         })
         .unwrap_or_else(|| q.id.clone());
     dest_tx.execute(&insert_sql, params_from_iter(values.iter()))?;
+    dest_tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&id_value])?;
+    dest_tx.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         SELECT id, path, summary, text,
+                trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '\"', ' ')),
+                trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '\"', ' '))
+         FROM memories WHERE id = ?1",
+        params![&id_value],
+    )?;
     let n: i64 = dest_tx.query_row(
         "SELECT COUNT(*) FROM memories WHERE id = ?1",
-        params![id_value],
+        params![&id_value],
         |row| row.get(0),
     )?;
     if n != 1 {
@@ -457,9 +466,14 @@ fn move_one(
     dest_tx.commit()?;
 
     // Source transaction: delete.
-    let src_tx = src_conn.unchecked_transaction()?;
+    let src_tx = src_conn.transaction()?;
     src_tx.execute("DELETE FROM memories WHERE id = ?1", params![&q.id])?;
-    let _ = src_tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]);
+    if let Err(e) = src_tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]) {
+        eprintln!(
+            "warning: failed to delete FTS row for moved quarantine row {}: {e}",
+            q.id
+        );
+    }
     src_tx.commit()?;
 
     Ok(())
@@ -486,7 +500,10 @@ pub fn cmd_purge(
             older_than_days, cutoff_iso
         );
         if json_out {
-            println!("{}", json!({"purged": 0, "cutoff": cutoff_iso, "apply": apply}));
+            println!(
+                "{}",
+                json!({"purged": 0, "cutoff": cutoff_iso, "apply": apply})
+            );
         } else {
             println!("{msg}");
         }
@@ -519,17 +536,25 @@ pub fn cmd_purge(
     }
     let mut purged = 0usize;
     for (db_path, group) in by_src {
-        let conn = Connection::open(&db_path)?;
-        let tx = conn.unchecked_transaction()?;
+        let mut conn = Connection::open(&db_path)?;
+        let tx = conn.transaction()?;
         for q in group {
             tx.execute("DELETE FROM memories WHERE id = ?1", params![&q.id])?;
-            let _ = tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]);
+            if let Err(e) = tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![&q.id]) {
+                eprintln!(
+                    "warning: failed to delete FTS row for purged quarantine row {}: {e}",
+                    q.id
+                );
+            }
             purged += 1;
         }
         tx.commit()?;
     }
     if json_out {
-        println!("{}", json!({"purged": purged, "cutoff": cutoff_iso, "apply": true}));
+        println!(
+            "{}",
+            json!({"purged": purged, "cutoff": cutoff_iso, "apply": true})
+        );
     } else {
         println!("[OK] purged {} quarantined row(s).", purged);
     }

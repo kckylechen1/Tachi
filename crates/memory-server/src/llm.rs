@@ -606,9 +606,7 @@ impl LlmClient {
         {
             Ok(summary) => Ok(summary),
             Err(e) => {
-                eprintln!(
-                    "[llm] generate_summary fell back to truncation after error: {e}"
-                );
+                eprintln!("[llm] generate_summary fell back to truncation after error: {e}");
                 // Fallback to truncation on error
                 Ok(text.chars().take(100).collect())
             }

@@ -229,7 +229,10 @@ mod tests {
     fn normalize_lowercases_only_first_segment() {
         assert_eq!(normalize_path("/Wiki/Foo"), "/wiki/Foo");
         assert_eq!(normalize_path("/HANDOFF/Agent-X"), "/handoff/Agent-X");
-        assert_eq!(normalize_path("/AGENTS/CamelCase/Sub"), "/agents/CamelCase/Sub");
+        assert_eq!(
+            normalize_path("/AGENTS/CamelCase/Sub"),
+            "/agents/CamelCase/Sub"
+        );
     }
 
     #[test]
@@ -291,6 +294,9 @@ mod tests {
         assert_eq!(standardize_handoff_path(None), "/handoff/unknown");
         assert_eq!(standardize_handoff_path(Some("")), "/handoff/unknown");
         assert_eq!(standardize_handoff_path(Some("   ")), "/handoff/unknown");
-        assert_eq!(standardize_handoff_path(Some("agent-x")), "/handoff/agent-x");
+        assert_eq!(
+            standardize_handoff_path(Some("agent-x")),
+            "/handoff/agent-x"
+        );
     }
 }

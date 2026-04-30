@@ -75,31 +75,46 @@ pub fn run_data_migrations(
 
 fn migrate_v1_path_normalize(conn: &mut Connection) -> Result<usize, MemoryError> {
     let tx = conn.transaction()?;
-    let rows: Vec<(String, String)> = {
-        let mut stmt = tx.prepare("SELECT id, path FROM memories")?;
-        let iter = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for r in iter {
-            out.push(r?);
-        }
-        out
-    };
-
     let mut count = 0usize;
-    for (id, path) in rows {
-        let normalized = path_router::normalize_path(&path);
-        if normalized != path {
-            tx.execute(
-                "UPDATE memories SET path = ?1 WHERE id = ?2",
-                params![normalized, id],
-            )?;
-            count += 1;
+    let mut after_id = String::new();
+    loop {
+        let rows = fetch_id_path_batch(&tx, &after_id, 500)?;
+        if rows.is_empty() {
+            break;
+        }
+        after_id = rows.last().map(|(id, _)| id.clone()).unwrap_or(after_id);
+        for (id, path) in rows {
+            let normalized = path_router::normalize_path(&path);
+            if normalized != path {
+                tx.execute(
+                    "UPDATE memories SET path = ?1 WHERE id = ?2",
+                    params![normalized, id],
+                )?;
+                count += 1;
+            }
         }
     }
     tx.commit()?;
     Ok(count)
+}
+
+fn fetch_id_path_batch(
+    conn: &Connection,
+    after_id: &str,
+    limit: usize,
+) -> Result<Vec<(String, String)>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM memories
+         WHERE id > ?1
+         ORDER BY id
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![after_id, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 // ─── v2: normalize scope (defensive) ──────────────────────────────────────────
@@ -145,50 +160,7 @@ fn migrate_v4_quarantine_cross_db(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| current_db_path.display().to_string());
 
-    // Pull candidates: rows with metadata.provenance.db_path set to something
-    // other than this DB's canonical path.
-    let candidates: Vec<(String, String, String, String)> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, path, metadata,
-                    COALESCE(json_extract(metadata, '$.provenance.db_path'), '')
-             FROM memories
-             WHERE metadata IS NOT NULL
-               AND json_extract(metadata, '$.provenance.db_path') IS NOT NULL",
-        )?;
-        let iter = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for r in iter {
-            out.push(r?);
-        }
-        out
-    };
-
-    // Filter to genuine mismatches (skip rows already under /_quarantine).
-    let mut to_quarantine: Vec<(String, String, String, String)> = Vec::new();
-    for (id, path, metadata, prov_db_path) in candidates {
-        if path.starts_with("/_quarantine") {
-            continue;
-        }
-        if prov_db_path.is_empty() {
-            continue;
-        }
-        let prov_canonical = std::fs::canonicalize(&prov_db_path)
-            .ok()
-            .map(|p| p.display().to_string())
-            .unwrap_or(prov_db_path.clone());
-        if prov_canonical != canonical_self {
-            to_quarantine.push((id, path, metadata, prov_canonical));
-        }
-    }
-
-    let candidate_count = to_quarantine.len();
+    let candidate_count = count_cross_db_candidates(conn, &canonical_self)?;
     if candidate_count == 0 {
         return Ok((0, false));
     }
@@ -206,47 +178,124 @@ fn migrate_v4_quarantine_cross_db(
     let detected_at = now_utc_iso();
     let tx = conn.transaction()?;
     let mut moved = 0usize;
-    for (id, original_path, metadata_str, expected_db) in to_quarantine {
-        let mut meta: serde_json::Value = serde_json::from_str(&metadata_str)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        if !meta.is_object() {
-            meta = serde_json::json!({});
+    let mut after_id = String::new();
+    loop {
+        let rows = fetch_cross_db_candidate_batch(&tx, &after_id, 500)?;
+        if rows.is_empty() {
+            break;
         }
-        let new_path = format!(
-            "/_quarantine/cross-db{}",
-            if original_path.starts_with('/') {
-                original_path.clone()
-            } else {
-                format!("/{original_path}")
+        after_id = rows
+            .last()
+            .map(|(id, _, _, _)| id.clone())
+            .unwrap_or(after_id);
+        for (id, original_path, metadata_str, prov_db_path) in rows {
+            if let Some(expected_db) = mismatched_provenance_db(&prov_db_path, &canonical_self) {
+                let mut meta: serde_json::Value =
+                    serde_json::from_str(&metadata_str).unwrap_or_else(|_| serde_json::json!({}));
+                if !meta.is_object() {
+                    meta = serde_json::json!({});
+                }
+                let original_suffix = if original_path.starts_with('/') {
+                    original_path.clone()
+                } else {
+                    format!("/{original_path}")
+                };
+                let new_path = format!("/_quarantine/cross-db{original_suffix}");
+                let q = serde_json::json!({
+                    "reason": "cross_db_pollution",
+                    "original_path": original_path,
+                    "detected_at": detected_at,
+                    "expected_db": expected_db,
+                    "actual_db": canonical_self,
+                });
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert("quarantine".into(), q);
+                }
+                let new_meta = serde_json::to_string(&meta)?;
+                tx.execute(
+                    "UPDATE memories SET path = ?1, metadata = ?2 WHERE id = ?3",
+                    params![new_path, new_meta, id],
+                )?;
+                if let Err(e) = tx.execute(
+                    "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
+                    params![&format!("/_quarantine/cross-db{original_suffix}"), id],
+                ) {
+                    eprintln!("warning: failed to update FTS for quarantined row {id}: {e}");
+                }
+                moved += 1;
             }
-        );
-        let q = serde_json::json!({
-            "reason": "cross_db_pollution",
-            "original_path": original_path,
-            "detected_at": detected_at,
-            // expected_db: where provenance says the row should live
-            // actual_db:   the DB file we're currently migrating (where the
-            //              polluted row was found)
-            "expected_db": expected_db,
-            "actual_db": canonical_self,
-        });
-        if let Some(obj) = meta.as_object_mut() {
-            obj.insert("quarantine".into(), q);
         }
-        let new_meta = serde_json::to_string(&meta)?;
-        tx.execute(
-            "UPDATE memories SET path = ?1, metadata = ?2 WHERE id = ?3",
-            params![new_path, new_meta, id],
-        )?;
-        // Refresh FTS path for accuracy (best-effort).
-        let _ = tx.execute(
-            "UPDATE memories_fts SET path = ?1 WHERE id = ?2",
-            params![&format!("/_quarantine/cross-db{}", original_path), id],
-        );
-        moved += 1;
     }
     tx.commit()?;
     Ok((moved, false))
+}
+
+fn count_cross_db_candidates(
+    conn: &Connection,
+    canonical_self: &str,
+) -> Result<usize, MemoryError> {
+    let mut count = 0usize;
+    let mut after_id = String::new();
+    loop {
+        let rows = fetch_cross_db_candidate_batch(conn, &after_id, 500)?;
+        if rows.is_empty() {
+            break;
+        }
+        after_id = rows
+            .last()
+            .map(|(id, _, _, _)| id.clone())
+            .unwrap_or(after_id);
+        for (_, _, _, prov_db_path) in rows {
+            if mismatched_provenance_db(&prov_db_path, canonical_self).is_some() {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn fetch_cross_db_candidate_batch(
+    conn: &Connection,
+    after_id: &str,
+    limit: usize,
+) -> Result<Vec<(String, String, String, String)>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, metadata,
+                COALESCE(json_extract(metadata, '$.provenance.db_path'), '')
+         FROM memories
+         WHERE id > ?1
+           AND path NOT LIKE '/_quarantine%'
+           AND metadata IS NOT NULL
+           AND json_extract(metadata, '$.provenance.db_path') IS NOT NULL
+         ORDER BY id
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![after_id, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn mismatched_provenance_db(prov_db_path: &str, canonical_self: &str) -> Option<String> {
+    if prov_db_path.is_empty() {
+        return None;
+    }
+    let prov_canonical = std::fs::canonicalize(prov_db_path)
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| prov_db_path.to_string());
+    if prov_canonical != canonical_self {
+        Some(prov_canonical)
+    } else {
+        None
+    }
 }
 
 // ─── sentinel helpers ─────────────────────────────────────────────────────────
@@ -290,13 +339,7 @@ mod tests {
         (conn, tmp)
     }
 
-    fn insert_row(
-        conn: &Connection,
-        id: &str,
-        path: &str,
-        scope: &str,
-        metadata: &str,
-    ) {
+    fn insert_row(conn: &Connection, id: &str, path: &str, scope: &str, metadata: &str) {
         conn.execute(
             "INSERT INTO memories
               (id, path, summary, text, importance, timestamp, category, topic,

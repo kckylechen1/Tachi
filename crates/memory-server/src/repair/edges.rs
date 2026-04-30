@@ -73,9 +73,7 @@ impl RepairRule for OrphanRefs {
             if !exists {
                 continue;
             }
-            let sql = format!(
-                "DELETE FROM {table} WHERE {col} NOT IN (SELECT id FROM memories)"
-            );
+            let sql = format!("DELETE FROM {table} WHERE {col} NOT IN (SELECT id FROM memories)");
             let n = match tx.execute(&sql, []) {
                 Ok(v) => v,
                 Err(_) => continue,

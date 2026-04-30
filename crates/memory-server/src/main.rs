@@ -41,11 +41,11 @@ mod provenance;
 mod repair;
 mod rescue;
 mod sandbox_ops;
-mod status_ops;
 mod server_handler;
 mod server_methods;
 mod shared_defs;
 mod skill_chain_ops;
+mod status_ops;
 mod tool_params;
 mod utils;
 mod vault_crypto;
@@ -89,10 +89,9 @@ use crate::hub_helpers::{
 use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
-    handle_hub_register,
-    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
-    handle_run_skill, handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
-    handle_vc_register, handle_vc_resolve,
+    handle_hub_register, handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled,
+    handle_hub_stats, handle_run_skill, handle_skill_evolve, handle_tachi_audit_log,
+    handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
     gc_expired_kanban_cards, handle_check_inbox, handle_post_card, handle_update_card,
@@ -128,8 +127,7 @@ use crate::sandbox_ops::{
 };
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_entry_with_enrichment, slim_l0_rule, slim_search_result,
-    DeadLetter, DLQ_MAX_ENTRIES,
-    DLQ_TTL_SECS,
+    DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
@@ -1809,6 +1807,9 @@ impl MemoryServer {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = bootstrap::run(cli) {
+        if let Some(exit) = e.downcast_ref::<repair::RepairExit>() {
+            std::process::exit(exit.code());
+        }
         eprintln!("Fatal: {e}");
         std::process::exit(1);
     }

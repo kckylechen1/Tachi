@@ -128,11 +128,7 @@ impl ReportBuilder {
     }
 
     fn render_json(&self) -> i32 {
-        let total_findings: usize = self
-            .rule_reports
-            .iter()
-            .map(|r| r.finding_total())
-            .sum();
+        let total_findings: usize = self.rule_reports.iter().map(|r| r.finding_total()).sum();
         let total_applied: usize = self.rule_reports.iter().map(|r| r.applied).sum();
         let total_errors: usize = self
             .rule_reports
@@ -188,7 +184,12 @@ impl ReportBuilder {
                 total_findings += n;
 
                 if !r.errors.is_empty() {
-                    println!("  [X] {} ({}): {}", r.rule_id, r.rule_name, r.errors.join("; "));
+                    println!(
+                        "  [X] {} ({}): {}",
+                        r.rule_id,
+                        r.rule_name,
+                        r.errors.join("; ")
+                    );
                     continue;
                 }
                 if r.skipped > 0 {
@@ -248,12 +249,7 @@ impl RuleReport {
     }
 }
 
-fn compute_exit(
-    apply_mode: bool,
-    findings: usize,
-    applied: usize,
-    errors: usize,
-) -> i32 {
+fn compute_exit(apply_mode: bool, findings: usize, applied: usize, errors: usize) -> i32 {
     if errors > 0 {
         return 2;
     }

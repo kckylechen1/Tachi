@@ -52,7 +52,8 @@ fn check(ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
     if !quick_ok {
         detail["quick_check"] = json!(quick.iter().take(20).cloned().collect::<Vec<_>>());
     }
-    r.findings.push(Finding::new("integrity_fail", 1).with_detail(detail));
+    r.findings
+        .push(Finding::new("integrity_fail", 1).with_detail(detail));
     Ok(r)
 }
 

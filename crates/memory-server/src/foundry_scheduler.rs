@@ -208,19 +208,13 @@ impl FoundryScheduler {
     /// Capture a read-only snapshot for `tachi status`.
     #[allow(dead_code)]
     pub fn snapshot(&self) -> SchedulerSnapshot {
-        let map = self
-            .workers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let map = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         let mut workers = Vec::with_capacity(map.len());
         let mut orphan_dbs_total: u64 = 0;
         let mut orphan_jobs_total: u64 = 0;
         for handle in map.values() {
             let polls = handle.metrics.polls_total.load(Ordering::Relaxed);
-            let reinj = handle
-                .metrics
-                .jobs_reinjected_total
-                .load(Ordering::Relaxed);
+            let reinj = handle.metrics.jobs_reinjected_total.load(Ordering::Relaxed);
             let orph = handle.metrics.jobs_orphan_total.load(Ordering::Relaxed);
             let last_poll = handle.metrics.last_poll_unix_secs.load(Ordering::Relaxed);
             let last_pending = handle.metrics.last_pending_count.load(Ordering::Relaxed);
@@ -258,10 +252,7 @@ impl FoundryScheduler {
     #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.cancel_root.cancel();
-        let map = self
-            .workers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let map = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         for handle in map.values() {
             handle.cancel.cancel();
         }
@@ -455,8 +446,7 @@ async fn run_one_poll(
                 .ok_or_else(|| format!("non-utf8 db path: {}", path_owned.display()))?;
             let store = MemoryStore::open_with_label(path_str, &label_owned)
                 .map_err(|e| format!("open {}: {e}", path_owned.display()))?;
-            load_pending_foundry_jobs(store.connection())
-                .map_err(|e| format!("load pending: {e}"))
+            load_pending_foundry_jobs(store.connection()).map_err(|e| format!("load pending: {e}"))
         })
         .await
         .unwrap_or_else(|e| Err(format!("poll join error: {e}")));
@@ -510,9 +500,7 @@ async fn run_one_poll(
                 metrics
                     .jobs_reinjected_total
                     .fetch_add(sent, Ordering::Relaxed);
-                eprintln!(
-                    "[foundry-scheduler:{label}] re-injected {sent} pending job(s)"
-                );
+                eprintln!("[foundry-scheduler:{label}] re-injected {sent} pending job(s)");
             }
         }
         Route::Orphan(reason) => {

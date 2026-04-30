@@ -86,7 +86,7 @@ pub fn canonicalize_db_path(p: &Path) -> PathBuf {
 ///   * filename is `feature-daemon-global.db` AND path contains `vitejs` or
 ///     `zread` (belt-and-suspenders for the vite zread fixture pattern)
 pub fn should_skip_path(p: &Path) -> Option<&'static str> {
-    let path_str = p.to_string_lossy();
+    let path_str = p.to_string_lossy().replace('\\', "/");
     let file_name = p
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -309,7 +309,6 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
     }
 
     // 5. Sanity guard.
-    let kept = by_canon.len();
     if report.entries_before > 0 && removed_total * 2 > report.entries_before {
         report.aborted = true;
         report.abort_reason = Some(format!(
@@ -328,16 +327,11 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
 
     // Re-assemble in original-encounter order; sort by path for stable output
     // (matches populate_from_doctor's behaviour).
-    let mut new_dbs: Vec<DbEntry> = order
-        .into_iter()
-        .filter_map(|k| by_canon.remove(&k))
-        .collect();
+    let mut new_dbs: Vec<DbEntry> = by_canon.into_values().collect();
     new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
     manifest.dbs = new_dbs;
     manifest.generated_at = Utc::now().to_rfc3339();
     report.entries_after = manifest.dbs.len();
-    let _ = kept; // silence unused on some configs
-
     // 6. Atomic save.
     manifest.save(manifest_path)?;
     Ok(report)
@@ -499,10 +493,7 @@ impl Manifest {
             by_canon.insert(canon.clone(), entry);
             order.push(canon);
         }
-        let mut new_dbs: Vec<DbEntry> = order
-            .into_iter()
-            .filter_map(|k| by_canon.remove(&k))
-            .collect();
+        let mut new_dbs: Vec<DbEntry> = by_canon.into_values().collect();
         new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
         self.dbs = new_dbs;
         self.generated_at = Utc::now().to_rfc3339();
@@ -1132,7 +1123,10 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let real_canon = canonicalize_db_path(&real);
         let link_canon = canonicalize_db_path(&link);
-        assert_eq!(real_canon, link_canon, "symlink alias must canonicalize to target");
+        assert_eq!(
+            real_canon, link_canon,
+            "symlink alias must canonicalize to target"
+        );
     }
 
     #[test]
@@ -1150,26 +1144,19 @@ mod tests {
         ))
         .is_some());
         // node_modules + .test.db
-        assert!(should_skip_path(Path::new(
-            "/repo/node_modules/foo/tests/bar.db"
-        ))
-        .is_some());
+        assert!(should_skip_path(Path::new("/repo/node_modules/foo/tests/bar.db")).is_some());
         // *.test.db anywhere
         assert!(should_skip_path(Path::new("/some/path/foo.test.db")).is_some());
         // *.fixture.db anywhere
         assert!(should_skip_path(Path::new("/some/path/foo.fixture.db")).is_some());
         // vite zread belt-and-suspenders
-        assert!(should_skip_path(Path::new(
-            "/x/zread/.cache/feature-daemon-global.db"
-        ))
-        .is_some());
+        assert!(should_skip_path(Path::new("/x/zread/.cache/feature-daemon-global.db")).is_some());
         // Real-looking Tachi DB must NOT be skipped.
         assert!(should_skip_path(Path::new("/Users/me/.tachi/global/memory.db")).is_none());
         assert!(should_skip_path(Path::new("/repo/.tachi/memory.db")).is_none());
-        assert!(should_skip_path(Path::new(
-            "/Users/me/.openclaw/agents/x/memory/memory.db"
-        ))
-        .is_none());
+        assert!(
+            should_skip_path(Path::new("/Users/me/.openclaw/agents/x/memory/memory.db")).is_none()
+        );
     }
 
     #[test]
@@ -1196,10 +1183,7 @@ mod tests {
         conn.execute_batch("CREATE TABLE chunks (id TEXT PRIMARY KEY);")
             .unwrap();
         drop(conn);
-        assert_eq!(
-            classify_db_schema(&chunks_path),
-            SchemaKind::OpenclawChunks
-        );
+        assert_eq!(classify_db_schema(&chunks_path), SchemaKind::OpenclawChunks);
 
         // Empty SQLite file → Unknown.
         let empty_path = dir.path().join("empty.db");
@@ -1281,10 +1265,10 @@ mod tests {
             comment: String::new(),
             dbs: vec![
                 mk(&good, "tachi"),
-                mk(&alias, "tachi"),     // dup-of-good
-                mk(&fixture, "tachi"),   // fixture → drop
-                mk(&chunks, "tachi"),    // mis-tagged → fix
-                mk(&missing, "tachi"),   // missing → drop
+                mk(&alias, "tachi"),   // dup-of-good
+                mk(&fixture, "tachi"), // fixture → drop
+                mk(&chunks, "tachi"),  // mis-tagged → fix
+                mk(&missing, "tachi"), // missing → drop
             ],
         };
         manifest.save(&manifest_path).unwrap();
@@ -1292,7 +1276,10 @@ mod tests {
         // Sanity guard: this would remove >50% (3 of 5). Confirm the guard
         // trips and the manifest is preserved untouched.
         let report = gc_manifest(&manifest_path).unwrap();
-        assert!(report.aborted, "5-entry manifest with 3 removals must trip sanity guard");
+        assert!(
+            report.aborted,
+            "5-entry manifest with 3 removals must trip sanity guard"
+        );
         let reloaded = Manifest::load(&manifest_path).unwrap();
         assert_eq!(reloaded.dbs.len(), 5, "aborted GC must not mutate manifest");
 
@@ -1312,9 +1299,18 @@ mod tests {
 
         let report = gc_manifest(&manifest_path).unwrap();
         assert!(!report.aborted, "non-aborted: {:?}", report.abort_reason);
-        assert_eq!(report.removed_fixture, 1, "the vite fixture must be dropped");
-        assert_eq!(report.removed_missing, 1, "the missing entry must be dropped");
-        assert_eq!(report.dedup_collapsed, 1, "alias must collapse onto good.db");
+        assert_eq!(
+            report.removed_fixture, 1,
+            "the vite fixture must be dropped"
+        );
+        assert_eq!(
+            report.removed_missing, 1,
+            "the missing entry must be dropped"
+        );
+        assert_eq!(
+            report.dedup_collapsed, 1,
+            "alias must collapse onto good.db"
+        );
         assert_eq!(report.schema_kind_fixed, 1, "chunks DB must be re-tagged");
 
         // Backup file written.
@@ -1337,8 +1333,14 @@ mod tests {
         // Final manifest contents: good, chunks (re-tagged), and the four extras.
         let final_m = Manifest::load(&manifest_path).unwrap();
         assert_eq!(final_m.dbs.len(), 6);
-        let good_canon = std::fs::canonicalize(&good).unwrap().to_string_lossy().to_string();
-        let chunks_canon = std::fs::canonicalize(&chunks).unwrap().to_string_lossy().to_string();
+        let good_canon = std::fs::canonicalize(&good)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let chunks_canon = std::fs::canonicalize(&chunks)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let chunks_entry = final_m.dbs.iter().find(|e| e.path == chunks_canon).unwrap();
         assert_eq!(chunks_entry.schema_kind, "openclaw_legacy");
         assert!(final_m.dbs.iter().any(|e| e.path == good_canon));

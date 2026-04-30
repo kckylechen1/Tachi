@@ -43,29 +43,36 @@ pub(crate) async fn run_status(
     watch: bool,
     json_out: bool,
     app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !watch {
-        return render_one(json_out, app_home);
+        return render_one(json_out, app_home, global_db_path, project_db_path);
     }
 
     if json_out {
         // --watch + --json doesn't make sense (JSON consumers don't want a
         // screen-clearing infinite stream). Treat as one-shot.
-        return render_one(true, app_home);
+        return render_one(true, app_home, global_db_path, project_db_path);
     }
 
     loop {
         // ANSI clear + cursor home so each frame replaces the previous.
         print!("\x1b[2J\x1b[H");
-        if let Err(e) = render_one(false, app_home) {
+        if let Err(e) = render_one(false, app_home, global_db_path, project_db_path) {
             eprintln!("[!] status render failed: {e}");
         }
         tokio::time::sleep(WATCH_INTERVAL).await;
     }
 }
 
-fn render_one(json_out: bool, app_home: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let snapshot = collect_snapshot(app_home);
+fn render_one(
+    json_out: bool,
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
 
     if json_out {
         let v = serde_json::to_value(&snapshot)?;
@@ -81,10 +88,7 @@ fn render_one(json_out: bool, app_home: &Path) -> Result<(), Box<dyn std::error:
     println!("Daemon");
     match &snapshot.daemon {
         DaemonStatus::Running { pid, lock_path } => {
-            println!(
-                "  [OK] running pid={pid} lock={}",
-                lock_path.display()
-            );
+            println!("  [OK] running pid={pid} lock={}", lock_path.display());
         }
         DaemonStatus::StalePid { pid, lock_path } => {
             println!(
@@ -177,7 +181,11 @@ struct DbStatus {
     error: Option<String>,
 }
 
-fn collect_snapshot(app_home: &Path) -> StatusSnapshot {
+fn collect_snapshot(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> StatusSnapshot {
     let lock_path = app_home.join("daemon.lock");
     let daemon = match read_pid_file(&lock_path) {
         Some(pid) if process_alive(pid) => DaemonStatus::Running {
@@ -205,7 +213,7 @@ fn collect_snapshot(app_home: &Path) -> StatusSnapshot {
         } else {
             entry.scope_hint.clone()
         };
-        let orphan = is_orphan_scope(&entry.scope_hint);
+        let orphan = is_orphan_path(&path, global_db_path, project_db_path);
         if !path.exists() {
             dbs.push(DbStatus {
                 path: entry.path.clone(),
@@ -260,8 +268,8 @@ fn probe_db(path: &Path) -> Result<(JobStatusHistogram, usize), String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
-    let store = MemoryStore::open_with_label(path_str, "tachi-status")
-        .map_err(|e| format!("open: {e}"))?;
+    let store =
+        MemoryStore::open_with_label(path_str, "tachi-status").map_err(|e| format!("open: {e}"))?;
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
@@ -286,11 +294,38 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
     })
 }
 
-/// Classify a manifest scope_hint as orphan from the scheduler's
-/// perspective. Mirrors the routing in
-/// [`crate::foundry_scheduler::classify_route`].
-fn is_orphan_scope(scope_hint: &str) -> bool {
-    matches!(scope_hint, "agent" | "foundry" | "vault" | "hub")
+/// Mirrors the scheduler's current reduced-scope routing: own global DB,
+/// own project DB, and canonical `~/.tachi/projects/<name>/memory.db` are
+/// routable; everything else is an orphan until DbScope::Path exists.
+fn is_orphan_path(db_path: &Path, global_db_path: &Path, project_db_path: Option<&Path>) -> bool {
+    if paths_equal(db_path, global_db_path) {
+        return false;
+    }
+    if let Some(project) = project_db_path {
+        if paths_equal(db_path, project) {
+            return false;
+        }
+    }
+    named_project_from_path(db_path).is_none()
+}
+
+fn named_project_from_path(db_path: &Path) -> Option<String> {
+    let parent = db_path.parent()?;
+    let name = parent.file_name()?.to_str()?;
+    let grand = parent.parent()?;
+    let grand_name = grand.file_name()?.to_str()?;
+    if grand_name == "projects" && db_path.file_name()?.to_str()? == "memory.db" {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -339,7 +374,10 @@ pub(crate) async fn run_daemon(
             let pid = match read_pid_file(&lock_path) {
                 Some(p) => p,
                 None => {
-                    println!("[OK] no daemon to kill (no lock file at {})", lock_path.display());
+                    println!(
+                        "[OK] no daemon to kill (no lock file at {})",
+                        lock_path.display()
+                    );
                     return Ok(());
                 }
             };
@@ -392,10 +430,13 @@ pub(crate) async fn run_foundry(
         FoundryAction::ConfigGet { db } => {
             let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
             let cfg = read_per_db_config(&target)?;
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "db": target.display().to_string(),
-                "config": cfg,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "db": target.display().to_string(),
+                    "config": cfg,
+                }))?
+            );
             Ok(())
         }
         FoundryAction::ConfigSet {
@@ -431,11 +472,14 @@ pub(crate) async fn run_foundry(
             }
             set_foundry_config(store.connection(), &cfg, "tachi-cli")
                 .map_err(|e| format!("set_foundry_config: {e}"))?;
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "db": target.display().to_string(),
-                "config": cfg,
-                "updated": true,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "db": target.display().to_string(),
+                    "config": cfg,
+                    "updated": true,
+                }))?
+            );
             Ok(())
         }
         FoundryAction::ConfigList { json: json_out } => {
@@ -482,8 +526,10 @@ pub(crate) async fn run_foundry(
                             .get("max_jobs_per_minute")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0);
-                        let dc =
-                            cfg.get("distill_concurrency").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let dc = cfg
+                            .get("distill_concurrency")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         let ec = cfg
                             .get("enrichment_concurrency")
                             .and_then(|v| v.as_u64())
@@ -505,8 +551,8 @@ fn read_per_db_config(path: &Path) -> Result<PerDbConfig, Box<dyn std::error::Er
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
     let store = MemoryStore::open_with_label(path_str, "tachi-foundry-config")
         .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let cfg = get_foundry_config(store.connection())
-        .map_err(|e| format!("get_foundry_config: {e}"))?;
+    let cfg =
+        get_foundry_config(store.connection()).map_err(|e| format!("get_foundry_config: {e}"))?;
     Ok(cfg)
 }
 
@@ -516,13 +562,14 @@ mod tests {
 
     #[test]
     fn orphan_classification_matches_scheduler_routing() {
-        assert!(is_orphan_scope("agent"));
-        assert!(is_orphan_scope("foundry"));
-        assert!(is_orphan_scope("vault"));
-        assert!(is_orphan_scope("hub"));
-        assert!(!is_orphan_scope("global"));
-        assert!(!is_orphan_scope("project"));
-        assert!(!is_orphan_scope(""));
+        let global = PathBuf::from("/tmp/status/global/memory.db");
+        let project = PathBuf::from("/tmp/status/project/memory.db");
+        let named = PathBuf::from("/home/u/.tachi/projects/sigil/memory.db");
+        let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
+        assert!(!is_orphan_path(&global, &global, Some(&project)));
+        assert!(!is_orphan_path(&project, &global, Some(&project)));
+        assert!(!is_orphan_path(&named, &global, Some(&project)));
+        assert!(is_orphan_path(&agent, &global, Some(&project)));
     }
 
     #[test]

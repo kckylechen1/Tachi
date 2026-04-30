@@ -70,7 +70,8 @@ fn r1_fts_drift_detected_and_rebuilt() {
     insert_memory(&conn, "m1", "/x/a", "hello", "{}", None, None);
     insert_memory(&conn, "m2", "/x/b", "world", "{}", None, None);
     // Manually delete one row from FTS to simulate drift.
-    conn.execute("DELETE FROM memories_fts WHERE id = 'm2'", []).unwrap();
+    conn.execute("DELETE FROM memories_fts WHERE id = 'm2'", [])
+        .unwrap();
     drop(conn);
 
     let mut ctx = open_ctx(&path, "test");
@@ -85,7 +86,10 @@ fn r1_fts_drift_detected_and_rebuilt() {
     assert_eq!(app.applied, 2, "expected 2 fts rows after rebuild");
 
     let dry2 = FtsRebuild.dry_run(&mut ctx).unwrap();
-    assert!(dry2.findings.is_empty(), "post-rebuild should be clean: {dry2:?}");
+    assert!(
+        dry2.findings.is_empty(),
+        "post-rebuild should be clean: {dry2:?}"
+    );
 }
 
 #[test]
@@ -111,7 +115,15 @@ fn r2_retention_backfill() {
     insert_memory(&conn, "h1", "/handoff/a", "h", "{}", None, None);
     insert_memory(&conn, "k1", "/kanban/x", "k", "{}", None, None);
     insert_memory(&conn, "w1", "/wiki/y", "w", "{}", None, None);
-    insert_memory(&conn, "d1", "/notes/z", "d", "{}", None, Some("foundry_distill"));
+    insert_memory(
+        &conn,
+        "d1",
+        "/notes/z",
+        "d",
+        "{}",
+        None,
+        Some("foundry_distill"),
+    );
     insert_memory(&conn, "n1", "/notes/n", "n", "{}", Some("durable"), None);
     drop(conn);
 
@@ -195,7 +207,10 @@ fn r5_integrity_passes_on_clean_db() {
     let (path, _conn) = fresh_db(&dir, "ok.db");
     let mut ctx = open_ctx(&path, "test");
     let r = IntegrityCheck.dry_run(&mut ctx).unwrap();
-    assert!(r.findings.is_empty(), "clean DB should report no findings: {r:?}");
+    assert!(
+        r.findings.is_empty(),
+        "clean DB should report no findings: {r:?}"
+    );
 }
 
 #[test]
@@ -241,8 +256,7 @@ fn r5_integrity_detects_corruption() {
     match IntegrityCheck.dry_run(&mut ctx) {
         Err(_) => { /* corruption surfaced as Err — expected */ }
         Ok(r) => assert!(
-            r.findings.iter().any(|f| f.kind == "integrity_fail")
-                || !r.errors.is_empty(),
+            r.findings.iter().any(|f| f.kind == "integrity_fail") || !r.errors.is_empty(),
             "expected corruption to surface, got {r:?}"
         ),
     }
@@ -276,7 +290,10 @@ fn r7_orphan_edges_detected_and_purged() {
     let app = OrphanRefs.apply(&mut ctx).unwrap();
     assert!(app.applied >= 2);
     let dry2 = OrphanRefs.dry_run(&mut ctx).unwrap();
-    assert!(dry2.findings.is_empty(), "post-purge should be clean: {dry2:?}");
+    assert!(
+        dry2.findings.is_empty(),
+        "post-purge should be clean: {dry2:?}"
+    );
 }
 
 #[test]
@@ -344,11 +361,15 @@ fn r3_cross_db_restore_all_moves_row() {
     // src should no longer have the row; dst should.
     let n_src: i64 = Connection::open(&src_path)
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let n_dst: i64 = Connection::open(&dst_path)
         .unwrap()
-        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(n_src, 0, "source should no longer have the row");
     assert_eq!(n_dst, 1, "destination should have the row");

@@ -155,14 +155,13 @@ impl MemorySource {
                 | "wiki"
                 | "ghost"
                 | "ingest_event"
-        ) || (s.starts_with("external:")
-            && {
-                let rest = &s["external:".len()..];
-                !rest.is_empty()
-                    && rest
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-            })
+        ) || (s.starts_with("external:") && {
+            let rest = &s["external:".len()..];
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        })
     }
 }
 
@@ -243,11 +242,11 @@ impl MemoryCategory {
             "handoff" => Self::Handoff,
             "ghost" => Self::Ghost,
             "wiki" => Self::Wiki,
-            _ => Self::default(),
+            _ => Self::Other,
         }
     }
 
-    /// Normalize an arbitrary string to a canonical category str (defaults to `fact`).
+    /// Normalize an arbitrary string to a canonical category str (unknown -> `other`).
     pub fn normalize(s: &str) -> &'static str {
         Self::from_str_opt(Some(s)).as_str()
     }
@@ -710,8 +709,8 @@ mod tests {
     fn test_memory_category_normalize() {
         assert_eq!(MemoryCategory::normalize("fact"), "fact");
         assert_eq!(MemoryCategory::normalize("Decision"), "decision");
-        assert_eq!(MemoryCategory::normalize("WeirdThing"), "fact");
-        assert_eq!(MemoryCategory::normalize(""), "fact");
+        assert_eq!(MemoryCategory::normalize("WeirdThing"), "other");
+        assert_eq!(MemoryCategory::normalize(""), "other");
         // Subsystem categories must round-trip cleanly.
         assert_eq!(MemoryCategory::normalize("kanban"), "kanban");
         assert_eq!(MemoryCategory::normalize("Handoff"), "handoff");
@@ -732,10 +731,16 @@ mod tests {
 
     #[test]
     fn test_default_retention_matrix() {
-        assert_eq!(default_retention_for("/handoff/foo", "manual"), Some("pinned"));
+        assert_eq!(
+            default_retention_for("/handoff/foo", "manual"),
+            Some("pinned")
+        );
         assert_eq!(default_retention_for("/handoff", "manual"), Some("pinned"));
         assert_eq!(default_retention_for("/kanban/x", "manual"), Some("pinned"));
-        assert_eq!(default_retention_for("/wiki/lessons", "manual"), Some("permanent"));
+        assert_eq!(
+            default_retention_for("/wiki/lessons", "manual"),
+            Some("permanent")
+        );
         assert_eq!(
             default_retention_for("/notes/2026", "foundry_distill"),
             Some("permanent")

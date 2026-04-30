@@ -69,10 +69,7 @@ fn matches(e: &DbEntry, want: &str) -> bool {
         return true;
     }
     // Canonicalize both sides for path comparison.
-    if let (Ok(a), Ok(b)) = (
-        std::fs::canonicalize(&e.path),
-        std::fs::canonicalize(want),
-    ) {
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(&e.path), std::fs::canonicalize(want)) {
         if a == b {
             return true;
         }

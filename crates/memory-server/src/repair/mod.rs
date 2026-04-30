@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::cli::{QuarantineAction, RepairAction};
 use crate::manifest::{DbEntry, Manifest};
@@ -47,6 +47,29 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 
 /// Default ordered set of rules run when `--rule` is not supplied.
 const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7"];
+
+#[derive(Debug)]
+pub struct RepairExit {
+    code: i32,
+}
+
+impl RepairExit {
+    pub fn new(code: i32) -> Self {
+        Self { code }
+    }
+
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for RepairExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "repair completed with exit code {}", self.code)
+    }
+}
+
+impl std::error::Error for RepairExit {}
 
 /// Errors raised by individual rules. We log + accumulate rather than abort.
 #[derive(Debug)]
@@ -141,9 +164,7 @@ pub async fn run_repair(
     // Subaction dispatch first.
     if let Some(act) = action {
         return match act {
-            RepairAction::Quarantine { action } => {
-                run_quarantine(action, app_home, json_out).await
-            }
+            RepairAction::Quarantine { action } => run_quarantine(action, app_home, json_out).await,
             RepairAction::Vacuum { db, apply } => {
                 vacuum::run_vacuum_cli(&db, apply, app_home, json_out).await
             }
@@ -161,9 +182,8 @@ pub async fn run_repair(
     }
 
     // No subcommand → multi-DB sweep over all rules (or filtered).
-    let manifest_path = Manifest::default_path(
-        &dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")),
-    );
+    let manifest_path =
+        Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
     // app_home is canonical; manifest lives at <app_home>/manifest.json.
     let manifest_path = if app_home.join("manifest.json").exists() {
         app_home.join("manifest.json")
@@ -178,7 +198,9 @@ pub async fn run_repair(
     let mut report = ReportBuilder::new(apply);
     let daemon_alive = inventory::daemon_alive(app_home);
     if daemon_alive {
-        report.note("daemon is running — R6 (VACUUM) skipped; in-DB rules continue with WAL.".to_string());
+        report.note(
+            "daemon is running — R6 (VACUUM) skipped; in-DB rules continue with WAL.".to_string(),
+        );
     }
 
     for entry in entries {
@@ -220,11 +242,7 @@ pub async fn run_repair(
                 if rule.mutates() && !no_backup && !backed_up {
                     match backup_db(&ctx.path) {
                         Ok(p) => {
-                            report.note(format!(
-                                "backed up {} → {}",
-                                ctx.label,
-                                p.display()
-                            ));
+                            report.note(format!("backed up {} → {}", ctx.label, p.display()));
                             backed_up = true;
                         }
                         Err(e) => {
@@ -245,9 +263,7 @@ pub async fn run_repair(
 
             match rr {
                 Ok(r) => {
-                    if rule.id() == "R5"
-                        && r.findings.iter().any(|f| f.kind == "integrity_fail")
-                    {
+                    if rule.id() == "R5" && r.findings.iter().any(|f| f.kind == "integrity_fail") {
                         integrity_ok = false;
                     }
                     report.push(r);
@@ -261,7 +277,7 @@ pub async fn run_repair(
 
     let exit = report.render(json_out);
     if exit != 0 {
-        std::process::exit(exit);
+        return Err(Box::new(RepairExit::new(exit)));
     }
     Ok(())
 }
@@ -278,23 +294,24 @@ fn resolve_rules(rule_filter: &[String]) -> Vec<String> {
     }
 }
 
-/// Take a backup of the DB file at `{path}.bak.{ts}` (and best-effort copy
-/// the WAL/SHM sidecars too).
+/// Take a consistent SQLite snapshot backup at `{path}.bak.{ts}`.
 pub fn backup_db(path: &Path) -> std::io::Result<PathBuf> {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let backup = sibling_with_suffix(path, &format!("bak.{ts}"));
-    std::fs::copy(path, &backup)?;
-    for ext in ["-wal", "-shm"] {
-        let mut src = path.as_os_str().to_owned();
-        src.push(ext);
-        let s: PathBuf = PathBuf::from(src);
-        if s.exists() {
-            let mut dst = backup.as_os_str().to_owned();
-            dst.push(ext);
-            let _ = std::fs::copy(&s, PathBuf::from(dst));
-        }
-    }
+    let _ = libsimple::enable_auto_extension();
+    memory_core::db::register_sqlite_vec();
+    let src = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(sqlite_io_error)?;
+    let mut dst = Connection::open(&backup).map_err(sqlite_io_error)?;
+    let backup_job = rusqlite::backup::Backup::new(&src, &mut dst).map_err(sqlite_io_error)?;
+    backup_job
+        .run_to_completion(128, std::time::Duration::from_millis(100), None)
+        .map_err(sqlite_io_error)?;
     Ok(backup)
+}
+
+fn sqlite_io_error(e: rusqlite::Error) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, e)
 }
 
 fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -318,9 +335,7 @@ async fn run_quarantine(
     };
     let manifest = Manifest::load_or_empty(&manifest_path);
     match action {
-        QuarantineAction::List { json } => {
-            quarantine::cmd_list(&manifest, json || json_out)
-        }
+        QuarantineAction::List { json } => quarantine::cmd_list(&manifest, json || json_out),
         QuarantineAction::Restore { id, apply } => {
             quarantine::cmd_restore(&manifest, &id, apply, json_out)
         }
@@ -380,7 +395,7 @@ async fn run_fts_cli(
     }
     let exit = report.render(json_out);
     if exit != 0 {
-        std::process::exit(exit);
+        return Err(Box::new(RepairExit::new(exit)));
     }
     Ok(())
 }

@@ -3,9 +3,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
-use crate::types::{
-    default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource,
-};
+use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
@@ -47,10 +45,16 @@ pub fn upsert(
         ));
     }
 
-    // Normalize enum-like fields to satisfy CHECK constraints.
-    let mut entry_owned = entry.clone();
-    normalize_for_write(&mut entry_owned);
-    let entry = &entry_owned;
+    // Normalize only the fields enforced by CHECK constraints; avoid cloning
+    // the full entry/vector on the hot write path.
+    let path = crate::path_router::normalize_path(&entry.path);
+    let source = MemorySource::parse_or_external(&entry.source);
+    let category = MemoryCategory::normalize(&entry.category);
+    let scope = MemoryScope::normalize(&entry.scope);
+    let retention_policy = entry
+        .retention_policy
+        .clone()
+        .or_else(|| default_retention_for(&path, &source).map(str::to_string));
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
     let last_access_utc = entry
@@ -102,19 +106,19 @@ pub fn upsert(
                domain       = excluded.domain"#,
         params![
             entry.id,
-            entry.path,
+            &path,
             entry.summary,
             entry.text,
             entry.importance,
             timestamp_utc,
-            entry.category,
+            category,
             entry.topic,
             kws_json,
             p_json,
             e_json,
             entry.location,
-            entry.source,
-            entry.scope,
+            &source,
+            scope,
             entry.archived,
             &write_time_utc,
             &write_time_utc,
@@ -122,7 +126,7 @@ pub fn upsert(
             last_access_utc,
             entry.revision.max(1),
             metadata_json,
-            entry.retention_policy,
+            &retention_policy,
             entry.domain,
         ],
     )?;
@@ -134,7 +138,7 @@ pub fn upsert(
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
-        params![entry.id, entry.path, entry.summary, entry.text, kws, ents],
+        params![entry.id, &path, entry.summary, entry.text, kws, ents],
     )?;
 
     if let Some(vec) = &entry.vector {

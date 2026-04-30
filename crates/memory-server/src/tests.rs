@@ -2596,7 +2596,10 @@ async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
     assert_eq!(v["register"]["review_status"], json!("pending"));
     assert_eq!(v["register"]["auto_approval_eligible"], json!(false));
     // No review step should have run.
-    assert!(v.get("review").is_none(), "untrusted path must not invoke review");
+    assert!(
+        v.get("review").is_none(),
+        "untrusted path must not invoke review"
+    );
     // A safety warning should be present in the response (warnings are
     // appended via `append_warning` which concatenates into a single "warning"
     // string field, not an array).
@@ -2632,14 +2635,16 @@ async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
     .await
     .expect("quick_add");
     let v: Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(v["register"]["auto_approval_eligible"], json!(true), "body: {body}");
+    assert_eq!(
+        v["register"]["auto_approval_eligible"],
+        json!(true),
+        "body: {body}"
+    );
     assert_eq!(v["auto_approve"], json!("applied"), "body: {body}");
     // The review sub-response must reflect the approve+enable transition.
     assert_eq!(v["review"]["review_status"], json!("approved"));
     assert_eq!(v["review"]["enabled"], json!(true));
 }
-
-
 
 #[tokio::test]
 async fn get_memory_reports_pending_when_neither_summary_nor_vector_present() {
@@ -2651,11 +2656,7 @@ async fn get_memory_reports_pending_when_neither_summary_nor_vector_present() {
     let id = format!("pending-{}", uuid::Uuid::new_v4());
     let entry = make_entry(&id);
     server
-        .with_global_store(|store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format!("save: {e}"))
-        })
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("save: {e}")))
         .expect("save entry");
 
     let body = crate::memory_ops::handle_get_memory(
@@ -2688,11 +2689,7 @@ async fn get_memory_reports_complete_when_summary_and_vector_present() {
     entry.summary = "a brief precomputed summary".to_string();
     entry.vector = Some(vec![0.0_f32; 1024]); // schema requires 1024-dim vectors
     server
-        .with_global_store(|store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format!("save: {e}"))
-        })
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("save: {e}")))
         .expect("save entry");
 
     let body = crate::memory_ops::handle_get_memory(

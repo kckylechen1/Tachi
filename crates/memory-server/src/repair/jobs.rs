@@ -44,22 +44,18 @@ impl RepairRule for JobsPurge {
         let dl_iso = dl_cutoff.to_rfc3339();
         let cp_iso = cp_cutoff.to_rfc3339();
 
-        let n_dl: i64 = ctx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM foundry_jobs
+        let n_dl: i64 = ctx.conn.query_row(
+            "SELECT COUNT(*) FROM foundry_jobs
                  WHERE status = 'dead_letter' AND updated_at < ?1",
-                [&dl_iso],
-                |row| row.get(0),
-            )?;
-        let n_cp: i64 = ctx
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM foundry_jobs
+            [&dl_iso],
+            |row| row.get(0),
+        )?;
+        let n_cp: i64 = ctx.conn.query_row(
+            "SELECT COUNT(*) FROM foundry_jobs
                  WHERE status = 'completed' AND updated_at < ?1",
-                [&cp_iso],
-                |row| row.get(0),
-            )?;
+            [&cp_iso],
+            |row| row.get(0),
+        )?;
         if n_dl > 0 {
             r.findings.push(
                 Finding::new("dead_letter_jobs", n_dl as usize)

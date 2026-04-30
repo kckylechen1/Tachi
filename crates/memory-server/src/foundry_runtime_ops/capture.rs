@@ -260,9 +260,8 @@ pub(super) fn persist_capture_entry(
         };
         let entry_to_write = if let Some(dest) = dest_path {
             let mut e = entry.clone();
-            e.metadata = crate::provenance::restamp_provenance_for_destination(
-                e.metadata, &dest, target_db,
-            );
+            e.metadata =
+                crate::provenance::restamp_provenance_for_destination(e.metadata, &dest, target_db);
             e
         } else {
             entry.clone()

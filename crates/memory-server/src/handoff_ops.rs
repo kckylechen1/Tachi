@@ -65,12 +65,14 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
     // Handoff lives in the global DB but uses a non-/global path prefix; opt
     // in to cross-project routing so path-routing validation lets it through.
     if let Some(obj) = metadata.as_object_mut() {
-        obj.insert("allow_cross_project".to_string(), serde_json::Value::Bool(true));
+        obj.insert(
+            "allow_cross_project".to_string(),
+            serde_json::Value::Bool(true),
+        );
     }
 
-    let routed_path = memory_core::path_router::standardize_handoff_path(
-        memo.target_agent.as_deref(),
-    );
+    let routed_path =
+        memory_core::path_router::standardize_handoff_path(memo.target_agent.as_deref());
 
     MemoryEntry {
         id: format!("handoff:{}", memo_id),

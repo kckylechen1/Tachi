@@ -12,7 +12,7 @@ lto = true
 strip = true
 
 [workspace.dependencies]
-rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled", "vtab"] }
 libsimple = { version = "0.3.0", features = ["rusqlite"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }

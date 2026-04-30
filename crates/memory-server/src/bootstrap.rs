@@ -2134,11 +2134,17 @@ fn db_path_held_by_other_process(db_path: &str) -> bool {
         use std::process::Command;
         let our_pid = std::process::id().to_string();
         // -t prints PIDs, one per line. -F p would also work but -t is portable.
-        let output = Command::new("lsof").arg("-t").arg("--").arg(db_path).output();
+        let output = Command::new("lsof")
+            .arg("-t")
+            .arg("--")
+            .arg(db_path)
+            .output();
         match output {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.lines().any(|line| line.trim() != our_pid && !line.trim().is_empty())
+                stdout
+                    .lines()
+                    .any(|line| line.trim() != our_pid && !line.trim().is_empty())
             }
             _ => false,
         }
@@ -2156,7 +2162,10 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // (config load, manifest resolution, daemon bind) are captured.
     let home_for_logs = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     init_tracing(&home_for_logs);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tachi memory-server starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "tachi memory-server starting"
+    );
 
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -2279,7 +2288,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
             }
-            Err(e) => tracing::warn!(target: "tachi::manifest::gc", error = %e, "manifest GC failed; continuing"),
+            Err(e) => {
+                tracing::warn!(target: "tachi::manifest::gc", error = %e, "manifest GC failed; continuing")
+            }
         }
     }
     let manifest_opt = if manifest_path.exists() {
@@ -2290,7 +2301,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let global_db_path = if let Some(m) = manifest_opt.as_ref() {
         if let Some(entry) = m.global() {
             let manifest_global = PathBuf::from(&entry.path);
-            let user_overrode = cli.global_db.is_some() || std::env::var_os("MEMORY_DB_PATH").is_some();
+            let user_overrode =
+                cli.global_db.is_some() || std::env::var_os("MEMORY_DB_PATH").is_some();
             if user_overrode {
                 if global_db_path != manifest_global {
                     eprintln!(
@@ -2521,7 +2533,14 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Commands::Status { watch, json } = &command {
-        return crate::status_ops::run_status(*watch, *json, &app_home).await;
+        return crate::status_ops::run_status(
+            *watch,
+            *json,
+            &app_home,
+            &global_db_path,
+            project_db_path.as_deref(),
+        )
+        .await;
     }
 
     if let Commands::Daemon { action } = &command {

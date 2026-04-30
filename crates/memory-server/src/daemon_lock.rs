@@ -222,12 +222,19 @@ mod tests {
         let second = DaemonLock::acquire(&path);
         match second {
             Err(DaemonLockError::AlreadyRunning { pid }) => {
-                assert_eq!(pid as u32, std::process::id(), "owner pid should match self");
+                assert_eq!(
+                    pid as u32,
+                    std::process::id(),
+                    "owner pid should match self"
+                );
             }
-            other => panic!("expected AlreadyRunning, got {}", match other {
-                Ok(_) => "Ok(_)".to_string(),
-                Err(e) => format!("Err({e})"),
-            }),
+            other => panic!(
+                "expected AlreadyRunning, got {}",
+                match other {
+                    Ok(_) => "Ok(_)".to_string(),
+                    Err(e) => format!("Err({e})"),
+                }
+            ),
         }
     }
 

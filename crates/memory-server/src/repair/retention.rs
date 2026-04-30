@@ -11,15 +11,20 @@ use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 
 pub struct RetentionBackfill;
 
-fn count_null(ctx: &DbContext, where_clause: &str, params_vec: &[&str]) -> Result<i64, RepairError> {
+fn count_null(
+    ctx: &DbContext,
+    where_clause: &str,
+    params_vec: &[&str],
+) -> Result<i64, RepairError> {
     let sql = format!(
         "SELECT COUNT(*) FROM memories WHERE retention_policy IS NULL AND ({where_clause})"
     );
     // rusqlite needs &dyn ToSql; map &str slice.
-    let p: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let n: i64 = ctx
-        .conn
-        .query_row(&sql, p.as_slice(), |r| r.get(0))?;
+    let p: Vec<&dyn rusqlite::ToSql> = params_vec
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let n: i64 = ctx.conn.query_row(&sql, p.as_slice(), |r| r.get(0))?;
     Ok(n)
 }
 
@@ -93,13 +98,15 @@ impl RepairRule for RetentionBackfill {
         )?;
         tx.commit()?;
         if n1 > 0 {
-            r.findings.push(Finding::new("retention_null_handoff_kanban", n1));
+            r.findings
+                .push(Finding::new("retention_null_handoff_kanban", n1));
         }
         if n2 > 0 {
             r.findings.push(Finding::new("retention_null_wiki", n2));
         }
         if n3 > 0 {
-            r.findings.push(Finding::new("retention_null_foundry_distill", n3));
+            r.findings
+                .push(Finding::new("retention_null_foundry_distill", n3));
         }
         r.applied = n1 + n2 + n3;
         // Suppress `unused` warning for params helper.

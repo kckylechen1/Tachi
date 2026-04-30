@@ -15,6 +15,12 @@ pub mod search;
 pub mod types;
 pub mod vault;
 
+pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
+pub use db::foundry_jobs::{
+    find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
+    load_pending_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobSummary,
+    JobStatusHistogram, PersistedFoundryJob,
+};
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -33,12 +39,6 @@ pub use types::{
     RetentionPolicy, SearchResult, StatsResult,
 };
 pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
-pub use db::foundry_jobs::{
-    find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
-    load_pending_foundry_jobs, update_foundry_job_status_with_reason,
-    FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob,
-};
-pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
@@ -296,11 +296,11 @@ impl MemoryStore {
         let total: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let with_fts: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT id) FROM memories_fts",
-            [],
-            |r| r.get(0),
-        )?;
+        let with_fts: i64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT id) FROM memories_fts", [], |r| {
+                    r.get(0)
+                })?;
         Ok((total, with_fts))
     }
 

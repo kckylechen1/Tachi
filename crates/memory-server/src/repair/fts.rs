@@ -69,21 +69,19 @@ impl RepairRule for FtsRebuild {
         let (mem, fts_opt) = fts_state(ctx)?;
         match fts_opt {
             None => {
-                r.findings.push(
-                    Finding::new("fts_table_missing", 1).with_detail(json!({
+                r.findings
+                    .push(Finding::new("fts_table_missing", 1).with_detail(json!({
                         "memories": mem,
-                    })),
-                );
+                    })));
             }
             Some(fts) if fts != mem => {
                 let drift = (mem - fts).abs() as usize;
-                r.findings.push(
-                    Finding::new("fts_drift", drift).with_detail(json!({
+                r.findings
+                    .push(Finding::new("fts_drift", drift).with_detail(json!({
                         "memories": mem,
                         "fts": fts,
                         "delta": mem - fts,
-                    })),
-                );
+                    })));
             }
             _ => {}
         }
@@ -95,11 +93,12 @@ impl RepairRule for FtsRebuild {
         if r.findings.is_empty() {
             return Ok(r);
         }
-        // Drop + recreate.
-        ctx.conn
-            .execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
-        ctx.conn.execute_batch(FTS_CREATE)?;
-        let inserted = ctx.conn.execute(FTS_INSERT, [])?;
+        // Drop + recreate atomically so a crash cannot leave the DB without FTS.
+        let tx = ctx.conn.transaction()?;
+        tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
+        tx.execute_batch(FTS_CREATE)?;
+        let inserted = tx.execute(FTS_INSERT, [])?;
+        tx.commit()?;
         let (mem, fts_opt) = fts_state(ctx)?;
         if fts_opt != Some(mem) {
             r.errors.push(format!(
