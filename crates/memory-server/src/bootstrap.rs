@@ -2082,6 +2082,34 @@ fn init_tracing(home: &std::path::Path) {
     let _ = writeln!(std::io::stderr(), "tachi: logging to {sink_label}");
 }
 
+/// Liveness probe for the manifest self-lock fix: returns true iff some
+/// process *other than us* currently holds the file at `db_path` open.
+/// Uses `lsof` on Unix (best-effort: missing binary, non-zero exit, or
+/// non-Unix platform → returns false, falling back to the prior pid-file
+/// check). Critical for the stdio MCP case where the holder never wrote
+/// `~/.tachi/daemon.pid`.
+fn db_path_held_by_other_process(db_path: &str) -> bool {
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+        let our_pid = std::process::id().to_string();
+        // -t prints PIDs, one per line. -F p would also work but -t is portable.
+        let output = Command::new("lsof").arg("-t").arg("--").arg(db_path).output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                stdout.lines().any(|line| line.trim() != our_pid && !line.trim().is_empty())
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = db_path;
+        false
+    }
+}
+
 #[tokio::main]
 async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // PR7 — install the tracing sink before doing anything else so early errors
@@ -2201,12 +2229,43 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 global_db_path
             } else {
                 // No override → trust the manifest.
-                if let Err(err) = m.check_writable(&entry.path) {
-                    return Err(format!(
-                        "manifest global DB is not writable: {err}. \
-                         Run `tachi doctor` to inspect, then `tachi manifest refresh` once resolved."
-                    )
-                    .into());
+                // Escape hatch: TACHI_BYPASS_MANIFEST=1 lets users (and the
+                // daemon itself when restarting after a crash) skip the
+                // manifest write guard so a misclassified-but-healthy DB
+                // does not self-lock the CLI. Doctor / manifest commands
+                // never go through this path.
+                let bypass = std::env::var("TACHI_BYPASS_MANIFEST")
+                    .ok()
+                    .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+                    .unwrap_or(false);
+                if !bypass {
+                    if let Err(err) = m.check_writable(&entry.path) {
+                        // Before failing hard, check if any live process
+                        // is already holding this DB — that is the most
+                        // common cause of a false-positive WalOrphan
+                        // classification. Two checks:
+                        //   (a) HTTP daemon pid file (~/.tachi/daemon.pid),
+                        //       only exists when started via `tachi --daemon`;
+                        //   (b) `lsof` on the DB path itself — covers
+                        //       stdio MCP instances that never write a pid
+                        //       file (the common case: editor/IDE spawned
+                        //       tachi as a subprocess).
+                        let daemon_alive =
+                            crate::cli_client::detect_daemon(&app_home).await.is_some();
+                        let db_held = db_path_held_by_other_process(&entry.path);
+                        if !daemon_alive && !db_held {
+                            return Err(format!(
+                                "manifest global DB is not writable: {err}. \
+                                 Run `tachi doctor` to inspect, then `tachi manifest refresh` once resolved. \
+                                 To force-bypass: TACHI_BYPASS_MANIFEST=1"
+                            )
+                            .into());
+                        }
+                        eprintln!(
+                            "info: manifest reports {} as not writable, but a live holder was detected (daemon={daemon_alive}, lsof={db_held}) — proceeding.",
+                            entry.path
+                        );
+                    }
                 }
                 if global_db_path != manifest_global {
                     eprintln!(

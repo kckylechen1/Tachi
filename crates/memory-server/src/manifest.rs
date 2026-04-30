@@ -136,7 +136,16 @@ impl Manifest {
             }
             let role = classify_role(f);
             let owner = derive_owner(&f.scope_hint);
-            let allow_write = matches!(f.classification, DbClassification::Healthy);
+            // WalOrphan is permitted for write: a non-empty -wal sidecar is the
+            // *expected* state for any SQLite DB held open by a running daemon.
+            // SQLite performs WAL recovery automatically on next open, so the
+            // classification reflects "needs inspection" rather than corruption.
+            // Without this, a healthy DB held by the live daemon trips
+            // check_writable and self-locks the CLI (see PR-A).
+            let allow_write = matches!(
+                f.classification,
+                DbClassification::Healthy | DbClassification::WalOrphan
+            );
             let entry = DbEntry {
                 path: f.path.clone(),
                 role,
@@ -561,7 +570,11 @@ mod tests {
     }
 
     #[test]
-    fn allow_write_only_for_healthy() {
+    fn allow_write_for_healthy_and_wal_orphan() {
+        // PR-A: WalOrphan is now write-allowed because a non-empty -wal file
+        // is the expected state for any DB held open by the live daemon, and
+        // SQLite recovers WAL automatically on next open. LegacySchema still
+        // blocks (real schema mismatch).
         let mut m = Manifest::empty();
         m.populate_from_doctor(&mk_report(vec![
             mk_finding("/u/a.db", DbClassification::Healthy, "project:a"),
@@ -574,7 +587,7 @@ mod tests {
             .map(|e| (e.path.clone(), e.allow_write))
             .collect();
         assert_eq!(by_path["/u/a.db"], true);
-        assert_eq!(by_path["/u/b.db"], false);
+        assert_eq!(by_path["/u/b.db"], true, "WalOrphan must be writable");
         assert_eq!(by_path["/u/c.db"], false);
     }
 
@@ -596,11 +609,18 @@ mod tests {
         m.populate_from_doctor(&mk_report(vec![
             mk_finding("/u/healthy.db", DbClassification::Healthy, "project:a"),
             mk_finding("/u/orphan.db", DbClassification::WalOrphan, "project:b"),
+            mk_finding("/u/legacy.db", DbClassification::LegacySchema, "project:c"),
         ]));
+        // PR-A: WalOrphan now writable (live daemon holds non-empty WAL).
         assert!(m.check_writable("/u/healthy.db").is_ok());
-        match m.check_writable("/u/orphan.db") {
+        assert!(
+            m.check_writable("/u/orphan.db").is_ok(),
+            "WalOrphan must be writable — SQLite recovers WAL on open"
+        );
+        // LegacySchema still blocks writes (real schema mismatch).
+        match m.check_writable("/u/legacy.db") {
             Err(ManifestGuardError::WriteForbidden { .. }) => {}
-            other => panic!("expected WriteForbidden, got {other:?}"),
+            other => panic!("expected WriteForbidden for legacy, got {other:?}"),
         }
         match m.check_writable("/u/never-seen.db") {
             Err(ManifestGuardError::NotInManifest { .. }) => {}
