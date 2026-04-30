@@ -28,6 +28,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use memory_core::types::{MemoryCategory, MemoryScope, MemorySource};
+
 /// A row pulled from the source DB, normalised for routing.
 #[derive(Debug, Clone)]
 pub struct SourceRow {
@@ -428,8 +430,11 @@ pub fn apply_rescue(
         let scope_final = if assignment.trading {
             "user".to_string()
         } else {
-            row.scope.clone()
+            MemoryScope::normalize(&row.scope).to_string()
         };
+        // B1/B2: normalize legacy source/category to satisfy CHECK constraints.
+        let source_final = MemorySource::parse_or_external(&row.source).to_string();
+        let category_final = MemoryCategory::normalize(&row.category).to_string();
 
         let result = if caps.has_domain && caps.has_retention_policy {
             conn.execute(
@@ -445,13 +450,13 @@ pub fn apply_rescue(
                     row.text,
                     row.importance,
                     row.timestamp,
-                    row.category,
+                    category_final,
                     row.topic,
                     row.keywords,
                     row.persons,
                     row.entities,
                     row.location,
-                    row.source,
+                    source_final,
                     scope_final,
                     row.archived,
                     row.created_at,
@@ -478,13 +483,13 @@ pub fn apply_rescue(
                     row.text,
                     row.importance,
                     row.timestamp,
-                    row.category,
+                    category_final,
                     row.topic,
                     row.keywords,
                     row.persons,
                     row.entities,
                     row.location,
-                    row.source,
+                    source_final,
                     scope_final,
                     row.archived,
                     row.created_at,

@@ -491,6 +491,14 @@ pub(super) async fn handle_post_card(
             "agent_session_id": params.agent_session_id.clone(),
         }),
     );
+    // Kanban lives in the global DB but uses per-agent paths under /kanban;
+    // opt in to cross-project routing so path validation lets it through.
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "allow_cross_project".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
 
     let entry = MemoryEntry {
         id: card_id.clone(),

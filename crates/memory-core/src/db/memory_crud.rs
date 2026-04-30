@@ -3,10 +3,33 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
-use crate::types::MemoryEntry;
+use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
+
+// ─── Normalization ────────────────────────────────────────────────────────────
+
+/// Coerce caller-provided enum-like fields to the canonical vocabulary
+/// enforced by the CHECK constraints on `memories`. Idempotent.
+///
+/// - `source`: routed through [`MemorySource::parse_or_external`]; user-controlled
+///   non-canonical values become `external:<sanitized>`.
+/// - `category`: clamped to one of fact/decision/experience/preference/entity/other.
+/// - `scope`: clamped to user/project/general (rejects `self`, `other_agent:*`).
+/// - `retention_policy`: defaulted via [`default_retention_for`] if the caller
+///   left it `None`.
+pub fn normalize_for_write(entry: &mut MemoryEntry) {
+    entry.path = crate::path_router::normalize_path(&entry.path);
+    entry.source = MemorySource::parse_or_external(&entry.source);
+    entry.category = MemoryCategory::normalize(&entry.category).to_string();
+    entry.scope = MemoryScope::normalize(&entry.scope).to_string();
+    if entry.retention_policy.is_none() {
+        if let Some(d) = default_retention_for(&entry.path, &entry.source) {
+            entry.retention_policy = Some(d.to_string());
+        }
+    }
+}
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +44,17 @@ pub fn upsert(
             "entry.id must be provided by caller".to_string(),
         ));
     }
+
+    // Normalize only the fields enforced by CHECK constraints; avoid cloning
+    // the full entry/vector on the hot write path.
+    let path = crate::path_router::normalize_path(&entry.path);
+    let source = MemorySource::parse_or_external(&entry.source);
+    let category = MemoryCategory::normalize(&entry.category);
+    let scope = MemoryScope::normalize(&entry.scope);
+    let retention_policy = entry
+        .retention_policy
+        .clone()
+        .or_else(|| default_retention_for(&path, &source).map(str::to_string));
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
     let last_access_utc = entry
@@ -72,19 +106,19 @@ pub fn upsert(
                domain       = excluded.domain"#,
         params![
             entry.id,
-            entry.path,
+            &path,
             entry.summary,
             entry.text,
             entry.importance,
             timestamp_utc,
-            entry.category,
+            category,
             entry.topic,
             kws_json,
             p_json,
             e_json,
             entry.location,
-            entry.source,
-            entry.scope,
+            &source,
+            scope,
             entry.archived,
             &write_time_utc,
             &write_time_utc,
@@ -92,7 +126,7 @@ pub fn upsert(
             last_access_utc,
             entry.revision.max(1),
             metadata_json,
-            entry.retention_policy,
+            &retention_policy,
             entry.domain,
         ],
     )?;
@@ -104,7 +138,7 @@ pub fn upsert(
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
-        params![entry.id, entry.path, entry.summary, entry.text, kws, ents],
+        params![entry.id, &path, entry.summary, entry.text, kws, ents],
     )?;
 
     if let Some(vec) = &entry.vector {
@@ -199,6 +233,8 @@ pub fn update_with_revision(
 ) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     let new_revision = expected_revision + 1;
+    // Normalize source to satisfy CHECK constraint.
+    let new_source = MemorySource::parse_or_external(new_source);
     let tx = conn.transaction()?;
 
     tx.execute(

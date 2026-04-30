@@ -3,7 +3,6 @@ use super::*;
 const HANDOFF_PATH: &str = "/handoff";
 const HANDOFF_MEMORY_LIMIT: usize = 50;
 const HANDOFF_DB_LIMIT: usize = 500;
-
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key)
         .ok()
@@ -46,7 +45,7 @@ fn memo_matches_agent(memo: &HandoffMemo, agent_id: Option<&str>) -> bool {
 
 fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntry {
     let memo_id = memo.id.clone();
-    let metadata = crate::provenance::inject_provenance(
+    let mut metadata = crate::provenance::inject_provenance(
         server,
         serde_json::json!({
             "handoff_memo_id": memo_id,
@@ -63,6 +62,17 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
             "next_steps_count": memo.next_steps.len(),
         }),
     );
+    // Handoff lives in the global DB but uses a non-/global path prefix; opt
+    // in to cross-project routing so path-routing validation lets it through.
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "allow_cross_project".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    let routed_path =
+        memory_core::path_router::standardize_handoff_path(memo.target_agent.as_deref());
 
     MemoryEntry {
         id: format!("handoff:{}", memo_id),
@@ -80,7 +90,7 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
         category: "handoff".to_string(),
         importance: 0.9,
         summary: format!("Handoff from {}", memo.from_agent),
-        path: HANDOFF_PATH.to_string(),
+        path: routed_path,
         timestamp: memo.created_at.clone(),
         topic: "agent-handoff".to_string(),
         keywords: vec!["handoff".to_string(), memo.from_agent.clone()],

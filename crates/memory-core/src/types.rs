@@ -62,6 +62,265 @@ impl std::fmt::Display for RetentionPolicy {
     }
 }
 
+// ─── Memory Source ──────────────────────────────────────────────────────────
+
+/// Canonical write provenance for memory entries.
+///
+/// User-controlled callers (e.g. ingest_source) may submit arbitrary strings;
+/// those should be funneled through [`MemorySource::parse_or_external`] which
+/// either returns a canonical name or an `external:<sanitized>` prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySource {
+    Manual,
+    Extraction,
+    Migration,
+    Auto,
+    FoundryDistill,
+    Handoff,
+    Kanban,
+    Wiki,
+    Ghost,
+    IngestEvent,
+}
+
+impl MemorySource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Extraction => "extraction",
+            Self::Migration => "migration",
+            Self::Auto => "auto",
+            Self::FoundryDistill => "foundry_distill",
+            Self::Handoff => "handoff",
+            Self::Kanban => "kanban",
+            Self::Wiki => "wiki",
+            Self::Ghost => "ghost",
+            Self::IngestEvent => "ingest_event",
+        }
+    }
+
+    pub fn from_str_opt(s: Option<&str>) -> Self {
+        match s.unwrap_or("").trim() {
+            "manual" => Self::Manual,
+            "extraction" => Self::Extraction,
+            "migration" => Self::Migration,
+            "auto" => Self::Auto,
+            "foundry_distill" => Self::FoundryDistill,
+            "handoff" => Self::Handoff,
+            "kanban" => Self::Kanban,
+            "wiki" => Self::Wiki,
+            "ghost" => Self::Ghost,
+            "ingest_event" => Self::IngestEvent,
+            _ => Self::Manual,
+        }
+    }
+
+    /// Returns canonical source name if `s` matches an enum variant; otherwise
+    /// returns `external:<sanitized>` (lowercased, non `[a-z0-9_-]` → `_`).
+    /// Idempotent: passing in `external:foo` returns `external:foo` unchanged.
+    /// Truncates the suffix to 64 chars.
+    pub fn parse_or_external(s: &str) -> String {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Self::Manual.as_str().to_string();
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        // Match canonical
+        match lower.as_str() {
+            "manual" | "extraction" | "migration" | "auto" | "foundry_distill" | "handoff"
+            | "kanban" | "wiki" | "ghost" | "ingest_event" => return lower,
+            _ => {}
+        }
+        // Already external:?
+        if let Some(rest) = lower.strip_prefix("external:") {
+            let san = sanitize_source_suffix(rest);
+            return format!("external:{}", san);
+        }
+        let san = sanitize_source_suffix(&lower);
+        format!("external:{}", san)
+    }
+
+    /// Whether `s` is an acceptable canonical or external: source value.
+    pub fn is_canonical(s: &str) -> bool {
+        matches!(
+            s,
+            "manual"
+                | "extraction"
+                | "migration"
+                | "auto"
+                | "foundry_distill"
+                | "handoff"
+                | "kanban"
+                | "wiki"
+                | "ghost"
+                | "ingest_event"
+        ) || (s.starts_with("external:") && {
+            let rest = &s["external:".len()..];
+            !rest.is_empty()
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+        })
+    }
+}
+
+impl std::fmt::Display for MemorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn sanitize_source_suffix(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(64));
+    for c in s.chars() {
+        let mapped = if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+            c
+        } else if c.is_ascii_uppercase() {
+            c.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        out.push(mapped);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+// ─── Memory Category ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryCategory {
+    #[default]
+    Fact,
+    Decision,
+    Experience,
+    Preference,
+    Entity,
+    Other,
+    // Subsystem-owned categories. Downstream code (kanban.rs, handoff_ops.rs,
+    // ghost promote, wiki write) dispatches on these by string equality, so
+    // they must round-trip cleanly through the CHECK constraint.
+    Kanban,
+    Handoff,
+    Ghost,
+    Wiki,
+}
+
+impl MemoryCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Decision => "decision",
+            Self::Experience => "experience",
+            Self::Preference => "preference",
+            Self::Entity => "entity",
+            Self::Other => "other",
+            Self::Kanban => "kanban",
+            Self::Handoff => "handoff",
+            Self::Ghost => "ghost",
+            Self::Wiki => "wiki",
+        }
+    }
+
+    pub fn from_str_opt(s: Option<&str>) -> Self {
+        match s.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "fact" => Self::Fact,
+            "decision" => Self::Decision,
+            "experience" => Self::Experience,
+            "preference" => Self::Preference,
+            "entity" => Self::Entity,
+            "other" => Self::Other,
+            "kanban" => Self::Kanban,
+            "handoff" => Self::Handoff,
+            "ghost" => Self::Ghost,
+            "wiki" => Self::Wiki,
+            _ => Self::Other,
+        }
+    }
+
+    /// Normalize an arbitrary string to a canonical category str (unknown -> `other`).
+    pub fn normalize(s: &str) -> &'static str {
+        Self::from_str_opt(Some(s)).as_str()
+    }
+}
+
+impl std::fmt::Display for MemoryCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ─── Memory Scope ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryScope {
+    User,
+    Project,
+    #[default]
+    General,
+}
+
+impl MemoryScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Project => "project",
+            Self::General => "general",
+        }
+    }
+
+    pub fn from_str_opt(s: Option<&str>) -> Self {
+        match s.unwrap_or("").trim().to_ascii_lowercase().as_str() {
+            "user" => Self::User,
+            "project" => Self::Project,
+            "general" => Self::General,
+            _ => Self::default(),
+        }
+    }
+
+    /// Normalize an arbitrary string to a canonical scope str (defaults to `general`).
+    /// Rejects values like `self` or `other_agent:*` by mapping them to `general`.
+    pub fn normalize(s: &str) -> &'static str {
+        Self::from_str_opt(Some(s)).as_str()
+    }
+}
+
+impl std::fmt::Display for MemoryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ─── Retention defaulting ───────────────────────────────────────────────────
+
+/// Returns the default retention_policy for an entry, based on its path and
+/// source. Returns `None` if no default applies (caller should leave the field
+/// untouched / NULL → durable).
+///
+/// Rules:
+///   - path starts with `/handoff` or `/kanban` → `pinned`
+///   - path starts with `/wiki`                 → `permanent`
+///   - source == `foundry_distill`              → `permanent`
+///   - everything else                          → None
+pub fn default_retention_for(path: &str, source: &str) -> Option<&'static str> {
+    if path.starts_with("/handoff") || path.starts_with("/kanban") {
+        Some("pinned")
+    } else if path.starts_with("/wiki") || source == "foundry_distill" {
+        Some("permanent")
+    } else {
+        None
+    }
+}
+
 // ─── GC Configuration ───────────────────────────────────────────────────────
 
 /// Externalized GC thresholds (replaces hardcoded literals in gc_tables/archive).
@@ -386,5 +645,107 @@ mod tests {
         assert!(RetentionPolicy::Pinned.is_gc_exempt());
         assert!(!RetentionPolicy::Durable.is_gc_exempt());
         assert!(!RetentionPolicy::Ephemeral.is_gc_exempt());
+    }
+
+    #[test]
+    fn test_memory_source_roundtrip() {
+        for src in [
+            MemorySource::Manual,
+            MemorySource::Extraction,
+            MemorySource::Migration,
+            MemorySource::Auto,
+            MemorySource::FoundryDistill,
+            MemorySource::Handoff,
+            MemorySource::Kanban,
+            MemorySource::Wiki,
+            MemorySource::Ghost,
+            MemorySource::IngestEvent,
+        ] {
+            let s = src.as_str();
+            assert_eq!(MemorySource::from_str_opt(Some(s)), src, "roundtrip {s}");
+            assert!(MemorySource::is_canonical(s));
+            assert_eq!(MemorySource::parse_or_external(s), s);
+        }
+        // Unknown -> Manual fallback
+        assert_eq!(
+            MemorySource::from_str_opt(Some("garbage")),
+            MemorySource::Manual
+        );
+        assert_eq!(MemorySource::from_str_opt(None), MemorySource::Manual);
+    }
+
+    #[test]
+    fn test_parse_or_external_canonical() {
+        assert_eq!(MemorySource::parse_or_external("manual"), "manual");
+        assert_eq!(MemorySource::parse_or_external("Manual"), "manual");
+        assert_eq!(MemorySource::parse_or_external("  ghost  "), "ghost");
+    }
+
+    #[test]
+    fn test_parse_or_external_non_canonical() {
+        let r = MemorySource::parse_or_external("Hub Tool / X");
+        assert!(r.starts_with("external:"), "got {r}");
+        assert!(MemorySource::is_canonical(&r));
+        // Idempotent
+        assert_eq!(MemorySource::parse_or_external(&r), r);
+    }
+
+    #[test]
+    fn test_parse_or_external_empty() {
+        assert_eq!(MemorySource::parse_or_external(""), "manual");
+        assert_eq!(MemorySource::parse_or_external("   "), "manual");
+    }
+
+    #[test]
+    fn test_parse_or_external_truncates() {
+        let long = "a".repeat(200);
+        let r = MemorySource::parse_or_external(&long);
+        assert!(r.starts_with("external:"));
+        // `external:` (9) + 64 chars = 73 max
+        assert!(r.len() <= 73, "len={}", r.len());
+    }
+
+    #[test]
+    fn test_memory_category_normalize() {
+        assert_eq!(MemoryCategory::normalize("fact"), "fact");
+        assert_eq!(MemoryCategory::normalize("Decision"), "decision");
+        assert_eq!(MemoryCategory::normalize("WeirdThing"), "other");
+        assert_eq!(MemoryCategory::normalize(""), "other");
+        // Subsystem categories must round-trip cleanly.
+        assert_eq!(MemoryCategory::normalize("kanban"), "kanban");
+        assert_eq!(MemoryCategory::normalize("Handoff"), "handoff");
+        assert_eq!(MemoryCategory::normalize("GHOST"), "ghost");
+        assert_eq!(MemoryCategory::normalize("wiki"), "wiki");
+    }
+
+    #[test]
+    fn test_memory_scope_normalize() {
+        assert_eq!(MemoryScope::normalize("user"), "user");
+        assert_eq!(MemoryScope::normalize("PROJECT"), "project");
+        assert_eq!(MemoryScope::normalize("general"), "general");
+        // Reject 'self' / 'other_agent:*' -> general
+        assert_eq!(MemoryScope::normalize("self"), "general");
+        assert_eq!(MemoryScope::normalize("other_agent:foo"), "general");
+        assert_eq!(MemoryScope::normalize(""), "general");
+    }
+
+    #[test]
+    fn test_default_retention_matrix() {
+        assert_eq!(
+            default_retention_for("/handoff/foo", "manual"),
+            Some("pinned")
+        );
+        assert_eq!(default_retention_for("/handoff", "manual"), Some("pinned"));
+        assert_eq!(default_retention_for("/kanban/x", "manual"), Some("pinned"));
+        assert_eq!(
+            default_retention_for("/wiki/lessons", "manual"),
+            Some("permanent")
+        );
+        assert_eq!(
+            default_retention_for("/notes/2026", "foundry_distill"),
+            Some("permanent")
+        );
+        assert_eq!(default_retention_for("/notes/2026", "manual"), None);
+        assert_eq!(default_retention_for("/", "manual"), None);
     }
 }

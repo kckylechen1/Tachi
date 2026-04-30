@@ -679,7 +679,10 @@ pub(super) fn coherent_distill_buckets(
     //   (2) defense in depth: if the filter contract drifts in future
     //       refactors, we still surface a structured skip reason instead
     //       of silently writing a low-quality distill.
-    buckets.into_iter().filter(|(_, group)| distill_quality_flags(group).is_empty()).collect()
+    buckets
+        .into_iter()
+        .filter(|(_, group)| distill_quality_flags(group).is_empty())
+        .collect()
 }
 
 async fn process_memory_distill_job(
@@ -720,9 +723,7 @@ async fn process_memory_distill_job(
     // legacy contract (one distill output per job).
     let mut buckets = coherent_distill_buckets(raw_entries);
     if buckets.is_empty() {
-        return Ok(DistillOutcome::Skipped(
-            SKIP_NO_COHERENT_BUCKET.to_string(),
-        ));
+        return Ok(DistillOutcome::Skipped(SKIP_NO_COHERENT_BUCKET.to_string()));
     }
     let (bucket_key, source_entries) = if let Some(preferred_key) = preferred_coherence_key {
         let preferred_bucket_key = format!("{}#{preferred_key}", item.path_prefix);
@@ -982,16 +983,17 @@ pub(crate) async fn run_foundry_maintenance_worker(
         // can surface *why* a job skipped/failed instead of just the bare
         // status. The reason is now returned in-band by
         // `handle_foundry_maintenance_item` (no global stash, no draining).
-        let (status_str, reason): (&str, Option<String>) = match &result {
-            Ok((memory_core::FoundryJobStatus::Skipped, reason)) => (
-                "skipped",
-                Some(reason.clone().unwrap_or_else(|| {
-                    "worker reported no-op (no qualifying inputs)".to_string()
-                })),
-            ),
-            Ok((_, _)) => ("completed", None),
-            Err(e) => ("failed", Some(e.clone())),
-        };
+        let (status_str, reason): (&str, Option<String>) =
+            match &result {
+                Ok((memory_core::FoundryJobStatus::Skipped, reason)) => (
+                    "skipped",
+                    Some(reason.clone().unwrap_or_else(|| {
+                        "worker reported no-op (no qualifying inputs)".to_string()
+                    })),
+                ),
+                Ok((_, _)) => ("completed", None),
+                Err(e) => ("failed", Some(e.clone())),
+            };
         let _ = with_foundry_store(&server, &item, |store| {
             memory_core::update_foundry_job_status_with_reason(
                 store.connection(),

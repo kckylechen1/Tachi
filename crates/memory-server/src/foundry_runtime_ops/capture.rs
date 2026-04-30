@@ -241,15 +241,34 @@ pub(super) fn persist_capture_entry(
     entry: &MemoryEntry,
 ) -> Result<(), String> {
     if let Some(project_name) = named_project {
+        let dest_path = MemoryServer::resolve_named_project_db_path(project_name)?;
+        let mut entry = entry.clone();
+        entry.metadata = crate::provenance::restamp_provenance_for_destination(
+            entry.metadata,
+            &dest_path,
+            DbScope::Project,
+        );
         server.with_named_project_store(project_name, |store| {
             store
-                .upsert(entry)
+                .upsert(&entry)
                 .map_err(|e| format!("Failed to save session capture to '{project_name}': {e}"))
         })
     } else {
+        let dest_path = match target_db {
+            DbScope::Global => Some(server.global_db_path.as_ref().clone()),
+            DbScope::Project => server.project_db_path.as_ref().map(|p| p.as_ref().clone()),
+        };
+        let entry_to_write = if let Some(dest) = dest_path {
+            let mut e = entry.clone();
+            e.metadata =
+                crate::provenance::restamp_provenance_for_destination(e.metadata, &dest, target_db);
+            e
+        } else {
+            entry.clone()
+        };
         server.with_store_for_scope(target_db, |store| {
             store
-                .upsert(entry)
+                .upsert(&entry_to_write)
                 .map_err(|e| format!("Failed to save captured memory: {e}"))
         })
     }

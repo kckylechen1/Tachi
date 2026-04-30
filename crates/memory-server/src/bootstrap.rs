@@ -1386,6 +1386,30 @@ async fn run_manifest_command(
                 Ok(())
             }
         }
+        ManifestAction::Gc { json } => {
+            let report = crate::manifest::gc_manifest(&manifest_path)?;
+            if json {
+                print_pretty_json(&serde_json::to_value(&report)?)
+            } else {
+                println!(
+                    "manifest gc: before={} after={} canonicalized={} removed_missing={} removed_fixture={} schema_kind_fixed={} dedup_collapsed={}{}",
+                    report.entries_before,
+                    report.entries_after,
+                    report.canonicalized,
+                    report.removed_missing,
+                    report.removed_fixture,
+                    report.schema_kind_fixed,
+                    report.dedup_collapsed,
+                    if report.aborted {
+                        format!(" ABORTED: {}", report.abort_reason.as_deref().unwrap_or("?"))
+                    } else {
+                        String::new()
+                    }
+                );
+                println!("(manifest at {})", manifest_path.display());
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1690,6 +1714,22 @@ async fn run_cli_command(
             Ok(())
         }
         Commands::Rescue { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Status { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Daemon { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Foundry { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Repair { .. } => {
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
@@ -2094,11 +2134,17 @@ fn db_path_held_by_other_process(db_path: &str) -> bool {
         use std::process::Command;
         let our_pid = std::process::id().to_string();
         // -t prints PIDs, one per line. -F p would also work but -t is portable.
-        let output = Command::new("lsof").arg("-t").arg("--").arg(db_path).output();
+        let output = Command::new("lsof")
+            .arg("-t")
+            .arg("--")
+            .arg(db_path)
+            .output();
         match output {
             Ok(o) if o.status.success() => {
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.lines().any(|line| line.trim() != our_pid && !line.trim().is_empty())
+                stdout
+                    .lines()
+                    .any(|line| line.trim() != our_pid && !line.trim().is_empty())
             }
             _ => false,
         }
@@ -2116,7 +2162,10 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // (config load, manifest resolution, daemon bind) are captured.
     let home_for_logs = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     init_tracing(&home_for_logs);
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tachi memory-server starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "tachi memory-server starting"
+    );
 
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -2208,6 +2257,42 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Failure to read the manifest is non-fatal: we proceed with the heuristic
     // result so first-run installs still work without `tachi doctor`.
     let manifest_path = crate::manifest::Manifest::default_path(&home);
+    // PR-2: hygiene pass before any manifest consumer reads. Idempotent.
+    // Failures are logged and swallowed — startup must never block on GC.
+    if matches!(command, Commands::Serve) && manifest_path.exists() {
+        match crate::manifest::gc_manifest(&manifest_path) {
+            Ok(report) => {
+                if report.aborted {
+                    tracing::warn!(
+                        target: "tachi::manifest::gc",
+                        reason = report.abort_reason.as_deref().unwrap_or(""),
+                        "manifest GC aborted at startup"
+                    );
+                } else if report.canonicalized
+                    + report.removed_missing
+                    + report.removed_fixture
+                    + report.schema_kind_fixed
+                    + report.dedup_collapsed
+                    > 0
+                {
+                    tracing::info!(
+                        target: "tachi::manifest::gc",
+                        before = report.entries_before,
+                        after = report.entries_after,
+                        canonicalized = report.canonicalized,
+                        removed_missing = report.removed_missing,
+                        removed_fixture = report.removed_fixture,
+                        schema_kind_fixed = report.schema_kind_fixed,
+                        dedup_collapsed = report.dedup_collapsed,
+                        "manifest GC applied at startup"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "tachi::manifest::gc", error = %e, "manifest GC failed; continuing")
+            }
+        }
+    }
     let manifest_opt = if manifest_path.exists() {
         crate::manifest::Manifest::load(&manifest_path).ok()
     } else {
@@ -2216,7 +2301,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let global_db_path = if let Some(m) = manifest_opt.as_ref() {
         if let Some(entry) = m.global() {
             let manifest_global = PathBuf::from(&entry.path);
-            let user_overrode = cli.global_db.is_some() || std::env::var_os("MEMORY_DB_PATH").is_some();
+            let user_overrode =
+                cli.global_db.is_some() || std::env::var_os("MEMORY_DB_PATH").is_some();
             if user_overrode {
                 if global_db_path != manifest_global {
                     eprintln!(
@@ -2339,7 +2425,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve project DB path
     let explicit_project_db = cli.project_db.is_some();
-    let mut project_db_path = if cli.no_project_db {
+    let project_db_path = if cli.no_project_db {
         if cli.project_db.is_some() {
             eprintln!("--project-db is ignored because --no-project-db is set");
         }
@@ -2377,10 +2463,20 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_else(|| "<unknown>".to_string())
             );
         } else {
+            // PR-4: previously this branch *disabled* the auto-detected
+            // project DB to avoid mixed project context. With the multi-DB
+            // FoundryScheduler in place, all manifest DBs receive foundry
+            // coverage equally, so we keep the auto-detected project but
+            // surface a clear warning so the operator knows the daemon's
+            // bound project follows whichever cwd it was launched from.
             eprintln!(
-                "Daemon mode: auto-detected project DB disabled to avoid mixed project context. Use --project-db PATH to opt into single-project daemon mode."
+                "Daemon mode: auto-detected project DB {} retained (multi-DB scheduler is active). \
+                 Use --project-db PATH to pin a specific project, or unset to run global-only.",
+                project_db_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string())
             );
-            project_db_path = None;
         }
     }
 
@@ -2434,6 +2530,46 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Commands::Rescue { action } = &command {
         return run_rescue_command(action.clone(), &home).await;
+    }
+
+    if let Commands::Status { watch, json } = &command {
+        return crate::status_ops::run_status(
+            *watch,
+            *json,
+            &app_home,
+            &global_db_path,
+            project_db_path.as_deref(),
+        )
+        .await;
+    }
+
+    if let Commands::Daemon { action } = &command {
+        return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+    }
+
+    if let Commands::Foundry { action } = &command {
+        return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
+    }
+
+    if let Commands::Repair {
+        action,
+        db,
+        rule,
+        apply,
+        no_backup,
+        json,
+    } = &command
+    {
+        return crate::repair::run_repair(
+            action.clone(),
+            db.clone(),
+            rule.clone(),
+            *apply,
+            *no_backup,
+            *json,
+            &app_home,
+        )
+        .await;
     }
 
     if !matches!(command, Commands::Serve) {
@@ -2789,6 +2925,50 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // In daemon mode, project DB auto-detection is disabled above to avoid
         // mixed project context. Users can still opt into single-project mode
         // via explicit --project-db.
+
+        // PR-4 singleton enforcement: acquire ~/.tachi/daemon.lock (flock +
+        // PID file) before binding the HTTP port so a duplicate daemon
+        // fails fast with a clear error instead of racing the first one
+        // for DB writes. The guard is held for the whole daemon lifetime
+        // and Drop releases the flock + unlinks the file.
+        let lock_path = app_home.join("daemon.lock");
+        let _daemon_lock = match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
+            Ok(g) => {
+                eprintln!(
+                    "[daemon] acquired singleton lock at {} (pid {})",
+                    lock_path.display(),
+                    std::process::id()
+                );
+                g
+            }
+            Err(e) => {
+                eprintln!(
+                    "[daemon] refusing to start: another tachi daemon already holds {} ({e})",
+                    lock_path.display()
+                );
+                return Err(format!("tachi daemon singleton lock unavailable: {e}").into());
+            }
+        };
+
+        // PR-4 multi-DB scheduler: periodically scan ~/.tachi/manifest.json
+        // and run a per-DB safety-net poll against foundry_jobs. Re-injects
+        // pending jobs into the existing foundry_tx mpsc channel for
+        // routable scopes (own global/project + named projects), counts
+        // orphans for unroutable manifest entries (dark DBs).
+        let manifest_path = app_home.join("manifest.json");
+        let scheduler = crate::foundry_scheduler::FoundryScheduler::start(
+            manifest_path.clone(),
+            server.foundry_tx_clone(),
+            server.global_db_path_buf(),
+            server.project_db_path_buf(),
+        );
+        eprintln!(
+            "[daemon] foundry scheduler started (manifest={})",
+            manifest_path.display()
+        );
+        // Hold scheduler for the whole daemon lifetime; Drop cancels
+        // the manifest watcher + per-DB workers.
+        let _scheduler = scheduler;
 
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,

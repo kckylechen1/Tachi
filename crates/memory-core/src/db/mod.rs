@@ -2,11 +2,13 @@ mod agent_state;
 mod audit;
 mod common;
 mod domain;
+pub mod foundry_config;
 pub mod foundry_jobs;
 mod ghost;
 mod graph;
 mod hub_db;
 mod memory_crud;
+pub mod migrations;
 mod pack_db;
 mod sandbox;
 mod schema;
@@ -36,8 +38,9 @@ pub use hub_db::{
 };
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, get_access_times, get_all, is_event_processed,
-    list_by_path, mark_event_processed, record_access, release_event_claim, search_fts, search_vec,
-    try_claim_event, update_enrichment_fields, update_with_revision, upsert,
+    list_by_path, mark_event_processed, normalize_for_write, record_access, release_event_claim,
+    search_fts, search_vec, try_claim_event, update_enrichment_fields, update_with_revision,
+    upsert,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_set_enabled, pack_upsert, projection_delete,
@@ -47,7 +50,7 @@ pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
     list_sandbox_policies, set_sandbox_policy, set_sandbox_rule,
 };
-pub use schema::init_schema;
+pub use schema::{init_schema, init_schema_with_label, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,
