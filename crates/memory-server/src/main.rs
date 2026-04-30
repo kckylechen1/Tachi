@@ -11,12 +11,14 @@ mod clawdoctor;
 mod cli;
 mod cli_client;
 mod copilot_ops;
+mod daemon_lock;
 mod dlq_ops;
 mod doctor;
 mod doctor_ops;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
+mod foundry_scheduler;
 mod ghost_ops;
 mod graph_state_ops;
 mod handoff_ops;
@@ -36,12 +38,14 @@ mod profiles;
 mod project_db_ops;
 mod prompts;
 mod provenance;
+mod repair;
 mod rescue;
 mod sandbox_ops;
 mod server_handler;
 mod server_methods;
 mod shared_defs;
 mod skill_chain_ops;
+mod status_ops;
 mod tool_params;
 mod utils;
 mod vault_crypto;
@@ -85,10 +89,9 @@ use crate::hub_helpers::{
 use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
-    handle_hub_register,
-    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
-    handle_run_skill, handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
-    handle_vc_register, handle_vc_resolve,
+    handle_hub_register, handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled,
+    handle_hub_stats, handle_run_skill, handle_skill_evolve, handle_tachi_audit_log,
+    handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
     gc_expired_kanban_cards, handle_check_inbox, handle_post_card, handle_update_card,
@@ -124,8 +127,7 @@ use crate::sandbox_ops::{
 };
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_entry_with_enrichment, slim_l0_rule, slim_search_result,
-    DeadLetter, DLQ_MAX_ENTRIES,
-    DLQ_TTL_SECS,
+    DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
@@ -423,7 +425,7 @@ impl MemoryServer {
                 ),
             )
         })?;
-        let global_store = MemoryStore::open(global_db_str)?;
+        let global_store = MemoryStore::open_with_label(global_db_str, "global")?;
         let global_vec_available = global_store.vec_available;
 
         let (project_store, project_rw_gate, project_db_path, project_vec_available) =
@@ -434,7 +436,15 @@ impl MemoryServer {
                         format!("Project DB path contains invalid UTF-8: {}", p.display()),
                     )
                 })?;
-                let store = MemoryStore::open(project_db_str)?;
+                // Derive project label from parent directory name
+                // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
+                let project_label = p
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|os| os.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
                 let v = store.vec_available;
                 (
                     Some(Arc::new(StdMutex::new(store))),
@@ -604,6 +614,23 @@ impl MemoryServer {
         self.llm.clear_provider_secrets();
         let secrets = load_unlocked_api_key_secrets(self)?;
         Ok(self.llm.set_provider_secrets(secrets))
+    }
+
+    /// Clone the foundry maintenance sender so external supervisors
+    /// (e.g. the multi-DB FoundryScheduler) can re-inject jobs into the
+    /// same in-process worker that handles enrichment-driven enqueues.
+    pub(crate) fn foundry_tx_clone(&self) -> mpsc::Sender<FoundryMaintenanceItem> {
+        self.foundry_tx.clone()
+    }
+
+    /// Path to this server's global memory DB (canonicalized at boot).
+    pub(crate) fn global_db_path_buf(&self) -> PathBuf {
+        (*self.global_db_path).clone()
+    }
+
+    /// Path to this server's project memory DB, when one is bound.
+    pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
+        self.project_db_path.as_ref().map(|p| (**p).clone())
     }
 }
 
@@ -1780,6 +1807,9 @@ impl MemoryServer {
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = bootstrap::run(cli) {
+        if let Some(exit) = e.downcast_ref::<repair::RepairExit>() {
+            std::process::exit(exit.code());
+        }
         eprintln!("Fatal: {e}");
         std::process::exit(1);
     }

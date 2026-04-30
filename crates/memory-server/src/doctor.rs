@@ -733,7 +733,11 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
     let gc_note = gc_old_checkpoint_copies(src_path, 3);
     if let Some(extra) = gc_note {
         let mut r = result;
-        r.note = if r.note.is_empty() { extra } else { format!("{}; {extra}", r.note) };
+        r.note = if r.note.is_empty() {
+            extra
+        } else {
+            format!("{}; {extra}", r.note)
+        };
         return r;
     }
     result

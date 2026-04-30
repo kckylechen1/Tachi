@@ -1005,7 +1005,7 @@ pub(super) async fn handle_ingest_source(
                 } else {
                     format!("{}/{}", path_prefix, index)
                 };
-                let metadata = crate::provenance::inject_provenance(
+                let mut metadata = crate::provenance::inject_provenance(
                     server,
                     base_metadata.clone(),
                     "ingest_source",
@@ -1021,6 +1021,14 @@ pub(super) async fn handle_ingest_source(
                         "event_hash": event_hash,
                     }),
                 );
+                // Wiki-pathed ingests opt into cross-project routing so they
+                // can land in the global DB when no wiki project is configured
+                // (audit B11 — preferred home is the wiki project DB).
+                if chunk_path.starts_with("/wiki/") {
+                    if let Some(obj) = metadata.as_object_mut() {
+                        obj.insert("allow_cross_project".to_string(), json!(true));
+                    }
+                }
                 let entry = build_ingest_entry(
                     entry_id,
                     chunk_path,

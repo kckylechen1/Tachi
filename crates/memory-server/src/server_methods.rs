@@ -73,7 +73,14 @@ impl MemoryServer {
                 db_path.display()
             )
         })?;
-        let store = MemoryStore::open(db_str).map_err(|e| format!("open project db: {e}"))?;
+        let project_label = db_path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|os| os.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let store = MemoryStore::open_with_label(db_str, &project_label)
+            .map_err(|e| format!("open project db: {e}"))?;
         let vec_available = store.vec_available;
 
         let state = ProjectDbState {
@@ -271,8 +278,8 @@ impl MemoryServer {
         // Use global rw_gate for write lock to avoid concurrent SQLITE_BUSY issues for named projects.
         // It's a coarse lock, but named project writes are fast and this prevents concurrent overlaps.
         let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
-        let mut store =
-            MemoryStore::open(db_str).map_err(|e| format!("open named project store: {e}"))?;
+        let mut store = MemoryStore::open_with_label(db_str, project_name)
+            .map_err(|e| format!("open named project store: {e}"))?;
         f(&mut store)
     }
 

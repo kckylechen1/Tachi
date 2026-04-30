@@ -41,8 +41,8 @@ pub(crate) async fn handle_hub_quick_add(
         scope: params.scope.clone(),
     };
     let register_body = handle_hub_register(server, register_params).await?;
-    let register_json: serde_json::Value =
-        serde_json::from_str(&register_body).map_err(|e| format!("parse register response: {e}"))?;
+    let register_json: serde_json::Value = serde_json::from_str(&register_body)
+        .map_err(|e| format!("parse register response: {e}"))?;
 
     let mut resp = serde_json::Map::new();
     resp.insert("register".into(), register_json.clone());
@@ -79,8 +79,8 @@ pub(crate) async fn handle_hub_quick_add(
             enabled: Some(true),
         };
         let review_body = handle_hub_review(server, review_params).await?;
-        let review_json: serde_json::Value =
-            serde_json::from_str(&review_body).map_err(|e| format!("parse review response: {e}"))?;
+        let review_json: serde_json::Value = serde_json::from_str(&review_body)
+            .map_err(|e| format!("parse review response: {e}"))?;
         resp.insert("review".into(), review_json);
         resp.insert("auto_approve".into(), json!("applied"));
     }

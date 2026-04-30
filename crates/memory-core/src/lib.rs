@@ -9,11 +9,18 @@ pub mod foundry;
 pub mod hub;
 pub mod noise;
 pub mod pack;
+pub mod path_router;
 pub mod scorer;
 pub mod search;
 pub mod types;
 pub mod vault;
 
+pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
+pub use db::foundry_jobs::{
+    find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
+    load_pending_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobSummary,
+    JobStatusHistogram, PersistedFoundryJob,
+};
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -32,36 +39,70 @@ pub use types::{
     RetentionPolicy, SearchResult, StatsResult,
 };
 pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
-pub use db::foundry_jobs::{
-    find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
-    load_pending_foundry_jobs, update_foundry_job_status_with_reason,
-    FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob,
-};
 
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
+
+/// Test/operator escape hatch: when set to a truthy value, the path-routing
+/// validation in `MemoryStore::upsert` is bypassed entirely. Useful for test
+/// fixtures that intentionally write across the canonical layout.
+fn path_validation_disabled() -> bool {
+    matches!(
+        std::env::var("TACHI_DISABLE_PATH_VALIDATION")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
 
 /// High-level handle that owns a database connection.
 /// Language bindings (NAPI, PyO3) will wrap this struct.
 pub struct MemoryStore {
     conn: Connection,
     pub vec_available: bool,
+    /// Manifest label for this DB ("global", "wiki", a project name, or
+    /// "unknown"). Used by path validation at write time.
+    db_label: String,
+    /// Whether path validation is enforced for this store. Disabled when
+    /// db_label is unknown to avoid breaking unlabeled callers.
+    path_validation: bool,
 }
 
 impl MemoryStore {
     /// Open (or create) a memory database at the given path.
     pub fn open(db_path: &str) -> Result<Self, MemoryError> {
+        Self::open_with_label_inner(db_path, "unknown", false)
+    }
+
+    /// Open (or create) a memory database with a known manifest label.
+    /// Enables path-routing validation at write time and runs data migrations.
+    pub fn open_with_label(db_path: &str, db_label: &str) -> Result<Self, MemoryError> {
+        Self::open_with_label_inner(db_path, db_label, true)
+    }
+
+    fn open_with_label_inner(
+        db_path: &str,
+        db_label: &str,
+        path_validation: bool,
+    ) -> Result<Self, MemoryError> {
         // Register extensions BEFORE opening the connection.
         libsimple::enable_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
-        let conn = Connection::open(db_path)?;
+        let mut conn = Connection::open(db_path)?;
         conn.busy_timeout(Duration::from_millis(5_000))?;
-        db::init_schema(&conn)?;
+        if path_validation {
+            let p = std::path::PathBuf::from(db_path);
+            let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p)?;
+        } else {
+            db::init_schema(&conn)?;
+        }
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
             vec_available,
+            db_label: db_label.to_string(),
+            path_validation,
         })
     }
 
@@ -80,6 +121,8 @@ impl MemoryStore {
         Ok(Self {
             conn,
             vec_available,
+            db_label: "unknown".to_string(),
+            path_validation: false,
         })
     }
 
@@ -95,11 +138,29 @@ impl MemoryStore {
         Ok(Self {
             conn,
             vec_available,
+            db_label: "unknown".to_string(),
+            path_validation: false,
         })
     }
 
     /// Insert or update a memory entry (with optional embedding vector).
     pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        if self.path_validation && !path_validation_disabled() {
+            let allow_cross = entry
+                .metadata
+                .get("allow_cross_project")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if let Err(e) =
+                path_router::validate_path_for_db(&entry.path, &self.db_label, allow_cross)
+            {
+                eprintln!(
+                    "warning: path-routing validation rejected write db_label={} path={} error={}",
+                    self.db_label, entry.path, e
+                );
+                return Err(MemoryError::InvalidArg(e.to_string()));
+            }
+        }
         db::upsert(&mut self.conn, entry, self.vec_available)
     }
 
@@ -235,11 +296,11 @@ impl MemoryStore {
         let total: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let with_fts: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT id) FROM memories_fts",
-            [],
-            |r| r.get(0),
-        )?;
+        let with_fts: i64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT id) FROM memories_fts", [], |r| {
+                    r.get(0)
+                })?;
         Ok((total, with_fts))
     }
 

@@ -239,6 +239,20 @@ pub(crate) async fn handle_tachi_wiki_write(
     keywords.sort();
     keywords.dedup();
 
+    // Wiki content's canonical home is a dedicated wiki project DB. Production
+    // callers should pass `project: "wiki"`; if absent we still write where the
+    // server routes us, but we set `metadata.allow_cross_project=true` so
+    // path-routing validation lets `/wiki/...` through on non-wiki DBs.
+    // Audit B11: this metadata flag is the explicit opt-in required by
+    // path_router::validate_path_for_db.
+    let mut wiki_metadata = json!({
+        "wiki": true,
+        "wiki_title": params.title,
+        "user_force": params.force,
+        "allow_cross_project": true,
+    });
+    let _ = wiki_metadata.as_object_mut();
+
     let save_result = handle_save_memory(
         server,
         SaveMemoryParams {
@@ -261,11 +275,7 @@ pub(crate) async fn handle_tachi_wiki_write(
             retention_policy: Some(params.retention_policy),
             domain: params.domain.or_else(|| Some("wiki".to_string())),
             timestamp: None,
-            metadata: Some(json!({
-                "wiki": true,
-                "wiki_title": params.title,
-                "user_force": params.force,
-            })),
+            metadata: Some(wiki_metadata),
         },
     )
     .await?;
