@@ -2208,15 +2208,17 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 // never go through this path.
                 let bypass = std::env::var("TACHI_BYPASS_MANIFEST")
                     .ok()
-                    .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
+                    .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
                     .unwrap_or(false);
                 if !bypass {
                     if let Err(err) = m.check_writable(&entry.path) {
                         // Before failing hard, check if a live daemon is already
                         // holding this DB — that is the most common cause of a
-                        // false-positive WalOrphan classification.
+                        // false-positive WalOrphan classification. Note: the
+                        // pid file lives in `app_home` (e.g. ~/.tachi), NOT in
+                        // the user home dir.
                         let daemon_alive =
-                            crate::cli_client::detect_daemon(&home).await.is_some();
+                            crate::cli_client::detect_daemon(&app_home).await.is_some();
                         if !daemon_alive {
                             return Err(format!(
                                 "manifest global DB is not writable: {err}. \
