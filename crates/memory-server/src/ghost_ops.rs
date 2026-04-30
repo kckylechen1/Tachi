@@ -313,7 +313,7 @@ pub(super) async fn handle_ghost_promote(
 
         let text = payload_to_text(&payload);
         let memory_id = format!("ghost:{}", params.message_id);
-        let metadata = crate::provenance::inject_provenance(
+        let mut metadata = crate::provenance::inject_provenance(
             server,
             json!({
                 "ghost_message_id": params.message_id.clone(),
@@ -331,6 +331,19 @@ pub(super) async fn handle_ghost_promote(
                 "publisher": publisher.clone(),
             }),
         );
+        // B9: keep `source` canonical ('ghost') and stash the publisher under
+        // metadata.ghost.publisher so we don't fan the source vocabulary out.
+        if let Some(map) = metadata.as_object_mut() {
+            let ghost_obj = map
+                .entry("ghost".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(g) = ghost_obj.as_object_mut() {
+                g.insert(
+                    "publisher".to_string(),
+                    serde_json::Value::String(publisher.clone()),
+                );
+            }
+        }
         let entry = MemoryEntry {
             id: memory_id.clone(),
             path: target_path.clone(),
@@ -344,7 +357,7 @@ pub(super) async fn handle_ghost_promote(
             persons: vec![publisher.clone()],
             entities: Vec::new(),
             location: String::new(),
-            source: format!("ghost:{}", publisher),
+            source: "ghost".to_string(),
             scope: "general".to_string(),
             archived: false,
             access_count: 0,

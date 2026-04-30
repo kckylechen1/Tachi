@@ -509,9 +509,310 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 
     ensure_fts_backfilled(conn)?;
 
+    migrate_enum_constraints(conn)?;
+
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+/// Idempotent migration that:
+///   1. Detects whether CHECK constraints are already in place (no-op if so).
+///   2. Normalizes legacy `source` / `category` / `scope` / `retention_policy`
+///      values to the canonical vocabulary defined in `types.rs`.
+///   3. Backfills `retention_policy` defaults for /handoff, /kanban, /wiki, and
+///      foundry_distill rows.
+///   4. Rebuilds the `memories` table with CHECK constraints (SQLite cannot
+///      ALTER TABLE ADD CHECK).
+///
+/// The standalone `memories_fts` virtual table is independent of the rebuild
+/// and is preserved across the rename.
+fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
+    // Check if CHECK constraints already exist by scanning sqlite_master.
+    let existing_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(sql) = existing_sql.as_deref() {
+        if sql.contains("CHECK (source") || sql.contains("CHECK(source") {
+            // Already migrated; nothing to do.
+            return Ok(());
+        }
+    }
+
+    // ── Step 1: Normalize source ────────────────────────────────────────────
+    // Empty/NULL → 'manual'
+    conn.execute(
+        "UPDATE memories SET source = 'manual'
+         WHERE source IS NULL OR trim(source) = ''",
+        [],
+    )?;
+    // Common legacy aliases
+    conn.execute(
+        "UPDATE memories SET source = 'manual'
+         WHERE lower(source) IN ('test', 'unit_test')",
+        [],
+    )?;
+
+    // ghost:<publisher> → 'ghost' + move publisher into metadata.ghost.publisher
+    // Only mutate metadata when it parses as JSON; otherwise just collapse source.
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, source, metadata FROM memories
+             WHERE source LIKE 'ghost:%'",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        for (id, source, metadata) in rows {
+            let publisher = source
+                .strip_prefix("ghost:")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let new_meta = match serde_json::from_str::<serde_json::Value>(&metadata) {
+                Ok(mut v) => {
+                    if !publisher.is_empty() {
+                        let obj = v.as_object_mut();
+                        if let Some(map) = obj {
+                            let ghost_entry = map
+                                .entry("ghost".to_string())
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let Some(g) = ghost_entry.as_object_mut() {
+                                g.insert(
+                                    "publisher".to_string(),
+                                    serde_json::Value::String(publisher.clone()),
+                                );
+                            }
+                        }
+                    }
+                    Some(v.to_string())
+                }
+                Err(_) => None, // leave metadata untouched
+            };
+            match new_meta {
+                Some(m) => {
+                    conn.execute(
+                        "UPDATE memories SET source='ghost', metadata=?1 WHERE id=?2",
+                        rusqlite::params![m, id],
+                    )?;
+                }
+                None => {
+                    conn.execute(
+                        "UPDATE memories SET source='ghost' WHERE id=?1",
+                        rusqlite::params![id],
+                    )?;
+                }
+            }
+        }
+    }
+
+    // Lowercase canonical sources so case-variants match the CHECK list.
+    conn.execute(
+        "UPDATE memories SET source = lower(source)
+         WHERE source IN ('Manual','Extraction','Migration','Auto','FoundryDistill','Handoff','Kanban','Wiki','Ghost','IngestEvent')
+            OR source GLOB '*[A-Z]*'",
+        [],
+    )?;
+
+    // Anything still not canonical (and not already external:) → external:<sanitized>
+    let canonical_list = [
+        "manual",
+        "extraction",
+        "migration",
+        "auto",
+        "foundry_distill",
+        "handoff",
+        "kanban",
+        "wiki",
+        "ghost",
+        "ingest_event",
+    ];
+    {
+        let mut stmt = conn.prepare("SELECT id, source FROM memories")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        for (id, source) in rows {
+            if canonical_list.contains(&source.as_str()) {
+                continue;
+            }
+            if let Some(suffix) = source.strip_prefix("external:") {
+                // Re-sanitize suffix to be safe
+                let sanitized = sanitize_source_suffix_sql(suffix);
+                let new_val = format!("external:{}", sanitized);
+                if new_val != source {
+                    conn.execute(
+                        "UPDATE memories SET source=?1 WHERE id=?2",
+                        rusqlite::params![new_val, id],
+                    )?;
+                }
+                continue;
+            }
+            let sanitized = sanitize_source_suffix_sql(&source);
+            let new_val = format!("external:{}", sanitized);
+            conn.execute(
+                "UPDATE memories SET source=?1 WHERE id=?2",
+                rusqlite::params![new_val, id],
+            )?;
+        }
+    }
+
+    // ── Step 2: Normalize category ──────────────────────────────────────────
+    conn.execute(
+        "UPDATE memories SET category = lower(category) WHERE category IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET category = 'other'
+         WHERE category IS NULL OR category = ''
+            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')",
+        [],
+    )?;
+
+    // ── Step 3: Normalize scope ─────────────────────────────────────────────
+    conn.execute(
+        "UPDATE memories SET scope = lower(scope) WHERE scope IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET scope = 'general'
+         WHERE scope IS NULL OR scope NOT IN ('user','project','general')",
+        [],
+    )?;
+
+    // ── Step 4: Normalize retention_policy ──────────────────────────────────
+    conn.execute(
+        "UPDATE memories SET retention_policy = lower(retention_policy)
+         WHERE retention_policy IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = NULL
+         WHERE retention_policy IS NOT NULL
+           AND retention_policy NOT IN ('ephemeral','durable','permanent','pinned')",
+        [],
+    )?;
+
+    // ── Step 5: Backfill retention defaults ─────────────────────────────────
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'pinned'
+         WHERE retention_policy IS NULL
+           AND (path LIKE '/handoff%' OR path LIKE '/kanban%')",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'permanent'
+         WHERE retention_policy IS NULL AND path LIKE '/wiki%'",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'permanent'
+         WHERE retention_policy IS NULL AND source = 'foundry_distill'",
+        [],
+    )?;
+
+    // ── Step 6: Rebuild table with CHECK constraints ────────────────────────
+    conn.execute_batch(
+        r#"
+        BEGIN;
+
+        CREATE TABLE memories_new (
+            id           TEXT PRIMARY KEY,
+            path         TEXT NOT NULL DEFAULT '/',
+            summary      TEXT NOT NULL DEFAULT '',
+            text         TEXT NOT NULL DEFAULT '',
+            importance   REAL NOT NULL DEFAULT 0.7,
+            timestamp    TEXT NOT NULL,
+            category     TEXT NOT NULL DEFAULT 'fact',
+            topic        TEXT NOT NULL DEFAULT '',
+            keywords     TEXT NOT NULL DEFAULT '[]',
+            persons      TEXT NOT NULL DEFAULT '[]',
+            entities     TEXT NOT NULL DEFAULT '[]',
+            location     TEXT NOT NULL DEFAULT '',
+            source       TEXT NOT NULL DEFAULT 'manual',
+            scope        TEXT NOT NULL DEFAULT 'general',
+            archived     INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL DEFAULT '',
+            access_count INTEGER NOT NULL DEFAULT 0,
+            last_access  TEXT,
+            revision     INTEGER NOT NULL DEFAULT 1,
+            metadata     TEXT NOT NULL DEFAULT '{}',
+            retention_policy TEXT,
+            domain       TEXT,
+            CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
+            CHECK (scope IN ('user','project','general')),
+            CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
+            CHECK (
+                source IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')
+                OR source LIKE 'external:%'
+            )
+        );
+
+        INSERT INTO memories_new
+            (id, path, summary, text, importance, timestamp, category, topic,
+             keywords, persons, entities, location, source, scope, archived,
+             created_at, updated_at, access_count, last_access, revision,
+             metadata, retention_policy, domain)
+        SELECT
+             id, path, summary, text, importance, timestamp, category, topic,
+             keywords, persons, entities, location, source, scope, archived,
+             created_at, updated_at, access_count, last_access, revision,
+             metadata, retention_policy, domain
+        FROM memories;
+
+        DROP TABLE memories;
+        ALTER TABLE memories_new RENAME TO memories;
+
+        CREATE INDEX IF NOT EXISTS idx_memories_path        ON memories(path);
+        CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
+        CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
+        CREATE INDEX IF NOT EXISTS idx_memories_domain      ON memories(domain);
+
+        COMMIT;
+        "#,
+    )?;
+
+    Ok(())
+}
+
+/// SQL-side equivalent of `sanitize_source_suffix` in types.rs.
+/// Lowercases, replaces non-`[a-z0-9_-]` with `_`, truncates to 64 chars.
+fn sanitize_source_suffix_sql(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(64));
+    for c in s.chars() {
+        let mapped = if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+            c
+        } else if c.is_ascii_uppercase() {
+            c.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        out.push(mapped);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
 }
 
 fn ensure_column(
@@ -571,4 +872,233 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn open_with_legacy_row(
+        source: &str,
+        category: &str,
+        scope: &str,
+        retention: Option<&str>,
+        path: &str,
+        metadata: &str,
+    ) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // Build legacy-shape table without CHECK constraints, mirroring the
+        // pre-migration schema.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id           TEXT PRIMARY KEY,
+                path         TEXT NOT NULL DEFAULT '/',
+                summary      TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                importance   REAL NOT NULL DEFAULT 0.7,
+                timestamp    TEXT NOT NULL,
+                category     TEXT NOT NULL DEFAULT 'fact',
+                topic        TEXT NOT NULL DEFAULT '',
+                keywords     TEXT NOT NULL DEFAULT '[]',
+                persons      TEXT NOT NULL DEFAULT '[]',
+                entities     TEXT NOT NULL DEFAULT '[]',
+                location     TEXT NOT NULL DEFAULT '',
+                source       TEXT NOT NULL DEFAULT 'manual',
+                scope        TEXT NOT NULL DEFAULT 'general',
+                archived     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access  TEXT,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                metadata     TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain       TEXT
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'simple'
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, persons, entities, location, source, scope, archived,
+                 created_at, updated_at, access_count, last_access, revision,
+                 metadata, retention_policy, domain)
+               VALUES (?1, ?2, '', 'hello', 0.5, '2026-04-30T00:00:00Z', ?3, '',
+                       '[]','[]','[]','', ?4, ?5, 0,
+                       '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
+                       ?6, ?7, NULL)"#,
+            params!["row1", path, category, source, scope, metadata, retention],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migration_normalizes_legacy_garbage() {
+        let conn = open_with_legacy_row(
+            "test",
+            "WeirdCat",
+            "self",
+            Some("garbage"),
+            "/notes/foo",
+            "{}",
+        );
+        // First run: performs full migration.
+        init_schema(&conn).unwrap();
+        let (source, category, scope, retention): (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT source, category, scope, retention_policy FROM memories WHERE id='row1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "manual");
+        assert_eq!(category, "other");
+        assert_eq!(scope, "general");
+        assert_eq!(retention, None);
+    }
+
+    #[test]
+    fn migration_collapses_ghost_publisher_into_metadata() {
+        let conn = open_with_legacy_row(
+            "ghost:agent_x",
+            "fact",
+            "general",
+            None,
+            "/ghost/messages",
+            "{}",
+        );
+        init_schema(&conn).unwrap();
+        let (source, metadata): (String, String) = conn
+            .query_row(
+                "SELECT source, metadata FROM memories WHERE id='row1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "ghost");
+        let m: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(m["ghost"]["publisher"], "agent_x");
+    }
+
+    #[test]
+    fn migration_backfills_handoff_retention_to_pinned() {
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/handoff/foo",
+            "{}",
+        );
+        init_schema(&conn).unwrap();
+        let r: Option<String> = conn
+            .query_row(
+                "SELECT retention_policy FROM memories WHERE id='row1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(r.as_deref(), Some("pinned"));
+    }
+
+    #[test]
+    fn migration_rejects_invalid_scope_after_migration() {
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
+        init_schema(&conn).unwrap();
+        // Now CHECK constraint should reject 'self'.
+        let err = conn
+            .execute(
+                r#"INSERT INTO memories
+                   (id, path, summary, text, importance, timestamp, category, topic,
+                    keywords, persons, entities, location, source, scope, archived,
+                    created_at, updated_at, access_count, last_access, revision,
+                    metadata, retention_policy, domain)
+                   VALUES ('row2', '/notes/y', '', '', 0.5, '2026-04-30T00:00:00Z',
+                           'fact', '', '[]','[]','[]','', 'manual', 'self', 0,
+                           '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
+                           '{}', NULL, NULL)"#,
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("check")
+                || err.to_string().to_ascii_lowercase().contains("constraint"),
+            "expected CHECK violation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
+        init_schema(&conn).unwrap();
+        // Snapshot the table SQL.
+        let sql1: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Run again — should be no-op.
+        init_schema(&conn).unwrap();
+        let sql2: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sql1, sql2);
+        // Row still present.
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 1);
+    }
+
+    #[test]
+    fn migration_preserves_fts_rows() {
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
+        // Pre-populate FTS to confirm it survives.
+        conn.execute(
+            "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+             VALUES ('row1', '/notes/x', '', 'hello', '', '')",
+            [],
+        )
+        .unwrap();
+        init_schema(&conn).unwrap();
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
+            .unwrap();
+        assert!(cnt >= 1);
+    }
 }

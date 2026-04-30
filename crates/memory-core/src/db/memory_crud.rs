@@ -3,10 +3,34 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
-use crate::types::MemoryEntry;
+use crate::types::{
+    default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource,
+};
 
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
+
+// ─── Normalization ────────────────────────────────────────────────────────────
+
+/// Coerce caller-provided enum-like fields to the canonical vocabulary
+/// enforced by the CHECK constraints on `memories`. Idempotent.
+///
+/// - `source`: routed through [`MemorySource::parse_or_external`]; user-controlled
+///   non-canonical values become `external:<sanitized>`.
+/// - `category`: clamped to one of fact/decision/experience/preference/entity/other.
+/// - `scope`: clamped to user/project/general (rejects `self`, `other_agent:*`).
+/// - `retention_policy`: defaulted via [`default_retention_for`] if the caller
+///   left it `None`.
+pub fn normalize_for_write(entry: &mut MemoryEntry) {
+    entry.source = MemorySource::parse_or_external(&entry.source);
+    entry.category = MemoryCategory::normalize(&entry.category).to_string();
+    entry.scope = MemoryScope::normalize(&entry.scope).to_string();
+    if entry.retention_policy.is_none() {
+        if let Some(d) = default_retention_for(&entry.path, &entry.source) {
+            entry.retention_policy = Some(d.to_string());
+        }
+    }
+}
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +45,11 @@ pub fn upsert(
             "entry.id must be provided by caller".to_string(),
         ));
     }
+
+    // Normalize enum-like fields to satisfy CHECK constraints.
+    let mut entry_owned = entry.clone();
+    normalize_for_write(&mut entry_owned);
+    let entry = &entry_owned;
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
     let last_access_utc = entry
@@ -199,6 +228,8 @@ pub fn update_with_revision(
 ) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     let new_revision = expected_revision + 1;
+    // Normalize source to satisfy CHECK constraint.
+    let new_source = MemorySource::parse_or_external(new_source);
     let tx = conn.transaction()?;
 
     tx.execute(

@@ -3594,7 +3594,10 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     revision: 1,
                     metadata: json!({}),
                     vector: None,
-                    retention_policy: None,
+                    // Explicit `durable` opts out of the `/wiki*` → permanent
+                    // default retention applied by `normalize_for_write`, so
+                    // the stale check still flags this fixture.
+                    retention_policy: Some("durable".to_string()),
                     domain: Some("general".to_string()),
                 },
                 MemoryEntry {
