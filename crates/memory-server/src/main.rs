@@ -38,6 +38,7 @@ mod profiles;
 mod project_db_ops;
 mod prompts;
 mod provenance;
+mod repair;
 mod rescue;
 mod sandbox_ops;
 mod status_ops;

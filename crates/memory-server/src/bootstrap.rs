@@ -1729,6 +1729,10 @@ async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Repair { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
         Commands::Remember {
             text,
             tags,
@@ -2526,6 +2530,27 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Commands::Foundry { action } = &command {
         return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
+    }
+
+    if let Commands::Repair {
+        action,
+        db,
+        rule,
+        apply,
+        no_backup,
+        json,
+    } = &command
+    {
+        return crate::repair::run_repair(
+            action.clone(),
+            db.clone(),
+            rule.clone(),
+            *apply,
+            *no_backup,
+            *json,
+            &app_home,
+        )
+        .await;
     }
 
     if !matches!(command, Commands::Serve) {

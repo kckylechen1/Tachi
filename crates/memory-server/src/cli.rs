@@ -314,6 +314,99 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: FoundryAction,
     },
+    /// PR-5: data-fix operations across manifest DBs (FTS rebuild, retention
+    /// backfill, quarantine resolution, foundry job purge, integrity check,
+    /// VACUUM, orphan reference cleanup). Default is dry-run; pass --apply to
+    /// actually mutate. Per-DB backup auto-taken before any mutation.
+    Repair {
+        #[command(subcommand)]
+        action: Option<RepairAction>,
+        /// Restrict to a single DB by manifest label / scope hint
+        /// (e.g. "global", "project:hapi", or an absolute path).
+        #[arg(long, value_name = "LABEL", global = true)]
+        db: Option<String>,
+        /// Comma-separated rule IDs to run, e.g. "R1,R2,R5". Default: all.
+        #[arg(long, value_delimiter = ',', global = true)]
+        rule: Vec<String>,
+        /// Apply repairs (mutate). Without this flag, dry-run only.
+        #[arg(long, global = true)]
+        apply: bool,
+        /// Skip the per-DB backup. DANGEROUS, not the default.
+        #[arg(long, global = true)]
+        no_backup: bool,
+        /// Emit a machine-readable JSON report instead of the human summary.
+        #[arg(long, global = true)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum RepairAction {
+    /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
+    Quarantine {
+        #[command(subcommand)]
+        action: QuarantineAction,
+    },
+    /// VACUUM INTO a temp file then atomically swap. Requires daemon stopped.
+    Vacuum {
+        /// Manifest label or absolute DB path. Required.
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        /// Apply (default: dry-run reports planned action only).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Convenience wrapper for R1 (FTS rebuild) on one DB.
+    Fts {
+        /// Manifest label or absolute DB path. Required.
+        #[arg(long, value_name = "LABEL")]
+        db: String,
+        /// Apply (default: dry-run reports drift only).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Re-emit the most recent dry-run as JSON. Convenience.
+    Report {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum QuarantineAction {
+    /// List all rows under /_quarantine/cross-db/* across the manifest.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore one quarantined row to its original_path within the same DB.
+    Restore {
+        /// Memory ID to restore.
+        #[arg(long)]
+        id: String,
+        /// Apply (default: dry-run).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Bulk cross-DB move: take all quarantined rows whose
+    /// metadata.quarantine.expected_db matches `--to-db` and physically
+    /// move them (INSERT into destination DB → verify → DELETE from source).
+    RestoreAll {
+        /// Destination DB (manifest label or absolute path).
+        #[arg(long)]
+        to_db: String,
+        /// Apply (default: dry-run).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Delete quarantined rows older than N days.
+    Purge {
+        #[arg(long)]
+        older_than: u64,
+        /// Apply (default: dry-run).
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
