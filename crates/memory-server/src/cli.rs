@@ -88,6 +88,18 @@ pub(crate) enum Commands {
     },
     /// Show database statistics
     Stats,
+    /// Status dashboard — memories, foundry jobs, wiki, and worker liveness across all DBs
+    Status {
+        /// Emit machine-readable JSON instead of the human dashboard
+        #[arg(long)]
+        json: bool,
+        /// Window for "recent" job counters, in hours (default: 24)
+        #[arg(long, default_value_t = 24)]
+        recent_hours: i64,
+        /// Worker is flagged idle if queue is empty AND last terminal job is older than this (minutes, default: 60)
+        #[arg(long, default_value_t = 60)]
+        idle_after_mins: i64,
+    },
     /// Inspect onboarding readiness and current local Tachi setup
     Setup {
         /// Emit machine-readable JSON instead of the human summary

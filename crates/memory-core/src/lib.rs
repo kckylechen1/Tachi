@@ -34,8 +34,8 @@ pub use types::{
 pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
 pub use db::foundry_jobs::{
     find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
-    load_pending_foundry_jobs, update_foundry_job_status_with_reason,
-    FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob,
+    load_pending_foundry_jobs, status_snapshot, update_foundry_job_status_with_reason,
+    FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob, StatusSnapshot,
 };
 
 use rusqlite::{Connection, OpenFlags};

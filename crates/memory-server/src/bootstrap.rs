@@ -1266,6 +1266,210 @@ fn collect_job_histograms(manifest: &crate::manifest::Manifest) -> Vec<DbJobRepo
     out
 }
 
+// ---------------------------------------------------------------------------
+// `tachi status` — one-screen dashboard across every DB recorded in the
+// manifest. Pure reader: opens each DB read-only, never touches schema or WAL.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize)]
+struct DbStatusEntry {
+    path: String,
+    role: String,
+    snapshot: memory_core::StatusSnapshot,
+    /// True when the worker for this DB looks idle (queue empty AND last
+    /// terminal job older than the caller-supplied threshold). False when
+    /// either condition fails OR when the DB has no jobs at all.
+    worker_idle: bool,
+    /// Set when this DB couldn't be opened or scanned. Renderers should
+    /// surface this so silent failures don't masquerade as healthy.
+    error: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct StatusReport {
+    generated_at: String,
+    recent_window_hours: i64,
+    idle_threshold_minutes: i64,
+    totals: StatusTotals,
+    databases: Vec<DbStatusEntry>,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+struct StatusTotals {
+    databases_scanned: usize,
+    databases_with_errors: usize,
+    memories: usize,
+    memories_wiki: usize,
+    memories_distilled: usize,
+    jobs_total: usize,
+    jobs_queued_or_running: usize,
+    jobs_recent_completed: usize,
+    jobs_recent_failed: usize,
+    jobs_recent_skipped: usize,
+}
+
+fn collect_status(
+    manifest: &crate::manifest::Manifest,
+    recent_hours: i64,
+    idle_after_mins: i64,
+) -> StatusReport {
+    let now = chrono::Utc::now();
+    let idle_cutoff = now - chrono::Duration::minutes(idle_after_mins);
+
+    let mut databases = Vec::with_capacity(manifest.dbs.len());
+    let mut totals = StatusTotals::default();
+
+    for entry in &manifest.dbs {
+        let conn = match rusqlite::Connection::open_with_flags(
+            &entry.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                totals.databases_scanned += 1;
+                totals.databases_with_errors += 1;
+                databases.push(DbStatusEntry {
+                    path: entry.path.clone(),
+                    role: format!("{:?}", entry.role),
+                    snapshot: memory_core::StatusSnapshot::default(),
+                    worker_idle: false,
+                    error: format!("open failed: {e}"),
+                });
+                continue;
+            }
+        };
+
+        let snap = match memory_core::status_snapshot(&conn, recent_hours) {
+            Ok(s) => s,
+            Err(e) => {
+                totals.databases_scanned += 1;
+                totals.databases_with_errors += 1;
+                databases.push(DbStatusEntry {
+                    path: entry.path.clone(),
+                    role: format!("{:?}", entry.role),
+                    snapshot: memory_core::StatusSnapshot::default(),
+                    worker_idle: false,
+                    error: format!("snapshot failed: {e}"),
+                });
+                continue;
+            }
+        };
+
+        // Idle iff queue is empty AND the last terminal job is stale (or the DB
+        // never ran a job at all but has memories that *should* have been
+        // distilled — caller can read snapshot.memories_total to interpret).
+        let last_terminal = snap
+            .last_terminal_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        let worker_idle = snap.worker_queue_depth == 0
+            && match last_terminal {
+                Some(t) => t < idle_cutoff,
+                None => snap.jobs.total == 0 && snap.memories_total > 0,
+            };
+
+        totals.databases_scanned += 1;
+        totals.memories += snap.memories_total;
+        totals.memories_wiki += snap.memories_wiki;
+        totals.memories_distilled += snap.memories_distilled;
+        totals.jobs_total += snap.jobs.total;
+        totals.jobs_queued_or_running += snap.worker_queue_depth;
+        totals.jobs_recent_completed += snap.jobs_recent_completed;
+        totals.jobs_recent_failed += snap.jobs_recent_failed;
+        totals.jobs_recent_skipped += snap.jobs_recent_skipped;
+
+        databases.push(DbStatusEntry {
+            path: entry.path.clone(),
+            role: format!("{:?}", entry.role),
+            snapshot: snap,
+            worker_idle,
+            error: String::new(),
+        });
+    }
+
+    StatusReport {
+        generated_at: now.to_rfc3339(),
+        recent_window_hours: recent_hours,
+        idle_threshold_minutes: idle_after_mins,
+        totals,
+        databases,
+    }
+}
+
+fn render_status_text(report: &StatusReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let t = &report.totals;
+    let _ = writeln!(
+        out,
+        "Tachi status — {} DBs scanned ({} with errors)",
+        t.databases_scanned, t.databases_with_errors
+    );
+    let _ = writeln!(
+        out,
+        "  recent window: {}h · idle threshold: {}m · generated {}",
+        report.recent_window_hours, report.idle_threshold_minutes, report.generated_at
+    );
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Memories");
+    let _ = writeln!(out, "  total       {:>8}", t.memories);
+    let _ = writeln!(out, "  wiki        {:>8}", t.memories_wiki);
+    let _ = writeln!(out, "  distilled   {:>8}", t.memories_distilled);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Foundry jobs (last {}h)", report.recent_window_hours);
+    let _ = writeln!(out, "  completed   {:>8}", t.jobs_recent_completed);
+    let _ = writeln!(out, "  skipped     {:>8}", t.jobs_recent_skipped);
+    let _ = writeln!(out, "  failed      {:>8}", t.jobs_recent_failed);
+    let _ = writeln!(out, "  in-flight   {:>8}", t.jobs_queued_or_running);
+    let _ = writeln!(out, "  total ever  {:>8}", t.jobs_total);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Per-DB");
+    for db in &report.databases {
+        let s = &db.snapshot;
+        let last = s.last_terminal_at.as_deref().unwrap_or("never");
+        let idle_tag = if db.worker_idle { " IDLE" } else { "" };
+        let _ = writeln!(
+            out,
+            "  {} [{}]{}",
+            db.path, db.role, idle_tag
+        );
+        if !db.error.is_empty() {
+            let _ = writeln!(out, "    error: {}", db.error);
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "    memories={} wiki={} distilled={} handoff={} kanban={}",
+            s.memories_total, s.memories_wiki, s.memories_distilled,
+            s.memories_handoff, s.memories_kanban,
+        );
+        let _ = writeln!(
+            out,
+            "    jobs: completed={} failed={} skipped={} queued={} running={} (last terminal: {})",
+            s.jobs.completed, s.jobs.failed, s.jobs.skipped, s.jobs.queued, s.jobs.running, last,
+        );
+    }
+    out
+}
+
+async fn run_status_command(
+    json_output: bool,
+    recent_hours: i64,
+    idle_after_mins: i64,
+    home: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_path = crate::manifest::Manifest::default_path(home);
+    let manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    let report = collect_status(&manifest, recent_hours, idle_after_mins);
+    if json_output {
+        print_pretty_json(&serde_json::to_value(&report)?)
+    } else {
+        print!("{}", render_status_text(&report));
+        Ok(())
+    }
+}
+
 async fn run_manifest_command(
     action: ManifestAction,
     home: &std::path::Path,
@@ -1946,6 +2150,9 @@ async fn run_cli_command(
             .await?;
             print_cli_tool_result(&body)
         }
+        Commands::Status { .. } => {
+            unreachable!("Status is dispatched ahead of run_cli_command")
+        }
     }
 }
 
@@ -2430,6 +2637,15 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Commands::Manifest { action } = &command {
         return run_manifest_command(action.clone(), &home, &app_home, git_root.as_ref()).await;
+    }
+
+    if let Commands::Status {
+        json,
+        recent_hours,
+        idle_after_mins,
+    } = &command
+    {
+        return run_status_command(*json, *recent_hours, *idle_after_mins, &home).await;
     }
 
     if let Commands::Rescue { action } = &command {

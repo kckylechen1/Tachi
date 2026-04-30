@@ -263,6 +263,156 @@ pub fn gc_foundry_jobs(conn: &Connection, days: i64) -> Result<usize, MemoryErro
     Ok(deleted)
 }
 
+/// `tachi status` snapshot for a single DB. Pure read — never writes. All
+/// fields are best-effort: if a table doesn't exist (legacy/placeholder DB)
+/// the corresponding count stays at zero rather than erroring out.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct StatusSnapshot {
+    /// Histogram across all foundry_jobs (cumulative, all-time).
+    pub jobs: JobStatusHistogram,
+    /// Job counts by kind (memory_distill, wiki_promote, ...) over the full table.
+    pub jobs_by_kind: Vec<(String, usize)>,
+    /// Number of jobs that reached terminal status within the last `recent_window_hours`.
+    pub jobs_recent_completed: usize,
+    pub jobs_recent_failed: usize,
+    pub jobs_recent_skipped: usize,
+    /// RFC3339 timestamp of the most recent job whose status is in
+    /// ('completed','failed','skipped'). None if no jobs ever ran.
+    pub last_terminal_at: Option<String>,
+    /// Memory totals (excludes archived rows).
+    pub memories_total: usize,
+    pub memories_wiki: usize,
+    pub memories_distilled: usize,
+    pub memories_handoff: usize,
+    pub memories_kanban: usize,
+    /// Idle hint: queued+running == 0 AND last_terminal_at older than the
+    /// caller-supplied threshold. The caller decides how to render it.
+    pub worker_queue_depth: usize,
+}
+
+/// Compute a `StatusSnapshot` for one read-only connection. `recent_window_hours`
+/// defines what "recent" means for the per-bucket counters (default caller: 24).
+pub fn status_snapshot(
+    conn: &Connection,
+    recent_window_hours: i64,
+) -> Result<StatusSnapshot, MemoryError> {
+    let mut snap = StatusSnapshot::default();
+
+    if table_exists(conn, "foundry_jobs")? {
+        snap.jobs = job_status_histogram(conn, 30).unwrap_or_default();
+        snap.worker_queue_depth = snap.jobs.queued + snap.jobs.running;
+
+        // Per-kind breakdown.
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT kind, COUNT(*) FROM foundry_jobs GROUP BY kind ORDER BY 2 DESC")
+        {
+            let rows = stmt
+                .query_map([], |row| {
+                    let kind: String = row.get(0)?;
+                    let n: i64 = row.get(1)?;
+                    Ok((kind, n as usize))
+                })
+                .ok();
+            if let Some(iter) = rows {
+                for r in iter.flatten() {
+                    snap.jobs_by_kind.push(r);
+                }
+            }
+        }
+
+        // Recent terminal counts (last `recent_window_hours`).
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(recent_window_hours)).to_rfc3339();
+        for (status, slot) in [
+            ("completed", &mut snap.jobs_recent_completed),
+            ("failed", &mut snap.jobs_recent_failed),
+            ("skipped", &mut snap.jobs_recent_skipped),
+        ] {
+            *slot = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM foundry_jobs WHERE status = ?1 AND updated_at >= ?2",
+                    params![status, cutoff],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) as usize;
+        }
+
+        // Last terminal timestamp.
+        snap.last_terminal_at = conn
+            .query_row(
+                "SELECT MAX(updated_at) FROM foundry_jobs
+                 WHERE status IN ('completed','failed','skipped')",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten();
+    }
+
+    if table_exists(conn, "memories")? {
+        snap.memories_total = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE archived = 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+
+        // /wiki/* path bucket.
+        snap.memories_wiki = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE archived = 0 AND path LIKE '/wiki/%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+
+        // Distilled = source produced by the foundry distill pipeline. Historically
+        // we have written 'foundry_distill' (current) and a small tail of 'distill'
+        // / 'distill_llm' rows from older runs. Match all three with a single LIKE
+        // pattern that anchors on `distill` to avoid false positives like
+        // 'distillery_test'.
+        snap.memories_distilled = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories
+                 WHERE archived = 0 AND (source = 'foundry_distill' OR source LIKE 'distill%')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+
+        snap.memories_handoff = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE archived = 0 AND category = 'handoff'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+
+        snap.memories_kanban = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE archived = 0 AND category = 'kanban'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0) as usize;
+    }
+
+    Ok(snap)
+}
+
+/// Check if a table exists (sqlite_master lookup). Used to make `status_snapshot`
+/// resilient against legacy / placeholder / non-Tachi sqlite files in the manifest.
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +542,75 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM foundry_jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn status_snapshot_aggregates_jobs_and_memories() {
+        let conn = open_test_db();
+
+        // Seed jobs across the status surface.
+        insert_minimal_job(&conn, "j-done-1", "completed");
+        insert_minimal_job(&conn, "j-done-2", "completed");
+        insert_minimal_job(&conn, "j-skip-1", "skipped");
+        insert_minimal_job(&conn, "j-queued-1", "queued");
+
+        // Backdate one completion so it does NOT count toward the 24h window.
+        let old = (chrono::Utc::now() - chrono::Duration::hours(48)).to_rfc3339();
+        conn.execute(
+            "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'j-done-2'",
+            params![old],
+        )
+        .unwrap();
+
+        // Seed three memories of distinct flavors so each bucket has signal.
+        let now = chrono::Utc::now().to_rfc3339();
+        for (id, path, source, category, archived) in [
+            ("m-wiki", "/wiki/topic-a", "manual", "fact", 0),
+            ("m-distill-old", "/general", "distill_llm", "fact", 0),
+            ("m-distill-new", "/general", "foundry_distill", "fact", 0),
+            ("m-handoff", "/handoff/x", "manual", "handoff", 0),
+            ("m-archived", "/wiki/old", "foundry_distill", "fact", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO memories (id, path, summary, text, importance, timestamp,
+                                       category, source, scope, archived, created_at, updated_at)
+                 VALUES (?1, ?2, '', '', 0.7, ?3, ?4, ?5, 'general', ?6, ?3, ?3)",
+                params![id, path, now, category, source, archived],
+            )
+            .unwrap();
+        }
+
+        let snap = status_snapshot(&conn, 24).unwrap();
+
+        // Jobs.
+        assert_eq!(snap.jobs.total, 4);
+        assert_eq!(snap.jobs.completed, 2);
+        assert_eq!(snap.jobs.skipped, 1);
+        assert_eq!(snap.jobs.queued, 1);
+        assert_eq!(snap.worker_queue_depth, 1);
+        assert_eq!(snap.jobs_recent_completed, 1, "old completion is filtered out");
+        assert_eq!(snap.jobs_recent_skipped, 1);
+        assert!(snap.last_terminal_at.is_some());
+        // Per-kind row exists for our seeded kind.
+        assert!(snap
+            .jobs_by_kind
+            .iter()
+            .any(|(k, n)| k == "thesis_compaction" && *n == 4));
+
+        // Memories: archived row excluded everywhere.
+        assert_eq!(snap.memories_total, 4);
+        assert_eq!(snap.memories_wiki, 1);
+        assert_eq!(snap.memories_distilled, 2, "covers both distill_llm and foundry_distill, excludes archived");
+        assert_eq!(snap.memories_handoff, 1);
+    }
+
+    #[test]
+    fn status_snapshot_handles_db_without_tables() {
+        // A bare in-memory DB with no Tachi schema should yield zeros, not error.
+        let conn = Connection::open_in_memory().unwrap();
+        let snap = status_snapshot(&conn, 24).unwrap();
+        assert_eq!(snap.jobs.total, 0);
+        assert_eq!(snap.memories_total, 0);
+        assert!(snap.last_terminal_at.is_none());
     }
 }
