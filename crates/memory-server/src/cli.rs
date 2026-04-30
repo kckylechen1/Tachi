@@ -336,6 +336,14 @@ pub(crate) enum ManifestAction {
         #[arg(long)]
         json: bool,
     },
+    /// Garbage-collect the manifest in place: drop missing files, drop test
+    /// fixtures, dedup symlink aliases by canonical path, fix mis-classified
+    /// `schema_kind`. Writes `~/.tachi/manifest.json.bak` before mutating.
+    Gc {
+        /// Output JSON instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

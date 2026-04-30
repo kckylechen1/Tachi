@@ -1386,6 +1386,30 @@ async fn run_manifest_command(
                 Ok(())
             }
         }
+        ManifestAction::Gc { json } => {
+            let report = crate::manifest::gc_manifest(&manifest_path)?;
+            if json {
+                print_pretty_json(&serde_json::to_value(&report)?)
+            } else {
+                println!(
+                    "manifest gc: before={} after={} canonicalized={} removed_missing={} removed_fixture={} schema_kind_fixed={} dedup_collapsed={}{}",
+                    report.entries_before,
+                    report.entries_after,
+                    report.canonicalized,
+                    report.removed_missing,
+                    report.removed_fixture,
+                    report.schema_kind_fixed,
+                    report.dedup_collapsed,
+                    if report.aborted {
+                        format!(" ABORTED: {}", report.abort_reason.as_deref().unwrap_or("?"))
+                    } else {
+                        String::new()
+                    }
+                );
+                println!("(manifest at {})", manifest_path.display());
+                Ok(())
+            }
+        }
     }
 }
 
@@ -2208,6 +2232,40 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Failure to read the manifest is non-fatal: we proceed with the heuristic
     // result so first-run installs still work without `tachi doctor`.
     let manifest_path = crate::manifest::Manifest::default_path(&home);
+    // PR-2: hygiene pass before any manifest consumer reads. Idempotent.
+    // Failures are logged and swallowed — startup must never block on GC.
+    if matches!(command, Commands::Serve) && manifest_path.exists() {
+        match crate::manifest::gc_manifest(&manifest_path) {
+            Ok(report) => {
+                if report.aborted {
+                    tracing::warn!(
+                        target: "tachi::manifest::gc",
+                        reason = report.abort_reason.as_deref().unwrap_or(""),
+                        "manifest GC aborted at startup"
+                    );
+                } else if report.canonicalized
+                    + report.removed_missing
+                    + report.removed_fixture
+                    + report.schema_kind_fixed
+                    + report.dedup_collapsed
+                    > 0
+                {
+                    tracing::info!(
+                        target: "tachi::manifest::gc",
+                        before = report.entries_before,
+                        after = report.entries_after,
+                        canonicalized = report.canonicalized,
+                        removed_missing = report.removed_missing,
+                        removed_fixture = report.removed_fixture,
+                        schema_kind_fixed = report.schema_kind_fixed,
+                        dedup_collapsed = report.dedup_collapsed,
+                        "manifest GC applied at startup"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(target: "tachi::manifest::gc", error = %e, "manifest GC failed; continuing"),
+        }
+    }
     let manifest_opt = if manifest_path.exists() {
         crate::manifest::Manifest::load(&manifest_path).ok()
     } else {
