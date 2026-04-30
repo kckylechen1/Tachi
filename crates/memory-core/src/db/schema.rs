@@ -431,6 +431,21 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_foundry_jobs_status ON foundry_jobs(status);
         CREATE INDEX IF NOT EXISTS idx_foundry_jobs_kind ON foundry_jobs(kind);
 
+        -- Per-DB Foundry runtime configuration. The scheduler reads one row per DB
+        -- to decide whether to spawn a worker, what concurrency caps to apply, and
+        -- which LLM provider override to use. Default behavior when row is missing:
+        -- enabled=1, max_jobs_per_minute=10, distill_concurrency=1, enrichment_concurrency=1.
+        CREATE TABLE IF NOT EXISTS foundry_config (
+            id                       INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled                  INTEGER NOT NULL DEFAULT 1,
+            max_jobs_per_minute      INTEGER NOT NULL DEFAULT 10,
+            distill_concurrency      INTEGER NOT NULL DEFAULT 1,
+            enrichment_concurrency   INTEGER NOT NULL DEFAULT 1,
+            llm_provider_override    TEXT,
+            updated_at               TEXT NOT NULL DEFAULT '',
+            updated_by               TEXT NOT NULL DEFAULT 'default'
+        );
+
         -- Domain configuration for memory routing and per-domain GC
         CREATE TABLE IF NOT EXISTS domains (
             name              TEXT PRIMARY KEY,

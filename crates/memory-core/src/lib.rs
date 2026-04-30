@@ -38,6 +38,7 @@ pub use db::foundry_jobs::{
     load_pending_foundry_jobs, update_foundry_job_status_with_reason,
     FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob,
 };
+pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
