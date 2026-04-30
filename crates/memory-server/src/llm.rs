@@ -636,7 +636,11 @@ impl LlmClient {
         // Reject obvious echo-back of the input prefix (defensive double-check
         // in case a future LLM provider returns the prompt instead of an answer).
         let input_prefix: String = text.chars().take(60).collect();
-        if !input_prefix.is_empty() && trimmed.starts_with(input_prefix.trim()) {
+        // Trim FIRST, then check non-empty: otherwise a whitespace-only prefix
+        // produces an empty trimmed string and `starts_with("")` is always true,
+        // rejecting every otherwise-valid LLM output. (Caught in PR #49 review.)
+        let trimmed_prefix = input_prefix.trim();
+        if !trimmed_prefix.is_empty() && trimmed.starts_with(trimmed_prefix) {
             return Err(
                 "LLM distill output appears to echo the input prefix; rejecting".to_string(),
             );
