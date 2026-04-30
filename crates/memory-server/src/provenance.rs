@@ -101,3 +101,128 @@ pub(super) fn inject_provenance(
     metadata_obj.insert("provenance".into(), serde_json::Value::Object(provenance));
     serde_json::Value::Object(metadata_obj)
 }
+
+/// Restamp the `provenance.db_path` and `provenance.db_scope` fields on a
+/// memory entry's metadata to reflect a new destination DB. Used when
+/// copying/distilling rows from one DB to another so the destination row
+/// correctly reports its location (audit fixes B6 / B11).
+///
+/// Also records the original source under `provenance.copied_from` so the
+/// lineage is preserved.
+pub(super) fn restamp_provenance_for_destination(
+    metadata: serde_json::Value,
+    destination_db_path: &std::path::Path,
+    destination_scope: DbScope,
+) -> serde_json::Value {
+    let mut metadata_obj = match metadata {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert("legacy_metadata".into(), other);
+            map
+        }
+    };
+
+    // Pull or create the provenance object.
+    let mut provenance = match metadata_obj.remove("provenance") {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    // Stash the previous origin (only if not already stashed).
+    if !provenance.contains_key("copied_from") {
+        let mut copied_from = serde_json::Map::new();
+        if let Some(prev) = provenance.get("db_path").cloned() {
+            copied_from.insert("db_path".into(), prev);
+        }
+        if let Some(prev) = provenance.get("db_scope").cloned() {
+            copied_from.insert("db_scope".into(), prev);
+        }
+        copied_from.insert("restamped_at".into(), json!(Utc::now().to_rfc3339()));
+        if !copied_from.is_empty() {
+            provenance.insert("copied_from".into(), serde_json::Value::Object(copied_from));
+        }
+    }
+
+    provenance.insert(
+        "db_path".into(),
+        json!(destination_db_path.display().to_string()),
+    );
+    provenance.insert("db_scope".into(), json!(destination_scope.as_str()));
+
+    metadata_obj.insert("provenance".into(), serde_json::Value::Object(provenance));
+    serde_json::Value::Object(metadata_obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn restamp_replaces_db_path_and_records_origin() {
+        let original = json!({
+            "provenance": {
+                "tool_name": "save_memory",
+                "db_path": "/old/global.db",
+                "db_scope": "global",
+                "captured_at": "2026-01-01T00:00:00Z",
+            },
+            "user_field": "preserved",
+        });
+        let dest = PathBuf::from("/new/project.db");
+        let restamped = restamp_provenance_for_destination(original, &dest, DbScope::Project);
+
+        let prov = restamped.get("provenance").unwrap();
+        assert_eq!(prov.get("db_path").unwrap(), "/new/project.db");
+        assert_eq!(prov.get("db_scope").unwrap(), "project");
+        let copied = prov.get("copied_from").unwrap();
+        assert_eq!(copied.get("db_path").unwrap(), "/old/global.db");
+        assert_eq!(copied.get("db_scope").unwrap(), "global");
+        // Non-provenance fields preserved.
+        assert_eq!(restamped.get("user_field").unwrap(), "preserved");
+        // Captured_at preserved on provenance.
+        assert_eq!(prov.get("captured_at").unwrap(), "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn restamp_idempotent_keeps_original_copied_from() {
+        let original = json!({
+            "provenance": {
+                "db_path": "/origin.db",
+                "db_scope": "global",
+            }
+        });
+        let first = restamp_provenance_for_destination(
+            original,
+            std::path::Path::new("/intermediate.db"),
+            DbScope::Project,
+        );
+        let second = restamp_provenance_for_destination(
+            first,
+            std::path::Path::new("/final.db"),
+            DbScope::Project,
+        );
+        let prov = second.get("provenance").unwrap();
+        assert_eq!(prov.get("db_path").unwrap(), "/final.db");
+        // copied_from still points at the *original* origin, not the intermediate.
+        assert_eq!(
+            prov.get("copied_from").unwrap().get("db_path").unwrap(),
+            "/origin.db"
+        );
+    }
+
+    #[test]
+    fn restamp_handles_missing_provenance() {
+        let original = json!({ "other": 1 });
+        let r = restamp_provenance_for_destination(
+            original,
+            std::path::Path::new("/x.db"),
+            DbScope::Global,
+        );
+        let prov = r.get("provenance").unwrap();
+        assert_eq!(prov.get("db_path").unwrap(), "/x.db");
+        assert_eq!(prov.get("db_scope").unwrap(), "global");
+    }
+}

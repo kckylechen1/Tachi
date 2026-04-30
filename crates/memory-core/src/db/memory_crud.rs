@@ -22,6 +22,7 @@ use super::sqlite_vec::serialize_f32;
 /// - `retention_policy`: defaulted via [`default_retention_for`] if the caller
 ///   left it `None`.
 pub fn normalize_for_write(entry: &mut MemoryEntry) {
+    entry.path = crate::path_router::normalize_path(&entry.path);
     entry.source = MemorySource::parse_or_external(&entry.source);
     entry.category = MemoryCategory::normalize(&entry.category).to_string();
     entry.scope = MemoryScope::normalize(&entry.scope).to_string();

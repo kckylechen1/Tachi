@@ -7,6 +7,7 @@ mod ghost;
 mod graph;
 mod hub_db;
 mod memory_crud;
+pub mod migrations;
 mod pack_db;
 mod sandbox;
 mod schema;
@@ -47,7 +48,7 @@ pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
     list_sandbox_policies, set_sandbox_policy, set_sandbox_rule,
 };
-pub use schema::init_schema;
+pub use schema::{init_schema, init_schema_with_label, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,

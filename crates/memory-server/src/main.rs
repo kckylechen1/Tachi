@@ -423,7 +423,7 @@ impl MemoryServer {
                 ),
             )
         })?;
-        let global_store = MemoryStore::open(global_db_str)?;
+        let global_store = MemoryStore::open_with_label(global_db_str, "global")?;
         let global_vec_available = global_store.vec_available;
 
         let (project_store, project_rw_gate, project_db_path, project_vec_available) =
@@ -434,7 +434,15 @@ impl MemoryServer {
                         format!("Project DB path contains invalid UTF-8: {}", p.display()),
                     )
                 })?;
-                let store = MemoryStore::open(project_db_str)?;
+                // Derive project label from parent directory name
+                // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
+                let project_label = p
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|os| os.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
                 let v = store.vec_available;
                 (
                     Some(Arc::new(StdMutex::new(store))),

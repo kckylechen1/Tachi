@@ -8,6 +8,10 @@ fn ensure_test_env() {
         std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
         std::env::set_var("SILICONFLOW_MODEL", "test-model");
         std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+        // Tests use a single global DB and seed paths across the canonical
+        // layout (wiki, project, etc.). Disable path-routing validation so
+        // those fixtures don't have to opt into cross-project routing.
+        std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
     });
 }
 
