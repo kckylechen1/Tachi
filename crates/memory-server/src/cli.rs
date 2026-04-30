@@ -290,6 +290,85 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "cli")]
         source: String,
     },
+    /// Show daemon + scheduler + per-DB foundry status.
+    ///
+    /// Inspects ~/.tachi/daemon.lock + ~/.tachi/manifest.json and queries
+    /// each manifest DB for foundry job status. Highlights orphan DBs
+    /// (manifest entries the running daemon's scheduler cannot route to)
+    /// and stuck in_progress jobs older than the configured threshold.
+    Status {
+        /// Re-render every 2 seconds (clear screen between frames).
+        #[arg(long)]
+        watch: bool,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect or terminate the running tachi daemon.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+    /// Per-DB foundry runtime configuration.
+    Foundry {
+        #[command(subcommand)]
+        action: FoundryAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum DaemonAction {
+    /// Show the running daemon's PID, port, started_at, and lock state.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send SIGTERM to the running daemon (no-op if no daemon is alive).
+    Kill {
+        /// Skip the live-process check and unlink the lock file regardless.
+        /// Use only when a stale ~/.tachi/daemon.lock survived a hard crash
+        /// and the PID inside is not actually a tachi process.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum FoundryAction {
+    /// Per-DB runtime config: get current values for one DB.
+    ConfigGet {
+        /// Absolute path to the target DB. Defaults to the global DB.
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+    },
+    /// Per-DB runtime config: set one or more values for one DB.
+    /// Unset flags leave the existing value untouched.
+    ConfigSet {
+        /// Absolute path to the target DB. Defaults to the global DB.
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        /// Foundry execution master switch for this DB.
+        #[arg(long)]
+        enabled: Option<bool>,
+        /// Throttle: maximum jobs the in-process worker may run per minute.
+        #[arg(long)]
+        max_jobs_per_minute: Option<u32>,
+        /// Concurrency cap for `distill` lane jobs in this DB.
+        #[arg(long)]
+        distill_concurrency: Option<u32>,
+        /// Concurrency cap for `enrichment` lane jobs in this DB.
+        #[arg(long)]
+        enrichment_concurrency: Option<u32>,
+        /// Optional LLM provider override (e.g. "openai", "anthropic").
+        /// Pass an empty string to clear.
+        #[arg(long)]
+        llm_provider_override: Option<String>,
+    },
+    /// Per-DB runtime config: list values for every manifest DB.
+    ConfigList {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

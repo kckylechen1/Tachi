@@ -1717,6 +1717,18 @@ async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Status { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Daemon { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
+        Commands::Foundry { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
         Commands::Remember {
             text,
             tags,
@@ -2397,7 +2409,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve project DB path
     let explicit_project_db = cli.project_db.is_some();
-    let mut project_db_path = if cli.no_project_db {
+    let project_db_path = if cli.no_project_db {
         if cli.project_db.is_some() {
             eprintln!("--project-db is ignored because --no-project-db is set");
         }
@@ -2502,6 +2514,18 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Commands::Rescue { action } = &command {
         return run_rescue_command(action.clone(), &home).await;
+    }
+
+    if let Commands::Status { watch, json } = &command {
+        return crate::status_ops::run_status(*watch, *json, &app_home).await;
+    }
+
+    if let Commands::Daemon { action } = &command {
+        return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+    }
+
+    if let Commands::Foundry { action } = &command {
+        return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
     }
 
     if !matches!(command, Commands::Serve) {

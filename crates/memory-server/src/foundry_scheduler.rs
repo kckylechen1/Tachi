@@ -99,6 +99,7 @@ struct WorkerHandle {
 
 /// Read-only snapshot of scheduler state for `tachi status`.
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)] // exposed for future in-daemon callers; tachi status reads manifest cross-process
 pub struct SchedulerSnapshot {
     pub workers: Vec<WorkerSnapshot>,
     pub orphan_dbs_total: u64,
@@ -106,6 +107,7 @@ pub struct SchedulerSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct WorkerSnapshot {
     pub db_path: String,
     pub label: String,
@@ -204,6 +206,7 @@ impl FoundryScheduler {
     }
 
     /// Capture a read-only snapshot for `tachi status`.
+    #[allow(dead_code)]
     pub fn snapshot(&self) -> SchedulerSnapshot {
         let map = self
             .workers

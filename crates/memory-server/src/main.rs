@@ -40,6 +40,7 @@ mod prompts;
 mod provenance;
 mod rescue;
 mod sandbox_ops;
+mod status_ops;
 mod server_handler;
 mod server_methods;
 mod shared_defs;
