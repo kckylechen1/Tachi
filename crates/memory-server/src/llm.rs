@@ -593,18 +593,59 @@ impl LlmClient {
         Err(last_err)
     }
 
-    /// Generate L0 summary using SUMMARY_PROMPT
+    /// Generate L0 summary using SUMMARY_PROMPT.
+    ///
+    /// On LLM error this falls back to a 100-char truncation of the input.
+    /// This is intentional for *summary* (we always want some text), but is
+    /// catastrophic for *distill* — the truncated input is never a real
+    /// distillation. Distill callers MUST use `generate_distill` instead.
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
         match self
             .call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
             .await
         {
             Ok(summary) => Ok(summary),
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "[llm] generate_summary fell back to truncation after error: {e}"
+                );
                 // Fallback to truncation on error
                 Ok(text.chars().take(100).collect())
             }
         }
+    }
+
+    /// Generate a distilled synthesis from concatenated source memories.
+    ///
+    /// Unlike `generate_summary`, this does NOT silently fall back to
+    /// truncation on error. Callers (Foundry distill worker) want a hard
+    /// failure so the job is marked failed/skipped rather than persisting
+    /// a "frankenstein" memory whose text is just the prompt's input prefix.
+    ///
+    /// Historical bug: prior to this method, `generate_summary` was reused
+    /// for distill and its silent fallback produced 15/23 (65%) garbage
+    /// distill memories in the antigravity project DB after just two days.
+    pub async fn generate_distill(&self, text: &str) -> Result<String, String> {
+        let out = self
+            .call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.4, 400)
+            .await?;
+        let trimmed = out.trim();
+        if trimmed.is_empty() {
+            return Err("LLM returned empty distill payload".to_string());
+        }
+        // Reject obvious echo-back of the input prefix (defensive double-check
+        // in case a future LLM provider returns the prompt instead of an answer).
+        let input_prefix: String = text.chars().take(60).collect();
+        // Trim FIRST, then check non-empty: otherwise a whitespace-only prefix
+        // produces an empty trimmed string and `starts_with("")` is always true,
+        // rejecting every otherwise-valid LLM output. (Caught in PR #49 review.)
+        let trimmed_prefix = input_prefix.trim();
+        if !trimmed_prefix.is_empty() && trimmed.starts_with(trimmed_prefix) {
+            return Err(
+                "LLM distill output appears to echo the input prefix; rejecting".to_string(),
+            );
+        }
+        Ok(trimmed.to_string())
     }
 
     /// Extract structured facts from text using EXTRACTION_PROMPT

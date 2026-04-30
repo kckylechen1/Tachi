@@ -728,7 +728,7 @@ async fn process_memory_distill_job(
 
     let distill_text = server
         .llm
-        .generate_summary(&build_distill_input(&source_entries))
+        .generate_distill(&build_distill_input(&source_entries))
         .await
         .map_err(|e| format!("Foundry distill summary failed: {e}"))?;
     if distill_text.trim().is_empty() {
@@ -777,7 +777,13 @@ async fn process_memory_distill_job(
         timestamp,
         category: "other".to_string(),
         topic: "foundry_distill".to_string(),
-        keywords: vec!["foundry".to_string(), "distill".to_string()],
+        keywords: dedup_strings({
+            let mut kws = vec!["foundry".to_string(), "distill".to_string()];
+            for entry in &source_entries {
+                kws.extend(entry.keywords.iter().cloned());
+            }
+            kws
+        }),
         persons: Vec::new(),
         entities: dedup_strings(
             source_entries
