@@ -156,23 +156,54 @@ impl MemoryServer {
                 match res {
                     Ok(true) => {
                         if new_vec.is_some() {
-                            if let (Some(agent_id), Some(path_prefix)) = (
-                                item.foundry_agent_id.as_deref(),
-                                item.foundry_path_prefix.as_deref(),
+                            // PR-4: always-on save_memory enrichment.
+                            //
+                            // Previously the foundry maintenance enqueue only
+                            // fired when both `foundry_agent_id` and
+                            // `foundry_path_prefix` were set by the caller.
+                            // The `handle_save_memory` path (and several
+                            // pipeline call sites) passed None for both,
+                            // which meant memories saved via save_memory
+                            // never reached the foundry pipeline (no
+                            // distill, no rerank). We now fall back to:
+                            //   - agent_id: the server's current agent
+                            //     profile id, else "system"
+                            //   - path_prefix: derived from the entry's
+                            //     stored path (parent directory), or "/"
+                            //     when the path has no parent
+                            // so every embedded memory becomes a
+                            // foundry candidate. The dedup gate inside
+                            // try_claim_event still suppresses no-op
+                            // double-enqueues.
+                            let agent_id_owned = item
+                                .foundry_agent_id
+                                .clone()
+                                .or_else(|| {
+                                    let guard = self
+                                        .agent_profile
+                                        .read()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    guard.as_ref().map(|p| p.agent_id.clone())
+                                })
+                                .unwrap_or_else(|| "system".to_string());
+
+                            let path_prefix_owned = match item.foundry_path_prefix.clone() {
+                                Some(p) => p,
+                                None => derive_path_prefix(self, item).unwrap_or_else(|| "/".to_string()),
+                            };
+
+                            if let Err(err) = enqueue_foundry_capture_maintenance(
+                                self,
+                                item.target_db,
+                                item.named_project.clone(),
+                                &agent_id_owned,
+                                &path_prefix_owned,
+                                &[item.id.clone()],
                             ) {
-                                if let Err(err) = enqueue_foundry_capture_maintenance(
-                                    self,
-                                    item.target_db,
-                                    item.named_project.clone(),
-                                    agent_id,
-                                    path_prefix,
-                                    &[item.id.clone()],
-                                ) {
-                                    eprintln!(
-                                        "[enrichment-batcher] failed to enqueue foundry maintenance for {}: {err}",
-                                        item.id
-                                    );
-                                }
+                                eprintln!(
+                                    "[enrichment-batcher] failed to enqueue foundry maintenance for {}: {err}",
+                                    item.id
+                                );
                             }
                         }
                     }
@@ -188,5 +219,37 @@ impl MemoryServer {
         }
 
         eprintln!("[enrichment-batcher] batch of {batch_size} complete");
+    }
+}
+
+/// Look up the saved memory's `path` and return its parent directory as a
+/// foundry path prefix. Used by the always-on enrichment fallback when the
+/// caller did not pass an explicit `foundry_path_prefix`. Returns None if
+/// the entry cannot be loaded; the caller falls back to "/".
+fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<String> {
+    let lookup = |store: &mut MemoryStore| {
+        store
+            .get(&item.id)
+            .map_err(|e| format!("derive path prefix get: {e}"))
+    };
+    let entry = if let Some(name) = item.named_project.as_deref() {
+        server.with_named_project_store_read(name, lookup).ok()?
+    } else {
+        server.with_store_for_scope_read(item.target_db, lookup).ok()?
+    }?;
+    let path = entry.path;
+    if path.is_empty() || path == "/" {
+        return Some("/".to_string());
+    }
+    // Take the path up to and including the last '/'; foundry path prefixes
+    // are directory-shaped, not file-shaped.
+    if let Some(idx) = path.rfind('/') {
+        if idx == 0 {
+            Some("/".to_string())
+        } else {
+            Some(path[..idx].to_string())
+        }
+    } else {
+        Some(path)
     }
 }
