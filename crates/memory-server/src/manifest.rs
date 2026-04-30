@@ -178,7 +178,9 @@ impl Manifest {
         self.dbs.iter().find(|e| e.role == DbRole::Global)
     }
 
-    /// All entries with a given role.
+    /// All entries with a given role. Currently only used by tests; gated
+    /// with cfg(test) to keep the build warning-free.
+    #[cfg(test)]
     pub fn by_role(&self, role: DbRole) -> Vec<&DbEntry> {
         self.dbs.iter().filter(|e| e.role == role).collect()
     }

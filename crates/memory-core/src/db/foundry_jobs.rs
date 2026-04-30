@@ -61,20 +61,6 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
     Ok(())
 }
 
-/// Update job status (and updated_at).
-pub fn update_foundry_job_status(
-    conn: &Connection,
-    id: &str,
-    status: &str,
-) -> Result<(), MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE foundry_jobs SET status = ?1, updated_at = ?2 WHERE id = ?3",
-        params![status, now, id],
-    )?;
-    Ok(())
-}
-
 /// Branch #5: update job status AND record a structured reason for the
 /// transition (skip-reason, fail-reason, abort-reason). The reason is stored
 /// as `terminal_reason` inside the existing `metadata` JSON column, avoiding

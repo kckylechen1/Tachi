@@ -265,9 +265,6 @@ fn distill_quality_flags(entries: &[MemoryEntry]) -> Vec<String> {
     if source_namespace_count(entries) > 1 {
         flags.push("mixed_namespace".to_string());
     }
-    if flags.is_empty() {
-        return flags;
-    }
     flags
 }
 
