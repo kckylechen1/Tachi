@@ -111,38 +111,11 @@ fn print_pretty_json(value: &serde_json::Value) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
-fn build_cli_memory_entry(
-    id: String,
-    text: String,
-    path: Option<String>,
-    importance: Option<f64>,
-    timestamp: String,
-) -> MemoryEntry {
-    MemoryEntry {
-        id,
-        path: path.unwrap_or_else(|| "/".to_string()),
-        summary: text.chars().take(100).collect(),
-        text,
-        importance: importance.unwrap_or(0.7).clamp(0.0, 1.0),
-        timestamp,
-        category: "fact".to_string(),
-        topic: String::new(),
-        keywords: vec![],
-        persons: vec![],
-        entities: vec![],
-        location: String::new(),
-        source: "cli".to_string(),
-        scope: "general".to_string(),
-        archived: false,
-        access_count: 0,
-        last_access: None,
-        revision: 1,
-        metadata: json!({}),
-        vector: None,
-        retention_policy: None,
-        domain: None,
-    }
-}
+// `build_cli_memory_entry` was removed alongside the legacy `Commands::Save`
+// arm. `tachi save` now aliases to `tachi remember`, which routes through
+// `crate::memory_search_ops::handle_remember` and constructs its `MemoryEntry`
+// from the richer `RememberParams` (tags, scope, project, category, topic,
+// domain, retention-policy, summary, force).
 
 fn evaluate_cli_capability_enabled(
     cap_type: &str,
@@ -1538,35 +1511,9 @@ async fn run_cli_command(
                 "results": results,
             }))
         }
-        Commands::Save {
-            text,
-            path,
-            importance,
-        } => {
-            if memory_core::is_noise_text(&text) {
-                return print_pretty_json(&json!({
-                    "saved": false,
-                    "noise": true,
-                    "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
-                    "hint": "Retry with a non-noise sentence.",
-                }));
-            }
-
-            let mut store = open_cli_store(db_path)?;
-            let id = uuid::Uuid::new_v4().to_string();
-            let timestamp = Utc::now().to_rfc3339();
-            let entry =
-                build_cli_memory_entry(id.clone(), text, path, importance, timestamp.clone());
-
-            store.upsert(&entry)?;
-            print_pretty_json(&json!({
-                "saved": true,
-                "id": id,
-                "timestamp": timestamp,
-                "path": entry.path,
-                "importance": entry.importance,
-            }))
-        }
+        // `Commands::Save` was removed in favor of `Commands::Remember` which
+        // carries `#[command(alias = "save")]`. The dispatcher therefore only
+        // sees `Remember`, even when the user typed `tachi save TEXT`.
         Commands::Stats => {
             let store = open_cli_store_read_only(db_path)?;
             let stats = store.stats(false)?;
@@ -2532,10 +2479,16 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return run_rescue_command(action.clone(), &home).await;
     }
 
-    if let Commands::Status { watch, json } = &command {
+    if let Commands::Status {
+        watch,
+        json,
+        hide_orphans,
+    } = &command
+    {
         return crate::status_ops::run_status(
             *watch,
             *json,
+            *hide_orphans,
             &app_home,
             &global_db_path,
             project_db_path.as_deref(),

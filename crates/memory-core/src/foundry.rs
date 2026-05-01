@@ -83,6 +83,7 @@ pub struct FoundryEvidence {
 pub enum FoundryModelLane {
     Embedding,
     Extraction,
+    Maintenance,
     Rerank,
     Distill,
     Reasoning,
@@ -93,7 +94,9 @@ pub enum FoundryModelLane {
 pub enum FoundryJobKind {
     SessionIngest,
     MemoryEnrichment,
-    MemoryRerank,
+    #[serde(alias = "memory_rerank")]
+    MemoryNeighborhood,
+    RecallRerankCache,
     MemoryDistill,
     ForgetSweep,
     SkillEvolution,
@@ -145,4 +148,27 @@ pub struct AgentEvolutionSynthesis {
     pub drift_signals: Vec<String>,
     pub proposals: Vec<AgentEvolutionProposal>,
     pub no_change_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_memory_rerank_deserializes_as_neighborhood_job() {
+        let kind: FoundryJobKind = serde_json::from_str("\"memory_rerank\"").unwrap();
+        assert_eq!(kind, FoundryJobKind::MemoryNeighborhood);
+    }
+
+    #[test]
+    fn split_background_jobs_have_distinct_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&FoundryJobKind::MemoryNeighborhood).unwrap(),
+            "\"memory_neighborhood\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FoundryJobKind::RecallRerankCache).unwrap(),
+            "\"recall_rerank_cache\""
+        );
+    }
 }

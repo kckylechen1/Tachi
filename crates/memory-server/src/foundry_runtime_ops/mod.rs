@@ -14,9 +14,12 @@ mod tests;
 const CAPTURE_DEDUP_THRESHOLD: f64 = 0.95;
 const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
 const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
+const FOUNDRY_RECALL_RERANK_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 const FOUNDRY_RELATED_LIMIT: usize = 4;
 const FOUNDRY_DISTILL_WINDOW: usize = 8;
 const FOUNDRY_DISTILL_KEEP: usize = 6;
+const FOUNDRY_RECALL_RERANK_TOP_K: usize = 6;
+const FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER: usize = 3;
 
 #[derive(Debug, Default)]
 pub(super) struct FoundryWorkerStats {

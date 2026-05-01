@@ -77,6 +77,7 @@ pub enum MemorySource {
     Migration,
     Auto,
     FoundryDistill,
+    FoundryRecallRerankCache,
     Handoff,
     Kanban,
     Wiki,
@@ -92,6 +93,7 @@ impl MemorySource {
             Self::Migration => "migration",
             Self::Auto => "auto",
             Self::FoundryDistill => "foundry_distill",
+            Self::FoundryRecallRerankCache => "foundry_recall_rerank_cache",
             Self::Handoff => "handoff",
             Self::Kanban => "kanban",
             Self::Wiki => "wiki",
@@ -107,6 +109,7 @@ impl MemorySource {
             "migration" => Self::Migration,
             "auto" => Self::Auto,
             "foundry_distill" => Self::FoundryDistill,
+            "foundry_recall_rerank_cache" => Self::FoundryRecallRerankCache,
             "handoff" => Self::Handoff,
             "kanban" => Self::Kanban,
             "wiki" => Self::Wiki,
@@ -128,8 +131,17 @@ impl MemorySource {
         let lower = trimmed.to_ascii_lowercase();
         // Match canonical
         match lower.as_str() {
-            "manual" | "extraction" | "migration" | "auto" | "foundry_distill" | "handoff"
-            | "kanban" | "wiki" | "ghost" | "ingest_event" => return lower,
+            "manual"
+            | "extraction"
+            | "migration"
+            | "auto"
+            | "foundry_distill"
+            | "foundry_recall_rerank_cache"
+            | "handoff"
+            | "kanban"
+            | "wiki"
+            | "ghost"
+            | "ingest_event" => return lower,
             _ => {}
         }
         // Already external:?
@@ -150,6 +162,7 @@ impl MemorySource {
                 | "migration"
                 | "auto"
                 | "foundry_distill"
+                | "foundry_recall_rerank_cache"
                 | "handoff"
                 | "kanban"
                 | "wiki"
@@ -655,6 +668,7 @@ mod tests {
             MemorySource::Migration,
             MemorySource::Auto,
             MemorySource::FoundryDistill,
+            MemorySource::FoundryRecallRerankCache,
             MemorySource::Handoff,
             MemorySource::Kanban,
             MemorySource::Wiki,
