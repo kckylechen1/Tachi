@@ -2279,6 +2279,181 @@ impl MemoryServer {
     ) -> Result<String, String> {
         handle_wiki_browse(self, params)
     }
+
+    #[tool(
+        description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does NOT auto-merge worktrees — use approve_merge for that."
+    )]
+    async fn tachi_complete(
+        &self,
+        Parameters(params): Parameters<TachiCompleteParams>,
+    ) -> Result<String, String> {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let date = now.format("%Y-%m-%d").to_string();
+        let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let task_id = params.task_id.clone().unwrap_or_else(|| {
+            let agent_slug = params
+                .agent
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+                .to_ascii_lowercase();
+            format!("{}-{}", ts, agent_slug)
+        });
+
+        let path = format!("/eval/{}/{}", date, task_id);
+
+        let outcome_norm = params.outcome.to_ascii_lowercase();
+        let outcome_emoji = match outcome_norm.as_str() {
+            "success" => "✓",
+            "failure" => "✗",
+            "partial" => "~",
+            "aborted" => "⊘",
+            _ => "?",
+        };
+
+        let duration_display = params
+            .duration_ms
+            .map(|ms| {
+                if ms < 1000 {
+                    format!("{}ms", ms)
+                } else if ms < 60_000 {
+                    format!("{:.1}s", (ms as f64) / 1000.0)
+                } else {
+                    format!("{:.1}min", (ms as f64) / 60_000.0)
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+
+        let cost_display = match (params.cost_tokens, params.cost_usd) {
+            (Some(t), Some(u)) => format!(" | {} tok | ${:.4}", t, u),
+            (Some(t), None) => format!(" | {} tok", t),
+            (None, Some(u)) => format!(" | ${:.4}", u),
+            _ => String::new(),
+        };
+
+        let mut summary_lines = vec![format!(
+            "[{}] {} completed task in {}{}",
+            outcome_emoji, params.agent, duration_display, cost_display
+        )];
+        summary_lines.push(format!("Task: {}", params.task));
+        if !params.skills_used.is_empty() {
+            summary_lines.push(format!("Skills: {}", params.skills_used.join(", ")));
+        }
+        if let Some(q) = params.quality_score {
+            summary_lines.push(format!("Quality: {:.2}", q));
+        }
+        if let Some(notes) = &params.notes {
+            if !notes.is_empty() {
+                summary_lines.push(format!("Notes: {}", notes));
+            }
+        }
+        let text = summary_lines.join("\n");
+
+        let mut keywords: Vec<String> = Vec::new();
+        keywords.push(params.agent.clone());
+        keywords.push(outcome_norm.clone());
+        keywords.push("eval".to_string());
+        for skill in &params.skills_used {
+            keywords.push(skill.clone());
+        }
+
+        let mut metadata_map = serde_json::Map::new();
+        metadata_map.insert("task_id".into(), serde_json::json!(task_id));
+        metadata_map.insert("agent".into(), serde_json::json!(params.agent));
+        metadata_map.insert("outcome".into(), serde_json::json!(outcome_norm));
+        if let Some(ms) = params.duration_ms {
+            metadata_map.insert("duration_ms".into(), serde_json::json!(ms));
+        }
+        if !params.skills_used.is_empty() {
+            metadata_map.insert(
+                "skills_used".into(),
+                serde_json::json!(params.skills_used),
+            );
+        }
+        if let Some(t) = params.cost_tokens {
+            metadata_map.insert("cost_tokens".into(), serde_json::json!(t));
+        }
+        if let Some(u) = params.cost_usd {
+            metadata_map.insert("cost_usd".into(), serde_json::json!(u));
+        }
+        if let Some(q) = params.quality_score {
+            metadata_map.insert("quality_score".into(), serde_json::json!(q));
+        }
+        if let Some(traj) = &params.trajectory {
+            metadata_map.insert("trajectory".into(), traj.clone());
+        }
+        if let Some(diff) = &params.diff {
+            if !diff.is_empty() {
+                metadata_map.insert("diff".into(), serde_json::json!(diff));
+            }
+        }
+        if let Some(wt) = &params.worktree {
+            metadata_map.insert("worktree".into(), serde_json::json!(wt));
+        }
+        if let Some(did) = &params.dispatch_id {
+            metadata_map.insert("dispatch_id".into(), serde_json::json!(did));
+        }
+
+        let mem_params = SaveMemoryParams {
+            text,
+            summary: format!(
+                "[{}] {} / {}",
+                outcome_emoji, params.agent, params.task
+            ),
+            path: path.clone(),
+            importance: match outcome_norm.as_str() {
+                "success" => 0.55,
+                "failure" => 0.75,
+                "partial" => 0.6,
+                "aborted" => 0.5,
+                _ => 0.5,
+            },
+            category: "experience".to_string(),
+            topic: params.task.clone(),
+            keywords,
+            persons: Vec::new(),
+            entities: params.skills_used.clone(),
+            location: String::new(),
+            scope: params
+                .scope
+                .clone()
+                .unwrap_or_else(|| "project".to_string()),
+            vector: None,
+            id: None,
+            force: false,
+            auto_link: true,
+            project: params.project.clone(),
+            retention_policy: None,
+            domain: None,
+            timestamp: None,
+            metadata: Some(serde_json::Value::Object(metadata_map)),
+        };
+
+        let save_result = handle_save_memory(self, mem_params).await?;
+        let save_json: serde_json::Value = serde_json::from_str(&save_result)
+            .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
+
+        let review_bundle = serde_json::json!({
+            "recorded": true,
+            "task_id": task_id,
+            "path": path,
+            "outcome": outcome_norm,
+            "eval_entry": save_json,
+            "next_steps": [
+                "Use tachi_search with 'eval' keyword to find related outcomes.",
+                "For worktree-based dispatch, run approve_merge / task_merge when ready.",
+                "Distill and skill_evolve pipelines are not yet auto-triggered (MVP).",
+            ],
+            "pending_pipeline": {
+                "distill_trajectory": "not yet auto-enqueued (pending worker)",
+                "skill_evolve": "not yet auto-enqueued (pending worker)",
+            }
+        });
+
+        serde_json::to_string(&review_bundle)
+            .map_err(|e| format!("Failed to serialize review bundle: {}", e))
+    }
 }
 
 // MCP pool proxy methods are in mcp_pool.rs

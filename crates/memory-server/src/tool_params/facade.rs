@@ -184,3 +184,70 @@ pub(crate) struct TachiHandoffParams {
     #[serde(default = "default_true")]
     pub acknowledge: bool,
 }
+
+// ─── Facade: task completion + eval ledger ───────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiCompleteParams {
+    /// Task ID (if absent, one is generated from timestamp + agent)
+    #[serde(default)]
+    pub task_id: Option<String>,
+
+    /// Task description / what was asked
+    pub task: String,
+
+    /// Agent that executed the task (e.g. "claude-code", "codex", "self")
+    pub agent: String,
+
+    /// Outcome: "success" | "failure" | "partial" | "aborted"
+    pub outcome: String,
+
+    /// Execution duration in milliseconds
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+
+    /// Skills used during execution (capability IDs)
+    #[serde(default)]
+    pub skills_used: Vec<String>,
+
+    /// Cost in tokens (total across all turns)
+    #[serde(default)]
+    pub cost_tokens: Option<u64>,
+
+    /// Cost in USD (if known)
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+
+    /// Quality score 0.0–1.0 (self-reported or computed later)
+    #[serde(default)]
+    pub quality_score: Option<f64>,
+
+    /// Free-form notes / summary of what was done
+    #[serde(default)]
+    pub notes: Option<String>,
+
+    /// Execution trajectory for later distillation. Array of step objects.
+    #[serde(default)]
+    pub trajectory: Option<serde_json::Value>,
+
+    /// Git diff / unified patch (if any files were changed)
+    #[serde(default)]
+    pub diff: Option<String>,
+
+    /// Worktree path (if dispatched via tachi_dispatch with isolation)
+    #[serde(default)]
+    pub worktree: Option<String>,
+
+    /// Parent dispatch ID (links back to tachi_dispatch record)
+    #[serde(default)]
+    pub dispatch_id: Option<String>,
+
+    /// Target database scope for the eval entry: "global" or "project" (default)
+    #[serde(default)]
+    pub scope: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+}

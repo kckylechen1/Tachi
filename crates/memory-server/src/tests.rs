@@ -1585,6 +1585,76 @@ async fn post_card_check_inbox_and_update_roundtrip() {
 }
 
 #[tokio::test]
+async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
+    let server = make_server();
+
+    let resp = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("smoke-test-001".to_string()),
+            task: "Refactor auth middleware".to_string(),
+            agent: "claude-code".to_string(),
+            outcome: "success".to_string(),
+            duration_ms: Some(5420),
+            skills_used: vec!["skill:superpowers".to_string()],
+            cost_tokens: Some(1234),
+            cost_usd: Some(0.0812),
+            quality_score: Some(0.9),
+            notes: Some("All tests green.".to_string()),
+            trajectory: None,
+            diff: Some("diff --git a/foo b/foo\n+bar\n".to_string()),
+            worktree: None,
+            dispatch_id: None,
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("tachi_complete should succeed");
+
+    let bundle: serde_json::Value = serde_json::from_str(&resp).expect("bundle JSON");
+    assert_eq!(bundle["recorded"], serde_json::json!(true));
+    assert_eq!(bundle["task_id"], serde_json::json!("smoke-test-001"));
+    assert_eq!(bundle["outcome"], serde_json::json!("success"));
+    let path = bundle["path"].as_str().expect("path present");
+    assert!(
+        path.starts_with("/eval/"),
+        "eval entry path should be under /eval, got {path}"
+    );
+    assert!(
+        path.ends_with("smoke-test-001"),
+        "path should include task_id, got {path}"
+    );
+
+    let eval_entry = &bundle["eval_entry"];
+    let id = eval_entry["id"]
+        .as_str()
+        .expect("eval entry should return memory id")
+        .to_string();
+
+    // Confirm the memory entry is actually retrievable with correct metadata.
+    let fetched_str = server
+        .get_memory(Parameters(GetMemoryParams {
+            id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched: serde_json::Value =
+        serde_json::from_str(&fetched_str).expect("memory JSON");
+    assert_eq!(fetched["category"], serde_json::json!("experience"));
+    let keywords = fetched["keywords"]
+        .as_array()
+        .expect("keywords array");
+    assert!(keywords.iter().any(|k| k == "eval"));
+    let metadata = &fetched["metadata"];
+    assert_eq!(metadata["agent"], serde_json::json!("claude-code"));
+    assert_eq!(metadata["outcome"], serde_json::json!("success"));
+    assert_eq!(metadata["cost_tokens"], serde_json::json!(1234));
+    assert_eq!(metadata["skills_used"][0], serde_json::json!("skill:superpowers"));
+    assert!(metadata["diff"].as_str().unwrap().contains("+bar"));
+}
+
+#[tokio::test]
 async fn save_memory_includes_provenance_for_registered_agent() {
     let server = make_server();
 

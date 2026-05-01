@@ -87,7 +87,7 @@ impl ToolProfile {
 
     /// Standard profile for IDE + CLI agents (Windsurf, Cursor, Antigravity,
     /// Trae, Codex standalone, Claude Code standalone). Enables all bundles but
-    /// intersects with a curated 10-tool allow-list to keep the tool tray small.
+    /// intersects with a curated ~11-tool allow-list to keep the tool tray small.
     const fn standard() -> Self {
         Self {
             observe: true,
@@ -101,7 +101,7 @@ impl ToolProfile {
     }
 
     /// Delegate profile for worker agents spawned by tachi_dispatch.
-    /// Read + remember bundles only, intersected with a curated 6-tool allow-list.
+    /// Read + remember bundles only, intersected with a curated 7-tool allow-list.
     /// No dispatch (prevent recursion), no handoff (parent manages), no hub_discover.
     const fn delegate() -> Self {
         Self {
@@ -193,6 +193,7 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_plan",
     "tachi_unstick",
     "tachi_browse",
+    "tachi_complete",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -241,7 +242,7 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "wiki_lint",
 ];
 
-/// Standard profile allow-list (10 tools). Intersected with all bundles
+/// Standard profile allow-list (~11 tools). Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Planning + context
@@ -260,11 +261,12 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Skill discovery + execution
     "hub_discover",
     "run_skill",
-    // Agent dispatch (pending implementation)
+    // Agent dispatch + task completion
     "tachi_dispatch",
+    "tachi_complete",
 ];
 
-/// Delegate profile allow-list (6 tools). For worker agents spawned by
+/// Delegate profile allow-list (7 tools). For worker agents spawned by
 /// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
 const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Search + browse
@@ -275,6 +277,8 @@ const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_save",
     // Self-rescue when stuck
     "tachi_unstick",
+    // Declare task completion
+    "tachi_complete",
     // Execute injected/recommended skills
     "run_skill",
 ];
@@ -582,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_profile_restricts_to_10_tools() {
+    fn standard_profile_restricts_to_allow_list() {
         let filtered = filter_tool_defs(
             vec![
                 // Standard tools (should pass)
@@ -595,6 +599,7 @@ mod tests {
                 test_tool("hub_discover"),
                 test_tool("run_skill"),
                 test_tool("recall_context"),
+                test_tool("tachi_complete"),
                 // tachi_dispatch not yet registered as a tool
                 // Old tools now excluded:
                 test_tool("search_memory"),
@@ -623,12 +628,13 @@ mod tests {
                 "hub_discover".to_string(),
                 "run_skill".to_string(),
                 "recall_context".to_string(),
+                "tachi_complete".to_string(),
             ]
         );
     }
 
     #[test]
-    fn delegate_profile_restricts_to_6_tools() {
+    fn delegate_profile_restricts_to_allow_list() {
         let filtered = filter_tool_defs(
             vec![
                 // Delegate tools (should pass)
@@ -637,6 +643,7 @@ mod tests {
                 test_tool("tachi_browse"),
                 test_tool("tachi_save"),
                 test_tool("tachi_unstick"),
+                test_tool("tachi_complete"),
                 test_tool("run_skill"),
                 // Should be excluded:
                 test_tool("tachi_plan"),
@@ -661,6 +668,7 @@ mod tests {
                 "tachi_browse".to_string(),
                 "tachi_save".to_string(),
                 "tachi_unstick".to_string(),
+                "tachi_complete".to_string(),
                 "run_skill".to_string(),
             ]
         );
