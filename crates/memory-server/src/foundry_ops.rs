@@ -800,7 +800,7 @@ fn mark_proposal_applied(server: &MemoryServer, proposal_id: &str) -> Result<(),
     })
 }
 
-pub(super) async fn handle_synthesize_agent_evolution(
+pub(crate) async fn handle_synthesize_agent_evolution(
     server: &MemoryServer,
     params: SynthesizeAgentEvolutionParams,
 ) -> Result<String, String> {
@@ -839,7 +839,7 @@ pub(super) async fn handle_synthesize_agent_evolution(
     .map_err(|e| format!("Failed to serialize synthesis response: {e}"))
 }
 
-pub(super) async fn handle_queue_agent_evolution(
+pub(crate) async fn handle_queue_agent_evolution(
     server: &MemoryServer,
     params: SynthesizeAgentEvolutionParams,
 ) -> Result<String, String> {
@@ -900,7 +900,7 @@ pub(super) async fn handle_queue_agent_evolution(
     .map_err(|e| format!("Failed to serialize queue response: {e}"))
 }
 
-pub(super) async fn handle_list_agent_evolution_proposals(
+pub(crate) async fn handle_list_agent_evolution_proposals(
     server: &MemoryServer,
     params: ListAgentEvolutionProposalsParams,
 ) -> Result<String, String> {
@@ -946,7 +946,7 @@ pub(super) async fn handle_list_agent_evolution_proposals(
     .map_err(|e| format!("Failed to serialize proposal list: {e}"))
 }
 
-pub(super) async fn handle_review_agent_evolution_proposal(
+pub(crate) async fn handle_review_agent_evolution_proposal(
     server: &MemoryServer,
     params: ReviewAgentEvolutionProposalParams,
 ) -> Result<String, String> {
@@ -980,7 +980,7 @@ pub(super) async fn handle_review_agent_evolution_proposal(
     .map_err(|e| format!("Failed to serialize proposal review response: {e}"))
 }
 
-pub(super) async fn handle_project_agent_profile(
+pub(crate) async fn handle_project_agent_profile(
     server: &MemoryServer,
     params: ProjectAgentProfileParams,
 ) -> Result<String, String> {

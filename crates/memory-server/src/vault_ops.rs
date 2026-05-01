@@ -403,7 +403,7 @@ pub(super) fn read_unlocked_vault_secret(
     Ok(value)
 }
 
-pub(super) async fn handle_vault_init(
+pub(crate) async fn handle_vault_init(
     server: &MemoryServer,
     params: VaultInitParams,
 ) -> Result<String, String> {
@@ -459,7 +459,7 @@ pub(super) async fn handle_vault_init(
     result
 }
 
-pub(super) async fn handle_vault_unlock(
+pub(crate) async fn handle_vault_unlock(
     server: &MemoryServer,
     params: VaultUnlockParams,
 ) -> Result<String, String> {
@@ -502,7 +502,7 @@ pub(super) async fn handle_vault_unlock(
     result
 }
 
-pub(super) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
     let result = {
         clear_cached_vault_state(server);
         serde_json::to_string(&json!({
@@ -521,7 +521,7 @@ pub(super) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, S
     result
 }
 
-pub(super) async fn handle_vault_set(
+pub(crate) async fn handle_vault_set(
     server: &MemoryServer,
     params: VaultSetParams,
 ) -> Result<String, String> {
@@ -629,7 +629,7 @@ pub(super) async fn handle_vault_set(
     result
 }
 
-pub(super) async fn handle_vault_get(
+pub(crate) async fn handle_vault_get(
     server: &MemoryServer,
     params: VaultGetParams,
 ) -> Result<String, String> {
@@ -674,7 +674,7 @@ pub(super) async fn handle_vault_get(
     result
 }
 
-pub(super) async fn handle_vault_list(
+pub(crate) async fn handle_vault_list(
     server: &MemoryServer,
     params: VaultListParams,
 ) -> Result<String, String> {
@@ -715,7 +715,7 @@ pub(super) async fn handle_vault_list(
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_vault_remove(
+pub(crate) async fn handle_vault_remove(
     server: &MemoryServer,
     params: VaultRemoveParams,
 ) -> Result<String, String> {
@@ -760,7 +760,7 @@ pub(super) async fn handle_vault_remove(
     }
 }
 
-pub(super) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
     let initialized = is_vault_initialized(server)?;
     let _ = maybe_auto_lock_vault(server);
     let locked = read_or_recover(&server.vault_key, "vault_key").is_none();
@@ -781,7 +781,7 @@ pub(super) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_vault_setup_rotation(
+pub(crate) async fn handle_vault_setup_rotation(
     server: &MemoryServer,
     params: VaultSetupRotationParams,
 ) -> Result<String, String> {

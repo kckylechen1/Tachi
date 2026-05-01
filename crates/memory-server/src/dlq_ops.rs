@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn handle_dlq_list(
+pub(crate) async fn handle_dlq_list(
     server: &MemoryServer,
     params: DlqListParams,
 ) -> Result<String, String> {
@@ -56,7 +56,7 @@ pub(super) async fn handle_dlq_list(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_dlq_retry(
+pub(crate) async fn handle_dlq_retry(
     server: &MemoryServer,
     params: DlqRetryParams,
 ) -> Result<String, String> {

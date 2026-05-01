@@ -1,4 +1,9 @@
 use super::*;
+use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
+use crate::vault_ops::{
+    VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
+};
 use memory_core::{AgentProjection, Pack};
 
 fn ensure_test_env() {

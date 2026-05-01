@@ -59,7 +59,7 @@ fn load_edges_for_memory(
     }
 }
 
-pub(super) async fn handle_add_edge(
+pub(crate) async fn handle_add_edge(
     server: &MemoryServer,
     params: AddEdgeParams,
 ) -> Result<String, String> {
@@ -96,7 +96,7 @@ pub(super) async fn handle_add_edge(
     serde_json::to_string(&resp).map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_get_edges(
+pub(crate) async fn handle_get_edges(
     server: &MemoryServer,
     params: GetEdgesParams,
 ) -> Result<String, String> {
@@ -130,7 +130,7 @@ pub(super) async fn handle_get_edges(
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_memory_graph(
+pub(crate) async fn handle_memory_graph(
     server: &MemoryServer,
     params: MemoryGraphParams,
 ) -> Result<String, String> {
@@ -262,7 +262,7 @@ pub(super) async fn handle_memory_graph(
     .map_err(|e| format!("Failed to serialize memory_graph response: {e}"))
 }
 
-pub(super) async fn handle_set_state(
+pub(crate) async fn handle_set_state(
     server: &MemoryServer,
     params: SetStateParams,
 ) -> Result<String, String> {
@@ -283,7 +283,7 @@ pub(super) async fn handle_set_state(
     })
 }
 
-pub(super) async fn handle_get_state(
+pub(crate) async fn handle_get_state(
     server: &MemoryServer,
     params: GetStateParams,
 ) -> Result<String, String> {

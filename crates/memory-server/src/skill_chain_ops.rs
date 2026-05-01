@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn handle_chain_skills(
+pub(crate) async fn handle_chain_skills(
     server: &MemoryServer,
     params: ChainSkillsParams,
 ) -> Result<String, String> {
