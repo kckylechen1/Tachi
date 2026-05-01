@@ -548,14 +548,49 @@ pub(crate) struct ExtractFactsParams {
     pub source: String,
 }
 
-/// A single message in a conversation turn
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+/// A single message in a conversation turn.
+///
+/// Some MCP clients send compact session windows as raw strings even though the
+/// schema advertises `{role, content}` objects. Accept both shapes at the
+/// boundary so callers get deterministic tool behavior instead of serde
+/// transport errors.
+#[derive(Debug, Clone, serde::Serialize, JsonSchema)]
 pub(crate) struct Message {
     /// Role of the message sender (e.g., "user", "assistant", "system")
     #[allow(dead_code)]
     pub role: String,
     /// Content of the message
     pub content: String,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum MessageInput {
+            Object {
+                #[serde(default = "default_message_role")]
+                role: String,
+                content: String,
+            },
+            Text(String),
+        }
+
+        match MessageInput::deserialize(deserializer)? {
+            MessageInput::Object { role, content } => Ok(Message { role, content }),
+            MessageInput::Text(content) => Ok(Message {
+                role: default_message_role(),
+                content,
+            }),
+        }
+    }
+}
+
+fn default_message_role() -> String {
+    "user".to_string()
 }
 
 #[allow(dead_code)]

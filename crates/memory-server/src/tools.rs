@@ -8,6 +8,7 @@
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
+use serde_json::{Value, json};
 
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
@@ -35,6 +36,7 @@ use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
 use crate::handoff_ops::{handle_handoff_check, handle_handoff_leave};
+use crate::hub_helpers::capability_callable;
 use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
@@ -43,8 +45,8 @@ use crate::hub_ops::{
     handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
-    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
-    UpdateCardParams,
+    CheckInboxParams, PostCardParams, UpdateCardParams, handle_check_inbox, handle_post_card,
+    handle_update_card,
 };
 use crate::memory_ops::{
     handle_archive_memory, handle_delete_domain, handle_delete_memory, handle_get_domain,
@@ -70,13 +72,141 @@ use crate::sandbox_ops::{
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::vault_ops::{
-    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
-    handle_vault_set, handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
     VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams,
+    VaultSetupRotationParams, VaultUnlockParams, handle_vault_get, handle_vault_init,
+    handle_vault_list, handle_vault_lock, handle_vault_remove, handle_vault_set,
+    handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
 };
 use crate::wiki_ops::{handle_wiki_browse, handle_wiki_lint, handle_wiki_search};
 use crate::{AgentProfile, MemoryServer};
+
+fn first_text_blocks(result: &rmcp::model::CallToolResult) -> Vec<String> {
+    result
+        .content
+        .iter()
+        .filter_map(|item| {
+            serde_json::to_value(item).ok().and_then(|value| {
+                value
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(String::from)
+            })
+        })
+        .collect()
+}
+
+fn matches_web_search_backend(capability_id: &str, selector: Option<&str>) -> bool {
+    let Some(selector) = selector.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    if selector.eq_ignore_ascii_case("auto") {
+        return true;
+    }
+    let normalized = selector
+        .strip_prefix("mcp:")
+        .unwrap_or(selector)
+        .to_ascii_lowercase();
+    let cap = capability_id
+        .strip_prefix("mcp:")
+        .unwrap_or(capability_id)
+        .to_ascii_lowercase();
+    cap == normalized || cap.contains(&normalized)
+}
+
+fn discovered_tool_schema(definition: &Value, tool_name: &str) -> Option<Value> {
+    definition
+        .get("discovered_tools")
+        .and_then(|tools| tools.as_array())
+        .and_then(|tools| {
+            tools.iter().find(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(|name| name == tool_name)
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|tool| {
+            tool.get("inputSchema")
+                .or_else(|| tool.get("input_schema"))
+                .cloned()
+        })
+}
+
+fn choose_web_search_tool(
+    capability_id: &str,
+    definition: &Value,
+    explicit_tool_name: Option<&str>,
+) -> String {
+    if let Some(name) = explicit_tool_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return name.to_string();
+    }
+
+    if let Some(name) = definition
+        .get("discovered_tools")
+        .and_then(|tools| tools.as_array())
+        .and_then(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(|name| name.as_str()))
+                .find(|name| name.to_ascii_lowercase().contains("search"))
+        })
+    {
+        return name.to_string();
+    }
+
+    match capability_id {
+        "mcp:exa" => "web_search_exa".to_string(),
+        "mcp:tavily" => "tavily_search".to_string(),
+        "mcp:web-search" => "web_search".to_string(),
+        _ => "search".to_string(),
+    }
+}
+
+fn web_search_arguments(
+    params: &TachiWebSearchParams,
+    input_schema: Option<&Value>,
+) -> serde_json::Map<String, Value> {
+    let mut args = serde_json::Map::new();
+    args.insert("query".to_string(), json!(params.query));
+
+    let has_property = |name: &str| {
+        input_schema
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.as_object())
+            .map(|properties| properties.contains_key(name))
+            .unwrap_or(false)
+    };
+
+    for key in ["numResults", "max_results", "maxResults", "limit", "top_k"] {
+        if has_property(key) {
+            args.insert(key.to_string(), json!(params.top_k));
+            break;
+        }
+    }
+
+    if !params.include_domains.is_empty() {
+        for key in ["include_domains", "includeDomains"] {
+            if has_property(key) {
+                args.insert(key.to_string(), json!(params.include_domains));
+                break;
+            }
+        }
+    }
+
+    if !params.exclude_domains.is_empty() {
+        for key in ["exclude_domains", "excludeDomains"] {
+            if has_property(key) {
+                args.insert(key.to_string(), json!(params.exclude_domains));
+                break;
+            }
+        }
+    }
+
+    args
+}
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
 
@@ -1211,5 +1341,581 @@ impl MemoryServer {
         Parameters(params): Parameters<VaultSetupRotationParams>,
     ) -> Result<String, String> {
         handle_vault_setup_rotation(self, params).await
+    }
+
+    // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
+
+    #[tool(
+        description = "Unified search across wiki and memory. Use scope to target 'wiki', 'memory', or 'all' (default)."
+    )]
+    pub(crate) async fn tachi_search(
+        &self,
+        Parameters(params): Parameters<TachiSearchParams>,
+    ) -> Result<String, String> {
+        let scope = params.scope.to_ascii_lowercase();
+        let mut parts = Vec::new();
+
+        if scope == "wiki" || scope == "all" {
+            let wiki_params = WikiSearchParams {
+                query: params.query.clone(),
+                path_prefix: params.path_prefix.clone(),
+                category: params.category.clone(),
+                top_k: params.top_k,
+                include_archived: params.include_archived,
+                agent_role: None,
+                project: params.project.clone(),
+                domain: params.domain.clone(),
+                weights: None,
+            };
+            let wiki_result = handle_tachi_wiki_search(self, wiki_params).await;
+            match wiki_result {
+                Ok(r) => parts.push(format!("## Wiki results\n{}", r)),
+                Err(e) => parts.push(format!("## Wiki results\nError: {e}")),
+            }
+        }
+
+        if scope == "memory" || scope == "all" {
+            let mem_params = SearchMemoryParams {
+                query: params.query.clone(),
+                query_vec: None,
+                top_k: params.top_k,
+                path_prefix: params.path_prefix.clone(),
+                include_archived: params.include_archived,
+                candidates_per_channel: 20,
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: None,
+                project: params.project.clone(),
+                domain: params.domain.clone(),
+            };
+            let mem_result = handle_search_memory(self, mem_params).await;
+            match mem_result {
+                Ok(r) => parts.push(format!("## Memory results\n{}", r)),
+                Err(e) => parts.push(format!("## Memory results\nError: {e}")),
+            }
+        }
+
+        Ok(parts.join("\n\n"))
+    }
+
+    #[tool(
+        description = "Search the live web through Tachi Hub. Uses vc:web_search routing and automatically falls back across available backends."
+    )]
+    pub(crate) async fn tachi_web_search(
+        &self,
+        Parameters(params): Parameters<TachiWebSearchParams>,
+    ) -> Result<String, String> {
+        let (bindings, binding_db) = self.get_virtual_capability_bindings("vc:web_search")?;
+        let mut candidates: Vec<String> = bindings
+            .into_iter()
+            .filter(|binding| binding.enabled)
+            .map(|binding| binding.capability_id)
+            .collect();
+
+        for fallback in ["mcp:web-search", "mcp:exa", "mcp:tavily"] {
+            if !candidates.iter().any(|candidate| candidate == fallback) {
+                candidates.push(fallback.to_string());
+            }
+        }
+
+        let backend_selector = params.backend.as_deref();
+        let mut attempts = Vec::new();
+
+        for capability_id in candidates {
+            if !matches_web_search_backend(&capability_id, backend_selector) {
+                continue;
+            }
+
+            let cap = match self.get_capability(&capability_id) {
+                Ok(cap) => cap,
+                Err(err) => {
+                    attempts.push(json!({
+                        "capability_id": capability_id,
+                        "status": "missing",
+                        "error": format!("{err}"),
+                    }));
+                    continue;
+                }
+            };
+
+            if !capability_callable(&cap) {
+                attempts.push(json!({
+                    "capability_id": capability_id,
+                    "status": "not_callable",
+                    "enabled": cap.enabled,
+                    "review_status": cap.review_status,
+                    "health_status": cap.health_status,
+                }));
+                continue;
+            }
+
+            let def: Value = match serde_json::from_str(&cap.definition) {
+                Ok(def) => def,
+                Err(err) => {
+                    attempts.push(json!({
+                        "capability_id": capability_id,
+                        "status": "bad_definition",
+                        "error": err.to_string(),
+                    }));
+                    continue;
+                }
+            };
+
+            let tool_name =
+                choose_web_search_tool(&capability_id, &def, params.tool_name.as_deref());
+            let schema = discovered_tool_schema(&def, &tool_name);
+            let arguments = web_search_arguments(&params, schema.as_ref());
+            let result = self
+                .proxy_call_capability_internal(
+                    &capability_id,
+                    Some("vc:web_search"),
+                    &tool_name,
+                    Some(arguments.clone()),
+                )
+                .await;
+
+            match result {
+                Ok(result) if !result.is_error.unwrap_or(false) => {
+                    let content = first_text_blocks(&result);
+                    let response = json!({
+                        "query": params.query,
+                        "backend": capability_id,
+                        "tool": tool_name,
+                        "binding_db": binding_db,
+                        "arguments": arguments,
+                        "content": content,
+                        "attempts": attempts,
+                    });
+                    return serde_json::to_string(&response)
+                        .map_err(|err| format!("serialize web search response: {err}"));
+                }
+                Ok(result) => {
+                    attempts.push(json!({
+                        "capability_id": capability_id,
+                        "tool": tool_name,
+                        "status": "tool_error",
+                        "content": first_text_blocks(&result),
+                    }));
+                }
+                Err(err) => {
+                    attempts.push(json!({
+                        "capability_id": capability_id,
+                        "tool": tool_name,
+                        "status": "call_failed",
+                        "error": format!("{err}"),
+                    }));
+                }
+            }
+        }
+
+        Err(format!(
+            "No web search backend succeeded for query '{}'. Attempts: {}",
+            params.query,
+            serde_json::to_string(&attempts).unwrap_or_else(|_| "[]".to_string())
+        ))
+    }
+
+    #[tool(
+        description = "Unified save: writes a wiki entry, memory, or quick note. Set kind to 'wiki', 'note', or 'memory' — or omit for auto-detection."
+    )]
+    pub(crate) async fn tachi_save(
+        &self,
+        Parameters(params): Parameters<TachiSaveParams>,
+    ) -> Result<String, String> {
+        let kind = params.kind.as_deref().unwrap_or("").to_ascii_lowercase();
+
+        // Auto-detect: title present → wiki, short text → note, otherwise → memory
+        let resolved_kind = if kind.is_empty() {
+            if params.title.is_some() {
+                "wiki"
+            } else if params.text.len() < 200 {
+                "note"
+            } else {
+                "memory"
+            }
+        } else {
+            &kind
+        };
+
+        match resolved_kind {
+            "wiki" => {
+                let title = params
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Untitled".to_string());
+                let wiki_params = WikiWriteParams {
+                    title,
+                    text: params.text.clone(),
+                    path: params.path.clone(),
+                    topic: params.topic.clone(),
+                    summary: params.summary.clone(),
+                    category: params
+                        .category
+                        .clone()
+                        .unwrap_or_else(|| "experience".to_string()),
+                    keywords: params.keywords.clone(),
+                    entities: params.entities.clone(),
+                    importance: params.importance.unwrap_or(0.85),
+                    scope: params.scope.clone().unwrap_or_else(|| "global".to_string()),
+                    retention_policy: params
+                        .retention_policy
+                        .clone()
+                        .unwrap_or_else(|| "permanent".to_string()),
+                    domain: params.domain.clone(),
+                    project: params.project.clone(),
+                    force: params.force,
+                };
+                handle_tachi_wiki_write(self, wiki_params).await
+            }
+            "note" => {
+                let remember_params = RememberParams {
+                    text: params.text.clone(),
+                    summary: params.summary.clone().unwrap_or_default(),
+                    tags: params.keywords.clone(),
+                    topic: params.topic.clone().unwrap_or_default(),
+                    importance: params.importance,
+                    scope: params.scope.clone(),
+                    project: params.project.clone(),
+                    path: params.path.clone(),
+                    category: params.category.clone(),
+                    domain: params.domain.clone(),
+                    retention_policy: params.retention_policy.clone(),
+                    force: params.force,
+                };
+                handle_remember(self, remember_params).await
+            }
+            _ => {
+                // "memory" or any other value
+                let mem_params = SaveMemoryParams {
+                    text: params.text.clone(),
+                    summary: params.summary.clone().unwrap_or_default(),
+                    path: params.path.clone().unwrap_or_else(|| "/".to_string()),
+                    importance: params.importance.unwrap_or(0.7),
+                    category: params
+                        .category
+                        .clone()
+                        .unwrap_or_else(|| "fact".to_string()),
+                    topic: params.topic.clone().unwrap_or_default(),
+                    keywords: params.keywords.clone(),
+                    persons: Vec::new(),
+                    entities: params.entities.clone(),
+                    location: String::new(),
+                    scope: params
+                        .scope
+                        .clone()
+                        .unwrap_or_else(|| "project".to_string()),
+                    vector: None,
+                    id: params.id.clone(),
+                    force: params.force,
+                    auto_link: true,
+                    project: params.project.clone(),
+                    retention_policy: params.retention_policy.clone(),
+                    domain: params.domain.clone(),
+                    timestamp: None,
+                    metadata: None,
+                };
+                handle_save_memory(self, mem_params).await
+            }
+        }
+    }
+
+    #[tool(
+        description = "Unified handoff: 'leave' a memo for the next session or 'check' for pending memos."
+    )]
+    pub(crate) async fn tachi_handoff(
+        &self,
+        Parameters(params): Parameters<TachiHandoffParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        match action.as_str() {
+            "leave" => {
+                let summary = params
+                    .summary
+                    .clone()
+                    .ok_or_else(|| "summary is required when action='leave'".to_string())?;
+                let leave_params = HandoffLeaveParams {
+                    summary,
+                    next_steps: params.next_steps.clone(),
+                    target_agent: params.target_agent.clone(),
+                    context: params.context.clone(),
+                };
+                handle_handoff_leave(self, leave_params).await
+            }
+            "check" => {
+                let check_params = HandoffCheckParams {
+                    agent_id: params.agent_id.clone(),
+                    acknowledge: params.acknowledge,
+                };
+                handle_handoff_check(self, check_params).await
+            }
+            _ => Err(format!(
+                "Invalid action '{}'. Use 'leave' or 'check'.",
+                params.action
+            )),
+        }
+    }
+
+    #[tool(
+        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, lightweight skill suggestions, and debugging checklist. (Alias: tachi_task_brief)"
+    )]
+    pub(crate) async fn tachi_plan(
+        &self,
+        Parameters(params): Parameters<TaskBriefParams>,
+    ) -> Result<String, String> {
+        handle_tachi_task_brief(self, params).await
+    }
+
+    #[tool(
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. (Alias: tachi_progress_check)"
+    )]
+    pub(crate) async fn tachi_unstick(
+        &self,
+        Parameters(params): Parameters<ProgressCheckParams>,
+    ) -> Result<String, String> {
+        handle_tachi_progress_check(self, params).await
+    }
+
+    #[tool(
+        description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc. (Alias: wiki_browse)"
+    )]
+    pub(crate) async fn tachi_browse(
+        &self,
+        Parameters(params): Parameters<WikiBrowseParams>,
+    ) -> Result<String, String> {
+        handle_wiki_browse(self, params)
+    }
+
+    #[tool(
+        description = "Dispatch a task to a delegate agent (Claude Code CLI, Codex CLI, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
+    )]
+    pub(crate) async fn tachi_dispatch(
+        &self,
+        Parameters(params): Parameters<TachiDispatchParams>,
+    ) -> Result<String, String> {
+        crate::dispatch_ops::handle_tachi_dispatch(self, params).await
+    }
+
+    #[tool(
+        description = "Merge a git worktree branch back to the main branch and optionally remove the worktree. Use after reviewing tachi_dispatch results."
+    )]
+    pub(crate) async fn approve_merge(
+        &self,
+        Parameters(params): Parameters<TachiApproveMergeParams>,
+    ) -> Result<String, String> {
+        crate::dispatch_ops::handle_approve_merge(params).await
+    }
+
+    #[tool(
+        description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does NOT auto-merge worktrees — use approve_merge for that."
+    )]
+    pub(crate) async fn tachi_complete(
+        &self,
+        Parameters(params): Parameters<TachiCompleteParams>,
+    ) -> Result<String, String> {
+        use chrono::Utc;
+
+        let now = Utc::now();
+        let date = now.format("%Y-%m-%d").to_string();
+        let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let task_id = params.task_id.clone().unwrap_or_else(|| {
+            let agent_slug = params
+                .agent
+                .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+                .to_ascii_lowercase();
+            format!("{}-{}", ts, agent_slug)
+        });
+
+        let path = format!("/eval/{}/{}", date, task_id);
+
+        let outcome_norm = params.outcome.to_ascii_lowercase();
+        let outcome_emoji = match outcome_norm.as_str() {
+            "success" => "✓",
+            "failure" => "✗",
+            "partial" => "~",
+            "aborted" => "⊘",
+            _ => "?",
+        };
+
+        let duration_display = params
+            .duration_ms
+            .map(|ms| {
+                if ms < 1000 {
+                    format!("{}ms", ms)
+                } else if ms < 60_000 {
+                    format!("{:.1}s", (ms as f64) / 1000.0)
+                } else {
+                    format!("{:.1}min", (ms as f64) / 60_000.0)
+                }
+            })
+            .unwrap_or_else(|| "?".to_string());
+
+        let cost_display = match (params.cost_tokens, params.cost_usd) {
+            (Some(t), Some(u)) => format!(" | {} tok | ${:.4}", t, u),
+            (Some(t), None) => format!(" | {} tok", t),
+            (None, Some(u)) => format!(" | ${:.4}", u),
+            _ => String::new(),
+        };
+
+        let mut summary_lines = vec![format!(
+            "[{}] {} completed task in {}{}",
+            outcome_emoji, params.agent, duration_display, cost_display
+        )];
+        summary_lines.push(format!("Task: {}", params.task));
+        if !params.skills_used.is_empty() {
+            summary_lines.push(format!("Skills: {}", params.skills_used.join(", ")));
+        }
+        if let Some(q) = params.quality_score {
+            summary_lines.push(format!("Quality: {:.2}", q));
+        }
+        if let Some(notes) = &params.notes {
+            if !notes.is_empty() {
+                summary_lines.push(format!("Notes: {}", notes));
+            }
+        }
+        let text = summary_lines.join("\n");
+
+        let mut keywords: Vec<String> = Vec::new();
+        keywords.push(params.agent.clone());
+        keywords.push(outcome_norm.clone());
+        keywords.push("eval".to_string());
+        for skill in &params.skills_used {
+            keywords.push(skill.clone());
+        }
+
+        let mut metadata_map = serde_json::Map::new();
+        metadata_map.insert("task_id".into(), serde_json::json!(task_id));
+        metadata_map.insert("agent".into(), serde_json::json!(params.agent));
+        metadata_map.insert("outcome".into(), serde_json::json!(outcome_norm));
+        if let Some(ms) = params.duration_ms {
+            metadata_map.insert("duration_ms".into(), serde_json::json!(ms));
+        }
+        if !params.skills_used.is_empty() {
+            metadata_map.insert("skills_used".into(), serde_json::json!(params.skills_used));
+        }
+        if let Some(t) = params.cost_tokens {
+            metadata_map.insert("cost_tokens".into(), serde_json::json!(t));
+        }
+        if let Some(u) = params.cost_usd {
+            metadata_map.insert("cost_usd".into(), serde_json::json!(u));
+        }
+        if let Some(q) = params.quality_score {
+            metadata_map.insert("quality_score".into(), serde_json::json!(q));
+        }
+        if let Some(traj) = &params.trajectory {
+            metadata_map.insert("trajectory".into(), traj.clone());
+        }
+        if let Some(diff) = &params.diff {
+            if !diff.is_empty() {
+                metadata_map.insert("diff".into(), serde_json::json!(diff));
+            }
+        }
+        if let Some(wt) = &params.worktree {
+            metadata_map.insert("worktree".into(), serde_json::json!(wt));
+        }
+        if let Some(did) = &params.dispatch_id {
+            metadata_map.insert("dispatch_id".into(), serde_json::json!(did));
+        }
+
+        let mem_params = SaveMemoryParams {
+            text,
+            summary: format!("[{}] {} / {}", outcome_emoji, params.agent, params.task),
+            path: path.clone(),
+            importance: match outcome_norm.as_str() {
+                "success" => 0.55,
+                "failure" => 0.75,
+                "partial" => 0.6,
+                "aborted" => 0.5,
+                _ => 0.5,
+            },
+            category: "experience".to_string(),
+            topic: params.task.clone(),
+            keywords,
+            persons: Vec::new(),
+            entities: params.skills_used.clone(),
+            location: String::new(),
+            scope: params
+                .scope
+                .clone()
+                .unwrap_or_else(|| "project".to_string()),
+            vector: None,
+            id: None,
+            force: false,
+            auto_link: true,
+            project: params.project.clone(),
+            retention_policy: None,
+            domain: None,
+            timestamp: None,
+            metadata: Some(serde_json::Value::Object(metadata_map)),
+        };
+
+        let save_result = handle_save_memory(self, mem_params).await?;
+        let save_json: serde_json::Value = serde_json::from_str(&save_result)
+            .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
+
+        let mut pipeline_status = serde_json::json!({
+            "distill_trajectory": "skipped (no trajectory data)",
+            "skill_evolve": "skipped",
+        });
+
+        if let Some(ref trajectory) = params.trajectory {
+            if let Some(trace_arr) = trajectory.as_array() {
+                if !trace_arr.is_empty() && outcome_norm == "success" {
+                    let server_clone = self.clone();
+                    let task_desc = params.task.clone();
+                    let agent = params.agent.clone();
+                    let trace = trace_arr.clone();
+                    let skills_used = params.skills_used.clone();
+                    let skill_path = if skills_used.is_empty() {
+                        format!("/skills/auto/{}", task_id)
+                    } else {
+                        skills_used[0].clone()
+                    };
+                    pipeline_status = serde_json::json!({
+                        "distill_trajectory": "enqueued",
+                        "skill_evolve": "will follow distill if successful",
+                    });
+                    tokio::spawn(async move {
+                        let distill_params = DistillTrajectoryParams {
+                            task_description: task_desc,
+                            execution_trace: trace,
+                            final_outcome: serde_json::json!({"outcome": "success", "agent": agent}),
+                            agent_id: agent.clone(),
+                            skill_path,
+                            skill_id: None,
+                            importance: None,
+                            domain: None,
+                            project: None,
+                            scope: "project".to_string(),
+                        };
+                        match handle_distill_trajectory(&server_clone, distill_params).await {
+                            Ok(r) => eprintln!(
+                                "[tachi_complete/worker] distill OK: {}",
+                                &r[..r.len().min(200)]
+                            ),
+                            Err(e) => eprintln!("[tachi_complete/worker] distill failed: {e}"),
+                        }
+                    });
+                }
+            }
+        }
+
+        let review_bundle = serde_json::json!({
+            "recorded": true,
+            "task_id": task_id,
+            "path": path,
+            "outcome": outcome_norm,
+            "eval_entry": save_json,
+            "next_steps": [
+                "Use tachi_search with 'eval' keyword to find related outcomes.",
+                "For worktree-based dispatch, run approve_merge when ready.",
+            ],
+            "pipeline": pipeline_status,
+        });
+
+        serde_json::to_string(&review_bundle)
+            .map_err(|e| format!("Failed to serialize review bundle: {}", e))
     }
 }

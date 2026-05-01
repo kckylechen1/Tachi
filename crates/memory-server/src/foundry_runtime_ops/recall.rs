@@ -191,7 +191,7 @@ pub(super) fn build_wiki_context(rows: &[Value]) -> String {
 }
 
 pub(super) fn parse_compact_context_response(raw: &str) -> Result<CompactContextDraft, String> {
-    let json_str = llm::LlmClient::strip_code_fence(raw);
+    let json_str = llm::LlmClient::extract_json_payload(raw)?;
     let parsed: CompactContextDraft = serde_json::from_str(json_str).map_err(|e| {
         format!(
             "Failed to parse compact_context JSON: {e} — response was: {}",
@@ -225,7 +225,7 @@ pub(super) async fn run_compaction_model(
 pub(super) fn parse_session_capture_response(
     raw: &str,
 ) -> Result<Vec<SessionCaptureDraft>, String> {
-    let json_str = llm::LlmClient::strip_code_fence(raw);
+    let json_str = llm::LlmClient::extract_json_payload(raw)?;
     let parsed: Vec<SessionCaptureDraft> = serde_json::from_str(json_str).map_err(|e| {
         format!(
             "Failed to parse session capture JSON: {e} — response was: {}",

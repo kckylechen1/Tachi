@@ -396,6 +396,8 @@ pub(crate) async fn handle_tachi_task_brief(
     let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
     let debug_checklist = build_debug_checklist(&wiki_rows);
 
+    let route_rec = build_route_recommendation(server, &params.task, params.project.as_deref()).await;
+
     serde_json::to_string(&json!({
         "status": "ok",
         "task": params.task,
@@ -405,6 +407,7 @@ pub(crate) async fn handle_tachi_task_brief(
         "memory_hits": compact_rows(memory_rows, top_k),
         "recommended_skills": skills,
         "debug_checklist": debug_checklist,
+        "route_recommendation": route_rec,
         "suggested_next_tools": [
             "tachi_wiki_search",
             "recall_context",
@@ -503,6 +506,101 @@ pub(crate) async fn handle_tachi_progress_check(
         },
     }))
     .map_err(|e| format!("serialize progress_check: {e}"))
+}
+
+async fn build_route_recommendation(
+    server: &MemoryServer,
+    task: &str,
+    project: Option<&str>,
+) -> serde_json::Value {
+    let eval_rows = match search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: task.to_string(),
+            query_vec: None,
+            top_k: 20,
+            path_prefix: Some("/eval/".to_string()),
+            include_archived: false,
+            candidates_per_channel: 40,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: project.map(|s| s.to_string()),
+            domain: None,
+        },
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return json!({"available": false}),
+    };
+
+    if eval_rows.is_empty() {
+        return json!({"available": false, "reason": "no eval history"});
+    }
+
+    let mut agent_stats: std::collections::HashMap<String, (u32, u32)> =
+        std::collections::HashMap::new();
+
+    for row in &eval_rows {
+        let meta = match row.get("metadata") {
+            Some(m) => m,
+            None => continue,
+        };
+        let agent = meta
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let outcome = meta
+            .get("outcome")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let entry = agent_stats.entry(agent).or_insert((0, 0));
+        entry.1 += 1;
+        if outcome == "success" {
+            entry.0 += 1;
+        }
+    }
+
+    let mut rankings: Vec<serde_json::Value> = agent_stats
+        .iter()
+        .map(|(agent, (success, total))| {
+            let rate = if *total > 0 {
+                (*success as f64) / (*total as f64)
+            } else {
+                0.0
+            };
+            json!({
+                "agent": agent,
+                "success": success,
+                "total": total,
+                "rate": (rate * 100.0).round() / 100.0,
+            })
+        })
+        .collect();
+    rankings.sort_by(|a, b| {
+        b.get("rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .partial_cmp(&a.get("rate").and_then(|v| v.as_f64()).unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let recommended = rankings
+        .first()
+        .and_then(|r| r.get("agent"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude");
+
+    json!({
+        "available": true,
+        "eval_count": eval_rows.len(),
+        "agent_rankings": rankings,
+        "recommended_agent": recommended,
+    })
 }
 
 #[cfg(test)]

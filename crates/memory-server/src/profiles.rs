@@ -6,7 +6,6 @@ enum ToolBundle {
     Remember,
     Coordinate,
     Operate,
-    AntigravityMinimal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,11 +15,13 @@ pub(super) struct ToolProfile {
     coordinate: bool,
     operate: bool,
     admin: bool,
-    /// Antigravity host: a curated minimal allow-list intersected on top of
-    /// the union of other bundles. When set, only patterns in
-    /// ANTIGRAVITY_MINIMAL_TOOL_PATTERNS pass — even if other bundles would
-    /// otherwise allow them. Designed to keep the Antigravity tool tray small.
-    antigravity_minimal: bool,
+    /// Standard profile: curated 10-tool allow-list for IDE + CLI agents.
+    /// When set, only patterns in STANDARD_MINIMAL_TOOL_PATTERNS pass.
+    standard_minimal: bool,
+    /// Delegate profile: curated 6-tool allow-list for worker agents.
+    /// When set, only patterns in DELEGATE_MINIMAL_TOOL_PATTERNS pass.
+    /// Standard takes precedence over delegate if both are set.
+    delegate_minimal: bool,
 }
 
 impl ToolProfile {
@@ -31,7 +32,8 @@ impl ToolProfile {
             coordinate: false,
             operate: false,
             admin: false,
-            antigravity_minimal: false,
+            standard_minimal: false,
+            delegate_minimal: false,
         }
     }
 
@@ -42,7 +44,8 @@ impl ToolProfile {
             coordinate: false,
             operate: false,
             admin: false,
-            antigravity_minimal: false,
+            standard_minimal: false,
+            delegate_minimal: false,
         }
     }
 
@@ -53,7 +56,8 @@ impl ToolProfile {
             coordinate: true,
             operate: false,
             admin: false,
-            antigravity_minimal: false,
+            standard_minimal: false,
+            delegate_minimal: false,
         }
     }
 
@@ -64,7 +68,8 @@ impl ToolProfile {
             coordinate: false,
             operate: true,
             admin: false,
-            antigravity_minimal: false,
+            standard_minimal: false,
+            delegate_minimal: false,
         }
     }
 
@@ -75,22 +80,38 @@ impl ToolProfile {
             coordinate: true,
             operate: true,
             admin: true,
-            antigravity_minimal: false,
+            standard_minimal: false,
+            delegate_minimal: false,
         }
     }
 
-    /// Antigravity host minimal profile: read + remember + handoff coordination,
-    /// constrained by an explicit allow-list (see ANTIGRAVITY_MINIMAL_TOOL_PATTERNS).
-    /// Replaces the previous behavior of mapping `antigravity` → full coordinate
-    /// bundle, which exposed ~30 tools in the IDE tool tray.
-    const fn antigravity() -> Self {
+    /// Standard profile for IDE + CLI agents (Windsurf, Cursor, Antigravity,
+    /// Trae, Codex standalone, Claude Code standalone). Enables all bundles but
+    /// intersects with a curated ~11-tool allow-list to keep the tool tray small.
+    const fn standard() -> Self {
         Self {
             observe: true,
             remember: true,
             coordinate: true,
+            operate: true,
+            admin: false,
+            standard_minimal: true,
+            delegate_minimal: false,
+        }
+    }
+
+    /// Delegate profile for worker agents spawned by tachi_dispatch.
+    /// Read + remember bundles only, intersected with a curated 7-tool allow-list.
+    /// No dispatch (prevent recursion), no handoff (parent manages), no hub_discover.
+    const fn delegate() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: false,
             operate: false,
             admin: false,
-            antigravity_minimal: true,
+            standard_minimal: false,
+            delegate_minimal: true,
         }
     }
 
@@ -101,9 +122,9 @@ impl ToolProfile {
             coordinate: self.coordinate || other.coordinate,
             operate: self.operate || other.operate,
             admin: self.admin || other.admin,
-            // Minimal allow-list is "sticky": once requested, additive merges
-            // do not silently expand the surface. Use `admin`/`full` to override.
-            antigravity_minimal: self.antigravity_minimal || other.antigravity_minimal,
+            // Minimal allow-lists are sticky. Standard > delegate if both set.
+            standard_minimal: self.standard_minimal || other.standard_minimal,
+            delegate_minimal: self.delegate_minimal || other.delegate_minimal,
         }
     }
 
@@ -114,7 +135,6 @@ impl ToolProfile {
                 ToolBundle::Remember => self.remember,
                 ToolBundle::Coordinate => self.coordinate,
                 ToolBundle::Operate => self.operate,
-                ToolBundle::AntigravityMinimal => self.antigravity_minimal,
             }
     }
 
@@ -122,8 +142,11 @@ impl ToolProfile {
         if self.admin {
             return "admin".to_string();
         }
-        if self.antigravity_minimal {
-            return "antigravity".to_string();
+        if self.standard_minimal {
+            return "standard".to_string();
+        }
+        if self.delegate_minimal {
+            return "delegate".to_string();
         }
 
         let mut names = Vec::new();
@@ -155,6 +178,7 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
+    "hub_discover",
     "search_memory",
     "get_memory",
     "memory_graph",
@@ -163,6 +187,13 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "get_edges",
     "wiki_search",
     "wiki_browse",
+    // Facade read tools
+    "tachi_search",
+    "tachi_web_search",
+    "tachi_plan",
+    "tachi_unstick",
+    "tachi_browse",
+    "tachi_complete",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -172,6 +203,8 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "extract_facts",
     "run_skill",
     "ingest_event",
+    // Facade write tool
+    "tachi_save",
 ];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -181,6 +214,10 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "handoff_leave",
     "post_card",
     "update_card",
+    // Facade coordination tools
+    "tachi_handoff",
+    "tachi_dispatch",
+    "approve_merge",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -206,27 +243,46 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "wiki_lint",
 ];
 
-/// Antigravity host minimal allow-list. Intersected with the union of
-/// observe+remember+coordinate bundles so the IDE tray stays small.
-/// Order: read-first, then write, then handoff/coordination.
-const ANTIGRAVITY_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    // Discovery + lessons
-    "tachi_task_brief",
-    "tachi_progress_check",
-    "tachi_wiki_search",
-    "wiki_search",
-    "wiki_browse",
-    // Memory read
-    "search_memory",
-    "get_memory",
-    "list_memories",
-    // Memory write (canonical + low-friction shortcut)
-    "save_memory",
-    "remember",
-    "tachi_wiki_write",
-    // Cross-session handoff (the only coordination Antigravity needs)
-    "handoff_check",
-    "handoff_leave",
+/// Standard profile allow-list (~11 tools). Intersected with all bundles
+/// so the IDE/CLI tool tray stays small and focused.
+const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Planning + context
+    "tachi_plan",
+    "recall_context",
+    // Unified search (wiki + memory)
+    "tachi_search",
+    // Live web search
+    "tachi_web_search",
+    // Wiki browse
+    "tachi_browse",
+    // Unified save (wiki + memory + note)
+    "tachi_save",
+    // Unified handoff (leave + check)
+    "tachi_handoff",
+    // Skill discovery + execution
+    "hub_discover",
+    "run_skill",
+    // Agent dispatch + task completion + merge
+    "tachi_dispatch",
+    "tachi_complete",
+    "approve_merge",
+];
+
+/// Delegate profile allow-list (7 tools). For worker agents spawned by
+/// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
+const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Search + browse
+    "tachi_search",
+    "tachi_web_search",
+    "tachi_browse",
+    // Save (if authorized)
+    "tachi_save",
+    // Self-rescue when stuck
+    "tachi_unstick",
+    // Declare task completion
+    "tachi_complete",
+    // Execute injected/recommended skills
+    "run_skill",
 ];
 
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
@@ -239,15 +295,18 @@ pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     {
         let token_profile = match token.to_ascii_lowercase().as_str() {
             "observe" | "read" | "reader" => ToolProfile::observe(),
-            "remember" | "write" | "writer" | "ide" | "agent" | "claude" | "claude-code"
-            | "codex" | "cursor" | "trae" => ToolProfile::remember(),
+            "remember" | "write" | "writer" | "agent" => ToolProfile::remember(),
+            "standard" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity"
+            | "claude" | "claude-code" | "codex" => ToolProfile::standard(),
+            "delegate" | "worker" | "subagent" => ToolProfile::delegate(),
             "coordinate" => ToolProfile::coordinate(),
-            "antigravity" => ToolProfile::antigravity(),
             "companion" | "copilot" | "coach" => ToolProfile::remember()
                 .merge(ToolProfile::coordinate())
                 .merge(ToolProfile::operate()),
             "workflow" => ToolProfile::coordinate().merge(ToolProfile::operate()),
-            "operate" | "runtime" | "openclaw" | "adapter" | "ops" => ToolProfile::operate(),
+            "operate" | "runtime" | "openclaw" | "hermes" | "adapter" | "ops" => {
+                ToolProfile::operate()
+            }
             "admin" | "full" => ToolProfile::admin(),
             _ => return None,
         };
@@ -295,12 +354,15 @@ fn tool_visible(
         return true;
     }
 
-    // Antigravity host: intersect bundle membership with a curated allow-list
-    // so the IDE tool tray stays small (~12 tools instead of ~30).
-    if profile.allows(ToolBundle::AntigravityMinimal)
-        && !matches_any_pattern(tool_name, ANTIGRAVITY_MINIMAL_TOOL_PATTERNS.iter().copied())
-    {
-        return false;
+    // Curated minimal allow-lists: standard (10 tools) > delegate (6 tools).
+    if profile.standard_minimal {
+        if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
+            return false;
+        }
+    } else if profile.delegate_minimal {
+        if !matches_any_pattern(tool_name, DELEGATE_MINIMAL_TOOL_PATTERNS.iter().copied()) {
+            return false;
+        }
     }
 
     profile.allows(ToolBundle::Observe)
@@ -376,8 +438,20 @@ mod tests {
 
     #[test]
     fn profile_parsing_maps_host_aliases() {
-        assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::remember()));
+        // IDE + CLI → standard
+        assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::standard()));
+        assert_eq!(parse_tool_profile("cursor"), Some(ToolProfile::standard()));
+        assert_eq!(parse_tool_profile("windsurf"), Some(ToolProfile::standard()));
+        assert_eq!(parse_tool_profile("antigravity"), Some(ToolProfile::standard()));
+        assert_eq!(parse_tool_profile("claude-code"), Some(ToolProfile::standard()));
+        assert_eq!(parse_tool_profile("ide"), Some(ToolProfile::standard()));
+        // Worker agents → delegate
+        assert_eq!(parse_tool_profile("delegate"), Some(ToolProfile::delegate()));
+        assert_eq!(parse_tool_profile("worker"), Some(ToolProfile::delegate()));
+        assert_eq!(parse_tool_profile("subagent"), Some(ToolProfile::delegate()));
+        // Framework agents → operate
         assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::operate()));
+        assert_eq!(parse_tool_profile("hermes"), Some(ToolProfile::operate()));
         assert_eq!(
             parse_tool_profile("companion"),
             Some(
@@ -385,10 +459,6 @@ mod tests {
                     .merge(ToolProfile::coordinate())
                     .merge(ToolProfile::operate())
             )
-        );
-        assert_eq!(
-            parse_tool_profile("antigravity"),
-            Some(ToolProfile::antigravity())
         );
         assert_eq!(
             parse_tool_profile("workflow"),
@@ -518,34 +588,31 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_profile_restricts_to_minimal_allowlist() {
-        // Bundle membership says coordinate would normally include
-        // ghost_publish/post_card/check_inbox; the antigravity intersection
-        // must drop them.
+    fn standard_profile_restricts_to_allow_list() {
         let filtered = filter_tool_defs(
             vec![
+                // Standard tools (should pass)
+                test_tool("tachi_plan"),
+                test_tool("tachi_search"),
+                test_tool("tachi_web_search"),
+                test_tool("tachi_browse"),
+                test_tool("tachi_save"),
+                test_tool("tachi_handoff"),
+                test_tool("hub_discover"),
+                test_tool("run_skill"),
+                test_tool("recall_context"),
+                test_tool("tachi_complete"),
+                test_tool("tachi_dispatch"),
+                test_tool("approve_merge"),
+                // Old tools now excluded:
                 test_tool("search_memory"),
                 test_tool("save_memory"),
-                test_tool("remember"),
+                test_tool("tachi_unstick"),
                 test_tool("get_memory"),
-                test_tool("list_memories"),
-                test_tool("tachi_task_brief"),
-                test_tool("tachi_progress_check"),
-                test_tool("tachi_wiki_search"),
-                test_tool("tachi_wiki_write"),
-                test_tool("handoff_check"),
-                test_tool("handoff_leave"),
-                // These should be filtered OUT by the minimal allow-list:
                 test_tool("ghost_publish"),
                 test_tool("post_card"),
-                test_tool("check_inbox"),
-                test_tool("update_card"),
-                test_tool("ingest_event"),
-                test_tool("memory_graph"),
-                test_tool("recommend_capability"),
-                test_tool("run_skill"),
             ],
-            Some(ToolProfile::antigravity()),
+            Some(ToolProfile::standard()),
             None,
         );
         let names: Vec<String> = filtered
@@ -555,30 +622,80 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "search_memory".to_string(),
-                "save_memory".to_string(),
-                "remember".to_string(),
-                "get_memory".to_string(),
-                "list_memories".to_string(),
-                "tachi_task_brief".to_string(),
-                "tachi_progress_check".to_string(),
-                "tachi_wiki_search".to_string(),
-                "tachi_wiki_write".to_string(),
-                "handoff_check".to_string(),
-                "handoff_leave".to_string(),
+                "tachi_plan".to_string(),
+                "tachi_search".to_string(),
+                "tachi_web_search".to_string(),
+                "tachi_browse".to_string(),
+                "tachi_save".to_string(),
+                "tachi_handoff".to_string(),
+                "hub_discover".to_string(),
+                "run_skill".to_string(),
+                "recall_context".to_string(),
+                "tachi_complete".to_string(),
+                "tachi_dispatch".to_string(),
+                "approve_merge".to_string(),
             ]
         );
     }
 
     #[test]
-    fn antigravity_profile_label_is_distinct() {
-        assert_eq!(ToolProfile::antigravity().as_str(), "antigravity");
-        // admin still wins over the minimal flag if explicitly merged.
+    fn delegate_profile_restricts_to_allow_list() {
+        let filtered = filter_tool_defs(
+            vec![
+                // Delegate tools (should pass)
+                test_tool("tachi_search"),
+                test_tool("tachi_web_search"),
+                test_tool("tachi_browse"),
+                test_tool("tachi_save"),
+                test_tool("tachi_unstick"),
+                test_tool("tachi_complete"),
+                test_tool("run_skill"),
+                // Should be excluded:
+                test_tool("tachi_plan"),
+                test_tool("tachi_handoff"),
+                test_tool("tachi_dispatch"),
+                test_tool("hub_discover"),
+                test_tool("recall_context"),
+                test_tool("search_memory"),
+            ],
+            Some(ToolProfile::delegate()),
+            None,
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
         assert_eq!(
-            ToolProfile::antigravity()
+            names,
+            vec![
+                "tachi_search".to_string(),
+                "tachi_web_search".to_string(),
+                "tachi_browse".to_string(),
+                "tachi_save".to_string(),
+                "tachi_unstick".to_string(),
+                "tachi_complete".to_string(),
+                "run_skill".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_and_delegate_labels() {
+        assert_eq!(ToolProfile::standard().as_str(), "standard");
+        assert_eq!(ToolProfile::delegate().as_str(), "delegate");
+        // admin still wins over minimal flags if explicitly merged.
+        assert_eq!(
+            ToolProfile::standard()
                 .merge(ToolProfile::admin())
                 .as_str(),
             "admin"
+        );
+        // standard wins over delegate if both set.
+        assert_eq!(
+            ToolProfile::delegate()
+                .merge(ToolProfile::standard())
+                .as_str(),
+            "standard"
         );
     }
 }

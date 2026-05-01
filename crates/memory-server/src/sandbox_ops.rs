@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::redact_sensitive_value;
 
 pub(crate) async fn handle_sandbox_set_rule(
     server: &MemoryServer,
@@ -168,9 +169,11 @@ pub(crate) async fn handle_sandbox_exec_audit(
             .map_err(|e| format!("Failed to list sandbox exec audit: {e}"))
     })?;
 
-    serde_json::to_string(&json!({
+    let mut output = json!({
         "count": rows.len(),
         "items": rows,
-    }))
-    .map_err(|e| format!("serialize: {e}"))
+    });
+    redact_sensitive_value(&mut output);
+
+    serde_json::to_string(&output).map_err(|e| format!("serialize: {e}"))
 }

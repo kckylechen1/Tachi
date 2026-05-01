@@ -12,6 +12,7 @@ mod cli;
 mod cli_client;
 mod copilot_ops;
 mod daemon_lock;
+mod dispatch_ops;
 mod dlq_ops;
 mod doctor;
 mod doctor_ops;
@@ -189,6 +190,12 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "get_domain",
     "wiki_search",
     "wiki_browse",
+    // Facade tools (read-only)
+    "tachi_search",
+    "tachi_web_search",
+    "tachi_plan",
+    "tachi_unstick",
+    "tachi_browse",
 ];
 
 /// Tools that invalidate the cache (write operations)
@@ -232,6 +239,9 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "distill_trajectory",
     "wiki_lint",
     "tachi_wiki_write",
+    // Facade tools (write / mixed)
+    "tachi_save",
+    "tachi_handoff",
 ];
 
 struct CachedResult {
