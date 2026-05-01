@@ -7,6 +7,7 @@ mod handlers;
 mod helpers;
 mod maintenance;
 mod recall;
+mod recall_cache;
 
 #[cfg(test)]
 mod tests;

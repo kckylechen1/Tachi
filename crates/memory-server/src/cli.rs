@@ -78,18 +78,17 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
-    /// Save a memory. Alias of `remember`.
-    ///
-    /// Historically `save` only accepted `--path` / `--importance`. We now
-    /// route it through the same `remember`-backed handler so the full flag
-    /// set (tags, scope, project, category, topic, domain, retention-policy,
-    /// summary, force) is available on both verbs and behavior is identical
-    /// (daemon-forwarding when a hub is up, in-process otherwise). The legacy
-    /// 3-flag invocation `tachi save TEXT --path X --importance Y` keeps
-    /// working unchanged because clap accepts the alias and all extra flags
-    /// are optional.
-    // Variant intentionally elided — see `Remember` below, which carries
+    // Save is now an alias of `remember` — see `Remember` below, which carries
     // `#[command(alias = "save")]`.
+    //
+    // Historically `save` only accepted `--path` / `--importance`. We now
+    // route it through the same `remember`-backed handler so the full flag
+    // set (tags, scope, project, category, topic, domain, retention-policy,
+    // summary, force) is available on both verbs and behavior is identical
+    // (daemon-forwarding when a hub is up, in-process otherwise). The legacy
+    // 3-flag invocation `tachi save TEXT --path X --importance Y` keeps
+    // working unchanged because clap accepts the alias and all extra flags
+    // are optional.
     /// Show database statistics
     Stats,
     /// Inspect onboarding readiness and current local Tachi setup
