@@ -12,6 +12,7 @@ mod cli;
 mod cli_client;
 mod copilot_ops;
 mod daemon_lock;
+mod dispatch_ops;
 mod dlq_ops;
 mod doctor;
 mod doctor_ops;
@@ -2278,6 +2279,16 @@ impl MemoryServer {
         Parameters(params): Parameters<WikiBrowseParams>,
     ) -> Result<String, String> {
         handle_wiki_browse(self, params)
+    }
+
+    #[tool(
+        description = "Dispatch a task to a delegate agent (Claude Code CLI, Codex CLI, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
+    )]
+    async fn tachi_dispatch(
+        &self,
+        Parameters(params): Parameters<TachiDispatchParams>,
+    ) -> Result<String, String> {
+        dispatch_ops::handle_tachi_dispatch(self, params).await
     }
 
     #[tool(

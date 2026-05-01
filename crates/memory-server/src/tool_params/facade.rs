@@ -185,6 +185,54 @@ pub(crate) struct TachiHandoffParams {
     pub acknowledge: bool,
 }
 
+// ─── Facade: agent dispatch ───────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiDispatchParams {
+    /// Agent backend to use: "claude" | "codex" | "custom"
+    pub agent: String,
+
+    /// Task description / prompt for the agent
+    pub task: String,
+
+    /// Working directory for the agent (default: current project root)
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Skills to inject into the agent's prompt (capability IDs)
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    /// Extra context query — runs tachi_search and injects top hits into prompt
+    #[serde(default)]
+    pub context_query: Option<String>,
+
+    /// Model override (e.g. "gpt-5.3-codex", "claude-sonnet-4")
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Timeout in seconds (default: 300)
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+
+    /// Approval policy for codex: "never" | "on-failure" | "on-request"
+    #[serde(default)]
+    pub approval_policy: Option<String>,
+
+    /// Sandbox mode for codex: "workspace-write" | "danger-full-access" | "read-only"
+    #[serde(default)]
+    pub sandbox: Option<String>,
+
+    /// Custom command (when agent="custom"): e.g. ["aider", "--yes-always"]
+    #[serde(default)]
+    pub command: Vec<String>,
+
+    /// Optional named project DB for context search
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[allow(dead_code)]
