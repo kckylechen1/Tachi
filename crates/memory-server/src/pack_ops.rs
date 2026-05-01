@@ -52,7 +52,7 @@ struct ProjectionSummary {
 }
 
 /// List installed packs.
-pub(super) async fn handle_pack_list(
+pub(crate) async fn handle_pack_list(
     server: &MemoryServer,
     params: PackListParams,
 ) -> Result<String, String> {
@@ -75,7 +75,7 @@ pub(super) async fn handle_pack_list(
 }
 
 /// Get details of a single pack.
-pub(super) async fn handle_pack_get(
+pub(crate) async fn handle_pack_get(
     server: &MemoryServer,
     params: PackGetParams,
 ) -> Result<String, String> {
@@ -92,7 +92,7 @@ pub(super) async fn handle_pack_get(
 }
 
 /// Register a pack (used after git clone / download).
-pub(super) async fn handle_pack_register(
+pub(crate) async fn handle_pack_register(
     server: &MemoryServer,
     params: PackRegisterParams,
 ) -> Result<String, String> {
@@ -156,7 +156,7 @@ pub(super) async fn handle_pack_register(
 }
 
 /// Remove a pack and its projections.
-pub(super) async fn handle_pack_remove(
+pub(crate) async fn handle_pack_remove(
     server: &MemoryServer,
     params: PackRemoveParams,
 ) -> Result<String, String> {
@@ -210,7 +210,7 @@ pub(super) async fn handle_pack_remove(
 }
 
 /// Project a pack's assets to one or more agents.
-pub(super) async fn handle_pack_project(
+pub(crate) async fn handle_pack_project(
     server: &MemoryServer,
     params: PackProjectParams,
 ) -> Result<String, String> {
@@ -286,7 +286,7 @@ pub(super) async fn handle_pack_project(
 }
 
 /// List agent projections.
-pub(super) async fn handle_projection_list(
+pub(crate) async fn handle_projection_list(
     server: &MemoryServer,
     params: ProjectionListParams,
 ) -> Result<String, String> {
