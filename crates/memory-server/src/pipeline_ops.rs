@@ -607,7 +607,7 @@ async fn ingest_structured_event(
         .map_err(|e| format!("Failed to serialize: {e}"))
 }
 
-pub(super) async fn handle_extract_facts(
+pub(crate) async fn handle_extract_facts(
     server: &MemoryServer,
     params: ExtractFactsParams,
 ) -> Result<String, String> {
@@ -675,7 +675,7 @@ pub(super) async fn handle_extract_facts(
     .unwrap())
 }
 
-pub(super) async fn handle_ingest(
+pub(crate) async fn handle_ingest(
     server: &MemoryServer,
     params: IngestParams,
 ) -> Result<String, String> {
@@ -733,7 +733,7 @@ pub(super) async fn handle_ingest(
     }
 }
 
-pub(super) async fn handle_ingest_event(
+pub(crate) async fn handle_ingest_event(
     server: &MemoryServer,
     params: IngestEventParams,
 ) -> Result<String, String> {
@@ -926,7 +926,7 @@ pub(super) async fn handle_ingest_event(
     .unwrap())
 }
 
-pub(super) async fn handle_ingest_source(
+pub(crate) async fn handle_ingest_source(
     server: &MemoryServer,
     params: IngestSourceParams,
 ) -> Result<String, String> {
@@ -1124,7 +1124,7 @@ pub(super) async fn handle_ingest_source(
         .map_err(|e| format!("Failed to serialize: {e}"))
 }
 
-pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<String, String> {
     let global_stats = server.with_global_store(|store| {
         store
             .stats(false)
@@ -1214,7 +1214,7 @@ pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
     .map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
-pub(super) async fn handle_sync_memories(
+pub(crate) async fn handle_sync_memories(
     server: &MemoryServer,
     params: SyncMemoriesParams,
 ) -> Result<String, String> {

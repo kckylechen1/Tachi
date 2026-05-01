@@ -742,45 +742,43 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // NOTE: each test below MUST use a unique env-var name. Cargo runs
+    // `#[test]` fns in parallel by default, so sharing a process-wide env var
+    // causes ordering-dependent flakes (e.g. one test setting the var while
+    // another asserts it's unset). See:
+    //   crates/memory-server/src/tests.rs::home_test_lock for the pattern we
+    //   use when an env var (HOME) genuinely cannot be uniquified.
 
     #[test]
     fn llm_client_initializes_without_provider_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
-        std::env::remove_var("TACHI_TEST_ONLY_API_KEY");
-
+        // Unique key — guaranteed never set by any other test or by the host
+        // shell, so this test is parallel-safe.
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_INIT_NO_ENV";
+        std::env::remove_var(KEY);
         let client = LlmClient::new().expect("client should not require API keys at startup");
 
+        assert!(client.provider_secret_for_tests(&[KEY]).is_none());
         assert!(
             client
-                .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
-                .is_none()
-        );
-        assert!(
-            client
-                .required_secret(&["TACHI_TEST_ONLY_API_KEY"])
+                .required_secret(&[KEY])
                 .expect_err("missing keys should fail at call time")
-                .contains("TACHI_TEST_ONLY_API_KEY")
+                .contains(KEY)
         );
     }
 
     #[test]
     fn vault_provider_secret_overrides_env_value() {
-        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
-        std::env::set_var("TACHI_TEST_ONLY_API_KEY", "env-value");
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_VAULT_OVERRIDE";
+        std::env::set_var(KEY, "env-value");
         let client = LlmClient::new().expect("client should initialize");
 
-        client.set_provider_secret("TACHI_TEST_ONLY_API_KEY", "vault-value");
+        client.set_provider_secret(KEY, "vault-value");
 
         assert_eq!(
-            client
-                .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
-                .unwrap(),
+            client.provider_secret_for_tests(&[KEY]).unwrap(),
             "vault-value"
         );
-        std::env::remove_var("TACHI_TEST_ONLY_API_KEY");
+        std::env::remove_var(KEY);
     }
 
     #[test]

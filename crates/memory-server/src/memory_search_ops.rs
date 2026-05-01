@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn handle_save_memory(
+pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
 ) -> Result<String, String> {
@@ -224,7 +224,7 @@ pub(super) async fn handle_save_memory(
 /// `tags`). Internally constructs `SaveMemoryParams` and delegates, so noise
 /// filter, capture gate, provenance injection, auto-link, and the enrichment
 /// batcher all run identically to a direct save_memory call.
-pub(super) async fn handle_remember(
+pub(crate) async fn handle_remember(
     server: &MemoryServer,
     params: RememberParams,
 ) -> Result<String, String> {
@@ -413,7 +413,7 @@ pub(super) async fn search_memory_rows(
     Ok(output)
 }
 
-pub(super) async fn handle_search_memory(
+pub(crate) async fn handle_search_memory(
     server: &MemoryServer,
     params: SearchMemoryParams,
 ) -> Result<String, String> {
@@ -421,7 +421,7 @@ pub(super) async fn handle_search_memory(
     serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
-pub(super) async fn handle_find_similar_memory(
+pub(crate) async fn handle_find_similar_memory(
     server: &MemoryServer,
     params: FindSimilarMemoryParams,
 ) -> Result<String, String> {

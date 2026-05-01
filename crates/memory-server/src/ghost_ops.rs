@@ -20,7 +20,7 @@ fn payload_to_text(payload: &serde_json::Value) -> String {
     serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string())
 }
 
-pub(super) async fn handle_ghost_publish(
+pub(crate) async fn handle_ghost_publish(
     server: &MemoryServer,
     params: GhostPublishParams,
 ) -> Result<String, String> {
@@ -51,7 +51,7 @@ pub(super) async fn handle_ghost_publish(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_ghost_subscribe(
+pub(crate) async fn handle_ghost_subscribe(
     server: &MemoryServer,
     params: GhostSubscribeParams,
 ) -> Result<String, String> {
@@ -142,7 +142,7 @@ pub(super) async fn handle_ghost_subscribe(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_ghost_topics(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_ghost_topics(server: &MemoryServer) -> Result<String, String> {
     let topics = server.with_global_store(|store| {
         store
             .ghost_list_topics(500)
@@ -156,7 +156,7 @@ pub(super) async fn handle_ghost_topics(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_ghost_ack(
+pub(crate) async fn handle_ghost_ack(
     server: &MemoryServer,
     params: GhostAckParams,
 ) -> Result<String, String> {
@@ -217,7 +217,7 @@ pub(super) async fn handle_ghost_ack(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_ghost_reflect(
+pub(crate) async fn handle_ghost_reflect(
     server: &MemoryServer,
     params: GhostReflectParams,
 ) -> Result<String, String> {
@@ -278,7 +278,7 @@ pub(super) async fn handle_ghost_reflect(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_ghost_promote(
+pub(crate) async fn handle_ghost_promote(
     server: &MemoryServer,
     params: GhostPromoteParams,
 ) -> Result<String, String> {

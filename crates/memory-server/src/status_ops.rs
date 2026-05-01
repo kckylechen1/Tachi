@@ -682,7 +682,9 @@ mod tests {
             // Non-.db artifacts the daemon may leave behind — we only filter
             // the canonical `.db` copy fixture.
             (
-                format!("{sep}tmp{sep}feature-daemon-global.db.checkpointed.20260430T012609Z.sqlite"),
+                format!(
+                    "{sep}tmp{sep}feature-daemon-global.db.checkpointed.20260430T012609Z.sqlite"
+                ),
                 false,
             ),
             // Real fixtures — MUST be suppressed.

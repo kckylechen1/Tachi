@@ -2,7 +2,7 @@ use super::*;
 
 use memory_core::GcConfig;
 
-pub(super) async fn handle_get_memory(
+pub(crate) async fn handle_get_memory(
     server: &MemoryServer,
     params: GetMemoryParams,
 ) -> Result<String, String> {
@@ -67,7 +67,7 @@ pub(super) async fn handle_get_memory(
     }
 }
 
-pub(super) async fn handle_list_memories(
+pub(crate) async fn handle_list_memories(
     server: &MemoryServer,
     params: ListMemoriesParams,
 ) -> Result<String, String> {
@@ -99,7 +99,7 @@ pub(super) async fn handle_list_memories(
     serde_json::to_string(&slim).map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_memory_stats(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_memory_stats(server: &MemoryServer) -> Result<String, String> {
     let global_stats = server.with_global_store_read(|store| {
         store
             .stats(false)
@@ -169,7 +169,7 @@ pub(super) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_delete_memory(
+pub(crate) async fn handle_delete_memory(
     server: &MemoryServer,
     params: DeleteMemoryParams,
 ) -> Result<String, String> {
@@ -201,7 +201,7 @@ pub(super) async fn handle_delete_memory(
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_archive_memory(
+pub(crate) async fn handle_archive_memory(
     server: &MemoryServer,
     params: ArchiveMemoryParams,
 ) -> Result<String, String> {
@@ -235,7 +235,7 @@ pub(super) async fn handle_archive_memory(
 
 // ─── Domain CRUD ────────────────────────────────────────────────────────────
 
-pub(super) async fn handle_register_domain(
+pub(crate) async fn handle_register_domain(
     server: &MemoryServer,
     params: RegisterDomainParams,
 ) -> Result<String, String> {
@@ -263,7 +263,7 @@ pub(super) async fn handle_register_domain(
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_get_domain(
+pub(crate) async fn handle_get_domain(
     server: &MemoryServer,
     params: GetDomainParams,
 ) -> Result<String, String> {
@@ -280,7 +280,7 @@ pub(super) async fn handle_get_domain(
     }
 }
 
-pub(super) async fn handle_list_domains(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_list_domains(server: &MemoryServer) -> Result<String, String> {
     let domains = server.with_global_store_read(|store| {
         store
             .list_domains()
@@ -294,7 +294,7 @@ pub(super) async fn handle_list_domains(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_delete_domain(
+pub(crate) async fn handle_delete_domain(
     server: &MemoryServer,
     params: DeleteDomainParams,
 ) -> Result<String, String> {
@@ -311,7 +311,7 @@ pub(super) async fn handle_delete_domain(
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(super) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, String> {
     let mut results = serde_json::Map::new();
 
     let global_gc = server.with_global_store(|store| {

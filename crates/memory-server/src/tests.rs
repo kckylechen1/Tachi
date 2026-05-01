@@ -1,4 +1,9 @@
 use super::*;
+use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
+use crate::vault_ops::{
+    VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
+};
 use memory_core::{AgentProjection, Pack};
 
 fn ensure_test_env() {
@@ -18,6 +23,14 @@ fn ensure_test_env() {
 fn home_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Tests that spawn real subprocesses sensitive to `HOME` (e.g. `npx`, which
+/// reads `~/.npm` for cache and registry config) MUST acquire this lock.
+/// Otherwise a concurrent `TempHomeGuard` (used by other tests) can repoint
+/// `HOME` mid-spawn, breaking the subprocess in non-deterministic ways.
+fn acquire_real_home_lock() -> std::sync::MutexGuard<'static, ()> {
+    home_test_lock().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct TempHomeGuard {
@@ -2715,6 +2728,13 @@ async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
 
 #[tokio::test]
 async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
+    // This test spawns `npx -y @modelcontextprotocol/server-everything` for
+    // real (the trusted-allowlist→discovery→enable path is the whole point).
+    // npx reads $HOME for ~/.npm cache + registry config. Other tests use
+    // `TempHomeGuard` to repoint HOME → npm cache miss → discovery fails
+    // → review.rs:33 sets enabled=false → this assertion explodes. Acquire
+    // the home lock so no TempHomeGuard runs while we're spawning npx.
+    let _home_guard = acquire_real_home_lock();
     let server = make_server();
     let definition = serde_json::json!({
         "transport": "stdio",

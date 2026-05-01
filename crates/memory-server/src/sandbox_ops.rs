@@ -1,7 +1,7 @@
 use super::*;
 use crate::utils::redact_sensitive_value;
 
-pub(super) async fn handle_sandbox_set_rule(
+pub(crate) async fn handle_sandbox_set_rule(
     server: &MemoryServer,
     params: SandboxSetRuleParams,
 ) -> Result<String, String> {
@@ -31,7 +31,7 @@ pub(super) async fn handle_sandbox_set_rule(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_sandbox_check(
+pub(crate) async fn handle_sandbox_check(
     server: &MemoryServer,
     params: SandboxCheckParams,
 ) -> Result<String, String> {
@@ -62,7 +62,7 @@ pub(super) async fn handle_sandbox_check(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_sandbox_set_policy(
+pub(crate) async fn handle_sandbox_set_policy(
     server: &MemoryServer,
     params: SandboxSetPolicyParams,
 ) -> Result<String, String> {
@@ -117,7 +117,7 @@ pub(super) async fn handle_sandbox_set_policy(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_sandbox_get_policy(
+pub(crate) async fn handle_sandbox_get_policy(
     server: &MemoryServer,
     params: SandboxGetPolicyParams,
 ) -> Result<String, String> {
@@ -137,7 +137,7 @@ pub(super) async fn handle_sandbox_get_policy(
     }
 }
 
-pub(super) async fn handle_sandbox_list_policies(
+pub(crate) async fn handle_sandbox_list_policies(
     server: &MemoryServer,
     params: SandboxListPoliciesParams,
 ) -> Result<String, String> {
@@ -154,7 +154,7 @@ pub(super) async fn handle_sandbox_list_policies(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_sandbox_exec_audit(
+pub(crate) async fn handle_sandbox_exec_audit(
     server: &MemoryServer,
     params: SandboxExecAuditParams,
 ) -> Result<String, String> {
