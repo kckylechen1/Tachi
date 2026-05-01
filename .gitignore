@@ -62,7 +62,16 @@ venv.bak/
 # Local test data
 data/
 .envrc
+tmp/
 
 # Design docs (local only)
 docs/superpowers/
 .gstack/
+
+# OpenClaw plugin: TS-compiled artifacts (CI rebuilds before tarball; see
+# .github/workflows/build-native.yml). Source of truth is *.ts.
+integrations/openclaw/*.js
+integrations/openclaw/*.d.ts
+integrations/openclaw/*.d.ts.map
+# openclaw-plugin-sdk.d.ts is hand-authored (not generated), keep tracked
+!integrations/openclaw/openclaw-plugin-sdk.d.ts
