@@ -217,6 +217,7 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // Facade coordination tools
     "tachi_handoff",
     "tachi_dispatch",
+    "approve_merge",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -261,9 +262,10 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Skill discovery + execution
     "hub_discover",
     "run_skill",
-    // Agent dispatch + task completion
+    // Agent dispatch + task completion + merge
     "tachi_dispatch",
     "tachi_complete",
+    "approve_merge",
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
@@ -601,6 +603,7 @@ mod tests {
                 test_tool("recall_context"),
                 test_tool("tachi_complete"),
                 test_tool("tachi_dispatch"),
+                test_tool("approve_merge"),
                 // Old tools now excluded:
                 test_tool("search_memory"),
                 test_tool("save_memory"),
@@ -630,6 +633,7 @@ mod tests {
                 "recall_context".to_string(),
                 "tachi_complete".to_string(),
                 "tachi_dispatch".to_string(),
+                "approve_merge".to_string(),
             ]
         );
     }

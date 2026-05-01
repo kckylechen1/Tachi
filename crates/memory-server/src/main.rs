@@ -2292,6 +2292,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Merge a git worktree branch back to the main branch and optionally remove the worktree. Use after reviewing tachi_dispatch results."
+    )]
+    async fn approve_merge(
+        &self,
+        Parameters(params): Parameters<TachiApproveMergeParams>,
+    ) -> Result<String, String> {
+        dispatch_ops::handle_approve_merge(params).await
+    }
+
+    #[tool(
         description = "Declare task completion and write an entry to the eval ledger. Records agent, outcome, duration, cost, skills used, and (optionally) trajectory/diff for later distillation. Returns a review bundle. Does NOT auto-merge worktrees — use approve_merge for that."
     )]
     async fn tachi_complete(
@@ -2445,6 +2455,55 @@ impl MemoryServer {
         let save_json: serde_json::Value = serde_json::from_str(&save_result)
             .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
 
+        let mut pipeline_status = serde_json::json!({
+            "distill_trajectory": "skipped (no trajectory data)",
+            "skill_evolve": "skipped",
+        });
+
+        if let Some(ref trajectory) = params.trajectory {
+            if let Some(trace_arr) = trajectory.as_array() {
+                if !trace_arr.is_empty() && outcome_norm == "success" {
+                    let server_clone = self.clone();
+                    let task_desc = params.task.clone();
+                    let agent = params.agent.clone();
+                    let trace = trace_arr.clone();
+                    let skills_used = params.skills_used.clone();
+                    let skill_path = if skills_used.is_empty() {
+                        format!("/skills/auto/{}", task_id)
+                    } else {
+                        skills_used[0].clone()
+                    };
+                    pipeline_status = serde_json::json!({
+                        "distill_trajectory": "enqueued",
+                        "skill_evolve": "will follow distill if successful",
+                    });
+                    tokio::spawn(async move {
+                        let distill_params = DistillTrajectoryParams {
+                            task_description: task_desc,
+                            execution_trace: trace,
+                            final_outcome: serde_json::json!({"outcome": "success", "agent": agent}),
+                            agent_id: agent.clone(),
+                            skill_path,
+                            skill_id: None,
+                            importance: None,
+                            domain: None,
+                            project: None,
+                            scope: "project".to_string(),
+                        };
+                        match handle_distill_trajectory(
+                            &server_clone,
+                            distill_params,
+                        )
+                        .await
+                        {
+                            Ok(r) => eprintln!("[tachi_complete/worker] distill OK: {}", &r[..r.len().min(200)]),
+                            Err(e) => eprintln!("[tachi_complete/worker] distill failed: {e}"),
+                        }
+                    });
+                }
+            }
+        }
+
         let review_bundle = serde_json::json!({
             "recorded": true,
             "task_id": task_id,
@@ -2453,13 +2512,9 @@ impl MemoryServer {
             "eval_entry": save_json,
             "next_steps": [
                 "Use tachi_search with 'eval' keyword to find related outcomes.",
-                "For worktree-based dispatch, run approve_merge / task_merge when ready.",
-                "Distill and skill_evolve pipelines are not yet auto-triggered (MVP).",
+                "For worktree-based dispatch, run approve_merge when ready.",
             ],
-            "pending_pipeline": {
-                "distill_trajectory": "not yet auto-enqueued (pending worker)",
-                "skill_evolve": "not yet auto-enqueued (pending worker)",
-            }
+            "pipeline": pipeline_status,
         });
 
         serde_json::to_string(&review_bundle)

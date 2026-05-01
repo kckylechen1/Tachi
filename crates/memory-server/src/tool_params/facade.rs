@@ -233,6 +233,27 @@ pub(crate) struct TachiDispatchParams {
     pub project: Option<String>,
 }
 
+// ─── Facade: worktree merge ──────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiApproveMergeParams {
+    /// Path to the git worktree to merge
+    pub worktree: String,
+
+    /// Branch name to merge (default: inferred from worktree HEAD)
+    #[serde(default)]
+    pub branch: Option<String>,
+
+    /// Merge strategy (default: "recursive")
+    #[serde(default)]
+    pub strategy: Option<String>,
+
+    /// Whether to remove the worktree after merge (default: true)
+    #[serde(default = "default_true")]
+    pub delete_worktree: bool,
+}
+
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[allow(dead_code)]
