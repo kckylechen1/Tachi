@@ -93,7 +93,8 @@ Latency-sensitive calls used during active agent turns:
 
 Worker-driven jobs that should not block tool use:
 
-- `memory_rerank`
+- `memory_neighborhood` (split out of the legacy `memory_rerank` job; on the Maintenance lane, writes `metadata.related_entries` back onto the source memory)
+- `recall_rerank_cache` (split out of the legacy `memory_rerank` job; on the Rerank lane, writes ephemeral `recall-cache/*` entries with `source=foundry_recall_rerank_cache` and `retention_policy=ephemeral`)
 - `memory_distill`
 - `forget_or_archive`
 - `skill_evolution`
@@ -120,7 +121,7 @@ Completed:
 - `section.build`, `compact.rollup`, and `compact.session_memory`
 - Tachi-side rerank for recall results
 - Tachi-side extraction + embedding for captured session memories
-- first Foundry maintenance worker for `memory_rerank`, `memory_distill`, and `forget_sweep`
+- first Foundry maintenance worker for `memory_neighborhood`, `recall_rerank_cache`, `memory_distill`, and `forget_sweep` (the legacy `memory_rerank` kind was split into `memory_neighborhood` + `recall_rerank_cache`; deserialization preserves backward compatibility via `#[serde(alias = "memory_rerank")]`)
 - OpenClaw integration updated to prefer the new Tachi APIs and expose only `memory_search / memory_save / memory_get / memory_graph`
 
 This means OpenClaw now prefers:
@@ -238,7 +239,7 @@ Already done:
 - `recall_context` can auto-scope by `agent_id`, and OpenClaw now passes it through
 - OpenClaw `before_agent_start` uses `recall_context` first, with local FTS fallback only for resilience
 - user-initiated OpenClaw memory search now also degrades only to local FTS fallback instead of local embedding + rerank
-- `capture_session` now queues Foundry maintenance jobs for `memory_rerank`, `memory_distill`, and `forget_sweep`
+- `capture_session` now queues Foundry maintenance jobs for `memory_neighborhood`, `recall_rerank_cache`, `memory_distill`, and `forget_sweep` (the legacy `memory_rerank` kind was split — see the §Offline path entry above)
 - capture entries that wait for background enrichment now re-enter Foundry maintenance after vectors land
 - Foundry maintenance now tracks worker counters through `get_pipeline_status`
 - `recall_context` now enforces agent-scoped path policy server-side

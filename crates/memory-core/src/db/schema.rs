@@ -677,6 +677,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             "migration",
             "auto",
             "foundry_distill",
+            "foundry_recall_rerank_cache",
             "handoff",
             "kanban",
             "wiki",
@@ -804,7 +805,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
             CHECK (
-                source IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')
+                source IN ('manual','extraction','migration','auto','foundry_distill','foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
                 OR source LIKE 'external:%'
             )
         );
@@ -878,7 +879,7 @@ fn fetch_noncanonical_source_batch(
 ) -> Result<Vec<(String, String)>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT id, source FROM memories
-         WHERE source NOT IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')
+         WHERE source NOT IN ('manual','extraction','migration','auto','foundry_distill','foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
            AND (
              source NOT LIKE 'external:%'
              OR source = 'external:'

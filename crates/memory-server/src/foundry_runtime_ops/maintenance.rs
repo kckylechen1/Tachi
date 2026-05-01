@@ -1,5 +1,6 @@
 use super::capture::*;
 use super::helpers::*;
+use super::recall::{rerank_rows, value_id, value_path, value_relevance, value_topic};
 use super::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
@@ -32,7 +33,10 @@ fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
 
 fn foundry_job_lane(kind: &memory_core::FoundryJobKind) -> memory_core::FoundryModelLane {
     match kind {
-        memory_core::FoundryJobKind::MemoryRerank => memory_core::FoundryModelLane::Rerank,
+        memory_core::FoundryJobKind::MemoryNeighborhood => {
+            memory_core::FoundryModelLane::Maintenance
+        }
+        memory_core::FoundryJobKind::RecallRerankCache => memory_core::FoundryModelLane::Rerank,
         memory_core::FoundryJobKind::MemoryDistill => memory_core::FoundryModelLane::Distill,
         memory_core::FoundryJobKind::ForgetSweep => memory_core::FoundryModelLane::Distill,
         _ => memory_core::FoundryModelLane::Reasoning,
@@ -41,7 +45,8 @@ fn foundry_job_lane(kind: &memory_core::FoundryJobKind) -> memory_core::FoundryM
 
 fn foundry_worker_name(kind: &memory_core::FoundryJobKind) -> &'static str {
     match kind {
-        memory_core::FoundryJobKind::MemoryRerank => "foundry_rerank",
+        memory_core::FoundryJobKind::MemoryNeighborhood => "foundry_neighborhood",
+        memory_core::FoundryJobKind::RecallRerankCache => "foundry_recall_rerank_cache",
         memory_core::FoundryJobKind::MemoryDistill => "foundry_distill",
         memory_core::FoundryJobKind::ForgetSweep => "foundry_forget",
         _ => "foundry",
@@ -50,7 +55,8 @@ fn foundry_worker_name(kind: &memory_core::FoundryJobKind) -> &'static str {
 
 pub(super) fn foundry_job_label(kind: &memory_core::FoundryJobKind) -> &'static str {
     match kind {
-        memory_core::FoundryJobKind::MemoryRerank => "memory_rerank",
+        memory_core::FoundryJobKind::MemoryNeighborhood => "memory_neighborhood",
+        memory_core::FoundryJobKind::RecallRerankCache => "recall_rerank_cache",
         memory_core::FoundryJobKind::MemoryDistill => "memory_distill",
         memory_core::FoundryJobKind::ForgetSweep => "forget_sweep",
         memory_core::FoundryJobKind::SessionIngest => "session_ingest",
@@ -104,15 +110,27 @@ pub(super) fn enqueue_capture_maintenance_jobs(
     let specs = vec![
         build_foundry_maintenance_job(
             server,
-            memory_core::FoundryJobKind::MemoryRerank,
+            memory_core::FoundryJobKind::MemoryNeighborhood,
             agent_id,
             path_prefix,
             memory_ids,
             json!({
-                "kind": "memory_rerank",
+                "kind": "memory_neighborhood",
                 "neighbor_limit": FOUNDRY_RELATED_LIMIT,
                 "merged_count": merged_count,
                 "duplicate_count": duplicate_count,
+            }),
+        ),
+        build_foundry_maintenance_job(
+            server,
+            memory_core::FoundryJobKind::RecallRerankCache,
+            agent_id,
+            path_prefix,
+            memory_ids,
+            json!({
+                "kind": "recall_rerank_cache",
+                "top_k": FOUNDRY_RECALL_RERANK_TOP_K,
+                "candidate_multiplier": FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
             }),
         ),
         build_foundry_maintenance_job(
@@ -479,12 +497,19 @@ pub(super) fn build_foundry_event_hash(
         }
     }
     signatures.sort();
+    let job_scope = match item.job.kind {
+        memory_core::FoundryJobKind::RecallRerankCache => {
+            stable_hash(&item.job.metadata.to_string())
+        }
+        _ => String::new(),
+    };
 
     Ok(stable_hash(&format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         foundry_job_label(&item.job.kind),
         item.named_project.as_deref().unwrap_or("default"),
         item.path_prefix,
+        job_scope,
         signatures.join(","),
     )))
 }
@@ -532,7 +557,7 @@ pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
 
-async fn process_memory_rerank_job(
+async fn process_memory_neighborhood_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
 ) -> Result<usize, String> {
@@ -542,7 +567,7 @@ async fn process_memory_rerank_job(
         let Some(entry) = with_foundry_store_read(server, item, |store| {
             store
                 .get(memory_id)
-                .map_err(|e| format!("Failed to load memory {} for rerank: {e}", memory_id))
+                .map_err(|e| format!("Failed to load memory {} for neighborhood: {e}", memory_id))
         })?
         else {
             continue;
@@ -631,8 +656,8 @@ async fn process_memory_rerank_job(
         let metadata = merge_foundry_metadata(
             &entry.metadata,
             json!({
-                "last_reranked_at": Utc::now().to_rfc3339(),
-                "rerank_job_id": item.job.id,
+                "last_neighborhood_at": Utc::now().to_rfc3339(),
+                "neighborhood_job_id": item.job.id,
                 "related_entries": related,
             }),
         );
@@ -643,6 +668,302 @@ async fn process_memory_rerank_job(
         if applied {
             updated += 1;
         }
+    }
+
+    Ok(updated)
+}
+
+fn job_metadata_value<'a>(
+    metadata: &'a serde_json::Value,
+    key: &str,
+) -> Option<&'a serde_json::Value> {
+    metadata
+        .get("job")
+        .and_then(|job| job.get(key))
+        .or_else(|| metadata.get(key))
+}
+
+fn job_metadata_usize(metadata: &serde_json::Value, key: &str, default: usize) -> usize {
+    job_metadata_value(metadata, key)
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(default)
+}
+
+fn job_metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    job_metadata_value(metadata, key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn recall_cache_queries_from_metadata(metadata: &serde_json::Value) -> Vec<String> {
+    job_metadata_value(metadata, "queries")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("query").and_then(serde_json::Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn default_recall_cache_query(
+    item: &FoundryMaintenanceItem,
+    source_entries: &[MemoryEntry],
+) -> String {
+    let topics = dedup_strings(
+        source_entries
+            .iter()
+            .flat_map(|entry| {
+                std::iter::once(entry.topic.clone())
+                    .chain(entry.keywords.iter().cloned())
+                    .chain(entry.entities.iter().cloned())
+            })
+            .collect::<Vec<_>>(),
+    );
+    let topic_hint = topics.into_iter().take(8).collect::<Vec<_>>().join(" ");
+    if !topic_hint.trim().is_empty() {
+        return format!("{} {}", item.path_prefix, topic_hint);
+    }
+
+    let agent = item
+        .job
+        .target_agent_id
+        .as_deref()
+        .unwrap_or("agent")
+        .trim();
+    format!("durable context for {agent} {}", item.path_prefix)
+}
+
+fn row_string(row: &serde_json::Value, key: &str) -> String {
+    row.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn build_recall_cache_text(query: &str, rows: &[serde_json::Value]) -> String {
+    let mut lines = vec![format!("Recall rerank cache for query: {query}")];
+    for (idx, row) in rows.iter().enumerate() {
+        let id = value_id(row);
+        let path = value_path(row);
+        let topic = value_topic(row);
+        let score = value_relevance(row);
+        let summary = row_string(row, "summary");
+        let text = row_string(row, "text");
+        lines.push(format!(
+            "{}. id={} score={:.3} topic={} path={}",
+            idx + 1,
+            if id.is_empty() { "unknown" } else { &id },
+            score,
+            if topic.is_empty() { "unknown" } else { &topic },
+            if path.is_empty() { "unknown" } else { &path },
+        ));
+        lines.push(format!(
+            "   {}",
+            if summary.trim().is_empty() {
+                text.chars().take(180).collect::<String>()
+            } else {
+                summary
+            }
+        ));
+    }
+    lines.join("\n")
+}
+
+async fn process_recall_rerank_cache_job(
+    server: &MemoryServer,
+    item: &FoundryMaintenanceItem,
+) -> Result<usize, String> {
+    let source_entries = with_foundry_store_read(server, item, |store| {
+        let mut entries = Vec::new();
+        for memory_id in &item.memory_ids {
+            if let Some(entry) = store
+                .get(memory_id)
+                .map_err(|e| format!("Failed to load memory {memory_id} for recall cache: {e}"))?
+            {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    })?;
+
+    let mut queries = recall_cache_queries_from_metadata(&item.job.metadata);
+    if queries.is_empty() && !source_entries.is_empty() {
+        queries.push(default_recall_cache_query(item, &source_entries));
+    }
+    queries = dedup_strings(queries);
+    if queries.is_empty() {
+        return Ok(0);
+    }
+
+    let top_k = job_metadata_usize(&item.job.metadata, "top_k", FOUNDRY_RECALL_RERANK_TOP_K).max(1);
+    let candidate_multiplier = job_metadata_usize(
+        &item.job.metadata,
+        "candidate_multiplier",
+        FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
+    )
+    .max(1);
+    let candidate_top_k = top_k.saturating_mul(candidate_multiplier);
+    let path_prefix = job_metadata_string(&item.job.metadata, "path_prefix")
+        .or_else(|| normalize_path_prefix_value(&item.path_prefix));
+    let agent_role = job_metadata_string(&item.job.metadata, "agent_role");
+    let project = job_metadata_string(&item.job.metadata, "project").or_else(|| {
+        if item.named_project.is_some() {
+            item.named_project.clone()
+        } else {
+            None
+        }
+    });
+    let scope = if item.target_db == DbScope::Project {
+        "project".to_string()
+    } else {
+        "global".to_string()
+    };
+
+    let mut updated = 0usize;
+    for query in queries {
+        let mut rows = search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.clone(),
+                query_vec: None,
+                top_k: candidate_top_k,
+                path_prefix: path_prefix.clone(),
+                include_archived: false,
+                candidates_per_channel: candidate_top_k.max(20),
+                mmr_threshold: None,
+                graph_expand_hops: 0,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: agent_role.clone(),
+                project: project.clone(),
+                domain: None,
+            },
+        )
+        .await?;
+        if let Some(prefix) = path_prefix.as_deref() {
+            rows.retain(|row| {
+                let path = value_path(row);
+                !path.is_empty() && path_is_within_prefix(&path, prefix)
+            });
+        }
+        rows.retain(|row| {
+            row.get("source").and_then(serde_json::Value::as_str)
+                != Some(FOUNDRY_RECALL_RERANK_CACHE_SOURCE)
+        });
+        let reranked = rerank_rows(server, &query, rows, top_k).await;
+        if reranked.is_empty() {
+            continue;
+        }
+
+        let cache_seed = format!(
+            "{}|{}|{}|{}",
+            item.named_project.as_deref().unwrap_or("default"),
+            item.path_prefix,
+            top_k,
+            query
+        );
+        let cache_id = format!("foundry:recall-cache:{}", stable_hash(&cache_seed));
+        let cache_topic = sanitize_safe_path_name(&query)
+            .chars()
+            .take(64)
+            .collect::<String>();
+        let cache_path = format!(
+            "{}/recall-cache/{}",
+            item.path_prefix.trim_end_matches('/'),
+            cache_topic
+        );
+        let result_ids = reranked.iter().map(value_id).collect::<Vec<_>>();
+        let result_scores = reranked
+            .iter()
+            .map(|row| {
+                json!({
+                    "id": value_id(row),
+                    "score": round3(value_relevance(row)),
+                    "path": value_path(row),
+                    "topic": value_topic(row),
+                })
+            })
+            .collect::<Vec<_>>();
+        let timestamp = Utc::now().to_rfc3339();
+        let text = build_recall_cache_text(&query, &reranked);
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "query": query,
+                "top_k": top_k,
+                "candidate_multiplier": candidate_multiplier,
+                "candidate_top_k": candidate_top_k,
+                "source_memory_ids": item.memory_ids.clone(),
+                "result_ids": result_ids.clone(),
+                "result_scores": result_scores,
+                "job_id": item.job.id.clone(),
+                "path_prefix": item.path_prefix.clone(),
+            }),
+            "foundry_worker",
+            "recall_rerank_cache",
+            Some(scope.as_str()),
+            item.target_db,
+            json!({
+                "agent_id": item.job.target_agent_id.clone(),
+                "path_prefix": item.path_prefix.clone(),
+            }),
+        );
+
+        let cache_entry = MemoryEntry {
+            id: cache_id,
+            path: cache_path,
+            summary: text.chars().take(100).collect(),
+            text,
+            importance: 0.35,
+            timestamp,
+            category: "other".to_string(),
+            topic: "recall_rerank_cache".to_string(),
+            keywords: vec![
+                "foundry".to_string(),
+                "recall".to_string(),
+                "rerank".to_string(),
+                "cache".to_string(),
+            ],
+            persons: Vec::new(),
+            entities: result_ids,
+            location: item.path_prefix.clone(),
+            source: FOUNDRY_RECALL_RERANK_CACHE_SOURCE.to_string(),
+            scope: scope.clone(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+            retention_policy: Some("ephemeral".to_string()),
+            domain: None,
+        };
+
+        persist_capture_entry(
+            server,
+            item.target_db,
+            item.named_project.as_deref(),
+            &cache_entry,
+        )?;
+        queue_capture_enrichment(
+            server,
+            item.target_db,
+            item.named_project.clone(),
+            &cache_entry,
+            false,
+            item.job.target_agent_id.as_deref(),
+            Some(&item.path_prefix),
+        );
+        updated += 1;
     }
 
     Ok(updated)
@@ -935,9 +1256,16 @@ async fn handle_foundry_maintenance_item(
     }
 
     let result = match item.job.kind {
-        memory_core::FoundryJobKind::MemoryRerank => process_memory_rerank_job(server, item)
-            .await
-            .map(|_| (memory_core::FoundryJobStatus::Completed, None)),
+        memory_core::FoundryJobKind::MemoryNeighborhood => {
+            process_memory_neighborhood_job(server, item)
+                .await
+                .map(|_| (memory_core::FoundryJobStatus::Completed, None))
+        }
+        memory_core::FoundryJobKind::RecallRerankCache => {
+            process_recall_rerank_cache_job(server, item)
+                .await
+                .map(|_| (memory_core::FoundryJobStatus::Completed, None))
+        }
         memory_core::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
             .await
             .map(|outcome| match outcome {
