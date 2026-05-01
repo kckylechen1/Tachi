@@ -606,7 +606,7 @@ fn build_bundle_section(
     }
 }
 
-pub(super) async fn handle_recommend_capability(
+pub(crate) async fn handle_recommend_capability(
     server: &MemoryServer,
     params: RecommendCapabilityParams,
 ) -> Result<String, String> {
@@ -629,7 +629,7 @@ pub(super) async fn handle_recommend_capability(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_recommend_skill(
+pub(crate) async fn handle_recommend_skill(
     server: &MemoryServer,
     params: RecommendSkillParams,
 ) -> Result<String, String> {
@@ -652,7 +652,7 @@ pub(super) async fn handle_recommend_skill(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_recommend_toolchain(
+pub(crate) async fn handle_recommend_toolchain(
     server: &MemoryServer,
     params: RecommendToolchainParams,
 ) -> Result<String, String> {
@@ -708,7 +708,7 @@ pub(super) async fn handle_recommend_toolchain(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_prepare_capability_bundle(
+pub(crate) async fn handle_prepare_capability_bundle(
     server: &MemoryServer,
     params: PrepareCapabilityBundleParams,
 ) -> Result<String, String> {

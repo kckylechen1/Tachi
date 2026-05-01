@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn handle_tachi_init_project_db(
+pub(crate) async fn handle_tachi_init_project_db(
     server: &MemoryServer,
     params: InitProjectDbParams,
 ) -> Result<String, String> {

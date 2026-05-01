@@ -260,7 +260,7 @@ fn upsert_acknowledged_entry(
         .map_err(|e| format!("Failed to acknowledge handoff memory: {e}"))
 }
 
-pub(super) async fn handle_handoff_leave(
+pub(crate) async fn handle_handoff_leave(
     server: &MemoryServer,
     params: HandoffLeaveParams,
 ) -> Result<String, String> {
@@ -302,7 +302,7 @@ pub(super) async fn handle_handoff_leave(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_handoff_check(
+pub(crate) async fn handle_handoff_check(
     server: &MemoryServer,
     params: HandoffCheckParams,
 ) -> Result<String, String> {

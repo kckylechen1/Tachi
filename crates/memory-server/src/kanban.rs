@@ -434,7 +434,7 @@ pub(super) async fn enrich_kanban_card_classification(
     Ok(())
 }
 
-pub(super) async fn handle_post_card(
+pub(crate) async fn handle_post_card(
     server: &MemoryServer,
     params: PostCardParams,
 ) -> Result<String, String> {
@@ -572,7 +572,7 @@ pub(super) async fn handle_post_card(
     serde_json::to_string(&serde_json::Value::Object(resp)).map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_check_inbox(
+pub(crate) async fn handle_check_inbox(
     server: &MemoryServer,
     params: CheckInboxParams,
 ) -> Result<String, String> {
@@ -634,7 +634,7 @@ pub(super) async fn handle_check_inbox(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(super) async fn handle_update_card(
+pub(crate) async fn handle_update_card(
     server: &MemoryServer,
     params: UpdateCardParams,
 ) -> Result<String, String> {
