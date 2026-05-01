@@ -651,7 +651,7 @@ impl LlmClient {
         let response = self
             .call_extract_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000)
             .await?;
-        let json_str = Self::strip_code_fence(&response);
+        let json_str = Self::extract_json_payload(&response)?;
 
         if json_str.trim().is_empty() {
             return Err("LLM returned empty facts payload after stripping fences".to_string());
@@ -687,27 +687,88 @@ impl LlmClient {
             inner
         }
     }
+
+    /// Extract the first complete JSON object/array from an LLM response.
+    ///
+    /// Some reasoning models prepend hidden-thought text or other prose before
+    /// the JSON even when the prompt asks for JSON-only. Keep strict JSON
+    /// parsing, but feed the parser the first balanced JSON payload instead of
+    /// the whole response.
+    pub fn extract_json_payload(text: &str) -> Result<&str, String> {
+        let text = Self::strip_code_fence(text).trim();
+        let start = text
+            .char_indices()
+            .find_map(|(idx, ch)| matches!(ch, '{' | '[').then_some((idx, ch)))
+            .ok_or_else(|| format!("No JSON object or array found in response: {text}"))?;
+        let (start_idx, open) = start;
+        let close = if open == '{' { '}' } else { ']' };
+        let mut stack = vec![close];
+        let mut in_string = false;
+        let mut escaped = false;
+
+        for (rel_idx, ch) in text[start_idx..].char_indices().skip(1) {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => stack.push('}'),
+                '[' => stack.push(']'),
+                '}' | ']' => {
+                    if stack.pop() != Some(ch) {
+                        return Err(format!("Mismatched JSON delimiter in response: {text}"));
+                    }
+                    if stack.is_empty() {
+                        let end_idx = start_idx + rel_idx + ch.len_utf8();
+                        return Ok(&text[start_idx..end_idx]);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(format!("Incomplete JSON payload in response: {text}"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn llm_client_initializes_without_provider_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
+        std::env::remove_var("TACHI_TEST_ONLY_API_KEY");
+
         let client = LlmClient::new().expect("client should not require API keys at startup");
 
-        assert!(client
-            .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
-            .is_none());
-        assert!(client
-            .required_secret(&["TACHI_TEST_ONLY_API_KEY"])
-            .expect_err("missing keys should fail at call time")
-            .contains("TACHI_TEST_ONLY_API_KEY"));
+        assert!(
+            client
+                .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
+                .is_none()
+        );
+        assert!(
+            client
+                .required_secret(&["TACHI_TEST_ONLY_API_KEY"])
+                .expect_err("missing keys should fail at call time")
+                .contains("TACHI_TEST_ONLY_API_KEY")
+        );
     }
 
     #[test]
     fn vault_provider_secret_overrides_env_value() {
+        let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
         std::env::set_var("TACHI_TEST_ONLY_API_KEY", "env-value");
         let client = LlmClient::new().expect("client should initialize");
 
@@ -720,5 +781,14 @@ mod tests {
             "vault-value"
         );
         std::env::remove_var("TACHI_TEST_ONLY_API_KEY");
+    }
+
+    #[test]
+    fn extract_json_payload_ignores_prefix_and_suffix() {
+        let raw = "<think>ignore</think>\n{\"ok\": true}\nextra text";
+        assert_eq!(
+            LlmClient::extract_json_payload(raw).expect("json payload"),
+            "{\"ok\": true}"
+        );
     }
 }

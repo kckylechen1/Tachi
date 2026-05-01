@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::redact_sensitive_value;
 use std::collections::HashSet;
 
 pub(crate) async fn handle_hub_discover(
@@ -58,6 +59,7 @@ pub(super) fn hub_discover_inner(
             );
             o.insert("callable".into(), json!(capability_callable(cap)));
         }
+        redact_sensitive_value(&mut obj);
         output.push(obj);
     }
     for cap in &global_caps {
@@ -73,6 +75,7 @@ pub(super) fn hub_discover_inner(
             );
             o.insert("callable".into(), json!(capability_callable(cap)));
         }
+        redact_sensitive_value(&mut obj);
         output.push(obj);
     }
 
@@ -98,6 +101,7 @@ pub(crate) async fn handle_hub_get(
                 );
                 o.insert("callable".into(), json!(capability_callable(&cap)));
             }
+            redact_sensitive_value(&mut obj);
             return serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"));
         }
     }
@@ -116,6 +120,7 @@ pub(crate) async fn handle_hub_get(
                 );
                 o.insert("callable".into(), json!(capability_callable(&cap)));
             }
+            redact_sensitive_value(&mut obj);
             serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"))
         }
         None => serde_json::to_string(&json!({"error": "Capability not found"}))

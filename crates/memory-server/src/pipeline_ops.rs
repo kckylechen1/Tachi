@@ -614,11 +614,20 @@ pub(super) async fn handle_extract_facts(
     let (target_db, _warning) = server.resolve_write_scope("project");
     let source = params.source.clone();
 
-    let facts = server
-        .llm
-        .extract_facts(&params.text)
-        .await
-        .map_err(|e| format!("LLM extraction failed: {e}"))?;
+    let facts = match server.llm.extract_facts(&params.text).await {
+        Ok(facts) => facts,
+        Err(err) => {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "status": "failed",
+                "reason": "llm_extraction_failed",
+                "error": err,
+                "source": source,
+                "facts_extracted": 0,
+                "facts_saved": 0
+            }))
+            .unwrap());
+        }
+    };
 
     if facts.is_empty() {
         return Ok(serde_json::to_string(&serde_json::json!({

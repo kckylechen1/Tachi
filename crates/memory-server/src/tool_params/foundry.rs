@@ -213,7 +213,7 @@ pub(crate) struct CompactContextParams {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, JsonSchema)]
 pub(crate) struct CompactArtifactItemParams {
     /// Stable id for the compacted artifact, if already assigned
     #[serde(default)]
@@ -233,6 +233,53 @@ pub(crate) struct CompactArtifactItemParams {
     /// Durable signals already extracted from the artifact
     #[serde(default)]
     pub durable_signals: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for CompactArtifactItemParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompactArtifactItemInput {
+            Object {
+                #[serde(default)]
+                item_id: Option<String>,
+                #[serde(default)]
+                window_id: Option<String>,
+                compacted_text: String,
+                #[serde(default)]
+                salient_topics: Vec<String>,
+                #[serde(default)]
+                durable_signals: Vec<String>,
+            },
+            Text(String),
+        }
+
+        match CompactArtifactItemInput::deserialize(deserializer)? {
+            CompactArtifactItemInput::Object {
+                item_id,
+                window_id,
+                compacted_text,
+                salient_topics,
+                durable_signals,
+            } => Ok(CompactArtifactItemParams {
+                item_id,
+                window_id,
+                compacted_text,
+                salient_topics,
+                durable_signals,
+            }),
+            CompactArtifactItemInput::Text(compacted_text) => Ok(CompactArtifactItemParams {
+                item_id: None,
+                window_id: None,
+                compacted_text,
+                salient_topics: Vec::new(),
+                durable_signals: Vec::new(),
+            }),
+        }
+    }
 }
 
 #[allow(dead_code)]

@@ -93,6 +93,112 @@ pub(super) fn value_to_template_text(v: &Value) -> String {
     }
 }
 
+pub(super) fn redact_sensitive_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if is_sensitive_key(key) {
+                    *child = Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_sensitive_value(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_sensitive_value(item);
+            }
+        }
+        Value::String(s) => {
+            *s = redact_sensitive_string(s);
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "apikey",
+        "api_key",
+        "token",
+        "secret",
+        "password",
+        "authorization",
+    ]
+    .iter()
+    .any(|needle| key.contains(needle))
+}
+
+fn redact_sensitive_string(input: &str) -> String {
+    let Some(query_start) = input.find('?') else {
+        return redact_inline_secret_markers(input);
+    };
+    let (prefix, rest) = input.split_at(query_start + 1);
+    let (query, suffix) = match rest.find('#') {
+        Some(fragment_start) => rest.split_at(fragment_start),
+        None => (rest, ""),
+    };
+    let redacted_query = query
+        .split('&')
+        .map(|part| {
+            let Some((name, _value)) = part.split_once('=') else {
+                return part.to_string();
+            };
+            if is_sensitive_key(name) {
+                format!("{name}=[REDACTED]")
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    redact_inline_secret_markers(&format!("{prefix}{redacted_query}{suffix}"))
+}
+
+fn redact_inline_secret_markers(input: &str) -> String {
+    let mut out = input.to_string();
+    for marker in ["Bearer ", "bearer "] {
+        if let Some(start) = out.find(marker) {
+            let value_start = start + marker.len();
+            let value_end = out[value_start..]
+                .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&'))
+                .map(|idx| value_start + idx)
+                .unwrap_or(out.len());
+            out.replace_range(value_start..value_end, "[REDACTED]");
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_sensitive_value_redacts_secret_keys_and_url_params() {
+        let mut value = json!({
+            "definition": {
+                "url": "https://example.test/mcp?tavilyApiKey=abc123&safe=ok",
+                "headers": {
+                    "Authorization": "Bearer secret-token"
+                }
+            }
+        });
+
+        redact_sensitive_value(&mut value);
+
+        assert_eq!(
+            value["definition"]["url"],
+            json!("https://example.test/mcp?tavilyApiKey=[REDACTED]&safe=ok")
+        );
+        assert_eq!(
+            value["definition"]["headers"]["Authorization"],
+            json!("[REDACTED]")
+        );
+    }
+}
+
 /// Stable hash function (FNV-1a). Deterministic across Rust toolchain versions,
 /// unlike DefaultHasher which uses SipHash with randomized keys.
 pub(super) fn stable_hash(input: &str) -> String {

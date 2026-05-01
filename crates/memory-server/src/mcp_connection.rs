@@ -1,6 +1,6 @@
 use super::*;
 use crate::vault_ops::read_unlocked_vault_secret;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Map as JsonMap;
 
@@ -359,7 +359,10 @@ where
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "auth.token is required for bearer auth".to_string())?;
             let token = resolve_secret_reference(key, secret_resolver)?;
-            Ok(vec![("Authorization".to_string(), format!("Bearer {token}"))])
+            Ok(vec![(
+                "Authorization".to_string(),
+                format!("Bearer {token}"),
+            )])
         }
         "basic" => {
             let user_key = obj
@@ -374,7 +377,10 @@ where
                 .transpose()?
                 .unwrap_or_default();
             let encoded = B64.encode(format!("{username}:{password}"));
-            Ok(vec![("Authorization".to_string(), format!("Basic {encoded}"))])
+            Ok(vec![(
+                "Authorization".to_string(),
+                format!("Basic {encoded}"),
+            )])
         }
         "api-key" => {
             let key = obj
@@ -450,6 +456,40 @@ pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
+    if let Some(url) = def.get("url").and_then(|value| value.as_str()) {
+        return Some(url);
+    }
+
+    let command = def.get("command").and_then(|value| value.as_str())?;
+    let command_name = std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command);
+    if command_name != "mcp-remote" {
+        return None;
+    }
+
+    def.get("args")
+        .and_then(|value| value.as_array())
+        .and_then(|args| {
+            args.iter()
+                .filter_map(|arg| arg.as_str())
+                .find(|arg| arg.starts_with("https://") || arg.starts_with("http://"))
+        })
+}
+
+fn resolve_remote_mcp_url_with_secret_resolver<F>(
+    def: &serde_json::Value,
+    secret_resolver: &F,
+) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    let url = remote_mcp_url(def).ok_or_else(|| "missing url for remote MCP".to_string())?;
+    expand_placeholders_with_secret_resolver(url, secret_resolver)
+}
+
 /// Returns true for remote HTTP-based MCP servers (streamable-http, sse, http transport).
 /// These servers use raw HTTP JSON-RPC instead of rmcp's transport layer to avoid
 /// argument serialization issues in rmcp's streamable-http client.
@@ -458,8 +498,27 @@ pub(crate) fn is_remote_http_mcp(def: &serde_json::Value) -> bool {
         .get("transport")
         .and_then(|v| v.as_str())
         .unwrap_or("stdio");
-    let has_url = def.get("url").and_then(|v| v.as_str()).is_some();
-    matches!(transport, "streamable-http" | "sse" | "http") && has_url
+    let has_remote_url = remote_mcp_url(def).is_some();
+    if matches!(transport, "streamable-http" | "sse" | "http") && has_remote_url {
+        return true;
+    }
+
+    // mcp-remote is a stdio wrapper around a remote HTTP MCP server. Treating
+    // it as remote HTTP lets Tachi use its own spec-compliant stateless
+    // Streamable HTTP path instead of paying an extra process hop.
+    transport == "stdio"
+        && def
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|command| {
+                std::path::Path::new(command)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(command)
+                    == "mcp-remote"
+            })
+            .unwrap_or(false)
+        && has_remote_url
 }
 
 fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
@@ -595,6 +654,41 @@ mod tests {
             .expect("x-api-key header should exist");
         assert_eq!(value, "custom-secret");
     }
+
+    #[test]
+    fn remote_mcp_url_extracts_mcp_remote_arg() {
+        let def = json!({
+            "transport": "stdio",
+            "command": "/usr/local/bin/mcp-remote",
+            "args": ["https://example.test/mcp?apiKey=secret"]
+        });
+
+        assert_eq!(
+            remote_mcp_url(&def),
+            Some("https://example.test/mcp?apiKey=secret")
+        );
+        assert!(is_remote_http_mcp(&def));
+    }
+
+    #[test]
+    fn remote_mcp_url_expands_vault_placeholder() {
+        std::env::remove_var("TAVILY_API_KEY");
+        let def = json!({
+            "transport": "stdio",
+            "command": "mcp-remote",
+            "args": ["https://mcp.tavily.com/mcp/?tavilyApiKey=${vault:TAVILY_API_KEY}"]
+        });
+
+        let url = resolve_remote_mcp_url_with_secret_resolver(&def, &|key| {
+            Ok((key == "TAVILY_API_KEY").then(|| "tvly-test-key".to_string()))
+        })
+        .expect("remote URL should resolve vault placeholders");
+
+        assert_eq!(
+            url,
+            "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key"
+        );
+    }
 }
 
 impl MemoryServer {
@@ -650,6 +744,16 @@ impl MemoryServer {
         })
     }
 
+    fn resolve_remote_mcp_url_for_capability(
+        &self,
+        capability_id: &str,
+        def: &serde_json::Value,
+    ) -> Result<String, String> {
+        resolve_remote_mcp_url_with_secret_resolver(def, &|key| {
+            self.resolve_vault_secret_for_capability(capability_id, key)
+        })
+    }
+
     pub(super) async fn proxy_call_bigmodel_mcp(
         &self,
         capability_id: &str,
@@ -657,10 +761,11 @@ impl MemoryServer {
         tool_name: &str,
         arguments: Option<JsonMap<String, serde_json::Value>>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let url = def
-            .get("url")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| rmcp::ErrorData::invalid_params("missing url for remote MCP", None))?;
+        let url = self
+            .resolve_remote_mcp_url_for_capability(capability_id, def)
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("resolve remote MCP URL: {e}"), None)
+            })?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(90))
             .build()
@@ -710,7 +815,7 @@ impl MemoryServer {
             }
         });
         let init_response = client
-            .post(url)
+            .post(&url)
             .headers(headers.clone())
             .json(&initialize_payload)
             .send()
@@ -746,7 +851,7 @@ impl MemoryServer {
         }
 
         client
-            .post(url)
+            .post(&url)
             .headers(session_headers.clone())
             .json(&json!({
                 "jsonrpc": "2.0",
@@ -772,7 +877,7 @@ impl MemoryServer {
             }
         });
         let call_response = client
-            .post(url)
+            .post(&url)
             .headers(session_headers)
             .json(&call_payload)
             .send()
@@ -801,6 +906,120 @@ impl MemoryServer {
         serde_json::from_value(result_json).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("decode remote tool result failed: {e}"), None)
         })
+    }
+
+    pub(super) async fn proxy_list_remote_http_mcp_tools(
+        &self,
+        capability_id: &str,
+        def: &serde_json::Value,
+    ) -> Result<Vec<rmcp::model::Tool>, String> {
+        let url = self.resolve_remote_mcp_url_for_capability(capability_id, def)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|e| format!("build http client: {e}"))?;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in self.resolve_header_map_for_capability(capability_id, def)? {
+            headers.insert(name, value);
+        }
+        if let Some(token) = def
+            .get("auth_header")
+            .and_then(|value| value.as_str())
+            .map(|value| self.resolve_auth_header_for_capability(capability_id, value))
+            .transpose()?
+        {
+            let bearer = format!("Bearer {token}");
+            let header_value = HeaderValue::from_str(&bearer)
+                .map_err(|e| format!("invalid authorization header: {e}"))?;
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
+        }
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+
+        let initialize_payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tachi-hub", "version": env!("CARGO_PKG_VERSION")},
+            }
+        });
+        let init_response = client
+            .post(&url)
+            .headers(headers.clone())
+            .json(&initialize_payload)
+            .send()
+            .await
+            .map_err(|e| format!("initialize request failed: {e}"))?;
+        let init_headers = init_response.headers().clone();
+        let init_body = init_response
+            .text()
+            .await
+            .map_err(|e| format!("initialize body: {e}"))?;
+        let init_json =
+            parse_sse_payload(&init_body).map_err(|e| format!("parse initialize response: {e}"))?;
+        if let Some(error) = init_json.get("error") {
+            return Err(format!("remote MCP initialize failed: {error}"));
+        }
+
+        let mut session_headers = headers.clone();
+        if let Some(sid) = init_headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            let session_header =
+                HeaderValue::from_str(sid).map_err(|e| format!("invalid session header: {e}"))?;
+            session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
+        }
+
+        let _ = client
+            .post(&url)
+            .headers(session_headers.clone())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }))
+            .send()
+            .await;
+
+        let list_response = client
+            .post(&url)
+            .headers(session_headers)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("tools/list request failed: {e}"))?;
+        let list_body = list_response
+            .text()
+            .await
+            .map_err(|e| format!("tools/list body: {e}"))?;
+        let list_json =
+            parse_sse_payload(&list_body).map_err(|e| format!("parse tools/list response: {e}"))?;
+        if let Some(error) = list_json.get("error") {
+            return Err(format!("remote MCP tools/list failed: {error}"));
+        }
+        let result_json = list_json
+            .get("result")
+            .cloned()
+            .ok_or_else(|| format!("remote MCP tools/list missing result: {list_json}"))?;
+        let result: rmcp::model::ListToolsResult = serde_json::from_value(result_json)
+            .map_err(|e| format!("decode tools/list result failed: {e}"))?;
+        Ok(result.tools)
     }
 
     pub(super) fn clear_proxy_tools(&self, server_name: &str) {
@@ -1241,6 +1460,12 @@ impl MemoryServer {
         capability_id: &str,
         def: &serde_json::Value,
     ) -> Result<Vec<rmcp::model::Tool>, String> {
+        if is_remote_http_mcp(def) {
+            return self
+                .proxy_list_remote_http_mcp_tools(capability_id, def)
+                .await;
+        }
+
         let client = self
             .connect_mcp_service(capability_id, None, def, self.mcp_discovery_timeout)
             .await?;
