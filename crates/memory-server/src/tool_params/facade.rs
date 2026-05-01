@@ -1,0 +1,186 @@
+use super::*;
+
+// ─── Facade: unified search ──────────────────────────────────────────────────
+
+fn default_facade_search_scope() -> String {
+    "all".to_string()
+}
+
+fn default_facade_top_k() -> usize {
+    6
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiSearchParams {
+    /// Search query text
+    pub query: String,
+
+    /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "all" searches both (default)
+    #[serde(default = "default_facade_search_scope")]
+    pub scope: String,
+
+    /// Number of results to return (default: 6)
+    #[serde(default = "default_facade_top_k")]
+    pub top_k: usize,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain filter
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Wiki category filter (only used when scope includes wiki)
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+// ─── Facade: web search ──────────────────────────────────────────────────────
+
+fn default_web_search_top_k() -> usize {
+    8
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWebSearchParams {
+    /// Web search query text
+    pub query: String,
+
+    /// Number of results to request when the backend supports it
+    #[serde(default = "default_web_search_top_k")]
+    pub top_k: usize,
+
+    /// Backend selector: "auto" (default), "exa", "tavily", "bigmodel", or a concrete capability id
+    #[serde(default)]
+    pub backend: Option<String>,
+
+    /// Explicit tool name override for advanced/debug usage
+    #[serde(default)]
+    pub tool_name: Option<String>,
+
+    /// Optional domains to include, if the selected backend supports it
+    #[serde(default)]
+    pub include_domains: Vec<String>,
+
+    /// Optional domains to exclude, if the selected backend supports it
+    #[serde(default)]
+    pub exclude_domains: Vec<String>,
+}
+
+// ─── Facade: unified save ────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiSaveParams {
+    /// Full text content
+    pub text: String,
+
+    /// Existing memory ID to update. When set, updates the entry instead of creating a new one.
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// What to save: "wiki" for wiki entry, "note" for a quick note, "memory" for full memory entry.
+    /// If omitted, auto-detected: title present → wiki; short/casual text → note; otherwise → memory.
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Title (required for wiki entries, ignored for notes)
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Short summary
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Hierarchical path
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// 0.0–1.0 importance score
+    #[serde(default)]
+    pub importance: Option<f64>,
+
+    /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Keyword tags
+    #[serde(default)]
+    pub keywords: Vec<String>,
+
+    /// Entity names mentioned
+    #[serde(default)]
+    pub entities: Vec<String>,
+
+    /// Scope: "user" | "project" | "general"
+    #[serde(default)]
+    pub scope: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Retention policy: "ephemeral" | "durable" | "permanent" | "pinned"
+    #[serde(default)]
+    pub retention_policy: Option<String>,
+
+    /// Bypass noise filter
+    #[serde(default)]
+    pub force: bool,
+
+    /// Topic / subject area
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
+// ─── Facade: unified handoff ─────────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiHandoffParams {
+    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos
+    pub action: String,
+
+    /// Summary of what was accomplished (required when action="leave")
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Next steps for the receiving agent (used when action="leave")
+    #[serde(default)]
+    pub next_steps: Vec<String>,
+
+    /// Target agent ID (used when action="leave")
+    #[serde(default)]
+    pub target_agent: Option<String>,
+
+    /// Optional context (used when action="leave")
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
+
+    /// Agent ID to check for (used when action="check")
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Whether to acknowledge retrieved memos (used when action="check", default: true)
+    #[serde(default = "default_true")]
+    pub acknowledge: bool,
+}
