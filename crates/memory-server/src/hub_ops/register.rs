@@ -88,54 +88,40 @@ pub(crate) async fn handle_hub_register(
     }
 
     if params.cap_type == "skill" {
-        let mut def: serde_json::Value =
-            match serde_json::from_str::<serde_json::Value>(&cap_definition) {
-                Ok(v) if v.is_object() => v,
-                Ok(_) => {
-                    append_warning(
-                        &mut resp,
-                        "Skill definition is not a JSON object; skipped static skill scan",
-                    );
-                    serde_json::json!({})
-                }
-                Err(_) => {
-                    append_warning(
-                        &mut resp,
-                        "Skill definition is not valid JSON; skipped static skill scan",
-                    );
-                    serde_json::json!({})
-                }
-            };
+        let mut def: serde_json::Value = serde_json::from_str::<serde_json::Value>(&cap_definition)
+            .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
 
-        if def.is_object() {
-            let static_scan = scan_skill_definition(&def);
-            let llm_scan = scan_skill_definition_with_llm(server, &def).await;
-            let scan = merge_skill_scans(&static_scan, llm_scan.as_ref());
-
-            let blocked = scan
-                .get("blocked")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let risk = scan
-                .get("risk")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            def["security_scan"] = scan.clone();
-            resp.insert("skill_scan".into(), scan);
-            if blocked {
-                enabled = false;
-                resp.insert("enabled".into(), json!(false));
-                append_warning(
-                    &mut resp,
-                    format!(
-                        "Skill static scan blocked registration activation (risk={risk}). Review definition and re-enable explicitly."
-                    ),
-                );
-            }
-            cap_definition = serde_json::to_string(&def)
-                .map_err(|e| format!("Failed to serialize skill definition: {e}"))?;
+        if !def.is_object() {
+            return Err("invalid skill definition JSON: expected object".to_string());
         }
+
+        let static_scan = scan_skill_definition(&def);
+        let llm_scan = scan_skill_definition_with_llm(server, &def).await;
+        let scan = merge_skill_scans(&static_scan, llm_scan.as_ref());
+
+        let blocked = scan
+            .get("blocked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let risk = scan
+            .get("risk")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        def["security_scan"] = scan.clone();
+        resp.insert("skill_scan".into(), scan);
+        if blocked {
+            enabled = false;
+            resp.insert("enabled".into(), json!(false));
+            append_warning(
+                &mut resp,
+                format!(
+                    "Skill static scan blocked registration activation (risk={risk}). Review definition and re-enable explicitly."
+                ),
+            );
+        }
+        cap_definition = serde_json::to_string(&def)
+            .map_err(|e| format!("Failed to serialize skill definition: {e}"))?;
     }
 
     let cap = HubCapability {

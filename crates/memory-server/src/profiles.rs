@@ -600,7 +600,7 @@ mod tests {
                 test_tool("run_skill"),
                 test_tool("recall_context"),
                 test_tool("tachi_complete"),
-                // tachi_dispatch not yet registered as a tool
+                test_tool("tachi_dispatch"),
                 // Old tools now excluded:
                 test_tool("search_memory"),
                 test_tool("save_memory"),
@@ -629,6 +629,7 @@ mod tests {
                 "run_skill".to_string(),
                 "recall_context".to_string(),
                 "tachi_complete".to_string(),
+                "tachi_dispatch".to_string(),
             ]
         );
     }
