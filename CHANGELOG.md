@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-01
+
+### Added
+- **Tool Surface v2**: added compact facade tools (`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`) plus delegate/eval tools (`tachi_dispatch`, `approve_merge`, `tachi_complete`).
+- **Agent-facing web search gateway**: `tachi_web_search` routes through `vc:web_search` with Exa/Tavily fallback behavior and schema-aware argument mapping.
+- **Capability-scoped Vault URL placeholders**: remote MCP URLs can now use `${vault:SECRET_NAME}` so query-string API keys such as Tavily's can live in Tachi Vault instead of Hub definitions.
+
+### Changed
+- **v1 cleanup split**: `memory-core` store methods are split into domain modules, and `memory-server` moved its `#[tool_router]` implementation out of `main.rs` into `tools.rs`.
+- **Tool profiles are additive allowlists**: standard/delegate profiles now expose the compact facade and recommendation paths while keeping raw admin surfaces out of normal agent views.
+- **OpenClaw JavaScript bridge removed from the Rust repo**: the live integration path is the native Tachi MCP binary plus install-time extension setup.
+
+### Fixed
+- **Tavily / `mcp-remote` transport**: remote HTTP MCP servers wrapped by `mcp-remote` now use Tachi's raw Streamable HTTP JSON-RPC path, including optional `Mcp-Session-Id` handling.
+- **Malformed skill JSON hard fail**: invalid skill definitions are rejected before persistence, preventing corrupt Hub rows from blocking later startup.
+- **Secret redaction**: Hub discovery/get output and sandbox audit output redact API-key/token/password fields and secret-bearing URL query parameters.
+- **Foundry/LLM tool robustness**: string message/item params deserialize correctly, reasoning-prefixed JSON is extracted safely, and recoverable LLM failures return structured tool results instead of transport errors.
+
+### Tests
+- `cargo test -p memory-core`
+- `cargo test -p memory-server`
+- `cargo check -p memory-server`
+
 ## [0.16.4] - 2026-04-28
 
 ### Added

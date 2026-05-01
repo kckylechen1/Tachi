@@ -44,6 +44,13 @@
 
 **藏经阁** 弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
 
+### 飞升之境（v1.0.0 正式版）
+
+- **道法自然（Tool Surface v2）**：重塑灵枢展露之貌。舍弃冗杂，新立 `tachi_search`、`tachi_save` 等统一法门，以供寻常灵核轻取。更添统御令旗（`tachi_dispatch`、`approve_merge`）供主尊调遣偏师。
+- **传世经阁（Wiki System）**：新辟维基阵法，纳 `tachi_wiki_write`、`tachi_wiki_search`、`wiki_browse` 等经籍刻印之法，并以 `wiki_lint` 巡阅，专为群仙长效共参而筑。
+- **划疆而治（Domain Management）**：新增疆域之治（`register_domain`、`list_domains` 等），各域互不侵扰，更可定独立之生灭轮回（GC 阈值）。
+- **洗尽铅华（架构归宗）**：OpenClaw 旁支法脉（JS Bridge）尽数斩断归元，今后天上地下皆以 MCP 纯血大阵为宗。百余法器尽数收归 `tools.rs` 统一调拨。
+
 ### 近次修补（v0.16.4）
 
 - **FTS 旧索补脉**：新增 `tachi backfill-fts [--db PATH] [--dry-run] [--full]`。可先验 `memories_fts` 缺口，亦可增量补齐，若旧索走火入魔，亦可一令重筑全表。
@@ -174,8 +181,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
    - 下载并安装 OpenClaw `tachi` 插件
    - 若检测到 `~/.openclaw/openclaw.json`，则自动写入 `plugins.allow`、`plugins.load.paths` 与 `plugins.slots.memory = "tachi"`
 
-   如仅需安装 OpenClaw 插件兼容旧流程，可执行：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
+   （按：OpenClaw 之 Node.js 皮囊已于 v1.0.0 悉数剥离，今后天上地下皆以纯血 MCP 大阵通讯。）
 
    可选：自动扫描本机常见 Agent 配置并注入 Tachi MCP 入口：
    python3 scripts/setup_agent_mcp.py --apply
@@ -205,7 +211,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 
 ## ✨ 五、 镇派绝学
 
-- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`, 可选) 与 Python (`PyO3`) 以应变千万。OpenClaw 分舵优先经 MCP stdio 通讯管道直连 Tachi 二进制，NAPI 为备降旁路。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
+- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Python (`PyO3`) 以应变千万。至于 Node.js (`NAPI-RS`) 之旁支皮囊已于 v1.0.0 尽数褪去，OpenClaw 等分舵今后皆奉纯血 MCP 通讯管道直连 Tachi 真身。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
 - **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
 - **🔍 三分天下（多系搜魂）**：
   - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥。
@@ -240,6 +246,8 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🛡️ 山门把关（Capture Gate）**：入库之时设四重试炼——域不可缺、路径须入二十二阁之一、非 markdown 长文之 Dump、字数过二百（scratch 阁除外）。`force=true` 可破后两关。`warn`（默认）、`enforce`、`off` 三档由 `TACHI_CAPTURE_GATE` 调控，免致低信噪之碎片滥入库藏。
 - **🏭 熔炉工籍（Foundry Job Lifecycle）**：神经熔炉之工籍今得加固，终了之因以原子之法烙于 metadata，GC Retention 延至三十日，更有工籍存亡总览（`job_status_histogram`）供掌师审阅。
 - **🧠 能力推荐**：`recommend_capability`、`recommend_skill`、`recommend_toolchain`、`prepare_capability_bundle`——藏经阁可为任务择选最优法器组合，点石成金。
+- **🎭 千机化相与令旗（Facade & Delegation）**：新制精悍法器十数（`tachi_search`、`tachi_save` 等）以供日常轻取，更添统御令旗（`tachi_dispatch`、`approve_merge`、`tachi_complete`），助主尊灵核调遣偏师，平息跨域战事。
+- **📚 维基万象阵（Wiki System）**：新辟传世典籍之所，纳 `tachi_wiki_write`、`tachi_wiki_search`、`wiki_browse` 等经籍刻印之法，并以 `wiki_lint` 巡阅经史，专为群仙共参、薪火相传而设。
 
 ---
 

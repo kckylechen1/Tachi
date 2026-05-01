@@ -139,8 +139,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
    - 下载并安装 OpenClaw `tachi` 插件
    - 若检测到 `~/.openclaw/openclaw.json`，则自动写入 `plugins.allow`、`plugins.load.paths` 与 `plugins.slots.memory = "tachi"`
 
-   如仅需安装 OpenClaw 插件兼容旧流程，可执行：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
+   注：OpenClaw 的 Node.js 原生桥接层已于 v1.0.0 移除，现全面采用原生 Tachi MCP 二进制通信。
 
    可选：自动扫描本机常见 Agent 配置并写入 Tachi MCP 入口：
    python3 scripts/setup_agent_mcp.py --apply
@@ -170,7 +169,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 
 ## ✨ 核心特性
 
-- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`, 可选) 和 Python (`PyO3`) 提供原生高性能绑定。OpenClaw 插件优先通过 MCP stdio 协议连接 Tachi 二进制，NAPI 为可选备降路径。最终暴露工具数由内置工具 + 已注册 MCP/Skill 动态决定。
+- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Python (`PyO3`) 提供原生高性能绑定。Node.js (`NAPI-RS`) 桥接层已于 v1.0.0 移除，OpenClaw 等插件现纯粹依赖稳定、跨平台的 MCP stdio 协议连接 Tachi 原生二进制。最终暴露工具数由内置工具 + 已注册 MCP/Skill 动态决定。
 - **🗂️ 文件系统命名空间**：记忆信息摒弃扁平存储，采用 `path` 路径参数（如 `/user/preferences`, `/project/architecture`）进行拓扑层级管理，有效实现业务数据的隔离与精准定向。
 - **🔍 三通道分流检索引擎**：
   - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
@@ -206,6 +205,8 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🛡️ 入库把关（Capture Gate）**：`save_memory` 时自动校验 domain、path 合规性、内容质量（防 markdown dump）与最小字数（默认 200，scratch 路径除外）。支持 `warn`（默认）/`enforce`/`off` 三档，由 `TACHI_CAPTURE_GATE` 环境变量控制。
 - **🏭 Foundry 任务生命周期加固**：任务终了原因以原子方式写入 metadata，GC Retention 延长至 30 天，新增 `job_status_histogram` 总览。
 - **🔌 OpenClaw 总录桥接**：OpenClaw 现在通过 `~/.tachi/manifest.json` 路由自身数据库，默认捕获门坎升至 200 字，MCP JSON 解析增强容错（BOM/空格/括号失衡）。
+- **🎭 工具门面 v2 (Facade & Delegation)**：提供紧凑、聚焦任务的统一工具入口 (`tachi_search`, `tachi_web_search`, `tachi_save`) 以及高阶的智能体调度与评估能力 (`tachi_dispatch`, `approve_merge`, `tachi_complete`)，专为跨 Agent 编排设计。
+- **📚 Wiki 知识库系统**：内置的持久化知识管理系统 (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`)，针对多智能体间的长效知识共享与沉淀进行了优化。
 
 ---
 

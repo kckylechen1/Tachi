@@ -26,7 +26,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/s
 
 ```bash
 tachi --version
-# Expected: tachi 0.16.4 (or later)
+# Expected: tachi 1.0.0 (or later)
 ```
 
 If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
@@ -42,7 +42,7 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
 
 | Agent | Config File |
 |---|---|
-| Claude Code | `~/.claude/mcp.json` |
+| Claude Code | `~/.claude/.mcp.json` |
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Cursor | `~/.cursor/mcp.json` |
 | OpenCode | `~/.config/opencode/config.json` (mcpServers section) |
@@ -154,36 +154,41 @@ This will:
 
 ---
 
-## Available MCP Tools (77+)
+## Available MCP Tools (120+)
 
-Once connected, Tachi exposes 77+ MCP tools organized into layers:
+Once connected, Tachi exposes 120+ MCP tools organized into layers. Most hosts should use a profile so they see a compact task-focused surface instead of the full admin catalog.
 
 ### Core Memory
-`save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`
+`save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
+*(Aliases: `cyberbrain_write`, `cyberbrain_search`)*
 
-### Knowledge Graph
+### Knowledge Graph & Domains
 `add_edge`, `get_edges`, `memory_graph`
+`register_domain`, `get_domain`, `list_domains`, `delete_domain`
 
 ### State & Config
 `set_state`, `get_state`
 
 ### Extraction & Ingestion
-`extract_facts`, `ingest_event`
+`extract_facts`, `ingest_event`, `ingest`, `ingest_source`
 
-### Neural Foundry (Context Lifecycle)
+### Neural Foundry (Context Lifecycle & Evolution)
 `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`
+`synthesize_agent_evolution`, `queue_agent_evolution`, `list_agent_evolution_proposals`, `review_agent_evolution_proposal`, `project_agent_profile`
 
 ### Capability Hub
 `hub_register`, `hub_discover`, `hub_get`, `hub_call`, `hub_feedback`, `hub_stats`, `hub_set_enabled`, `hub_disconnect`, `hub_review`, `hub_set_active_version`, `hub_export_skills`
+*(Aliases: `section9_review`)*
 
 ### Skill Packs
-`pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`
+`pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`, `projection_list`
 
 ### Virtual Capabilities
 `vc_register`, `vc_bind`, `vc_resolve`, `vc_list`
 
 ### Ghost Whispers (Pub/Sub)
 `ghost_publish`, `ghost_subscribe`, `ghost_topics`, `ghost_ack`, `ghost_reflect`, `ghost_promote`
+*(Aliases: `ghost_whisper`, `ghost_listen`, `ghost_channels`)*
 
 ### Agent Identity
 `agent_register`, `agent_whoami`, `handoff_leave`, `handoff_check`
@@ -196,39 +201,47 @@ Once connected, Tachi exposes 77+ MCP tools organized into layers:
 
 ### Sandbox & Governance
 `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
+*(Aliases: `shell_set_policy`, `shell_get_policy`, `shell_list_policies`, `shell_exec_audit`)*
 
 ### Recommendations
 `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`
 
+### Facade & Delegation
+`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `approve_merge`, `tachi_complete`
+*(Aliases for real tools: `tachi_task_brief`, `tachi_progress_check`)*
+
+### Wiki System
+`wiki_lint`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_search`, `wiki_browse`
+
 ### Utilities
-`skill_evolve`, `run_skill`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `section9_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`, `tachi_doctor_scan`
 
 ### Tool Surface Selection
 
 Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select an additive surface bundle:
 
-- `observe` — read-only memory + capability recommendation
+- `standard` — Curated Tool Surface v2 for IDEs and CLI agents (11 tools: tachi_search, tachi_save, run_skill, tachi_dispatch, etc.)
+- `delegate` — Minimal surface for worker agents spawned by `tachi_dispatch` (7 tools)
+- `observe` — Read-only memory + capability recommendation
 - `remember` — `observe` + `save_memory`, `extract_facts`, `run_skill`
 - `coordinate` — `remember` + ghost / kanban / handoff tools
 - `operate` — `remember` + runtime hooks and gateway/evolution helpers
-- `admin` — full surface
+- `admin` — Full surface (120+ tools)
 
 Host aliases:
 
-- `codex`, `claude`, `cursor`, `trae`, `ide`, `agent` → `remember`
-- `antigravity` → `coordinate`
-- `workflow` → `coordinate + operate`
-- `openclaw`, `runtime`, `adapter`, `ops` → `operate`
+- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`
+- `worker`, `subagent`, `delegate` → `delegate`
+- `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
 
 Examples:
 
 ```bash
-tachi --profile remember
-TACHI_PROFILE=antigravity tachi
-TACHI_PROFILE=observe+coordinate tachi
+tachi --profile standard
+TACHI_PROFILE=claude-code tachi
 ```
 
-If no profile is specified, Tachi keeps the historical `admin` default for compatibility. New host integrations should set an explicit surface.
+If no profile is specified, Tachi keeps the historical `admin` default for compatibility. New host integrations should explicitly set a profile like `standard`.
 
 ---
 

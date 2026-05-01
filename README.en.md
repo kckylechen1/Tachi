@@ -136,8 +136,7 @@ Please install the Tachi memory extension for OpenClaw:
    - download and install the OpenClaw `tachi` plugin
    - auto-update `~/.openclaw/openclaw.json` when present, including `plugins.allow`, `plugins.load.paths`, and `plugins.slots.memory = "tachi"`
 
-   If you only want the legacy OpenClaw-plugin-only flow, run:
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
+   Note: The legacy Node.js bridge has been removed as of v1.0.0. The OpenClaw plugin now strictly communicates via the native Tachi MCP binary over stdio.
 
    Optional: auto-detect local agent configs and inject a Tachi MCP entry:
    python3 scripts/setup_agent_mcp.py --apply
@@ -167,7 +166,7 @@ Operational notes:
 
 ## ✨ Key Features
 
-- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`, optional) and Python (`PyO3`). The OpenClaw plugin communicates via MCP stdio by default, with NAPI as an optional fallback. Built-in tools plus registered proxy/skill tools are exposed dynamically.
+- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Python (`PyO3`). The legacy Node.js (`NAPI-RS`) bridge was removed in v1.0.0, and plugins like OpenClaw now communicate exclusively via the stable cross-platform MCP stdio protocol. Built-in tools plus registered proxy/skill tools are exposed dynamically.
 - **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
 - **🔍 3-Channel Hybrid Search Engine**:
   - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
@@ -203,6 +202,8 @@ Operational notes:
 - **🛡️ Capture Gate**: Pre-write validation on `save_memory` — domain required, path must match allowed buckets, markdown-dump detection, and configurable min-chars floor (default 200, scratch-exempt). Three modes: `warn` (default), `enforce`, `off` via `TACHI_CAPTURE_GATE`.
 - **🏭 Foundry Job Lifecycle Hardening**: Atomic terminal-reason metadata updates, GC retention extended to 30 days, and `job_status_histogram` for cross-DB overview.
 - **🔌 OpenClaw Manifest Bridge**: OpenClaw now routes through `~/.tachi/manifest.json`, raises default capture floor to 200 chars, and tolerates noisy MCP JSON (BOM, whitespace, bracket recovery).
+- **🎭 Tool Surface v2 (Facade & Delegation)**: Provides compact, task-focused unified tools (`tachi_search`, `tachi_web_search`, `tachi_save`, etc.) along with advanced delegation and evaluation capabilities (`tachi_dispatch`, `approve_merge`, `tachi_complete`) for cross-agent orchestration.
+- **📚 Wiki System**: Built-in, durable knowledge base system (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`) optimized for multi-agent knowledge sharing.
 
 ---
 

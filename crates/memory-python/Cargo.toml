@@ -1,6 +1,6 @@
 [package]
 name = "memory-python"
-version = "0.17.0"
+version = "1.0.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "PyO3 Python binding for memory-core (replaces sqlite3 in memory-mcp)"
