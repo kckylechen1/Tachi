@@ -90,7 +90,6 @@ pub(crate) async fn handle_hub_register(
     if params.cap_type == "skill" {
         let mut def: serde_json::Value = serde_json::from_str::<serde_json::Value>(&cap_definition)
             .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
-
         if !def.is_object() {
             return Err("invalid skill definition JSON: expected object".to_string());
         }
@@ -228,9 +227,9 @@ pub(crate) async fn handle_hub_register(
                             Ok(parsed) => parsed,
                             Err(e) => {
                                 eprintln!(
-                                        "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
-                                        cap_id, e
-                                    );
+                                    "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
+                                    cap_id, e
+                                );
                                 serde_json::json!({"summary": analysis_raw})
                             }
                         };

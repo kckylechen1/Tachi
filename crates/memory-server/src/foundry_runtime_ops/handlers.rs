@@ -80,13 +80,34 @@ pub(crate) async fn handle_compact_rollup(
             }))
             .collect::<Vec<_>>(),
     });
-    let draft = run_compaction_model(
+    let draft = match run_compaction_model(
         server,
         crate::prompts::COMPACT_ROLLUP_PROMPT,
         &payload,
         params.max_output_tokens,
     )
-    .await?;
+    .await
+    {
+        Ok(draft) => draft,
+        Err(err) => {
+            return serde_json::to_string(&json!({
+                "status": "failed",
+                "reason": "llm_compaction_failed",
+                "error": err,
+                "agent_id": params.agent_id,
+                "conversation_id": params.conversation_id,
+                "rollup_id": params.rollup_id,
+                "compacted_text": "",
+                "estimated_tokens": 0,
+                "target_tokens": params.target_tokens.max(32),
+                "salient_topics": [],
+                "durable_signals": [],
+                "source_item_count": items.len(),
+                "section": null,
+            }))
+            .map_err(|e| format!("Failed to serialize compact_rollup response: {e}"));
+        }
+    };
     let compacted_text = draft.compacted_text.trim().to_string();
     let estimated_tokens = estimate_token_count(&compacted_text);
     let source_refs = items
@@ -403,13 +424,34 @@ pub(crate) async fn handle_compact_context(
         "current_summary": params.current_summary,
         "messages": params.messages,
     });
-    let draft = run_compaction_model(
+    let draft = match run_compaction_model(
         server,
         crate::prompts::COMPACT_CONTEXT_PROMPT,
         &payload,
         params.max_output_tokens,
     )
-    .await?;
+    .await
+    {
+        Ok(draft) => draft,
+        Err(err) => {
+            return serde_json::to_string(&json!({
+                "status": "failed",
+                "reason": "llm_compaction_failed",
+                "error": err,
+                "trigger": params.trigger,
+                "conversation_id": params.conversation_id,
+                "window_id": params.window_id,
+                "compacted_text": "",
+                "estimated_tokens": 0,
+                "target_tokens": params.target_tokens.max(32),
+                "salient_topics": [],
+                "durable_signals": [],
+                "captured_memory_ids": [],
+                "queued_job_ids": [],
+            }))
+            .map_err(|e| format!("Failed to serialize compact_context response: {e}"));
+        }
+    };
     let compacted_text = draft.compacted_text.trim().to_string();
     let estimated_tokens = estimate_token_count(&compacted_text);
 
@@ -817,7 +859,7 @@ pub(crate) async fn handle_capture_session(
     });
     let request = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("Failed to serialize session capture payload: {e}"))?;
-    let raw = server
+    let drafts = match server
         .llm
         .call_extract_llm(
             crate::prompts::SESSION_CAPTURE_PROMPT,
@@ -826,8 +868,38 @@ pub(crate) async fn handle_capture_session(
             0.1,
             2400,
         )
-        .await?;
-    let drafts = parse_session_capture_response(&raw)?;
+        .await
+    {
+        Ok(raw) => match parse_session_capture_response(&raw) {
+            Ok(drafts) => drafts,
+            Err(err) if entries.is_empty() => {
+                return serde_json::to_string(&json!({
+                    "status": "failed",
+                    "reason": "llm_capture_parse_failed",
+                    "error": err,
+                    "captured": 0,
+                    "conversation_id": params.conversation_id,
+                    "turn_id": params.turn_id,
+                    "agent_id": params.agent_id,
+                }))
+                .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+            }
+            Err(_) => Vec::new(),
+        },
+        Err(err) if entries.is_empty() => {
+            return serde_json::to_string(&json!({
+                "status": "failed",
+                "reason": "llm_capture_failed",
+                "error": err,
+                "captured": 0,
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+            }))
+            .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+        }
+        Err(_) => Vec::new(),
+    };
 
     if drafts.is_empty() && entries.is_empty() {
         return serde_json::to_string(&json!({
