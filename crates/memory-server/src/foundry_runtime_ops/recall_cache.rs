@@ -82,8 +82,7 @@ pub(super) async fn process_recall_rerank_cache_job(
     let path_prefix = job_metadata_string(&item.job.metadata, "path_prefix")
         .or_else(|| normalize_path_prefix_value(&item.path_prefix));
     let agent_role = job_metadata_string(&item.job.metadata, "agent_role");
-    let project = job_metadata_string(&item.job.metadata, "project")
-        .or(item.named_project.clone());
+    let project = job_metadata_string(&item.job.metadata, "project").or(item.named_project.clone());
     let scope = if item.target_db == DbScope::Project {
         "project".to_string()
     } else {
