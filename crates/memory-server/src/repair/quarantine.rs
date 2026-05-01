@@ -84,6 +84,44 @@ impl RepairRule for QuarantineSweep {
 
 // ─── Subcommands ─────────────────────────────────────────────────────────────
 
+/// B5: known historical migrations for `metadata.quarantine.expected_db`.
+///
+/// PR-3 v4 stamped `expected_db` with the absolute DB path that *should*
+/// have owned the row. Some of those paths are now stale because the
+/// extension layout moved on disk:
+///
+///   `~/.openclaw/local-plugins/extensions/memory-hybrid-bridge/data/agents/<X>/memory.db`
+///                                ↓
+///   `~/.openclaw/extensions/tachi/data/agents/<X>/memory.db`
+///
+/// Without this rewrite, `restore-all --to-db <label>` filters by canonical
+/// path equality and matches zero rows even though the user's intent —
+/// "move these to the modern home of the same agent" — is unambiguous.
+///
+/// We deliberately keep the mapping table tiny and explicit (one entry).
+/// Generic tail-matching would risk collapsing unrelated DBs that happen
+/// to share an `agents/<X>/memory.db` suffix.
+const LEGACY_EXPECTED_DB_REWRITES: &[(&str, &str)] = &[(
+    "/.openclaw/local-plugins/extensions/memory-hybrid-bridge/data/agents/",
+    "/.openclaw/extensions/tachi/data/agents/",
+)];
+
+/// Apply known legacy→current path rewrites to a stale `expected_db`. Pure
+/// string substitution — no I/O. Returns the original on no-match so call
+/// sites can chain with `canonicalize` without losing information.
+pub(crate) fn rewrite_legacy_expected_db(raw: &str) -> String {
+    for (from, to) in LEGACY_EXPECTED_DB_REWRITES {
+        if let Some(idx) = raw.find(from) {
+            let mut out = String::with_capacity(raw.len() + to.len());
+            out.push_str(&raw[..idx]);
+            out.push_str(to);
+            out.push_str(&raw[idx + from.len()..]);
+            return out;
+        }
+    }
+    raw.to_string()
+}
+
 #[derive(Debug)]
 struct QRow {
     id: String,
@@ -257,12 +295,18 @@ pub fn cmd_restore_all(
     let rows = collect_quarantined(manifest)?;
 
     // Filter: rows whose expected_db canonicalizes to the destination.
+    //
+    // B5: `expected_db` may point at a stale path that no longer exists on
+    // disk (e.g. the historical `memory-hybrid-bridge` location). We first
+    // run it through `rewrite_legacy_expected_db` so the canonicalize step
+    // resolves against the modern home of the same DB before comparing.
     let mut moves: Vec<&QRow> = rows
         .iter()
         .filter(|q| {
-            let canon = std::fs::canonicalize(&q.expected_db)
+            let rewritten = rewrite_legacy_expected_db(&q.expected_db);
+            let canon = std::fs::canonicalize(&rewritten)
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| q.expected_db.clone());
+                .unwrap_or(rewritten);
             canon == dest_canonical
         })
         .collect();

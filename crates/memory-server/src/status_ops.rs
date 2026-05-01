@@ -42,24 +42,43 @@ const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 pub(crate) async fn run_status(
     watch: bool,
     json_out: bool,
+    hide_orphans: bool,
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !watch {
-        return render_one(json_out, app_home, global_db_path, project_db_path);
+        return render_one(
+            json_out,
+            hide_orphans,
+            app_home,
+            global_db_path,
+            project_db_path,
+        );
     }
 
     if json_out {
         // --watch + --json doesn't make sense (JSON consumers don't want a
         // screen-clearing infinite stream). Treat as one-shot.
-        return render_one(true, app_home, global_db_path, project_db_path);
+        return render_one(
+            true,
+            hide_orphans,
+            app_home,
+            global_db_path,
+            project_db_path,
+        );
     }
 
     loop {
         // ANSI clear + cursor home so each frame replaces the previous.
         print!("\x1b[2J\x1b[H");
-        if let Err(e) = render_one(false, app_home, global_db_path, project_db_path) {
+        if let Err(e) = render_one(
+            false,
+            hide_orphans,
+            app_home,
+            global_db_path,
+            project_db_path,
+        ) {
             eprintln!("[!] status render failed: {e}");
         }
         tokio::time::sleep(WATCH_INTERVAL).await;
@@ -68,6 +87,7 @@ pub(crate) async fn run_status(
 
 fn render_one(
     json_out: bool,
+    hide_orphans: bool,
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
@@ -75,6 +95,9 @@ fn render_one(
     let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
 
     if json_out {
+        // JSON consumers always see the full snapshot incl. orphans, so
+        // dashboards/scripts retain visibility regardless of how the
+        // operator filters their human-readable view.
         let v = serde_json::to_value(&snapshot)?;
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -102,19 +125,42 @@ fn render_one(
     }
     println!();
 
-    // Manifest section
+    // Manifest section.
+    //
+    // B6: when --hide-orphans is passed, suppress per-row noise from DBs
+    // the daemon's scheduler has no route to (typically agent-owned DBs
+    // from extensions whose hub plugin is not installed). Orphans still
+    // appear in --json output and in the Summary count below so the total
+    // is never silently understated.
+    let visible_dbs: Vec<&DbStatus> = snapshot
+        .dbs
+        .iter()
+        .filter(|db| !(hide_orphans && db.orphan))
+        .collect();
+    let hidden_orphans = snapshot.dbs.len() - visible_dbs.len();
+
     println!("Manifest ({} dbs)", snapshot.dbs.len());
     if snapshot.dbs.is_empty() {
         println!("  [!] manifest empty or missing — run `tachi doctor` to populate it");
     }
-    for db in &snapshot.dbs {
+    if hidden_orphans > 0 {
+        println!(
+            "  [i] {hidden_orphans} orphan db{plural} hidden by --hide-orphans (still counted in Summary)",
+            plural = if hidden_orphans == 1 { "" } else { "s" },
+        );
+    }
+    for db in &visible_dbs {
         let stuck_marker = if db.stuck_in_progress > 0 {
             format!(" [!] {} stuck in_progress", db.stuck_in_progress)
         } else {
             String::new()
         };
+        // "orphan" = manifest entry exists but the running daemon's
+        // scheduler has no route that maps writes to that DB. It's
+        // informational, not an error — extensions register manifest
+        // rows whose hub plugin may be inactive on this host.
         let orphan_marker = if db.orphan {
-            " [!] orphan (no scheduler route)"
+            " [i] orphan (no scheduler route on this host — informational, not an error)"
         } else {
             ""
         };
@@ -139,7 +185,7 @@ fn render_one(
     let total_orphan = snapshot.dbs.iter().filter(|d| d.orphan).count();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
     println!(
-        "Summary: {n} dbs, {pending} total pending, {orphan} orphan, {stuck} stuck in_progress",
+        "Summary: {n} dbs, {pending} total pending, {orphan} orphan (informational), {stuck} stuck in_progress",
         n = snapshot.dbs.len(),
         pending = total_pending,
         orphan = total_orphan,
@@ -487,6 +533,14 @@ pub(crate) async fn run_foundry(
             let manifest = Manifest::load(&manifest_path).unwrap_or_else(|_| Manifest::empty());
             let mut entries: Vec<serde_json::Value> = Vec::new();
             for entry in &manifest.dbs {
+                // B4: skip checkpoint-copy fixtures (`*.db.checkpointed.<ts>.db`).
+                // These are produced by the daemon's WAL-checkpoint copy-aside
+                // dance during integration tests; they're never user-meaningful
+                // foundry targets but kept getting picked up by manifest scans
+                // because they live next to real DBs in `tmp/`.
+                if is_checkpoint_fixture_path(&entry.path) {
+                    continue;
+                }
                 let p = PathBuf::from(&entry.path);
                 if !p.exists() {
                     entries.push(json!({
@@ -518,7 +572,13 @@ pub(crate) async fn run_foundry(
                     let db = e.get("db").and_then(|v| v.as_str()).unwrap_or("?");
                     let label = e.get("label").and_then(|v| v.as_str()).unwrap_or("?");
                     if let Some(err) = e.get("error").and_then(|v| v.as_str()) {
-                        println!("[X] {label:<20} {db}  ({err})");
+                        // B4: route failure rows to stderr so a user piping
+                        // the clean `[OK]` list (`tachi foundry config-list
+                        // 2>/dev/null | awk ...`) doesn't get a poisoned
+                        // table. Behavior of `--json` is unchanged: machine
+                        // consumers always get the full structured list on
+                        // stdout including the `error` field.
+                        eprintln!("[X] {label:<20} {db}  ({err})");
                     } else {
                         let cfg = e.get("config").cloned().unwrap_or(serde_json::Value::Null);
                         let enabled = cfg.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -543,6 +603,26 @@ pub(crate) async fn run_foundry(
             Ok(())
         }
     }
+}
+
+/// B4: a path is a checkpoint-copy fixture if its filename matches the
+/// daemon's internal WAL copy-aside naming scheme:
+/// `<base>.db.checkpointed.<RFC3339-ish-stamp>.db`. These are throw-away
+/// byproducts of integration tests / WAL truncation rescues; they should
+/// never appear in user-facing manifest listings.
+///
+/// Detection is purely lexical (no stat / no I/O) so it stays cheap inside
+/// the manifest-iteration loop. We require BOTH the `.checkpointed.` infix
+/// AND a final `.db` extension so we don't accidentally suppress real DBs
+/// that happen to have the substring elsewhere in their absolute path
+/// (e.g. an unfortunate parent directory name).
+fn is_checkpoint_fixture_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let file = lower
+        .rsplit(std::path::MAIN_SEPARATOR)
+        .next()
+        .unwrap_or(&lower);
+    file.contains(".checkpointed.") && file.ends_with(".db")
 }
 
 fn read_per_db_config(path: &Path) -> Result<PerDbConfig, Box<dyn std::error::Error>> {
@@ -576,5 +656,56 @@ mod tests {
     fn truncate_honors_max() {
         assert_eq!(truncate("abc", 5), "abc");
         assert_eq!(truncate("abcdefghij", 5), "abcd…");
+    }
+
+    /// B4: `tachi foundry config-list` must skip checkpoint-copy fixtures
+    /// (`*.db.checkpointed.<stamp>.db`) but keep real DBs. Pure-lexical
+    /// classifier so the manifest loop stays I/O-free.
+    #[test]
+    fn checkpoint_fixture_classifier_recognizes_only_real_fixtures() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let cases = [
+            // Real production DBs — must NOT be suppressed.
+            (
+                format!("{sep}Users{sep}u{sep}.tachi{sep}global{sep}memory.db"),
+                false,
+            ),
+            (
+                format!("{sep}home{sep}u{sep}.openclaw{sep}agents{sep}main{sep}memory.db"),
+                false,
+            ),
+            // Parent directory contains the substring but the file does not.
+            (
+                format!("{sep}srv{sep}checkpointed{sep}prod{sep}memory.db"),
+                false,
+            ),
+            // Non-.db artifacts the daemon may leave behind — we only filter
+            // the canonical `.db` copy fixture.
+            (
+                format!("{sep}tmp{sep}feature-daemon-global.db.checkpointed.20260430T012609Z.sqlite"),
+                false,
+            ),
+            // Real fixtures — MUST be suppressed.
+            (
+                format!("{sep}tmp{sep}feature-daemon-global.db.checkpointed.20260430T012609Z.db"),
+                true,
+            ),
+            (
+                format!("{sep}tmp{sep}feature-daemon-project.db.checkpointed.20260430T015747Z.db"),
+                true,
+            ),
+            // Mixed-case stamps still classified (lowercase compare).
+            (
+                format!("{sep}tmp{sep}foo.db.CHECKPOINTED.20260430T015747Z.DB"),
+                true,
+            ),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(
+                is_checkpoint_fixture_path(&path),
+                expected,
+                "is_checkpoint_fixture_path({path:?}) misclassified"
+            );
+        }
     }
 }

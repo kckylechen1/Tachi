@@ -78,14 +78,18 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
-    /// Save a memory
-    Save {
-        text: String,
-        #[arg(long)]
-        path: Option<String>,
-        #[arg(long)]
-        importance: Option<f64>,
-    },
+    /// Save a memory. Alias of `remember`.
+    ///
+    /// Historically `save` only accepted `--path` / `--importance`. We now
+    /// route it through the same `remember`-backed handler so the full flag
+    /// set (tags, scope, project, category, topic, domain, retention-policy,
+    /// summary, force) is available on both verbs and behavior is identical
+    /// (daemon-forwarding when a hub is up, in-process otherwise). The legacy
+    /// 3-flag invocation `tachi save TEXT --path X --importance Y` keeps
+    /// working unchanged because clap accepts the alias and all extra flags
+    /// are optional.
+    // Variant intentionally elided — see `Remember` below, which carries
+    // `#[command(alias = "save")]`.
     /// Show database statistics
     Stats,
     /// Inspect onboarding readiness and current local Tachi setup
@@ -171,6 +175,7 @@ pub(crate) enum Commands {
     },
     /// Quick-capture a memory note. Mirrors the `remember` MCP tool.
     /// Forwards to a running daemon if one is detected; otherwise runs in-process.
+    #[command(alias = "save")]
     Remember {
         /// Full text content to remember.
         text: String,
@@ -303,6 +308,18 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON instead of the human summary.
         #[arg(long)]
         json: bool,
+        /// Suppress the per-row `[!] orphan` marker and exclude orphan DBs
+        /// from the human-readable Manifest section. Orphans still count
+        /// toward the Summary line so the total isn't silently misleading.
+        ///
+        /// "Orphan" here means: the manifest entry exists, but the running
+        /// daemon's scheduler has no route that maps writes to that DB
+        /// (typically agent-owned DBs from extensions whose hub plugin is
+        /// not installed). It is NOT an error — just noise on hosts that
+        /// keep many extension manifests around. `--json` output is
+        /// unaffected so machine consumers always see the orphan flag.
+        #[arg(long)]
+        hide_orphans: bool,
     },
     /// Inspect or terminate the running tachi daemon.
     Daemon {

@@ -55,6 +55,23 @@ fn fts_state(ctx: &DbContext) -> Result<(i64, Option<i64>), RepairError> {
     Ok((mem_count, Some(fts_count)))
 }
 
+/// Count orphaned FTS5 shadow tables (those whose virtual parent
+/// `memories_fts` no longer exists). When > 0, a naive
+/// `CREATE VIRTUAL TABLE memories_fts` will fail with
+/// "table memories_fts_data already exists".
+fn orphan_shadow_count(ctx: &DbContext) -> Result<i64, RepairError> {
+    let count: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type='table' AND name LIKE 'memories_fts\\_%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(RepairError::from)?;
+    Ok(count)
+}
+
 impl RepairRule for FtsRebuild {
     fn id(&self) -> &'static str {
         "R1"
@@ -67,12 +84,25 @@ impl RepairRule for FtsRebuild {
     fn dry_run(&self, ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
         let mut r = RuleReport::new(self.id(), self.name(), ctx.label.clone());
         let (mem, fts_opt) = fts_state(ctx)?;
+        let orphan_shadows = orphan_shadow_count(ctx)?;
         match fts_opt {
             None => {
-                r.findings
-                    .push(Finding::new("fts_table_missing", 1).with_detail(json!({
-                        "memories": mem,
-                    })));
+                let mut detail = json!({
+                    "memories": mem,
+                    "orphan_shadow_tables": orphan_shadows,
+                });
+                let kind = if orphan_shadows > 0 {
+                    // Surface the actual blocking condition so the user sees
+                    // what `apply` is going to clean up before the rebuild.
+                    detail["note"] = json!(
+                        "orphan FTS5 shadow tables detected; \
+                         apply will DROP them before recreating memories_fts"
+                    );
+                    "fts_table_missing_with_orphan_shadows"
+                } else {
+                    "fts_table_missing"
+                };
+                r.findings.push(Finding::new(kind, 1).with_detail(detail));
             }
             Some(fts) if fts != mem => {
                 let drift = (mem - fts).abs() as usize;
@@ -94,8 +124,26 @@ impl RepairRule for FtsRebuild {
             return Ok(r);
         }
         // Drop + recreate atomically so a crash cannot leave the DB without FTS.
+        //
+        // We must defensively drop the FTS5 shadow tables as well: a previous
+        // half-applied DROP / aborted CREATE can leave `memories_fts_data` (and
+        // friends) orphaned without the parent virtual table, in which case
+        // `CREATE VIRTUAL TABLE memories_fts` fails with
+        // `error creating shadow table memories_fts_data: table ... already exists`
+        // and the DB is stuck — the exact `project:quant` symptom.
         let tx = ctx.conn.transaction()?;
         tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
+        for shadow in [
+            "memories_fts_data",
+            "memories_fts_idx",
+            "memories_fts_docsize",
+            "memories_fts_config",
+            "memories_fts_content",
+        ] {
+            // These are real tables once the virtual parent is gone, so a plain
+            // DROP TABLE works. IF EXISTS keeps the healthy path a no-op.
+            tx.execute_batch(&format!("DROP TABLE IF EXISTS {shadow};"))?;
+        }
         tx.execute_batch(FTS_CREATE)?;
         let inserted = tx.execute(FTS_INSERT, [])?;
         tx.commit()?;
