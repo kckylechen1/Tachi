@@ -467,6 +467,12 @@ impl Manifest {
             }
             let role = classify_role(f);
             let owner = derive_owner(&f.scope_hint);
+            // WalOrphan is permitted for write: a non-empty -wal sidecar is the
+            // *expected* state for any SQLite DB held open by a running daemon.
+            // SQLite performs WAL recovery automatically on next open, so the
+            // classification reflects "needs inspection" rather than corruption.
+            // Without this, a healthy DB held by the live daemon trips
+            // check_writable and self-locks the CLI (see PR-A).
             let allow_write = matches!(
                 f.classification,
                 DbClassification::Healthy | DbClassification::WalOrphan
