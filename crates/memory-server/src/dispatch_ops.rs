@@ -100,12 +100,15 @@ async fn generate_mcp_config(
 
     let config = json!({ "mcpServers": mcp_servers });
 
-    // Write to temp file under ~/.tachi/tmp/
-    let tachi_home = std::env::var("TACHI_HOME")
-        .ok()
-        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.tachi")))
-        .unwrap_or_else(|| "~/.tachi".to_string());
-    let tmp_dir = PathBuf::from(&tachi_home).join("tmp");
+    // Write to temp file under $TACHI_HOME/tmp or $HOME/.tachi/tmp
+    let tmp_dir = if let Ok(home) = std::env::var("TACHI_HOME") {
+        PathBuf::from(home)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".tachi")
+    } else {
+        std::env::temp_dir().join("tachi")
+    };
+    let tmp_dir = tmp_dir.join("tmp");
     std::fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("Failed to create tmp dir for MCP config: {e}"))?;
 
@@ -251,7 +254,7 @@ fn build_codex_command(
     if profile == "full" {
         cmd.arg("--dangerously-bypass-approvals-and-sandbox");
     } else {
-        let sandbox = params.sandbox.as_deref().unwrap_or("danger-full-access");
+        let sandbox = params.sandbox.as_deref().unwrap_or("workspace-write");
         cmd.arg("--sandbox").arg(sandbox);
     }
 
@@ -388,6 +391,17 @@ pub(crate) async fn handle_tachi_dispatch(
     // 2. Assemble prompt
     let prompt = assemble_prompt(server, &params).await;
 
+    // Scope guard: ensure MCP config cleanup on all exit paths (including errors)
+    struct McpCleanup(Option<PathBuf>);
+    impl Drop for McpCleanup {
+        fn drop(&mut self) {
+            if let Some(ref path) = self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let _mcp_cleanup = McpCleanup(mcp_config_path.clone());
+
     // 3. Build command
     let cmd = match agent_norm.as_str() {
         "claude" | "claude-code" | "claude-cli" => {
@@ -408,12 +422,7 @@ pub(crate) async fn handle_tachi_dispatch(
     // 4. Execute
     let result = run_agent_subprocess(cmd, timeout).await?;
 
-    // 5. Clean up temp MCP config
-    if let Some(ref path) = mcp_config_path {
-        let _ = std::fs::remove_file(path);
-    }
-
-    // 6. Parse output
+    // 5. Parse output
     let parsed_output = match agent_norm.as_str() {
         "claude" | "claude-code" | "claude-cli" => parse_claude_output(&result.output),
         _ => json!({"text": result.output}),
