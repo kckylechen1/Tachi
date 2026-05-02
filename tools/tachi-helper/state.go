@@ -9,9 +9,7 @@ type State struct {
 	VaultInit    bool
 	VaultLocked  bool
 	VaultEntries int
-
-	// Vault
-	Password string
+	TachiMissing bool
 
 	// Keys
 	DotEnvFiles []string

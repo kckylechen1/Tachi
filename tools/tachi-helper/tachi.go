@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -157,7 +159,7 @@ func appendToRC(rcPath string) error {
 	}
 	defer f.Close()
 
-	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env)\"; }\n"
+	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env --keychain)\"; }\n"
 	_, err = f.WriteString(block)
 	return err
 }
@@ -170,43 +172,114 @@ var mcpServerDefs = []struct {
 	NeedsKey string
 }{
 	{
-		ID:   "mcp:exa",
-		Name: "Exa (Web Search)",
-		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","exa-mcp-server"],"discovered_tools":[]}`,
+		ID:       "mcp:exa",
+		Name:     "Exa (Web Search)",
+		DefJSON:  `{"transport":"stdio","command":"npx","args":["-y","exa-mcp-server"],"discovered_tools":[]}`,
 		NeedsKey: "EXA_API_KEY",
 	},
 	{
-		ID:   "mcp:tavily",
-		Name: "Tavily (Web Search)",
-		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","tavily-mcp"],"discovered_tools":[]}`,
+		ID:       "mcp:tavily",
+		Name:     "Tavily (Web Search)",
+		DefJSON:  `{"transport":"stdio","command":"npx","args":["-y","tavily-mcp"],"discovered_tools":[]}`,
 		NeedsKey: "TAVILY_API_KEY",
 	},
 	{
-		ID:   "mcp:context7",
-		Name: "Context7 (Documentation)",
+		ID:      "mcp:context7",
+		Name:    "Context7 (Documentation)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@upstash/context7-mcp@latest"],"discovered_tools":[]}`,
 	},
 	{
-		ID:   "mcp:memory",
-		Name: "Memory (Persistent Memory)",
+		ID:      "mcp:memory",
+		Name:    "Memory (Persistent Memory)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"discovered_tools":[]}`,
 	},
 	{
-		ID:   "mcp:filesystem",
-		Name: "Filesystem (File Access)",
+		ID:      "mcp:filesystem",
+		Name:    "Filesystem (File Access)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/"],"discovered_tools":[]}`,
 	},
 }
 
-// parseJSONString extracts a string field from JSON.
-func parseJSONString(data []byte, field string) string {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return ""
+type vaultStatus struct {
+	Initialized bool `json:"initialized"`
+	Locked      bool `json:"locked"`
+	EntryCount  int  `json:"entry_count"`
+}
+
+func getVaultStatus() (vaultStatus, error) {
+	tc, err := NewMCPClient()
+	if err != nil {
+		return vaultStatus{}, err
 	}
-	var val string
-	if raw, ok := obj[field]; ok {
-		json.Unmarshal(raw, &val)
+	defer tc.Close()
+
+	result, err := tc.CallTool("vault_status", map[string]interface{}{})
+	if err != nil {
+		return vaultStatus{}, err
 	}
-	return val
+
+	text, err := toolResultText(result)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+
+	var status vaultStatus
+	if err := json.Unmarshal([]byte(text), &status); err != nil {
+		return vaultStatus{}, fmt.Errorf("parse vault status: %w", err)
+	}
+	return status, nil
+}
+
+func toolResultText(data []byte) (string, error) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parse tool result: %w", err)
+	}
+	if result.IsError {
+		return "", fmt.Errorf("tool returned error")
+	}
+	for _, item := range result.Content {
+		if item.Type == "text" && item.Text != "" {
+			return item.Text, nil
+		}
+	}
+	return "", fmt.Errorf("tool result contained no text")
+}
+
+func generatePassword() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func storeInKeychain(password string) error {
+	cmd := exec.Command("security", "add-generic-password",
+		"-U",
+		"-s", "tachi-vault",
+		"-a", "default",
+		"-w", password,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func readFromKeychain() (string, error) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", "tachi-vault",
+		"-a", "default",
+		"-w",
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to read from Keychain: %s", strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -159,7 +160,15 @@ func (s *mcpStep) registerMCPs() tea.Cmd {
 }
 
 func registerHubMCP(id, name, definition string) error {
-	// Use tachi hub register CLI command
-	// tachi hub register --id mcp:exa --cap-type mcp --name "Exa" --definition '{...}'
-	return nil // TODO: exec tachi hub register
+	cmd := exec.Command("tachi", "hub", "register",
+		id,
+		"--cap-type", "mcp",
+		"--name", name,
+		"--definition", definition,
+	)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }

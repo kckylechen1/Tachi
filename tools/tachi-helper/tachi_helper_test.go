@@ -153,6 +153,17 @@ func TestMCPClientStart(t *testing.T) {
 	t.Logf("vault_status result: %s", string(result))
 }
 
+func TestToolResultText(t *testing.T) {
+	result := []byte(`{"content":[{"type":"text","text":"{\"initialized\":true,\"locked\":false,\"entry_count\":2}"}],"isError":false}`)
+	text, err := toolResultText(result)
+	if err != nil {
+		t.Fatalf("toolResultText error: %v", err)
+	}
+	if !strings.Contains(text, `"initialized":true`) {
+		t.Fatalf("unexpected tool text: %s", text)
+	}
+}
+
 func TestWizardInit(t *testing.T) {
 	w := newWizard()
 	if w.current != stepWelcome {
@@ -179,6 +190,9 @@ func TestAppendToRC(t *testing.T) {
 	content := string(data)
 	if !strings.Contains(content, "tachi_env()") {
 		t.Errorf("rc file doesn't contain helper function: %s", content)
+	}
+	if !strings.Contains(content, "--keychain") {
+		t.Errorf("rc file helper missing --keychain flag: %s", content)
 	}
 
 	// Should be idempotent

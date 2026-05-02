@@ -1470,6 +1470,7 @@ async fn run_env_command(
     filter: Option<&str>,
     env_only: bool,
     stdin_password: bool,
+    keychain: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_cli_store_read_only(global_db_path)?;
 
@@ -1484,7 +1485,19 @@ async fn run_env_command(
         })?;
 
     // 2. Prompt for password
-    let password = if stdin_password {
+    let password = if keychain {
+        let output = std::process::Command::new("security")
+            .args(["find-generic-password", "-s", "tachi-vault", "-a", "default", "-w"])
+            .output()?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to read from Keychain: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        String::from_utf8(output.stdout)?.trim().to_string()
+    } else if stdin_password {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
         buf.trim().to_string()
@@ -2639,6 +2652,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         filter,
         env_only,
         stdin_password,
+        keychain,
     } = &command
     {
         return run_env_command(
@@ -2646,6 +2660,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             filter.as_deref(),
             *env_only,
             *stdin_password,
+            *keychain,
         )
         .await;
     }
