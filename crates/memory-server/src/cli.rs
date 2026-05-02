@@ -354,6 +354,23 @@ pub(crate) enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Output vault secrets as `export KEY=VALUE` lines for shell injection.
+    /// Replaces project .env files — pipe into shell with: eval "$(tachi env)"
+    /// or add to .bashrc/.zshrc: eval "$(tachi env)".
+    Env {
+        /// Optional glob-style filter on secret names (e.g. "OPENAI*" or "*API_KEY").
+        /// Without this flag, all unrestricted secrets are emitted.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Only emit secrets whose names match a prefix commonly used as env vars
+        /// (all-uppercase with underscores, e.g. OPENAI_API_KEY).
+        #[arg(long)]
+        env_only: bool,
+        /// Read master password from stdin instead of prompting interactively.
+        /// Useful for scripts: echo "$PASS" | tachi env --stdin-password
+        #[arg(long)]
+        stdin_password: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
