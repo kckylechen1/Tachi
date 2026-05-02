@@ -4,18 +4,19 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
+	"os"
 	"os/exec"
 	"sync"
 )
 
 // MCPClient communicates with tachi via MCP stdio protocol (JSON-RPC).
 type MCPClient struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	mu     sync.Mutex
-	nextID int
+	cmd     *exec.Cmd
+	stdin   *bufio.Writer
+	stdout  *bufio.Reader
+	closeFn func()
+	mu      sync.Mutex
+	nextID  int
 }
 
 type jsonRPCRequest struct {
@@ -27,7 +28,7 @@ type jsonRPCRequest struct {
 
 type jsonRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      int             `json:"jsonrpc"`
+	ID      int             `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
@@ -39,11 +40,17 @@ type jsonRPCError struct {
 
 func NewMCPClient() (*MCPClient, error) {
 	cmd := exec.Command("tachi")
-	stdin, err := cmd.StdinPipe()
+	// Force admin profile so all tools (including vault) are accessible,
+	// regardless of any TACHI_EXPOSED_TOOLS or TACHI_PROFILE in the user's env.
+	cmd.Env = append(os.Environ(),
+		"TACHI_PROFILE=admin",
+		"TACHI_EXPOSED_TOOLS=",
+	)
+	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdin pipe: %w", err)
 	}
-	stdout, err := cmd.StdoutPipe()
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
@@ -53,10 +60,17 @@ func NewMCPClient() (*MCPClient, error) {
 		return nil, fmt.Errorf("start tachi: %w", err)
 	}
 
+	// Wrap stdin in a buffered writer so we can flush after each request
+	stdin := bufio.NewWriter(stdinPipe)
+
 	tc := &MCPClient{
 		cmd:    cmd,
 		stdin:  stdin,
-		stdout: bufio.NewReader(stdout),
+		stdout: bufio.NewReader(stdoutPipe),
+		closeFn: func() {
+			stdinPipe.Close()
+			cmd.Wait()
+		},
 	}
 
 	if err := tc.initialize(); err != nil {
@@ -81,13 +95,14 @@ func (tc *MCPClient) initialize() error {
 	}
 
 	// Send initialized notification (no ID = notification)
-	notif := jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "notifications/initialized",
+	notif := map[string]string{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
 	}
 	data, _ := json.Marshal(notif)
 	data = append(data, '\n')
 	tc.stdin.Write(data)
+	tc.stdin.Flush()
 
 	return nil
 }
@@ -121,6 +136,9 @@ func (tc *MCPClient) sendRequest(method string, params interface{}) (json.RawMes
 	if _, err := tc.stdin.Write(data); err != nil {
 		return nil, fmt.Errorf("write request: %w", err)
 	}
+	if err := tc.stdin.Flush(); err != nil {
+		return nil, fmt.Errorf("flush request: %w", err)
+	}
 
 	// Read response lines until we get one with matching ID
 	for {
@@ -147,6 +165,5 @@ func (tc *MCPClient) sendRequest(method string, params interface{}) (json.RawMes
 }
 
 func (tc *MCPClient) Close() {
-	tc.stdin.Close()
-	tc.cmd.Wait()
+	tc.closeFn()
 }
