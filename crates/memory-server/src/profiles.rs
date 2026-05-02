@@ -197,7 +197,6 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_plan",
     "tachi_unstick",
     "tachi_browse",
-    "tachi_complete",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -209,6 +208,7 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "ingest_event",
     // Facade write tool
     "tachi_save",
+    "tachi_complete",
 ];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -289,6 +289,103 @@ const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "run_skill",
 ];
 
+#[cfg(test)]
+const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
+    "add_edge",
+    "chain_skills",
+    "cyberbrain_search",
+    "cyberbrain_write",
+    "delete_domain",
+    "delete_memory",
+    "distill_trajectory",
+    "dlq_list",
+    "dlq_retry",
+    "get_domain",
+    "get_state",
+    "hub_export_skills",
+    "hub_feedback",
+    "hub_get",
+    "hub_quick_add",
+    "hub_register",
+    "hub_review",
+    "hub_set_active_version",
+    "hub_set_enabled",
+    "hub_stats",
+    "ingest",
+    "ingest_source",
+    "list_domains",
+    "memory_gc",
+    "pack_get",
+    "pack_list",
+    "pack_project",
+    "pack_register",
+    "pack_remove",
+    "projection_list",
+    "register_domain",
+    "sandbox_check",
+    "sandbox_exec_audit",
+    "sandbox_get_policy",
+    "sandbox_list_policies",
+    "sandbox_set_policy",
+    "sandbox_set_rule",
+    "section9_audit_log",
+    "section9_review",
+    "set_state",
+    "shell_exec_audit",
+    "shell_get_policy",
+    "shell_list_policies",
+    "shell_set_policy",
+    "skill_evolve",
+    "tachi_audit_log",
+    "tachi_doctor_scan",
+    "tachi_init_project_db",
+    "vault_get",
+    "vault_init",
+    "vault_list",
+    "vault_lock",
+    "vault_remove",
+    "vault_set",
+    "vault_setup_rotation",
+    "vault_status",
+    "vault_unlock",
+    "vc_bind",
+    "vc_list",
+    "vc_register",
+    "vc_resolve",
+];
+
+#[cfg(test)]
+const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
+    "archive_memory",
+    "capture_session",
+    "compact_rollup",
+    "compact_session_memory",
+    "extract_facts",
+    "ghost_ack",
+    "ghost_listen",
+    "ghost_promote",
+    "ghost_publish",
+    "ghost_reflect",
+    "ghost_subscribe",
+    "ghost_whisper",
+    "handoff_check",
+    "handoff_leave",
+    "ingest_event",
+    "post_card",
+    "project_agent_profile",
+    "queue_agent_evolution",
+    "remember",
+    "review_agent_evolution_proposal",
+    "save_memory",
+    "sync_memories",
+    "synthesize_agent_evolution",
+    "tachi_complete",
+    "tachi_handoff",
+    "tachi_save",
+    "tachi_wiki_write",
+    "update_card",
+];
+
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     let mut resolved: Option<ToolProfile> = None;
 
@@ -340,6 +437,19 @@ pub(super) fn filter_tool_defs(
         .into_iter()
         .filter(|tool| tool_visible(tool.name.as_ref(), profile, env_patterns))
         .collect()
+}
+
+#[cfg(test)]
+fn tool_matches_bundle(tool_name: &str, bundle: ToolBundle) -> bool {
+    matches_any_pattern(
+        tool_name,
+        match bundle {
+            ToolBundle::Observe => OBSERVE_TOOL_PATTERNS.iter().copied(),
+            ToolBundle::Remember => REMEMBER_TOOL_PATTERNS.iter().copied(),
+            ToolBundle::Coordinate => COORDINATE_TOOL_PATTERNS.iter().copied(),
+            ToolBundle::Operate => OPERATE_TOOL_PATTERNS.iter().copied(),
+        },
+    )
 }
 
 pub(super) fn tool_visible(
@@ -427,6 +537,52 @@ pub(super) fn tool_name_matches_pattern(tool_name: &str, pattern: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn ensure_test_env() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
+            std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
+            std::env::set_var("SILICONFLOW_MODEL", "test-model");
+            std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+            std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
+        });
+    }
+
+    fn native_route_names() -> Vec<String> {
+        ensure_test_env();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("profiles test runtime");
+        let _guard = runtime.enter();
+        let db_path = std::env::temp_dir().join(format!(
+            "profiles-metadata-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
+        let mut names: Vec<String> = server
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn bundle_count(tool_name: &str) -> usize {
+        [
+            ToolBundle::Observe,
+            ToolBundle::Remember,
+            ToolBundle::Coordinate,
+            ToolBundle::Operate,
+        ]
+        .into_iter()
+        .filter(|bundle| tool_matches_bundle(tool_name, *bundle))
+        .count()
+    }
 
     fn test_tool(name: &str) -> Tool {
         serde_json::from_value(serde_json::json!({
@@ -564,6 +720,86 @@ mod tests {
                 "ingest_event".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
+        let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+        for name in STANDARD_MINIMAL_TOOL_PATTERNS
+            .iter()
+            .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
+        {
+            assert!(
+                route_names.contains(*name),
+                "minimal allow-list entry '{name}' is missing from the tool router"
+            );
+        }
+    }
+
+    #[test]
+    fn every_bundle_wildcard_matches_a_real_tool() {
+        let route_names = native_route_names();
+        let wildcard_patterns: BTreeSet<&str> = OBSERVE_TOOL_PATTERNS
+            .iter()
+            .chain(REMEMBER_TOOL_PATTERNS.iter())
+            .chain(COORDINATE_TOOL_PATTERNS.iter())
+            .chain(OPERATE_TOOL_PATTERNS.iter())
+            .chain(STANDARD_MINIMAL_TOOL_PATTERNS.iter())
+            .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
+            .copied()
+            .filter(|pattern| pattern.contains('*'))
+            .collect();
+
+        for pattern in wildcard_patterns {
+            assert!(
+                route_names
+                    .iter()
+                    .any(|tool_name| tool_name_matches_pattern(tool_name, pattern)),
+                "wildcard pattern '{pattern}' matches no routed tool"
+            );
+        }
+    }
+
+    #[test]
+    fn every_real_tool_is_either_bundled_or_explicitly_admin_only() {
+        let route_names = native_route_names();
+        let actual_admin_only: BTreeSet<String> = route_names
+            .iter()
+            .filter(|tool_name| bundle_count(tool_name) == 0)
+            .cloned()
+            .collect();
+        let expected_admin_only: BTreeSet<String> = ADMIN_ONLY_NATIVE_ROUTE_NAMES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+
+        assert_eq!(
+            actual_admin_only, expected_admin_only,
+            "new routed tools must either join a non-admin bundle or be explicitly classified as admin-only"
+        );
+    }
+
+    #[test]
+    fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
+        let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+
+        for tool_name in NON_ADMIN_WRITE_ROUTE_NAMES {
+            assert!(
+                route_names.contains(*tool_name),
+                "expected non-admin write tool '{tool_name}' to exist in the router"
+            );
+            assert!(
+                bundle_count(tool_name) > 0,
+                "non-admin write tool '{tool_name}' must belong to a bundle"
+            );
+            assert!(
+                crate::CACHE_INVALIDATING_TOOLS.contains(tool_name),
+                "non-admin write tool '{tool_name}' must invalidate the read cache"
+            );
+        }
+
+        assert!(!tool_matches_bundle("tachi_complete", ToolBundle::Observe));
+        assert!(tool_matches_bundle("tachi_complete", ToolBundle::Remember));
     }
 
     #[test]
