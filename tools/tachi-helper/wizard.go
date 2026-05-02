@@ -78,10 +78,8 @@ func (w *wizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			if w.current == stepSummary {
-				w.quitting = true
-				return w, tea.Quit
-			}
+			w.quitting = true
+			return w, tea.Quit
 		case "esc":
 			if w.current == stepSummary {
 				w.quitting = true
@@ -123,43 +121,68 @@ func (w *wizard) View() string {
 	sb.WriteString("\n")
 	sb.WriteString(w.renderFooter())
 
+	wWidth := w.width - 4
+	if wWidth > 80 {
+		wWidth = 80 // Max width
+	} else if wWidth < 50 {
+		wWidth = 50 // Min width
+	}
+
 	return boxStyle.
-		Width(max(w.width-4, 50)).
-		Height(max(w.height-2, 20)).
+		Width(wWidth).
+		Height(max(w.height-4, 20)).
 		Render(sb.String())
 }
 
 func (w *wizard) renderHeader(s step) string {
-	title := headerStyle.Render(fmt.Sprintf("Tachi Setup  ·  Step %d of %d", w.current+1, stepCount))
+	badge := stepBadgeStyle.Render(fmt.Sprintf(" STEP %d/%d ", w.current+1, stepCount))
+	title := headerStyle.Render(T("Tachi Setup Wizard", "Tachi 设置向导"))
+
+	headerRow := lipgloss.JoinHorizontal(lipgloss.Center, badge, title)
 
 	var steps []string
-	labels := []string{"Welcome", "Health Check", "Vault", "Keys", "MCP", "Shell", "Done"}
+	labels := []string{
+		T("Welcome", "欢迎"),
+		T("Health", "健康检查"),
+		T("Vault", "密钥库"),
+		T("Keys", "密钥"),
+		T("MCP", "MCP"),
+		T("Shell", "Shell"),
+		T("Done", "完成"),
+	}
 	for i, label := range labels {
 		switch {
 		case stepID(i) < w.current:
 			steps = append(steps, stepDoneStyle.Render("✓ "+label))
 		case stepID(i) == w.current:
-			steps = append(steps, stepActiveStyle.Render("● "+label))
+			steps = append(steps, stepActiveStyle.Render("▶ "+label))
 		default:
-			steps = append(steps, stepPendingStyle.Render("○ "+label))
+			steps = append(steps, stepPendingStyle.Render("· "+label))
 		}
 	}
-	progress := lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(steps, stepPendingStyle.Render("  ")))
+	progress := lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(steps, stepPendingStyle.Render(" ─ ")))
+	divider := dividerStyle.Render(strings.Repeat("─", 65))
 
 	sub := subtitleStyle.Render(s.subtitle())
+	
+	headerBlock := headerRow + "\n\n" + progress + "\n" + divider
 	if sub != "" {
-		sub = "\n" + sub
+		headerBlock += "\n\n" + sub
 	}
 
-	return title + "\n" + progress + sub
+	return headerBlock
 }
 
 func (w *wizard) renderFooter() string {
+	var hint string
 	if w.current == stepWelcome {
-		return hintStyle.Render("enter: start  ·  q: quit")
+		hint = T("enter: start  ·  L: language  ·  q: quit", "回车: 开始  ·  L: 切换中英文  ·  q: 退出")
+	} else if w.current == stepSummary {
+		hint = T("q / esc: quit", "q / esc: 退出")
+	} else {
+		hint = T("enter: next  ·  esc: back  ·  q: quit", "回车: 下一步  ·  esc: 上一步  ·  q: 退出")
 	}
-	if w.current == stepSummary {
-		return hintStyle.Render("q / esc: quit")
-	}
-	return hintStyle.Render("enter: next  ·  esc: back  ·  q: quit")
+
+	divider := dividerStyle.Render(strings.Repeat("─", 60))
+	return "\n" + divider + "\n" + hintStyle.Render(hint)
 }

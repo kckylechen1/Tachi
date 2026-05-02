@@ -138,8 +138,8 @@ func detectShell() (shellType, rcPath string) {
 	}
 }
 
-// appendToRC appends the eval line to the shell rc file if not already present.
-func appendToRC(rcPath, line string) error {
+// appendToRC appends the tachi_env helper function to the shell rc file if not already present.
+func appendToRC(rcPath string) error {
 	// Read existing content
 	data, err := os.ReadFile(rcPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -147,8 +147,7 @@ func appendToRC(rcPath, line string) error {
 	}
 
 	content := string(data)
-	if strings.Contains(content, `eval "$(tachi env)"`) ||
-		strings.Contains(content, "eval \"$(tachi env)\"") {
+	if strings.Contains(content, "tachi_env()") {
 		return nil // already present
 	}
 
@@ -158,7 +157,7 @@ func appendToRC(rcPath, line string) error {
 	}
 	defer f.Close()
 
-	block := fmt.Sprintf("\n# Tachi — inject vault secrets into shell environment\neval \"$(tachi env)\"\n")
+	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env)\"; }\n"
 	_, err = f.WriteString(block)
 	return err
 }

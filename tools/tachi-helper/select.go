@@ -68,21 +68,28 @@ func (m *multiSelect) View() string {
 	for i, item := range m.items {
 		cursor := "  "
 		if i == m.cursor {
-			cursor = cursorStyle.Render("› ")
+			cursor = lipgloss.NewStyle().Foreground(accent).Render("▐ ")
 		}
 
 		checkbox := "[ ]"
 		if m.selected[i] {
 			checkbox = checkedStyle.Render("[✓]")
+		} else {
+			checkbox = lipgloss.NewStyle().Foreground(textDim).Render("[ ]")
 		}
 
 		label := itemStyle.Render(item)
 		if i == m.cursor {
-			label = lipgloss.NewStyle().Foreground(bright).Render(item)
+			label = lipgloss.NewStyle().Foreground(textBright).Bold(true).Render(item)
 		}
 
-		sb.WriteString(fmt.Sprintf("  %s %s %s\n", cursor, checkbox, label))
+		line := fmt.Sprintf("%s%s %s", cursor, checkbox, label)
+		if i == m.cursor {
+			line = lipgloss.NewStyle().Background(bgActive).PaddingRight(2).Render(line)
+		}
+
+		sb.WriteString("  " + line + "\n")
 	}
-	sb.WriteString(hintStyle.Render("\n  ↑/↓: navigate  ·  space: toggle  ·  a: select all"))
+	sb.WriteString(hintStyle.Render(T("\n  ↑/↓: navigate  ·  space: toggle  ·  a: select all", "\n  ↑/↓: 导航  ·  空格: 切换  ·  a: 全选")))
 	return sb.String()
 }

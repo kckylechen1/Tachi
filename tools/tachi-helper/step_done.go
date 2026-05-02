@@ -16,8 +16,8 @@ func newDoneStep(state *State) *doneStep {
 	return &doneStep{state: state}
 }
 
-func (s *doneStep) title() string    { return "Setup Complete" }
-func (s *doneStep) subtitle() string { return "Summary of what was configured" }
+func (s *doneStep) title() string    { return T("Setup Complete", "设置完成") }
+func (s *doneStep) subtitle() string { return T("Summary of what was configured", "配置摘要") }
 
 func (s *doneStep) Init() tea.Cmd { return nil }
 
@@ -29,18 +29,18 @@ func (s *doneStep) View() string {
 	var sb strings.Builder
 
 	sb.WriteString("\n")
-	sb.WriteString(checkStyle.Render("  ✓ Tachi setup complete!") + "\n\n")
+	sb.WriteString(checkStyle.Render("  ✓ "+T("Tachi setup complete!", "Tachi 设置完成!")) + "\n\n")
 	sb.WriteString("  ─────────────────────────────────────\n\n")
 
 	items := []struct {
 		label string
 		value string
 	}{
-		{"Tachi", s.state.TachiVersion},
-		{"Vault", fmt.Sprintf("initialized (%d keys)", len(s.state.SelectedKeys))},
-		{"Keys imported", fmt.Sprintf("%d", len(s.state.SelectedKeys))},
-		{"MCP servers", fmt.Sprintf("%d registered", len(s.state.SelectedMCPs))},
-		{"Shell", fmt.Sprintf("%s (%s)", s.state.ShellType, boolMark(s.state.RCModified))},
+		{T("Tachi", "Tachi"), s.state.TachiVersion},
+		{T("Vault", "密钥库"), fmt.Sprintf(T("initialized (%d keys)", "已初始化 (%d 个密钥)"), len(s.state.SelectedKeys))},
+		{T("Keys imported", "已导入密钥"), fmt.Sprintf("%d", len(s.state.SelectedKeys))},
+		{T("MCP servers", "MCP 服务器"), fmt.Sprintf(T("%d registered", "已注册 %d 个"), len(s.state.SelectedMCPs))},
+		{T("Shell", "Shell"), fmt.Sprintf("%s (%s)", s.state.ShellType, boolMark(s.state.RCModified))},
 	}
 
 	for _, item := range items {
@@ -51,22 +51,22 @@ func (s *doneStep) View() string {
 	}
 
 	sb.WriteString("\n  ─────────────────────────────────────\n\n")
-	sb.WriteString("  Next steps:\n\n")
-	sb.WriteString("  1. " + lipgloss.NewStyle().Foreground(bright).Bold(true).Render(`Run: eval "$(tachi env)"`) + "\n")
-	sb.WriteString("     to load secrets into your current shell\n\n")
-	sb.WriteString("  2. Store more keys with your MCP client:\n")
+	sb.WriteString("  " + T("Next steps:", "后续步骤:") + "\n\n")
+	sb.WriteString("  1. " + lipgloss.NewStyle().Foreground(textBright).Bold(true).Render(T("Load secrets into your shell:", "将密钥加载到 shell 中:")) + "\n")
+	sb.WriteString("     " + codeStyle.Render(`tachi_env`) + "\n\n")
+	sb.WriteString("  2. " + lipgloss.NewStyle().Foreground(textBright).Bold(true).Render(T("Store more keys via MCP:", "通过 MCP 存储更多密钥:")) + "\n")
 	sb.WriteString("     " + codeStyle.Render(`tachi vault_set(name="KEY", value="secret")`) + "\n\n")
-	sb.WriteString("  3. Remove .env files from your projects:\n")
+	sb.WriteString("  3. " + lipgloss.NewStyle().Foreground(textBright).Bold(true).Render(T("Remove .env files:", "移除 .env 文件:")) + "\n")
 	sb.WriteString("     " + codeStyle.Render(`git rm .env && echo ".env" >> .gitignore`) + "\n")
 
-	sb.WriteString("\n\n" + hintStyle.Render("  q / esc: quit"))
+	sb.WriteString("\n\n" + hintStyle.Render(T("  q / esc: quit", "  q / esc: 退出")))
 
 	return sb.String()
 }
 
 func boolMark(b bool) string {
 	if b {
-		return checkStyle.Render("rc modified")
+		return checkStyle.Render(T("helper added", "已添加辅助函数"))
 	}
-	return "skipped"
+	return T("skipped", "已跳过")
 }

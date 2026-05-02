@@ -19,10 +19,10 @@ const (
 )
 
 type keysStep struct {
-	state  *State
-	phase  keysPhase
-	ms     *multiSelect
-	errMsg string
+	state    *State
+	phase    keysPhase
+	ms       *multiSelect
+	errMsg   string
 	imported int
 	skipped  int
 }
@@ -31,12 +31,12 @@ func newKeysStep(state *State) *keysStep {
 	return &keysStep{state: state}
 }
 
-func (s *keysStep) title() string { return "Import API Keys" }
+func (s *keysStep) title() string { return T("Import API Keys", "导入 API 密钥") }
 func (s *keysStep) subtitle() string {
 	if len(s.state.FoundKeys) == 0 {
-		return "No .env files found to import"
+		return T("No .env files found to import", "未找到可导入的 .env 文件")
 	}
-	return fmt.Sprintf("Found %d keys in .env files — select which to import into Vault", len(s.state.FoundKeys))
+	return fmt.Sprintf(T("Found %d keys in .env files — select which to import into Vault", "在 .env 文件中找到 %d 个密钥 — 选择要导入密钥库的密钥"), len(s.state.FoundKeys))
 }
 
 func (s *keysStep) Init() tea.Cmd {
@@ -130,25 +130,25 @@ func (s *keysStep) View() string {
 
 	switch s.phase {
 	case keysPhaseSkip:
-		sb.WriteString(warnStyle.Render("  ⊘ Skipped") + " — no keys to import\n")
-		sb.WriteString("\n" + hintStyle.Render("  Press Enter to continue"))
+		sb.WriteString(warnStyle.Render("  ⊘ "+T("Skipped", "已跳过")) + T(" — no keys to import\n", " — 没有密钥需要导入\n"))
+		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 
 	case keysPhaseSelect:
-		sb.WriteString("  Select keys to import into Vault:\n\n")
+		sb.WriteString("  " + T("Select keys to import into Vault:", "选择要导入密钥库的密钥:") + "\n\n")
 		sb.WriteString(s.ms.View())
-		sb.WriteString(hintStyle.Render("\n  enter: import selected  ·  s: skip this step"))
+		sb.WriteString(hintStyle.Render(T("\n  enter: import selected  ·  s: skip this step", "\n  回车: 导入选中  ·  s: 跳过此步骤")))
 
 	case keysPhaseImporting:
 		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") +
-			fmt.Sprintf(" Importing %d keys into Vault...\n", len(s.state.SelectedKeys)))
+			fmt.Sprintf(T(" Importing %d keys into Vault...", " 正在导入 %d 个密钥到密钥库..."), len(s.state.SelectedKeys))+"\n")
 
 	case keysPhaseDone:
 		if s.errMsg != "" {
-			sb.WriteString("  " + crossStyle.Render("✗ Import failed: "+s.errMsg) + "\n")
+			sb.WriteString("  " + crossStyle.Render("✗ "+T("Import failed: ", "导入失败: ")+s.errMsg) + "\n")
 		} else {
-			sb.WriteString("  " + checkStyle.Render(fmt.Sprintf("✓ Imported %d key(s) into Vault", s.imported)) + "\n")
+			sb.WriteString("  " + checkStyle.Render(fmt.Sprintf("✓ "+T("Imported %d key(s) into Vault", "已导入 %d 个密钥到密钥库"), s.imported)) + "\n")
 		}
-		sb.WriteString("\n" + hintStyle.Render("  Press Enter to continue"))
+		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 	}
 
 	return sb.String()
@@ -170,7 +170,7 @@ func (s *keysStep) importKeys() tea.Cmd {
 			"password": s.state.Password,
 		})
 		if err != nil {
-			return keysErrorMsg{err: "vault unlock: " + err.Error()}
+			return keysErrorMsg{err: T("vault unlock: ", "密钥库解锁: ") + err.Error()}
 		}
 
 		count := 0
@@ -192,7 +192,7 @@ func (s *keysStep) importKeys() tea.Cmd {
 				"secret_type": "api_key",
 			})
 			if err != nil {
-				return keysErrorMsg{err: fmt.Sprintf("failed to set %s: %s", name, err.Error())}
+				return keysErrorMsg{err: fmt.Sprintf(T("failed to set %s: ", "设置 %s 失败: "), name) + err.Error()}
 			}
 			count++
 		}

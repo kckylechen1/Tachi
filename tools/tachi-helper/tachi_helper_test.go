@@ -170,25 +170,25 @@ func TestAppendToRC(t *testing.T) {
 	// Write initial content
 	os.WriteFile(rcFile, []byte("export PATH=$HOME/bin:$PATH\n"), 0644)
 
-	err := appendToRC(rcFile, `eval "$(tachi env)"`)
+	err := appendToRC(rcFile)
 	if err != nil {
 		t.Fatalf("appendToRC error: %v", err)
 	}
 
 	data, _ := os.ReadFile(rcFile)
 	content := string(data)
-	if !strings.Contains(content, `eval "$(tachi env)"`) {
-		t.Errorf("rc file doesn't contain eval line: %s", content)
+	if !strings.Contains(content, "tachi_env()") {
+		t.Errorf("rc file doesn't contain helper function: %s", content)
 	}
 
 	// Should be idempotent
-	err = appendToRC(rcFile, `eval "$(tachi env)"`)
+	err = appendToRC(rcFile)
 	if err != nil {
 		t.Fatalf("second appendToRC error: %v", err)
 	}
 	data, _ = os.ReadFile(rcFile)
-	lines := strings.Count(string(data), `eval "$(tachi env)"`)
+	lines := strings.Count(string(data), "tachi_env()")
 	if lines != 1 {
-		t.Errorf("eval line appears %d times, want 1", lines)
+		t.Errorf("helper function appears %d times, want 1", lines)
 	}
 }

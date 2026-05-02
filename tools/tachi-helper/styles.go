@@ -2,51 +2,82 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// OpenCode-inspired palette: foreground-only, minimal backgrounds.
 var (
-	accent   = lipgloss.Color("#06B6D4") // cyan
-	success  = lipgloss.Color("#10B981") // green
-	warning  = lipgloss.Color("#F59E0B") // amber
-	danger   = lipgloss.Color("#EF4444") // red
-	dimText  = lipgloss.Color("#71717A") // zinc-500
-	bright   = lipgloss.Color("#FAFAFA") // near white
-	normal   = lipgloss.Color("#E4E4E7") // zinc-200
-	selected = lipgloss.Color("#22D3EE") // cyan-400
-	muted    = lipgloss.Color("#A1A1AA") // zinc-400
+	// Brand Colors
+	accent   = lipgloss.Color("#06B6D4") // Cyan
+	success  = lipgloss.Color("#10B981") // Green
+	warning  = lipgloss.Color("#F59E0B") // Amber
+	danger   = lipgloss.Color("#EF4444") // Red
+
+	// Grayscale
+	textBright = lipgloss.Color("#FAFAFA") // near white
+	textNormal = lipgloss.Color("#E4E4E7") // zinc-200
+	textDim    = lipgloss.Color("#71717A") // zinc-500
+	textMuted  = lipgloss.Color("#A1A1AA") // zinc-400
+
+	// Backgrounds & Borders
+	bgDark   = lipgloss.Color("#18181B") // zinc-900 (code blocks)
+	bgActive = lipgloss.Color("#27272A") // zinc-800 (selected items)
+	border   = lipgloss.Color("#3F3F46") // zinc-700
 )
 
 var (
-	subtitleStyle = lipgloss.NewStyle().
-			Foreground(dimText).
-			MarginBottom(1)
+	// 1. Layout & Border
+	boxStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(border).
+			Padding(1, 3).
+			MarginTop(1)
 
+	// 2. Header
 	headerStyle = lipgloss.NewStyle().
-			Foreground(accent).
+			Foreground(textBright).
 			Bold(true)
 
+	stepBadgeStyle = lipgloss.NewStyle().
+			Background(accent).
+			Foreground(lipgloss.Color("#000000")).
+			Bold(true).
+			Padding(0, 1).
+			MarginRight(1)
+
+	dividerStyle = lipgloss.NewStyle().Foreground(border)
+
+	subtitleStyle = lipgloss.NewStyle().Foreground(textDim)
+
+	// 3. Step Progress Bar
 	stepDoneStyle    = lipgloss.NewStyle().Foreground(success)
 	stepActiveStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	stepPendingStyle = lipgloss.NewStyle().Foreground(dimText)
+	stepPendingStyle = lipgloss.NewStyle().Foreground(textDim)
 
+	// 4. Check Results
 	checkStyle = lipgloss.NewStyle().Foreground(success).Bold(true)
 	crossStyle = lipgloss.NewStyle().Foreground(danger).Bold(true)
 	warnStyle  = lipgloss.NewStyle().Foreground(warning).Bold(true)
 
-	hintStyle = lipgloss.NewStyle().Foreground(dimText)
+	// 5. Inputs & Cursor
+	cursorStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
 
-	cursorStyle  = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	itemStyle    = lipgloss.NewStyle().Foreground(normal)
+	// 6. Lists
+	itemStyle    = lipgloss.NewStyle().Foreground(textNormal)
 	checkedStyle = lipgloss.NewStyle().Foreground(success)
 
-	// No box background — let the terminal bg show through.
-	// Just padding for breathing room.
-	boxStyle = lipgloss.NewStyle().
-			Padding(1, 3)
+	activeItemStyle = lipgloss.NewStyle().
+			Foreground(accent).
+			Background(bgActive).
+			Bold(true).
+			PaddingRight(1)
 
-	// Code: just dim foreground, no background.
-	codeStyle = lipgloss.NewStyle().Foreground(muted)
+	// 7. Code / Commands
+	codeStyle = lipgloss.NewStyle().
+			Foreground(textMuted).
+			Background(bgDark).
+			Padding(0, 1)
 
-	// Labels in key-value pairs.
-	labelDimStyle = lipgloss.NewStyle().Foreground(dimText)
-	valueStyle    = lipgloss.NewStyle().Foreground(normal)
+	// 8. Hints
+	hintStyle = lipgloss.NewStyle().Foreground(textDim)
+
+	// Key-Value pairs
+	labelDimStyle = lipgloss.NewStyle().Foreground(textDim)
+	valueStyle    = lipgloss.NewStyle().Foreground(textBright).Bold(true)
 )

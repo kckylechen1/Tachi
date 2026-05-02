@@ -18,10 +18,10 @@ const (
 )
 
 type mcpStep struct {
-	state     *State
-	phase     mcpPhase
-	ms        *multiSelect
-	errMsg    string
+	state      *State
+	phase      mcpPhase
+	ms         *multiSelect
+	errMsg     string
 	registered int
 }
 
@@ -29,9 +29,9 @@ func newMCPStep(state *State) *mcpStep {
 	return &mcpStep{state: state}
 }
 
-func (s *mcpStep) title() string { return "MCP Servers" }
+func (s *mcpStep) title() string { return T("MCP Servers", "MCP 服务器") }
 func (s *mcpStep) subtitle() string {
-	return "Register MCP servers in the Tachi Hub for all agents to use"
+	return T("Register MCP servers in the Tachi Hub for all agents to use", "在 Tachi Hub 中注册 MCP 服务器供所有代理使用")
 }
 
 func (s *mcpStep) Init() tea.Cmd {
@@ -39,7 +39,7 @@ func (s *mcpStep) Init() tea.Cmd {
 	for i, mcp := range mcpServerDefs {
 		label := mcp.Name
 		if mcp.NeedsKey != "" {
-			label += fmt.Sprintf(" (requires %s)", mcp.NeedsKey)
+			label += fmt.Sprintf(T(" (requires %s)", " (需要 %s)"), mcp.NeedsKey)
 		}
 		items[i] = label
 	}
@@ -95,25 +95,25 @@ func (s *mcpStep) View() string {
 
 	switch s.phase {
 	case mcpPhaseSelect:
-		sb.WriteString("  Select MCP servers to register:\n\n")
+		sb.WriteString("  " + T("Select MCP servers to register:", "选择要注册的 MCP 服务器:") + "\n\n")
 		sb.WriteString(s.ms.View())
-		sb.WriteString(hintStyle.Render("\n  enter: register selected  ·  s: skip"))
+		sb.WriteString(hintStyle.Render(T("\n  enter: register selected  ·  s: skip", "\n  回车: 注册选中  ·  s: 跳过")))
 
 	case mcpPhaseRegistering:
 		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") +
-			fmt.Sprintf(" Registering %d MCP server(s)...\n", len(s.state.SelectedMCPs)))
+			fmt.Sprintf(T(" Registering %d MCP server(s)...", " 正在注册 %d 个 MCP 服务器..."), len(s.state.SelectedMCPs))+"\n")
 
 	case mcpPhaseSkip:
-		sb.WriteString(warnStyle.Render("  ⊘ Skipped") + " — no MCP servers registered\n")
-		sb.WriteString("\n" + hintStyle.Render("  Press Enter to continue"))
+		sb.WriteString(warnStyle.Render("  ⊘ "+T("Skipped", "已跳过")) + T(" — no MCP servers registered\n", " — 未注册 MCP 服务器\n"))
+		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 
 	case mcpPhaseDone:
 		if s.errMsg != "" {
-			sb.WriteString("  " + crossStyle.Render("✗ Registration failed: "+s.errMsg) + "\n")
+			sb.WriteString("  " + crossStyle.Render("✗ "+T("Registration failed: ", "注册失败: ")+s.errMsg) + "\n")
 		} else {
-			sb.WriteString("  " + checkStyle.Render(fmt.Sprintf("✓ Registered %d MCP server(s)", s.registered)) + "\n")
+			sb.WriteString("  " + checkStyle.Render(fmt.Sprintf("✓ "+T("Registered %d MCP server(s)", "已注册 %d 个 MCP 服务器"), s.registered)) + "\n")
 		}
-		sb.WriteString("\n" + hintStyle.Render("  Press Enter to continue"))
+		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 	}
 
 	return sb.String()
@@ -136,7 +136,7 @@ func (s *mcpStep) registerMCPs() tea.Cmd {
 			for i, d := range mcpServerDefs {
 				itemLabel := d.Name
 				if d.NeedsKey != "" {
-					itemLabel += fmt.Sprintf(" (requires %s)", d.NeedsKey)
+					itemLabel += fmt.Sprintf(T(" (requires %s)", " (需要 %s)"), d.NeedsKey)
 				}
 				if itemLabel == label {
 					def = &mcpServerDefs[i]
