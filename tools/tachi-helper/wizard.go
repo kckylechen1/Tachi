@@ -167,7 +167,7 @@ func (w *wizard) renderHeader(s step) string {
 	divider := dividerStyle.Render(strings.Repeat("─", max(min(w.width-8, 65), 30)))
 
 	sub := subtitleStyle.Render(s.subtitle())
-	
+
 	headerBlock := headerRow + "\n\n" + progress + "\n" + divider
 	if sub != "" {
 		headerBlock += "\n\n" + sub

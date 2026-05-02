@@ -108,6 +108,8 @@ Then add to your agent's MCP config:
 }
 ```
 
+> **Default profile changed in v1.0.1**: If `TACHI_PROFILE` is not set, Tachi now defaults to `standard` (12 curated tools) instead of `admin` (all 148 tools). For most agents, `standard` or `coordinate` is sufficient. Set `TACHI_PROFILE=admin` only if you need raw access to vault, hub, and low-level tools.
+>
 > **Note**: Setting `"TACHI_PROFILE": "coordinate"` (or `"remember"`) ensures that standard Agent/IDE sidebars (like Cursor/Claude Desktop) are not cluttered with hundreds of raw Tachi skills.
 > 
 > **🤖 Prompting Tip for IDE Agents**: Because individual skills are hidden in gateway mode, less capable AI assistants might not know how to invoke them organically. We strongly recommend appending the following strict instruction to your IDE's Custom Instructions or `.cursorrules`:
