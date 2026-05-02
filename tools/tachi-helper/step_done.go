@@ -55,9 +55,9 @@ func (s *doneStep) View() string {
 	sb.WriteString("  1. " + lipgloss.NewStyle().Foreground(bright).Bold(true).Render(`Run: eval "$(tachi env)"`) + "\n")
 	sb.WriteString("     to load secrets into your current shell\n\n")
 	sb.WriteString("  2. Store more keys with your MCP client:\n")
-	sb.WriteString("     " + codeBlockStyle.Render(`tachi vault_set(name="KEY", value="secret")`) + "\n\n")
+	sb.WriteString("     " + codeStyle.Render(`tachi vault_set(name="KEY", value="secret")`) + "\n\n")
 	sb.WriteString("  3. Remove .env files from your projects:\n")
-	sb.WriteString("     " + codeBlockStyle.Render(`git rm .env && echo ".env" >> .gitignore`) + "\n")
+	sb.WriteString("     " + codeStyle.Render(`git rm .env && echo ".env" >> .gitignore`) + "\n")
 
 	sb.WriteString("\n\n" + hintStyle.Render("  q / esc: quit"))
 

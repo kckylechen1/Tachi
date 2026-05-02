@@ -79,7 +79,7 @@ func (s *shellStep) View() string {
 		sb.WriteString("  The following line will be appended to ")
 		sb.WriteString(lipgloss.NewStyle().Foreground(accent).Bold(true).Render(shortPath(s.state.ShellRC)))
 		sb.WriteString(":\n\n")
-		sb.WriteString("  " + codeBlockStyle.Render(evalLine))
+		sb.WriteString("  " + codeStyle.Render(evalLine))
 		sb.WriteString("\n\n")
 		sb.WriteString("  This loads your Vault secrets into the shell environment\n")
 		sb.WriteString("  on every terminal start, replacing .env files.\n\n")
@@ -91,18 +91,18 @@ func (s *shellStep) View() string {
 	case shellPhaseSkip:
 		sb.WriteString(warnStyle.Render("  ⊘ Skipped") + " — shell rc not modified\n")
 		sb.WriteString("\n  You can add it manually later:\n")
-		sb.WriteString("  " + codeBlockStyle.Render(`eval "$(tachi env)"`))
+		sb.WriteString("  " + codeStyle.Render(`eval "$(tachi env)"`))
 		sb.WriteString("\n\n" + hintStyle.Render("  Press Enter to continue"))
 
 	case shellPhaseDone:
 		if s.errMsg != "" {
 			sb.WriteString("  " + crossStyle.Render("✗ "+s.errMsg) + "\n")
 			sb.WriteString("\n  Add manually:\n")
-			sb.WriteString("  " + codeBlockStyle.Render(`eval "$(tachi env)"`))
+			sb.WriteString("  " + codeStyle.Render(`eval "$(tachi env)"`))
 		} else {
 			sb.WriteString("  " + checkStyle.Render("✓ Shell integration added to "+shortPath(s.state.ShellRC)) + "\n")
 			sb.WriteString("\n  Run to activate now:\n")
-			sb.WriteString("  " + codeBlockStyle.Render(`source `+s.state.ShellRC))
+			sb.WriteString("  " + codeStyle.Render(`source `+s.state.ShellRC))
 		}
 		sb.WriteString("\n\n" + hintStyle.Render("  Press Enter to continue"))
 	}

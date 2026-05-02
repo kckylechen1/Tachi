@@ -130,7 +130,7 @@ func (w *wizard) View() string {
 }
 
 func (w *wizard) renderHeader(s step) string {
-	title := headerBarStyle.Render(fmt.Sprintf("Tachi Setup  ·  Step %d of %d", w.current+1, stepCount))
+	title := headerStyle.Render(fmt.Sprintf("Tachi Setup  ·  Step %d of %d", w.current+1, stepCount))
 
 	var steps []string
 	labels := []string{"Welcome", "Health Check", "Vault", "Keys", "MCP", "Shell", "Done"}
