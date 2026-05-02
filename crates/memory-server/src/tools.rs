@@ -77,7 +77,9 @@ use crate::vault_ops::{
     handle_vault_list, handle_vault_lock, handle_vault_remove, handle_vault_set,
     handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
 };
-use crate::wiki_ops::{handle_wiki_browse, handle_wiki_lint, handle_wiki_search};
+use crate::wiki_ops::{
+    handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_search,
+};
 use crate::{AgentProfile, MemoryServer};
 
 fn first_text_blocks(result: &rmcp::model::CallToolResult) -> Vec<String> {
@@ -457,6 +459,16 @@ impl MemoryServer {
         Parameters(params): Parameters<WikiWriteParams>,
     ) -> Result<String, String> {
         handle_tachi_wiki_write(self, params).await
+    }
+
+    #[tool(
+        description = "Ingest a URL or local file into the wiki knowledge base, deriving metadata and linking related entries."
+    )]
+    pub(crate) async fn tachi_wiki_ingest(
+        &self,
+        Parameters(params): Parameters<TachiWikiIngestParams>,
+    ) -> Result<String, String> {
+        handle_wiki_ingest(self, params).await
     }
 
     #[tool(

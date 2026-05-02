@@ -1803,6 +1803,33 @@ async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Wiki { action } => match action {
+            crate::cli::WikiAction::Export {
+                format,
+                output,
+                project,
+            } => {
+                if !format.eq_ignore_ascii_case("obsidian") {
+                    return Err(format!(
+                        "unsupported wiki export format '{format}' (expected obsidian)"
+                    )
+                    .into());
+                }
+                let output = if output == PathBuf::from("~") {
+                    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+                } else if let Some(rest) = output.to_string_lossy().strip_prefix("~/") {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .join(rest)
+                } else {
+                    output
+                };
+                let server = MemoryServer::new(db_path.clone(), project_db_path.cloned())?;
+                let result = crate::wiki_ops::export_wiki_obsidian(&server, &project, &output)
+                    .map_err(std::io::Error::other)?;
+                print_pretty_json(&result)
+            }
+        },
         Commands::Remember {
             text,
             tags,

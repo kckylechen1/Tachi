@@ -979,6 +979,20 @@ pub(crate) struct WikiBrowseParams {
     pub project: String,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWikiIngestParams {
+    /// URL or file path to ingest.
+    pub source: String,
+
+    /// Optional topic hint for categorization.
+    #[serde(default)]
+    pub topic: Option<String>,
+
+    /// Whether to update related wiki entries.
+    #[serde(default = "default_true")]
+    pub update_related: bool,
+}
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
 pub(crate) fn fact_to_entry(
     fact: &serde_json::Value,

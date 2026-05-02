@@ -75,6 +75,27 @@ fn make_server() -> MemoryServer {
     MemoryServer::new(db_path, None).expect("failed to create test server")
 }
 
+fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
+    ensure_test_env();
+    let temp_home = TempHomeGuard::new();
+    let global_db = temp_home.temp_home.join("global.sqlite");
+    let server = MemoryServer::new(global_db, None).expect("failed to create test server");
+    (server, temp_home)
+}
+
+fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHomeGuard) {
+    let (server, temp_home) = make_server_with_temp_home();
+    let wiki_dir = temp_home.temp_home.join(".tachi/projects/wiki");
+    std::fs::create_dir_all(&wiki_dir).expect("create wiki project dir");
+    let wiki_db = wiki_dir.join("memory.db");
+    let mut store = MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db"))
+        .expect("open wiki project db");
+    for entry in entries {
+        store.upsert(&entry).expect("seed wiki project entry");
+    }
+    (server, temp_home)
+}
+
 fn make_entry(id: &str) -> MemoryEntry {
     MemoryEntry {
         id: id.to_string(),
@@ -3610,6 +3631,154 @@ async fn tachi_wiki_write_generates_readable_cjk_path_without_domain_warning() {
 }
 
 #[tokio::test]
+async fn wiki_browse_includes_related_entries_and_logs_operation() {
+    let mut alpha = make_entry("wiki-related-alpha");
+    alpha.path = "/wiki/engineering/debugging/alpha".to_string();
+    alpha.summary = "Alpha debugging".to_string();
+    alpha.text = "Alpha debugging lesson for MCP".to_string();
+    alpha.entities = vec!["MCP".to_string()];
+    alpha.importance = 0.7;
+
+    let mut beta = make_entry("wiki-related-beta");
+    beta.path = "/wiki/engineering/debugging/beta".to_string();
+    beta.summary = "Beta debugging".to_string();
+    beta.text = "Beta debugging lesson for MCP".to_string();
+    beta.entities = vec!["MCP".to_string()];
+    beta.importance = 0.9;
+
+    let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
+
+    let response = server
+        .wiki_browse(Parameters(WikiBrowseParams {
+            category: Some("engineering/debugging".to_string()),
+            limit: 10,
+            project: "wiki".to_string(),
+        }))
+        .await
+        .expect("wiki browse should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki browse json");
+    let entries = json["entries"].as_array().expect("entries array");
+    assert!(entries.iter().any(|entry| {
+        entry["related_entries"]
+            .as_array()
+            .is_some_and(|related| related.iter().any(|item| item["id"] == "wiki-related-beta"))
+    }));
+
+    let log = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get("wiki-operation-log")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read wiki log")
+        .expect("wiki log should exist");
+    assert!(log.text.contains("browse | /wiki/engineering/debugging"));
+}
+
+#[tokio::test]
+async fn wiki_search_includes_related_entries_for_top_results() {
+    let mut alpha = make_entry("wiki-search-alpha");
+    alpha.path = "/wiki/engineering/debugging/search-alpha".to_string();
+    alpha.summary = "MCP schema debugging".to_string();
+    alpha.text = "MCP schema debugging requires checking serialization.".to_string();
+    alpha.entities = vec!["MCP".to_string()];
+
+    let mut beta = make_entry("wiki-search-beta");
+    beta.path = "/wiki/engineering/debugging/search-beta".to_string();
+    beta.summary = "MCP transport debugging".to_string();
+    beta.text = "MCP transport debugging should come after schema checks.".to_string();
+    beta.entities = vec!["MCP".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
+
+    let response = server
+        .wiki_search(Parameters(WikiSearchParams {
+            query: "MCP debugging".to_string(),
+            path_prefix: Some("/wiki".to_string()),
+            category: None,
+            top_k: 5,
+            include_archived: false,
+            agent_role: None,
+            project: Some("wiki".to_string()),
+            domain: None,
+            weights: None,
+        }))
+        .await
+        .expect("wiki search should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki search json");
+    assert!(json["results"].as_array().is_some_and(|results| {
+        results.iter().any(|entry| {
+            entry["related_entries"]
+                .as_array()
+                .is_some_and(|related| !related.is_empty())
+        })
+    }));
+}
+
+#[tokio::test]
+async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
+    let mut entry = make_entry("wiki-export-entry");
+    entry.path = "/wiki/engineering/debugging/export".to_string();
+    entry.summary = "Export MCP lesson".to_string();
+    entry.text = "MCP export lesson references MCP explicitly.".to_string();
+    entry.topic = "export-mcp".to_string();
+    entry.keywords = vec!["debugging".to_string()];
+    entry.entities = vec!["MCP".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+    let out_dir = std::env::temp_dir().join(format!("wiki-export-{}", uuid::Uuid::new_v4()));
+
+    let result = crate::wiki_ops::export_wiki_obsidian(&server, "wiki", &out_dir)
+        .expect("wiki export should succeed");
+    assert_eq!(result["count"], json!(1));
+    let md_path = out_dir.join("engineering/debugging/export/export-mcp.md");
+    let markdown = std::fs::read_to_string(&md_path).expect("read exported markdown");
+    assert!(markdown.contains("tags: [\"debugging\"]"));
+    assert!(markdown.contains("[[MCP]] export lesson references [[MCP]] explicitly."));
+    let index = std::fs::read_to_string(out_dir.join("_index.md")).expect("read index");
+    assert!(index.contains("[[export-mcp]]"));
+    let _ = std::fs::remove_dir_all(out_dir);
+}
+
+#[tokio::test]
+async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
+    let mut existing = make_entry("wiki-ingest-existing");
+    existing.path = "/wiki/general/existing".to_string();
+    existing.summary = "Existing ingest topic".to_string();
+    existing.text = "Existing entry for IngestTopic.".to_string();
+    existing.entities = vec!["IngestTopic".to_string()];
+
+    let (server, home) = seed_wiki_project_entries(vec![existing]);
+    let source_path = home.temp_home.join("ingest-source.md");
+    std::fs::write(&source_path, "# Ingest source\nIngestTopic appears in this source.")
+        .expect("write ingest source");
+
+    let response = server
+        .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
+            source: source_path.to_string_lossy().to_string(),
+            topic: Some("IngestTopic".to_string()),
+            update_related: true,
+        }))
+        .await
+        .expect("wiki ingest should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki ingest json");
+    let created_id = json["id"].as_str().expect("created id");
+    assert_eq!(json["status"], json!("created"));
+    assert!(json["related_entries"].as_array().is_some_and(|items| {
+        items.iter().any(|item| item["id"] == "wiki-ingest-existing")
+    }));
+
+    let edges = server
+        .with_named_project_store_read("wiki", |store| {
+            store
+                .get_edges(created_id, "outgoing", Some("references"))
+                .map_err(|e| e.to_string())
+        })
+        .expect("read ingest edges");
+    assert!(edges.iter().any(|edge| edge.target_id == "wiki-ingest-existing"));
+}
+
+#[tokio::test]
 async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
     let server = make_server();
 
@@ -3836,6 +4005,78 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     domain: Some("general".to_string()),
                 },
                 MemoryEntry {
+                    id: "wiki-dirty".to_string(),
+                    path: "/wiki/test/dirty".to_string(),
+                    summary: "dirty <think）leak".to_string(),
+                    text: "A leaked <think） tag should be reported.".to_string(),
+                    importance: 0.7,
+                    timestamp: Utc::now().to_rfc3339(),
+                    category: "fact".to_string(),
+                    topic: "dirty".to_string(),
+                    keywords: vec![],
+                    persons: vec![],
+                    entities: vec![],
+                    location: String::new(),
+                    source: "test".to_string(),
+                    scope: "global".to_string(),
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    metadata: json!({}),
+                    vector: None,
+                    retention_policy: None,
+                    domain: Some("general".to_string()),
+                },
+                MemoryEntry {
+                    id: "wiki-duplicate-a".to_string(),
+                    path: "/wiki/test/duplicate-a".to_string(),
+                    summary: "duplicate a".to_string(),
+                    text: "Duplicate token sequence exact match for wiki lint duplicate detection.".to_string(),
+                    importance: 0.7,
+                    timestamp: Utc::now().to_rfc3339(),
+                    category: "fact".to_string(),
+                    topic: "duplicate".to_string(),
+                    keywords: vec![],
+                    persons: vec![],
+                    entities: vec![],
+                    location: String::new(),
+                    source: "test".to_string(),
+                    scope: "global".to_string(),
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    metadata: json!({}),
+                    vector: None,
+                    retention_policy: None,
+                    domain: Some("general".to_string()),
+                },
+                MemoryEntry {
+                    id: "wiki-duplicate-b".to_string(),
+                    path: "/wiki/test/duplicate-b".to_string(),
+                    summary: "duplicate b".to_string(),
+                    text: "Duplicate token sequence exact match for wiki lint duplicate detection.".to_string(),
+                    importance: 0.7,
+                    timestamp: Utc::now().to_rfc3339(),
+                    category: "fact".to_string(),
+                    topic: "duplicate".to_string(),
+                    keywords: vec![],
+                    persons: vec![],
+                    entities: vec![],
+                    location: String::new(),
+                    source: "test".to_string(),
+                    scope: "global".to_string(),
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    metadata: json!({}),
+                    vector: None,
+                    retention_policy: None,
+                    domain: Some("general".to_string()),
+                },
+                MemoryEntry {
                     id: "skill-snapshot-a".to_string(),
                     path: "/skills/coding/merge-a/distilled/20260406T000000".to_string(),
                     summary: "merge a".to_string(),
@@ -3964,6 +4205,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                 "contradictions".to_string(),
                 "stale".to_string(),
                 "missing_edges".to_string(),
+                "dirty_data".to_string(),
+                "duplicates".to_string(),
             ],
             limit: 50,
             stale_days: 90,
@@ -3999,6 +4242,20 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
             .unwrap()
             .is_empty(),
         "expected contradiction candidates"
+    );
+    assert!(
+        json["dirty_data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == "wiki-dirty"),
+        "expected dirty data finding"
+    );
+    assert!(
+        json["duplicates"].as_array().unwrap().iter().any(|v| {
+            v["left_id"] == "wiki-duplicate-a" && v["right_id"] == "wiki-duplicate-b"
+        }),
+        "expected duplicate finding"
     );
 
     let archived = server

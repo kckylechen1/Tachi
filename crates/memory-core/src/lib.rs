@@ -203,6 +203,7 @@ impl MemoryStore {
     }
 
     /// Revision-checked update used for optimistic locking in merge flows.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_with_revision(
         &mut self,
         id: &str,
@@ -489,6 +490,7 @@ impl MemoryStore {
     // ─── Derived Items Operations ──────────────────────────────────────────────
 
     /// Save a derived item (causal extraction, distilled rule, etc.)
+    #[allow(clippy::too_many_arguments)]
     pub fn save_derived(
         &self,
         text: &str,

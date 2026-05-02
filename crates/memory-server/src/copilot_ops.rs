@@ -286,6 +286,11 @@ pub(crate) async fn handle_tachi_wiki_write(
         obj.insert("wiki_path".to_string(), json!(path));
         obj.insert("wiki_topic".to_string(), json!(topic));
     }
+    crate::wiki_ops::append_wiki_log(
+        server,
+        "write",
+        &format!("{} | {}", path, response.get("id").and_then(Value::as_str).unwrap_or("unknown")),
+    );
     serde_json::to_string(&response).map_err(|e| format!("serialize wiki_write: {e}"))
 }
 
@@ -321,7 +326,7 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
-    let rows = search_memory_rows(
+    let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -335,11 +340,22 @@ pub(crate) async fn handle_tachi_wiki_search(
             graph_relation_filter: None,
             weights: None,
             agent_role: params.agent_role,
-            project: params.project,
+            project: params.project.clone(),
             domain: params.domain,
         },
     )
     .await?;
+
+    let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
+    for row in rows.iter_mut().take(3) {
+        crate::wiki_ops::add_related_entries_to_row(row, server, &project_name, 5);
+    }
+
+    crate::wiki_ops::append_wiki_log(
+        server,
+        "search",
+        &format!("{} | {} result(s)", params.query, rows.len()),
+    );
 
     serde_json::to_string(&json!({
         "query": params.query,

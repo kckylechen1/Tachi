@@ -5,6 +5,7 @@ use crate::error::MemoryError;
 // ─── Audit Log Operations ────────────────────────────────────────────────────
 
 /// Insert an audit log entry for a proxy tool call.
+#[allow(clippy::too_many_arguments)]
 pub fn audit_log_insert(
     conn: &Connection,
     timestamp: &str,
