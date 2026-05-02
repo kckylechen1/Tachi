@@ -26,8 +26,10 @@ func newDoctorStep(state *State) *doctorStep {
 	return &doctorStep{state: state}
 }
 
-func (s *doctorStep) title() string    { return T("Health Check", "健康检查") }
-func (s *doctorStep) subtitle() string { return T("Checking Tachi installation and configuration", "正在检查 Tachi 安装和配置") }
+func (s *doctorStep) title() string { return T("Health Check", "健康检查") }
+func (s *doctorStep) subtitle() string {
+	return T("Checking Tachi installation and configuration", "正在检查 Tachi 安装和配置")
+}
 
 func (s *doctorStep) Init() tea.Cmd {
 	return runDoctorChecks(s.state)
@@ -72,7 +74,7 @@ func (s *doctorStep) View() string {
 
 	if s.done {
 		if s.state.TachiPath == "" {
-			sb.WriteString("\n" + crossStyle.Render("  " + T("Cannot continue without Tachi. Please install it and restart.", "缺少 Tachi 依赖，无法继续。请安装后重新运行。")))
+			sb.WriteString("\n" + crossStyle.Render("  "+T("Cannot continue without Tachi. Please install it and restart.", "缺少 Tachi 依赖，无法继续。请安装后重新运行。")))
 		} else {
 			sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车键继续")))
 		}
@@ -129,13 +131,34 @@ func runDoctorChecks(state *State) tea.Cmd {
 		}
 
 		// Check 3: vault
-		state.VaultInit = false
-		state.VaultLocked = true
-		results = append(results, checkResult{
-			label:  T("Vault", "密钥库"),
-			ok:     false,
-			detail: T("not initialized — will set up next", "未初始化 — 下一步将进行设置"),
-		})
+		if status, err := getVaultStatus(); err == nil {
+			state.VaultInit = status.Initialized
+			state.VaultLocked = status.Locked
+			state.VaultEntries = status.EntryCount
+			detail := T("not initialized — will set up next", "未初始化 — 下一步将进行设置")
+			ok := false
+			if status.Initialized {
+				ok = true
+				lockState := T("unlocked", "已解锁")
+				if status.Locked {
+					lockState = T("locked", "已锁定")
+				}
+				detail = fmt.Sprintf(T("initialized, %s, %d entries", "已初始化，%s，%d 条密钥"), lockState, status.EntryCount)
+			}
+			results = append(results, checkResult{
+				label:  T("Vault", "密钥库"),
+				ok:     ok,
+				detail: detail,
+			})
+		} else {
+			state.VaultInit = false
+			state.VaultLocked = true
+			results = append(results, checkResult{
+				label:  T("Vault", "密钥库"),
+				ok:     false,
+				detail: T("status unavailable — will try setup next", "状态不可用 — 下一步将尝试设置"),
+			})
+		}
 
 		// Check 4: .env files
 		envFiles := scanDotEnvFiles()
@@ -183,4 +206,3 @@ func mapStr(slice []string, fn func(string) string) []string {
 	}
 	return out
 }
-

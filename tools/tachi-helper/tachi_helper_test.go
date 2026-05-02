@@ -153,6 +153,17 @@ func TestMCPClientStart(t *testing.T) {
 	t.Logf("vault_status result: %s", string(result))
 }
 
+func TestToolResultText(t *testing.T) {
+	result := []byte(`{"content":[{"type":"text","text":"{\"initialized\":true,\"locked\":false,\"entry_count\":2}"}],"isError":false}`)
+	text, err := toolResultText(result)
+	if err != nil {
+		t.Fatalf("toolResultText error: %v", err)
+	}
+	if !strings.Contains(text, `"initialized":true`) {
+		t.Fatalf("unexpected tool text: %s", text)
+	}
+}
+
 func TestWizardInit(t *testing.T) {
 	w := newWizard()
 	if w.current != stepWelcome {

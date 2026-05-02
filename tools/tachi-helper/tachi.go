@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -171,34 +172,85 @@ var mcpServerDefs = []struct {
 	NeedsKey string
 }{
 	{
-		ID:   "mcp:exa",
-		Name: "Exa (Web Search)",
-		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","exa-mcp-server"],"discovered_tools":[]}`,
+		ID:       "mcp:exa",
+		Name:     "Exa (Web Search)",
+		DefJSON:  `{"transport":"stdio","command":"npx","args":["-y","exa-mcp-server"],"discovered_tools":[]}`,
 		NeedsKey: "EXA_API_KEY",
 	},
 	{
-		ID:   "mcp:tavily",
-		Name: "Tavily (Web Search)",
-		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","tavily-mcp"],"discovered_tools":[]}`,
+		ID:       "mcp:tavily",
+		Name:     "Tavily (Web Search)",
+		DefJSON:  `{"transport":"stdio","command":"npx","args":["-y","tavily-mcp"],"discovered_tools":[]}`,
 		NeedsKey: "TAVILY_API_KEY",
 	},
 	{
-		ID:   "mcp:context7",
-		Name: "Context7 (Documentation)",
+		ID:      "mcp:context7",
+		Name:    "Context7 (Documentation)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@upstash/context7-mcp@latest"],"discovered_tools":[]}`,
 	},
 	{
-		ID:   "mcp:memory",
-		Name: "Memory (Persistent Memory)",
+		ID:      "mcp:memory",
+		Name:    "Memory (Persistent Memory)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"discovered_tools":[]}`,
 	},
 	{
-		ID:   "mcp:filesystem",
-		Name: "Filesystem (File Access)",
+		ID:      "mcp:filesystem",
+		Name:    "Filesystem (File Access)",
 		DefJSON: `{"transport":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/"],"discovered_tools":[]}`,
 	},
 }
 
+type vaultStatus struct {
+	Initialized bool `json:"initialized"`
+	Locked      bool `json:"locked"`
+	EntryCount  int  `json:"entry_count"`
+}
+
+func getVaultStatus() (vaultStatus, error) {
+	tc, err := NewMCPClient()
+	if err != nil {
+		return vaultStatus{}, err
+	}
+	defer tc.Close()
+
+	result, err := tc.CallTool("vault_status", map[string]interface{}{})
+	if err != nil {
+		return vaultStatus{}, err
+	}
+
+	text, err := toolResultText(result)
+	if err != nil {
+		return vaultStatus{}, err
+	}
+
+	var status vaultStatus
+	if err := json.Unmarshal([]byte(text), &status); err != nil {
+		return vaultStatus{}, fmt.Errorf("parse vault status: %w", err)
+	}
+	return status, nil
+}
+
+func toolResultText(data []byte) (string, error) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return "", fmt.Errorf("parse tool result: %w", err)
+	}
+	if result.IsError {
+		return "", fmt.Errorf("tool returned error")
+	}
+	for _, item := range result.Content {
+		if item.Type == "text" && item.Text != "" {
+			return item.Text, nil
+		}
+	}
+	return "", fmt.Errorf("tool result contained no text")
+}
 
 func generatePassword() string {
 	b := make([]byte, 32)
