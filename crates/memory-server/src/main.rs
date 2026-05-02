@@ -216,8 +216,10 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_export_skills",
     "skill_evolve",
     "capture_session",
+    "archive_memory",
     "compact_rollup",
     "compact_session_memory",
+    "sync_memories",
     "synthesize_agent_evolution",
     "queue_agent_evolution",
     "review_agent_evolution_proposal",
@@ -231,6 +233,15 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_init_project_db",
     "ghost_reflect",
     "ghost_promote",
+    "ghost_publish",
+    "ghost_whisper",
+    "ghost_subscribe",
+    "ghost_listen",
+    "ghost_ack",
+    "handoff_leave",
+    "handoff_check",
+    "post_card",
+    "update_card",
     "pack_register",
     "pack_remove",
     "pack_project",
@@ -242,6 +253,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // Facade tools (write / mixed)
     "tachi_save",
     "tachi_handoff",
+    "tachi_complete",
 ];
 
 struct CachedResult {
@@ -485,7 +497,7 @@ impl MemoryServer {
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
             rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             agent_profile: Arc::new(StdRwLock::new(None)),
-            tool_profile: Arc::new(StdRwLock::new(None)),
+            tool_profile: Arc::new(StdRwLock::new(Some(crate::profiles::default_tool_profile()))),
             handoff_memos: Arc::new(StdMutex::new(Vec::new())),
         };
 

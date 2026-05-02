@@ -1,5 +1,16 @@
 use super::*;
 
+fn current_exposed_tool_patterns() -> Option<Vec<String>> {
+    std::env::var("TACHI_EXPOSED_TOOLS")
+        .ok()
+        .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+        .filter(|patterns| !patterns.is_empty())
+}
+
+fn tool_not_found_error() -> rmcp::ErrorData {
+    rmcp::ErrorData::invalid_request("tool not found".to_string(), None)
+}
+
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
@@ -75,10 +86,7 @@ impl ServerHandler for MemoryServer {
                 }
             }
 
-            let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
-                .ok()
-                .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
-                .filter(|patterns| !patterns.is_empty());
+            let env_patterns = current_exposed_tool_patterns();
             tools = crate::profiles::filter_tool_defs(
                 tools,
                 self.active_tool_profile(),
@@ -100,6 +108,15 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let name = params.name.as_ref();
+            let env_patterns = current_exposed_tool_patterns();
+
+            if !crate::profiles::tool_visible(
+                name,
+                self.active_tool_profile(),
+                env_patterns.as_deref(),
+            ) {
+                return Err(tool_not_found_error());
+            }
 
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {
@@ -209,7 +226,7 @@ impl ServerHandler for MemoryServer {
                             .await
                     }
                 } else {
-                    Err(rmcp::ErrorData::invalid_params("tool not found", None))
+                    Err(tool_not_found_error())
                 }
             };
 
