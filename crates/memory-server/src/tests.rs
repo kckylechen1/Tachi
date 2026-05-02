@@ -147,6 +147,45 @@ fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
     }
 }
 
+async fn call_tool_via_server(
+    server: MemoryServer,
+    tool_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
+    if let Some(arguments) = arguments.filter(|args| !args.is_empty()) {
+        params = params.with_arguments(arguments);
+    }
+
+    let request = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+        params,
+    ));
+    let (transport, mut receiver) = rmcp::transport::OneshotTransport::<rmcp::service::RoleServer>::new(
+        rmcp::model::ClientJsonRpcMessage::request(request, rmcp::model::RequestId::Number(1)),
+    );
+    let service = rmcp::service::serve_directly(server, transport, None);
+
+    let message = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
+        .await
+        .expect("tool call timed out")
+        .expect("tool call should yield one response");
+
+    let quit_reason = service.waiting().await.expect("wait for oneshot service");
+    assert!(
+        matches!(quit_reason, rmcp::service::QuitReason::Closed),
+        "oneshot service should close cleanly after one tool call"
+    );
+
+    match message {
+        rmcp::model::ServerJsonRpcMessage::Response(response) => match response.result {
+            rmcp::model::ServerResult::CallToolResult(result) => Ok(result),
+            other => panic!("expected CallToolResult, got {other:?}"),
+        },
+        rmcp::model::ServerJsonRpcMessage::Error(error) => Err(error.error),
+        other => panic!("expected tool response or error, got {other:?}"),
+    }
+}
+
 #[test]
 fn hub_call_arguments_schema_and_deserialize_preserve_nested_tool_args() {
     let schema = rmcp::handler::server::tool::schema_for_type::<HubCallParams>();
@@ -178,6 +217,24 @@ fn hub_call_arguments_schema_and_deserialize_preserve_nested_tool_args() {
     assert_eq!(
         alias_params.arguments.get("query"),
         Some(&json!("alias preserved"))
+    );
+}
+
+#[tokio::test]
+async fn standard_profile_direct_add_edge_call_is_rejected() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        crate::profiles::parse_tool_profile("standard")
+            .expect("standard profile should parse"),
+    ));
+
+    let err = call_tool_via_server(server, "add_edge", None)
+        .await
+        .expect_err("standard profile should not be able to call add_edge directly");
+
+    assert!(
+        err.to_string().to_ascii_lowercase().contains("tool not found"),
+        "hidden tool calls should fail like missing tools, got: {err}"
     );
 }
 
