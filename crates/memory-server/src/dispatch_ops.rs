@@ -3,6 +3,7 @@ use crate::MemoryServer;
 use crate::SearchMemoryParams;
 use chrono::Utc;
 use serde_json::json;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -12,6 +13,109 @@ pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
+}
+
+// ─── MCP config generation ───────────────────────────────────────────────────
+
+/// Generate a temporary MCP config JSON file for the dispatched agent subprocess.
+/// Queries the Hub for registered MCP servers and writes a Claude Code / Codex
+/// compatible mcpServers config.
+///
+/// When `inject_tachi` is true, adds a "tachi" entry pointing at the running
+/// daemon's stdio transport. When `inject_hub` is true, walks all Hub-registered
+/// MCP capabilities and adds them.
+///
+/// Returns the path to the temp file (caller should clean up after subprocess exits).
+async fn generate_mcp_config(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    inject_tachi: bool,
+    inject_hub: bool,
+) -> Result<Option<PathBuf>, String> {
+    let mut mcp_servers = serde_json::Map::new();
+
+    if inject_tachi {
+        // Point at the Tachi binary in stdio mode
+        mcp_servers.insert(
+            "tachi".to_string(),
+            json!({
+                "command": "tachi",
+                "args": ["serve"]
+            }),
+        );
+    }
+
+    if inject_hub {
+        // Walk Hub for MCP-type capabilities with a stdio transport definition
+        let caps = server
+            .with_global_store(|store| {
+                store
+                    .hub_list(Some("mcp"), true)
+                    .map_err(|e| format!("hub list for mcp config: {e}"))
+            })
+            .unwrap_or_default();
+
+        for cap in caps {
+            if !cap.enabled {
+                continue;
+            }
+            let def: serde_json::Value =
+                serde_json::from_str(&cap.definition).unwrap_or_default();
+            let transport = def.get("transport").and_then(|t| t.as_str()).unwrap_or("");
+            if transport != "stdio" {
+                continue;
+            }
+            let command = match def.get("command").and_then(|c| c.as_str()) {
+                Some(c) => c,
+                None => continue,
+            };
+            let args = def
+                .get("args")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            // Derive server key from capability id: "mcp:context7" → "context7"
+            let key = cap
+                .id
+                .strip_prefix("mcp:")
+                .unwrap_or(&cap.id)
+                .to_string();
+
+            let mut entry = json!({ "command": command });
+            if !args.is_empty() {
+                entry["args"] = json!(args);
+            }
+            mcp_servers.insert(key, entry);
+        }
+    }
+
+    if mcp_servers.is_empty() {
+        return Ok(None);
+    }
+
+    let config = json!({ "mcpServers": mcp_servers });
+
+    // Write to temp file under ~/.tachi/tmp/
+    let tachi_home = std::env::var("TACHI_HOME")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.tachi")))
+        .unwrap_or_else(|| "~/.tachi".to_string());
+    let tmp_dir = PathBuf::from(&tachi_home).join("tmp");
+    std::fs::create_dir_all(&tmp_dir)
+        .map_err(|e| format!("Failed to create tmp dir for MCP config: {e}"))?;
+
+    let config_path = tmp_dir.join(format!("dispatch-{dispatch_id}-mcp.json"));
+    let config_str = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize MCP config: {e}"))?;
+    std::fs::write(&config_path, config_str)
+        .map_err(|e| format!("Failed to write MCP config: {e}"))?;
+
+    Ok(Some(config_path))
 }
 
 // ─── Prompt assembly ─────────────────────────────────────────────────────────
@@ -66,10 +170,7 @@ pub(crate) async fn assemble_prompt(
             let def: serde_json::Value =
                 serde_json::from_str(&cap.definition).unwrap_or_default();
             if let Some(prompt) = def.get("prompt").and_then(|v| v.as_str()) {
-                parts.push(format!(
-                    "## Skill: {}\n{}",
-                    skill_id, prompt
-                ));
+                parts.push(format!("## Skill: {}\n{}", skill_id, prompt));
             }
         }
     }
@@ -82,36 +183,94 @@ pub(crate) async fn assemble_prompt(
 
 // ─── Agent subprocess builders ───────────────────────────────────────────────
 
-fn build_claude_command(params: &TachiDispatchParams, prompt: &str) -> Command {
+/// Resolve the effective permission profile: explicit param → "full" as default
+/// for dispatched agents (the whole point of dispatch is autonomous execution).
+fn resolve_permission_profile(params: &TachiDispatchParams) -> &str {
+    params
+        .permission_profile
+        .as_deref()
+        .unwrap_or("full")
+}
+
+fn build_claude_command(
+    params: &TachiDispatchParams,
+    prompt: &str,
+    mcp_config_path: Option<&PathBuf>,
+) -> Command {
     let mut cmd = Command::new("claude");
     cmd.arg("-p"); // print mode
     cmd.arg("--output-format").arg("json");
+
+    // Permission profile
+    let profile = resolve_permission_profile(params);
+    match profile {
+        "full" => {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        "allowlist" if !params.allowed_tools.is_empty() => {
+            for tool in &params.allowed_tools {
+                cmd.arg("--allowedTools").arg(tool);
+            }
+        }
+        _ => {} // "default" — no permission flags
+    }
+
+    // Max turns
+    if let Some(turns) = params.max_turns {
+        cmd.arg("--max-turns").arg(turns.to_string());
+    }
+
+    // Model override
     if let Some(ref model) = params.model {
         cmd.arg("--model").arg(model);
     }
+
+    // MCP config injection
+    if let Some(path) = mcp_config_path {
+        cmd.arg("--mcp-config").arg(path);
+    }
+
     cmd.arg(prompt);
+
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(cwd);
     }
     cmd
 }
 
-fn build_codex_command(params: &TachiDispatchParams, prompt: &str) -> Command {
+fn build_codex_command(
+    params: &TachiDispatchParams,
+    prompt: &str,
+    _mcp_config_path: Option<&PathBuf>,
+) -> Command {
     let mut cmd = Command::new("codex");
-    let policy = params
-        .approval_policy
-        .as_deref()
-        .unwrap_or("never");
-    cmd.arg("--approval-policy").arg(policy);
-    let sandbox = params.sandbox.as_deref().unwrap_or("workspace-write");
-    cmd.arg("--sandbox").arg(sandbox);
-    cmd.arg("--quiet");
-    if let Some(ref model) = params.model {
-        cmd.arg("--model").arg(model);
+    cmd.arg("exec"); // non-interactive subcommand
+
+    // Permission profile
+    let profile = resolve_permission_profile(params);
+    if profile == "full" {
+        cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+    } else {
+        let sandbox = params.sandbox.as_deref().unwrap_or("danger-full-access");
+        cmd.arg("--sandbox").arg(sandbox);
     }
+
+    cmd.arg("--json");
+
+    if let Some(turns) = params.max_turns {
+        // Codex doesn't have a direct --max-turns; use -c config override
+        cmd.arg("-c")
+            .arg(format!("max_turns={turns}"));
+    }
+
+    if let Some(ref model) = params.model {
+        cmd.arg("-m").arg(model);
+    }
+
     cmd.arg(prompt);
+
     if let Some(ref cwd) = params.cwd {
-        cmd.current_dir(cwd);
+        cmd.arg("-C").arg(cwd);
     }
     cmd
 }
@@ -120,7 +279,14 @@ fn build_custom_command(params: &TachiDispatchParams, prompt: &str) -> Result<Co
     if params.command.is_empty() {
         return Err("agent='custom' requires a non-empty 'command' array".to_string());
     }
-    let mut cmd = Command::new(&params.command[0]);
+    let binary = &params.command[0];
+    if !crate::utils::is_trusted_command(binary) {
+        return Err(format!(
+            "Command '{}' is not in the trusted allowlist. Allowed: npx, node, bun, deno, python3, python, uv, cargo, rustup, docker, podman, tachi, or paths under /opt/homebrew/, /usr/local/bin/, ~/.cargo/bin/, ~/.local/bin/",
+            binary
+        ));
+    }
+    let mut cmd = Command::new(binary);
     for arg in &params.command[1..] {
         cmd.arg(arg);
     }
@@ -208,16 +374,28 @@ pub(crate) async fn handle_tachi_dispatch(
     );
 
     let agent_norm = params.agent.to_ascii_lowercase();
-    let timeout_secs = params.timeout_secs.unwrap_or(300);
-    let timeout = Duration::from_secs(timeout_secs);
+    let timeout = Duration::from_secs(params.timeout_secs);
 
-    // 1. Assemble prompt
+    // 1. Generate MCP config if requested
+    let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
+    let inject_hub = params.inject_hub_mcps.unwrap_or(false);
+    let mcp_config_path = if inject_tachi || inject_hub {
+        generate_mcp_config(server, &dispatch_id, inject_tachi, inject_hub).await?
+    } else {
+        None
+    };
+
+    // 2. Assemble prompt
     let prompt = assemble_prompt(server, &params).await;
 
-    // 2. Build command
+    // 3. Build command
     let cmd = match agent_norm.as_str() {
-        "claude" | "claude-code" | "claude-cli" => build_claude_command(&params, &prompt),
-        "codex" | "codex-cli" | "openai" => build_codex_command(&params, &prompt),
+        "claude" | "claude-code" | "claude-cli" => {
+            build_claude_command(&params, &prompt, mcp_config_path.as_ref())
+        }
+        "codex" | "codex-cli" | "openai" => {
+            build_codex_command(&params, &prompt, mcp_config_path.as_ref())
+        }
         "custom" => build_custom_command(&params, &prompt)?,
         other => {
             return Err(format!(
@@ -227,21 +405,23 @@ pub(crate) async fn handle_tachi_dispatch(
         }
     };
 
-    // 3. Execute
+    // 4. Execute
     let result = run_agent_subprocess(cmd, timeout).await?;
 
-    // 4. Parse output
+    // 5. Clean up temp MCP config
+    if let Some(ref path) = mcp_config_path {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // 6. Parse output
     let parsed_output = match agent_norm.as_str() {
         "claude" | "claude-code" | "claude-cli" => parse_claude_output(&result.output),
         _ => json!({"text": result.output}),
     };
 
-    let success = result
-        .exit_code
-        .map(|c| c == 0)
-        .unwrap_or(false);
+    let success = result.exit_code.map(|c| c == 0).unwrap_or(false);
 
-    // 5. Build response
+    // 7. Build response
     let response = json!({
         "dispatch_id": dispatch_id,
         "agent": agent_norm,
@@ -253,6 +433,8 @@ pub(crate) async fn handle_tachi_dispatch(
         "skills_injected": params.skills,
         "context_query": params.context_query,
         "cwd": params.cwd,
+        "permission_profile": resolve_permission_profile(&params),
+        "mcp_injected": mcp_config_path.is_some(),
         "next_steps": [
             format!("Call tachi_complete with dispatch_id='{}' to record the eval.", dispatch_id),
             "Review output and decide if work is acceptable.",

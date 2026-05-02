@@ -187,6 +187,10 @@ pub(crate) struct TachiHandoffParams {
 
 // ─── Facade: agent dispatch ───────────────────────────────────────────────────
 
+fn default_dispatch_timeout() -> u64 {
+    600
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiDispatchParams {
@@ -212,17 +216,37 @@ pub(crate) struct TachiDispatchParams {
     #[serde(default)]
     pub model: Option<String>,
 
-    /// Timeout in seconds (default: 300)
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
+    /// Timeout in seconds (default: 600)
+    #[serde(default = "default_dispatch_timeout")]
+    pub timeout_secs: u64,
 
-    /// Approval policy for codex: "never" | "on-failure" | "on-request"
+    /// Permission profile for Claude Code: "full" skips all confirmations,
+    /// "allowlist" uses allowed_tools, "default" adds no permission flags.
+    /// For Codex: "full" maps to --dangerously-bypass-approvals-and-sandbox.
     #[serde(default)]
-    pub approval_policy: Option<String>,
+    pub permission_profile: Option<String>,
+
+    /// Tool allowlist when permission_profile = "allowlist".
+    /// e.g. ["Bash(git*)", "Read", "Write", "Edit", "Glob", "Grep"]
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+
+    /// Maximum conversation turns for the dispatched agent (prevents infinite loops).
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 
     /// Sandbox mode for codex: "workspace-write" | "danger-full-access" | "read-only"
     #[serde(default)]
     pub sandbox: Option<String>,
+
+    /// Whether to inject Tachi's own MCP server into the subprocess agent config.
+    /// Lets the dispatched agent call tachi_search, tachi_save, etc.
+    #[serde(default)]
+    pub inject_tachi_mcp: Option<bool>,
+
+    /// Whether to inject Hub-registered MCP servers (e.g. context7) into the subprocess.
+    #[serde(default)]
+    pub inject_hub_mcps: Option<bool>,
 
     /// Custom command (when agent="custom"): e.g. ["aider", "--yes-always"]
     #[serde(default)]
