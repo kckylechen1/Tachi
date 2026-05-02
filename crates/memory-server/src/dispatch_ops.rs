@@ -1,14 +1,193 @@
 use crate::TachiDispatchParams;
+use crate::TachiBoardParams;
 use crate::MemoryServer;
 use crate::SearchMemoryParams;
+use crate::SaveMemoryParams;
 use chrono::Utc;
 use serde_json::json;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
+// ─── Kanban helpers ────────────────────────────────────────────────────────────
+
+/// Initialize a kanban task entry in the memory DB
+async fn init_kanban_task(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    params: &TachiDispatchParams,
+    plan_path: Option<&str>,
+) -> Result<(), String> {
+    let text = format!(
+        "Dispatch Task\nAgent: {}\nTask: {}\nPlan: {}",
+        params.agent,
+        params.task,
+        plan_path.unwrap_or("inline"),
+    );
+    let metadata = json!({
+        "type": "a2a_task",
+        "dispatch_id": dispatch_id,
+        "a2a_state": "TASK_STATE_WORKING",
+        "agent": params.agent,
+        "plan_file": plan_path,
+        "eval_ledger_id": null,
+    });
+
+    crate::memory_search_ops::handle_save_memory(
+        server,
+        SaveMemoryParams {
+            text,
+            summary: format!(
+                "Kanban: {} via {}",
+                params.task.chars().take(80).collect::<String>(),
+                params.agent
+            ),
+            path: format!("/kanban/tasks/{}", dispatch_id),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec![
+                "kanban".to_string(),
+                "dispatch".to_string(),
+                params.agent.clone(),
+            ],
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: true,
+            project: None,
+            retention_policy: Some("durable".to_string()),
+            domain: Some("system".to_string()),
+            timestamp: None,
+            metadata: Some(metadata),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Check if a kanban task has been properly closed (completed/failed)
+async fn check_kanban_is_closed(server: &MemoryServer, dispatch_id: &str) -> bool {
+    let path = format!("/kanban/tasks/{}", dispatch_id);
+    if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: dispatch_id.to_string(),
+            query_vec: None,
+            top_k: 1,
+            path_prefix: Some(path),
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.7),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+        },
+    )
+    .await
+    {
+        for row in &rows {
+            if let Some(meta) = row.get("metadata") {
+                if let Some(state) = meta.get("a2a_state").and_then(|v| v.as_str()) {
+                    return matches!(
+                        state,
+                        "TASK_STATE_COMPLETED"
+                            | "TASK_STATE_FAILED"
+                            | "TASK_STATE_CANCELED"
+                    );
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Update kanban task state
+pub(crate) async fn update_kanban_state(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    new_state: &str,
+    eval_id: Option<&str>,
+) -> Result<(), String> {
+    let path = format!("/kanban/tasks/{}", dispatch_id);
+    let rows = crate::memory_search_ops::search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: dispatch_id.to_string(),
+            query_vec: None,
+            top_k: 1,
+            path_prefix: Some(path.clone()),
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.7),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+        },
+    )
+    .await?;
+
+    if let Some(row) = rows.first() {
+        if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+            let mut meta = row.get("metadata").cloned().unwrap_or(json!({}));
+            if let Some(obj) = meta.as_object_mut() {
+                obj.insert("a2a_state".to_string(), json!(new_state));
+                if let Some(eid) = eval_id {
+                    obj.insert("eval_ledger_id".to_string(), json!(eid));
+                }
+                obj.insert(
+                    "updated_at".to_string(),
+                    json!(Utc::now().to_rfc3339()),
+                );
+            }
+            crate::memory_search_ops::handle_save_memory(
+                server,
+                SaveMemoryParams {
+                    text: row
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    summary: format!("Kanban [{}]: {}", new_state, dispatch_id),
+                    path,
+                    importance: 0.7,
+                    category: "fact".to_string(),
+                    topic: "kanban".to_string(),
+                    keywords: vec!["kanban".to_string()],
+                    persons: Vec::new(),
+                    entities: Vec::new(),
+                    location: String::new(),
+                    scope: "project".to_string(),
+                    vector: None,
+                    id: Some(id.to_string()),
+                    force: true,
+                    auto_link: true,
+                    project: None,
+                    retention_policy: Some("durable".to_string()),
+                    domain: Some("system".to_string()),
+                    timestamp: None,
+                    metadata: Some(meta),
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
@@ -347,6 +526,7 @@ async fn run_agent_subprocess(
 
 // ─── Parse Claude JSON output ────────────────────────────────────────────────
 
+#[allow(dead_code)]
 fn parse_claude_output(raw: &str) -> serde_json::Value {
     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
         if let Some(result) = parsed.get("result") {
@@ -379,7 +559,21 @@ pub(crate) async fn handle_tachi_dispatch(
     let agent_norm = params.agent.to_ascii_lowercase();
     let timeout = Duration::from_secs(params.timeout_secs);
 
-    // 1. Generate MCP config if requested
+    // 1. Create isolated workspace directory
+    let workspace_dir = {
+        let base = if let Ok(home) = std::env::var("TACHI_HOME") {
+            PathBuf::from(home)
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".tachi")
+        } else {
+            std::env::temp_dir().join("tachi")
+        };
+        base.join("runs").join(&dispatch_id)
+    };
+    std::fs::create_dir_all(&workspace_dir)
+        .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
+
+    // 2. Generate MCP config if requested
     let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
     let inject_hub = params.inject_hub_mcps.unwrap_or(false);
     let mcp_config_path = if inject_tachi || inject_hub {
@@ -388,21 +582,22 @@ pub(crate) async fn handle_tachi_dispatch(
         None
     };
 
-    // 2. Assemble prompt
+    // 3. Assemble prompt & write plan file to workspace
     let prompt = assemble_prompt(server, &params).await;
+    let plan_path = workspace_dir.join("plan.md");
+    std::fs::write(&plan_path, &prompt)
+        .map_err(|e| format!("Failed to write plan file: {e}"))?;
 
-    // Scope guard: ensure MCP config cleanup on all exit paths (including errors)
-    struct McpCleanup(Option<PathBuf>);
-    impl Drop for McpCleanup {
-        fn drop(&mut self) {
-            if let Some(ref path) = self.0 {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    let _mcp_cleanup = McpCleanup(mcp_config_path.clone());
+    // 4. Initialize kanban task
+    init_kanban_task(
+        server,
+        &dispatch_id,
+        &params,
+        Some(&plan_path.to_string_lossy()),
+    )
+    .await?;
 
-    // 3. Build command
+    // 5. Build command
     let cmd = match agent_norm.as_str() {
         "claude" | "claude-code" | "claude-cli" => {
             build_claude_command(&params, &prompt, mcp_config_path.as_ref())
@@ -419,38 +614,166 @@ pub(crate) async fn handle_tachi_dispatch(
         }
     };
 
-    // 4. Execute
-    let result = run_agent_subprocess(cmd, timeout).await?;
+    // 6. Spawn background task with Watchdog
+    let server_clone = server.clone();
+    let d_id = dispatch_id.clone();
+    let agent_for_watchdog = agent_norm.clone();
+    let task_desc = params.task.clone();
 
-    // 5. Parse output
-    let parsed_output = match agent_norm.as_str() {
-        "claude" | "claude-code" | "claude-cli" => parse_claude_output(&result.output),
-        _ => json!({"text": result.output}),
-    };
+    // Scope guard for MCP config cleanup (moved into spawned task)
+    struct McpCleanup(Option<PathBuf>);
+    impl Drop for McpCleanup {
+        fn drop(&mut self) {
+            if let Some(ref path) = self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 
-    let success = result.exit_code.map(|c| c == 0).unwrap_or(false);
+    tokio::task::spawn(async move {
+        let _mcp_cleanup = McpCleanup(mcp_config_path);
 
-    // 7. Build response
-    let response = json!({
-        "dispatch_id": dispatch_id,
-        "agent": agent_norm,
-        "task": params.task,
-        "success": success,
-        "exit_code": result.exit_code,
-        "duration_ms": result.duration_ms,
-        "output": parsed_output,
-        "skills_injected": params.skills,
-        "context_query": params.context_query,
-        "cwd": params.cwd,
-        "permission_profile": resolve_permission_profile(&params),
-        "mcp_injected": mcp_config_path.is_some(),
-        "next_steps": [
-            format!("Call tachi_complete with dispatch_id='{}' to record the eval.", dispatch_id),
-            "Review output and decide if work is acceptable.",
-        ],
+        let result = run_agent_subprocess(cmd, timeout).await;
+
+        // --- WATCHDOG: check if sub-agent properly closed the loop ---
+        tokio::time::sleep(Duration::from_secs(2)).await; // grace period for tachi_complete to propagate
+
+        let is_closed = check_kanban_is_closed(&server_clone, &d_id).await;
+        if !is_closed {
+            let (outcome, note) = match &result {
+                Err(e) => ("failure".to_string(), format!("Watchdog: {}", e)),
+                Ok(r) if r.exit_code.map(|c| c == 0).unwrap_or(false) => {
+                    let tail = &r.output[r.output.len().saturating_sub(500)..];
+                    ("partial".to_string(), format!("Watchdog: Agent exited 0 but did not call tachi_complete. Output tail: {}", tail))
+                }
+                Ok(r) => {
+                    let tail = &r.output[r.output.len().saturating_sub(500)..];
+                    ("failure".to_string(), format!("Watchdog: Agent crashed (exit {:?}). Stderr tail: {}", r.exit_code, tail))
+                }
+            };
+
+            // System auto-recovery: force close the loop
+            let _ = crate::complete_ops::handle_tachi_complete(
+                &server_clone,
+                crate::TachiCompleteParams {
+                    dispatch_id: Some(d_id.clone()),
+                    task: task_desc,
+                    agent: format!("watchdog/{}", agent_for_watchdog),
+                    outcome,
+                    notes: Some(note),
+                    task_id: None,
+                    duration_ms: None,
+                    skills_used: Vec::new(),
+                    cost_tokens: None,
+                    cost_usd: None,
+                    quality_score: None,
+                    trajectory: None,
+                    diff: None,
+                    worktree: None,
+                    scope: None,
+                    project: None,
+                },
+            )
+            .await;
+
+            // Update kanban to FAILED
+            let _ = update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None).await;
+        }
+
+        // Cleanup workspace
+        let _ = std::fs::remove_dir_all(workspace_dir);
     });
 
-    serde_json::to_string(&response).map_err(|e| format!("serialize dispatch response: {e}"))
+    // 7. Immediately return — main agent is unblocked!
+    let response = json!({
+        "dispatch_id": dispatch_id,
+        "task": {
+            "id": dispatch_id,
+            "status": { "state": "TASK_STATE_WORKING" },
+        },
+        "agent": agent_norm,
+        "message": "Task dispatched to background. You are unblocked. Use tachi_board to check status.",
+        "plan_file": plan_path.to_string_lossy(),
+    });
+
+    serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+}
+
+// ─── Task Board (Kanban) handler ──────────────────────────────────────────────
+
+pub(crate) async fn handle_tachi_board(
+    server: &MemoryServer,
+    params: TachiBoardParams,
+) -> Result<String, String> {
+    let limit = params.limit.unwrap_or(20);
+
+    let rows = crate::memory_search_ops::search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: "kanban dispatch task".to_string(),
+            query_vec: None,
+            top_k: limit,
+            path_prefix: Some("/kanban/tasks/".to_string()),
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.7),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: params.project.clone(),
+            domain: None,
+        },
+    )
+    .await?;
+
+    // Filter by state if requested
+    let state_filter = params.state_filter.as_deref().unwrap_or("all");
+    let filtered: Vec<&serde_json::Value> = if state_filter == "all" {
+        rows.iter().collect()
+    } else {
+        let target_state = match state_filter {
+            "working" => "TASK_STATE_WORKING",
+            "completed" => "TASK_STATE_COMPLETED",
+            "failed" => "TASK_STATE_FAILED",
+            "pending" => "TASK_STATE_PENDING",
+            "input_required" => "TASK_STATE_INPUT_REQUIRED",
+            "canceled" => "TASK_STATE_CANCELED",
+            other => other, // allow raw A2A state
+        };
+        rows.iter()
+            .filter(|row| {
+                row.get("metadata")
+                    .and_then(|m| m.get("a2a_state"))
+                    .and_then(|s| s.as_str())
+                    == Some(target_state)
+            })
+            .collect()
+    };
+
+    // Build compact board view
+    let tasks: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|row| {
+            let meta = row.get("metadata").cloned().unwrap_or(json!({}));
+            json!({
+                "dispatch_id": meta.get("dispatch_id"),
+                "agent": meta.get("agent"),
+                "state": meta.get("a2a_state"),
+                "eval_id": meta.get("eval_ledger_id"),
+                "summary": row.get("summary"),
+                "updated_at": meta.get("updated_at"),
+            })
+        })
+        .collect();
+
+    serde_json::to_string(&json!({
+        "board": "kanban",
+        "filter": state_filter,
+        "count": tasks.len(),
+        "tasks": tasks,
+    }))
+    .map_err(|e| format!("serialize board: {e}"))
 }
 
 // ─── Worktree merge handler ──────────────────────────────────────────────────
