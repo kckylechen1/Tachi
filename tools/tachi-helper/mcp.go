@@ -54,7 +54,7 @@ func NewMCPClient() (*MCPClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil // discard tachi logs
+	cmd.Stderr = os.Stderr
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start tachi: %w", err)

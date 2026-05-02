@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -97,6 +96,7 @@ func runDoctorChecks(state *State) tea.Cmd {
 				ok:     false,
 				detail: T("not found in PATH — install tachi first", "在 PATH 中未找到 — 请先安装 tachi"),
 			})
+			state.TachiMissing = true
 		} else {
 			ver := tachiVersion()
 			results = append(results, checkResult{
@@ -105,7 +105,9 @@ func runDoctorChecks(state *State) tea.Cmd {
 				detail: fmt.Sprintf("%s (%s)", path, ver),
 			})
 			state.TachiPath = path
+			state.TachiMissing = false
 			state.TachiVersion = ver
+			state.TachiMissing = false
 		}
 
 		// Check 2: global DB
@@ -141,7 +143,7 @@ func runDoctorChecks(state *State) tea.Cmd {
 		if len(envFiles) > 0 {
 			results = append(results, checkResult{
 				label:  fmt.Sprintf(T(".env files (%d found)", "找到 %d 个 .env 文件"), len(envFiles)),
-				ok:     false,
+				ok:     true,
 				detail: strings.Join(mapStr(envFiles, shortPath), ", "),
 			})
 		} else {
@@ -182,10 +184,3 @@ func mapStr(slice []string, fn func(string) string) []string {
 	return out
 }
 
-func userHomeDir() (string, error) {
-	u, err := user.Current()
-	if err != nil {
-		return os.UserHomeDir()
-	}
-	return u.HomeDir, nil
-}

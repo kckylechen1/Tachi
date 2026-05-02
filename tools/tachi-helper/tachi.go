@@ -2,7 +2,8 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -157,7 +158,7 @@ func appendToRC(rcPath string) error {
 	}
 	defer f.Close()
 
-	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env)\"; }\n"
+	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env --keychain)\"; }\n"
 	_, err = f.WriteString(block)
 	return err
 }
@@ -198,15 +199,35 @@ var mcpServerDefs = []struct {
 	},
 }
 
-// parseJSONString extracts a string field from JSON.
-func parseJSONString(data []byte, field string) string {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(data, &obj); err != nil {
-		return ""
+
+func generatePassword() string {
+	b := make([]byte, 32)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+func storeInKeychain(password string) error {
+	cmd := exec.Command("security", "add-generic-password",
+		"-U",
+		"-s", "tachi-vault",
+		"-a", "default",
+		"-w", password,
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))
 	}
-	var val string
-	if raw, ok := obj[field]; ok {
-		json.Unmarshal(raw, &val)
+	return nil
+}
+
+func readFromKeychain() (string, error) {
+	out, err := exec.Command("security", "find-generic-password",
+		"-s", "tachi-vault",
+		"-a", "default",
+		"-w",
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to read from Keychain: %s", strings.TrimSpace(string(out)))
 	}
-	return val
+	return strings.TrimSpace(string(out)), nil
 }

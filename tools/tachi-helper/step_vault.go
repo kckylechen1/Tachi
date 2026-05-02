@@ -1,9 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -11,52 +11,32 @@ import (
 type vaultPhase int
 
 const (
-	vaultPhasePassword vaultPhase = iota
-	vaultPhaseConfirm
-	vaultPhaseCreating
+	vaultPhaseCreating vaultPhase = iota
 	vaultPhaseDone
 	vaultPhaseError
 )
 
 type vaultStep struct {
-	state       *State
-	phase       vaultPhase
-	password    textinput.Model
-	confirm     textinput.Model
-	errMsg      string
-	init        bool // true = init, false = just unlock
+	state  *State
+	phase  vaultPhase
+	errMsg string
 }
 
 func newVaultStep(state *State) *vaultStep {
-	ti := textinput.New()
-	ti.EchoMode = textinput.EchoPassword
-	ti.EchoCharacter = '•'
-	ti.Placeholder = T("Master password", "主密码")
-	ti.Focus()
-
-	ci := textinput.New()
-	ci.EchoMode = textinput.EchoPassword
-	ci.EchoCharacter = '•'
-	ci.Placeholder = T("Confirm password", "确认密码")
-
 	return &vaultStep{
-		state:    state,
-		phase:    vaultPhasePassword,
-		password: ti,
-		confirm:  ci,
-		init:     true, // first time setup
+		state: state,
+		phase: vaultPhaseCreating,
 	}
 }
 
 func (s *vaultStep) title() string { return T("Vault Setup", "密钥库设置") }
 func (s *vaultStep) subtitle() string {
-	if s.init {
-		return T("Create a master password for the encrypted Vault", "为加密密钥库创建主密码")
-	}
-	return T("Enter your Vault password to unlock", "输入密钥库密码以解锁")
+	return T("Creating encrypted vault with auto-generated key", "正在使用自动生成的密钥创建加密密钥库")
 }
 
-func (s *vaultStep) Init() tea.Cmd { return textinput.Blink }
+func (s *vaultStep) Init() tea.Cmd {
+	return vaultInitWithKeychainCmd()
+}
 
 func (s *vaultStep) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -70,60 +50,17 @@ func (s *vaultStep) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter":
-			return s.handleEnter()
+			if s.phase == vaultPhaseDone {
+				return s, stepDone()
+			}
+			if s.phase == vaultPhaseError {
+				s.phase = vaultPhaseCreating
+				s.errMsg = ""
+				return s, vaultInitWithKeychainCmd()
+			}
 		case "ctrl+c":
 			return s, tea.Quit
 		}
-	}
-
-	var cmd tea.Cmd
-	if s.phase == vaultPhasePassword {
-		s.password, cmd = s.password.Update(msg)
-	} else if s.phase == vaultPhaseConfirm {
-		s.confirm, cmd = s.confirm.Update(msg)
-	}
-	return s, cmd
-}
-
-func (s *vaultStep) handleEnter() (tea.Model, tea.Cmd) {
-	switch s.phase {
-	case vaultPhasePassword:
-		pwd := s.password.Value()
-		if len(pwd) < 8 {
-			s.errMsg = T("Password must be at least 8 characters", "密码长度至少为 8 个字符")
-			return s, nil
-		}
-		s.errMsg = ""
-		if s.init {
-			s.phase = vaultPhaseConfirm
-			s.confirm.Focus()
-			return s, textinput.Blink
-		}
-		// unlock existing vault
-		s.state.Password = pwd
-		return s, vaultUnlockCmd(pwd)
-
-	case vaultPhaseConfirm:
-		if s.confirm.Value() != s.password.Value() {
-			s.errMsg = T("Passwords don't match", "两次输入的密码不一致")
-			s.confirm.SetValue("")
-			return s, nil
-		}
-		s.state.Password = s.password.Value()
-		s.phase = vaultPhaseCreating
-		return s, vaultInitCmd(s.password.Value())
-
-	case vaultPhaseError:
-		// Reset and retry
-		s.phase = vaultPhasePassword
-		s.password.SetValue("")
-		s.confirm.SetValue("")
-		s.errMsg = ""
-		s.password.Focus()
-		return s, textinput.Blink
-
-	case vaultPhaseDone:
-		return s, stepDone()
 	}
 	return s, nil
 }
@@ -133,40 +70,38 @@ func (s *vaultStep) View() string {
 	sb.WriteString("\n")
 
 	switch s.phase {
-	case vaultPhasePassword, vaultPhaseError:
-		sb.WriteString("  " + T("Enter master password:", "输入主密码:") + "\n\n")
-		sb.WriteString("  " + s.password.View() + "\n")
-		if s.errMsg != "" {
-			sb.WriteString("\n  " + crossStyle.Render("✗ "+s.errMsg) + "\n")
-		}
-
-	case vaultPhaseConfirm:
-		sb.WriteString("  " + T("Confirm master password:", "确认主密码:") + "\n\n")
-		sb.WriteString("  " + s.confirm.View() + "\n")
-		if s.errMsg != "" {
-			sb.WriteString("\n  " + crossStyle.Render("✗ "+s.errMsg) + "\n")
-		}
-
 	case vaultPhaseCreating:
-		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") + " " + T("Initializing vault...", "正在初始化密钥库...") + "\n")
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") + " " + T("Generating master key and initializing vault...", "正在生成主密钥并初始化密钥库...") + "\n")
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(textDim).Render(T("Password will be stored in macOS Keychain (tachi-vault)", "密码将存储在 macOS 钥匙串 (tachi-vault)")) + "\n")
 
 	case vaultPhaseDone:
 		sb.WriteString("  " + checkStyle.Render("✓ "+T("Vault initialized successfully", "密钥库初始化成功")) + "\n")
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(textDim).Render(
+			fmt.Sprintf(T("Master key stored in macOS Keychain (%s)", "主密钥已存储在 macOS 钥匙串 (%s)"), "tachi-vault")) + "\n")
 		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
+
+	case vaultPhaseError:
+		sb.WriteString("  " + crossStyle.Render("✗ "+T("Vault initialization failed", "密钥库初始化失败")) + "\n")
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(textDim).Render(s.errMsg) + "\n")
+		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to retry", "  按回车重试")))
 	}
 
 	return sb.String()
 }
-
-// --- Commands ---
 
 type vaultCreatedMsg struct{}
 type vaultErrorMsg struct {
 	err string
 }
 
-func vaultInitCmd(password string) tea.Cmd {
+func vaultInitWithKeychainCmd() tea.Cmd {
 	return func() tea.Msg {
+		password := generatePassword()
+
+		if err := storeInKeychain(password); err != nil {
+			return vaultErrorMsg{err: T("Keychain store failed: ", "钥匙串存储失败: ") + err.Error()}
+		}
+
 		tc, err := NewMCPClient()
 		if err != nil {
 			return vaultErrorMsg{err: T("Failed to start tachi: ", "启动 tachi 失败: ") + err.Error()}
@@ -174,24 +109,6 @@ func vaultInitCmd(password string) tea.Cmd {
 		defer tc.Close()
 
 		_, err = tc.CallTool("vault_init", map[string]interface{}{
-			"password": password,
-		})
-		if err != nil {
-			return vaultErrorMsg{err: err.Error()}
-		}
-		return vaultCreatedMsg{}
-	}
-}
-
-func vaultUnlockCmd(password string) tea.Cmd {
-	return func() tea.Msg {
-		tc, err := NewMCPClient()
-		if err != nil {
-			return vaultErrorMsg{err: T("Failed to start tachi: ", "启动 tachi 失败: ") + err.Error()}
-		}
-		defer tc.Close()
-
-		_, err = tc.CallTool("vault_unlock", map[string]interface{}{
 			"password": password,
 		})
 		if err != nil {

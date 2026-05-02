@@ -159,6 +159,11 @@ type keysErrorMsg struct{ err string }
 
 func (s *keysStep) importKeys() tea.Cmd {
 	return func() tea.Msg {
+		password, err := readFromKeychain()
+		if err != nil {
+			return keysErrorMsg{err: T("Keychain read failed: ", "钥匙串读取失败: ") + err.Error()}
+		}
+
 		tc, err := NewMCPClient()
 		if err != nil {
 			return keysErrorMsg{err: err.Error()}
@@ -167,7 +172,7 @@ func (s *keysStep) importKeys() tea.Cmd {
 
 		// First unlock vault
 		_, err = tc.CallTool("vault_unlock", map[string]interface{}{
-			"password": s.state.Password,
+			"password": password,
 		})
 		if err != nil {
 			return keysErrorMsg{err: T("vault unlock: ", "密钥库解锁: ") + err.Error()}

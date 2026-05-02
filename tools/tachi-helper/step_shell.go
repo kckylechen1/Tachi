@@ -72,14 +72,14 @@ func (s *shellStep) View() string {
 
 	switch s.phase {
 	case shellPhaseConfirm:
-		helperFunc := `tachi_env() { eval "$(tachi env)"; }`
+		helperFunc := `tachi_env() { eval "$(tachi env --keychain)"; }`
 		sb.WriteString("  " + T("The following will be appended to", "以下内容将追加到") + " ")
 		sb.WriteString(lipgloss.NewStyle().Foreground(accent).Bold(true).Render(shortPath(s.state.ShellRC)))
 		sb.WriteString(":\n\n")
 		sb.WriteString("  " + codeStyle.Render(helperFunc))
 		sb.WriteString("\n\n")
 		sb.WriteString("  " + T("Run tachi_env whenever you need secrets loaded.", "需要加载密钥时运行 tachi_env。") + "\n")
-		sb.WriteString("  " + T("No password prompt on every terminal start.", "每次打开终端无需输入密码。") + "\n\n")
+		sb.WriteString("  " + T("Password is read from macOS Keychain automatically.", "密码自动从 macOS 钥匙串读取。") + "\n\n")
 		sb.WriteString(hintStyle.Render("  " + T("enter/y: add to "+s.state.ShellType+"rc  ·  n: skip", "回车/y: 添加到 "+s.state.ShellType+"rc  ·  n: 跳过")))
 
 	case shellPhaseWriting:
@@ -88,14 +88,14 @@ func (s *shellStep) View() string {
 	case shellPhaseSkip:
 		sb.WriteString(warnStyle.Render("  ⊘ "+T("Skipped", "已跳过")) + T(" — shell rc not modified\n", " — shell rc 未修改\n"))
 		sb.WriteString("\n  " + T("You can add it manually later:", "您可以稍后手动添加:") + "\n")
-		sb.WriteString("  " + codeStyle.Render(`tachi_env() { eval "$(tachi env)"; }`))
+		sb.WriteString("  " + codeStyle.Render(`tachi_env() { eval "$(tachi env --keychain)"; }`))
 		sb.WriteString("\n\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 
 	case shellPhaseDone:
 		if s.errMsg != "" {
 			sb.WriteString("  " + crossStyle.Render("✗ "+s.errMsg) + "\n")
 			sb.WriteString("\n  " + T("Add manually:", "手动添加:") + "\n")
-			sb.WriteString("  " + codeStyle.Render(`tachi_env() { eval "$(tachi env)"; }`))
+			sb.WriteString("  " + codeStyle.Render(`tachi_env() { eval "$(tachi env --keychain)"; }`))
 		} else {
 			sb.WriteString("  " + checkStyle.Render("✓ "+T("Helper function added to", "辅助函数已添加到")+" "+shortPath(s.state.ShellRC)) + "\n")
 			sb.WriteString("\n  " + T("Activate now:", "立即激活:") + "\n")

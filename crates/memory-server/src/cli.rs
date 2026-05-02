@@ -355,8 +355,8 @@ pub(crate) enum Commands {
         json: bool,
     },
     /// Output vault secrets as `export KEY=VALUE` lines for shell injection.
-    /// Replaces project .env files — pipe into shell with: eval "$(tachi env)"
-    /// or add to .bashrc/.zshrc: eval "$(tachi env)".
+    /// Replaces project .env files — pipe into shell with: eval "$(tachi env --keychain)"
+    /// or add to .bashrc/.zshrc: eval "$(tachi env --keychain)".
     Env {
         /// Optional glob-style filter on secret names (e.g. "OPENAI*" or "*API_KEY").
         /// Without this flag, all unrestricted secrets are emitted.
@@ -370,6 +370,10 @@ pub(crate) enum Commands {
         /// Useful for scripts: echo "$PASS" | tachi env --stdin-password
         #[arg(long)]
         stdin_password: bool,
+        /// Read master password from macOS Keychain instead of prompting.
+        /// Uses service name "tachi-vault", account "default".
+        #[arg(long)]
+        keychain: bool,
     },
 }
 

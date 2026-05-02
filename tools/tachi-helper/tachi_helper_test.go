@@ -180,6 +180,9 @@ func TestAppendToRC(t *testing.T) {
 	if !strings.Contains(content, "tachi_env()") {
 		t.Errorf("rc file doesn't contain helper function: %s", content)
 	}
+	if !strings.Contains(content, "--keychain") {
+		t.Errorf("rc file helper missing --keychain flag: %s", content)
+	}
 
 	// Should be idempotent
 	err = appendToRC(rcFile)

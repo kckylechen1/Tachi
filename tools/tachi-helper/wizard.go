@@ -88,6 +88,9 @@ func (w *wizard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case stepDoneMsg:
+		if w.current == stepDoctor && w.state.TachiMissing {
+			return w, nil
+		}
 		if w.current < stepCount-1 {
 			w.current++
 			return w, w.steps[w.current].Init()
@@ -161,7 +164,7 @@ func (w *wizard) renderHeader(s step) string {
 		}
 	}
 	progress := lipgloss.JoinHorizontal(lipgloss.Top, strings.Join(steps, stepPendingStyle.Render(" ─ ")))
-	divider := dividerStyle.Render(strings.Repeat("─", 65))
+	divider := dividerStyle.Render(strings.Repeat("─", max(min(w.width-8, 65), 30)))
 
 	sub := subtitleStyle.Render(s.subtitle())
 	
@@ -183,6 +186,6 @@ func (w *wizard) renderFooter() string {
 		hint = T("enter: next  ·  esc: back  ·  q: quit", "回车: 下一步  ·  esc: 上一步  ·  q: 退出")
 	}
 
-	divider := dividerStyle.Render(strings.Repeat("─", 60))
+	divider := dividerStyle.Render(strings.Repeat("─", max(min(w.width-8, 60), 30)))
 	return "\n" + divider + "\n" + hintStyle.Render(hint)
 }
