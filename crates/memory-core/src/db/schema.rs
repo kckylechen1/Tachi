@@ -1099,7 +1099,14 @@ mod migration_tests {
 
     #[test]
     fn migration_backfills_handoff_retention_to_pinned() {
-        let conn = open_with_legacy_row("manual", "fact", "general", None, "/handoff/foo", "{}");
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/handoff/foo",
+            "{}",
+        );
         init_schema(&conn).unwrap();
         let r: Option<String> = conn
             .query_row(
@@ -1113,7 +1120,14 @@ mod migration_tests {
 
     #[test]
     fn migration_rejects_invalid_scope_after_migration() {
-        let conn = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
         init_schema(&conn).unwrap();
         // Now CHECK constraint should reject 'self'.
         let err = conn
@@ -1139,7 +1153,14 @@ mod migration_tests {
 
     #[test]
     fn migration_is_idempotent() {
-        let conn = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
         init_schema(&conn).unwrap();
         // Snapshot the table SQL.
         let sql1: String = conn
@@ -1168,7 +1189,14 @@ mod migration_tests {
 
     #[test]
     fn migration_preserves_fts_rows() {
-        let conn = open_with_legacy_row("manual", "fact", "general", None, "/notes/x", "{}");
+        let conn = open_with_legacy_row(
+            "manual",
+            "fact",
+            "general",
+            None,
+            "/notes/x",
+            "{}",
+        );
         // Pre-populate FTS to confirm it survives.
         conn.execute(
             "INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
