@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-02
+
+### ⚠️ BREAKING
+
+- **Default profile changed from `admin` to `standard`**. When no `TACHI_PROFILE` is set, Tachi now exposes only the 12-tool standard surface instead of the full 148-tool admin surface. To restore the previous behavior, set `TACHI_PROFILE=admin` explicitly in your MCP config or environment.
+
+  | Migration | Before (v1.0.0) | After (v1.0.1) |
+  |-----------|-----------------|-----------------|
+  | No profile set | `admin` (all tools) | `standard` (12 tools) |
+  | `TACHI_PROFILE=admin` | admin | admin (unchanged) |
+  | `TACHI_PROFILE=standard` | standard | standard (unchanged) |
+  | `TACHI_PROFILE=coordinate` | coordinate | coordinate (unchanged) |
+
+### Added
+
+- **`call_tool` profile enforcement**: tool calls are now validated against the active profile. Hidden tools return `"tool not found"` (identical to truly missing tools) — no information leakage about tool existence.
+- **Default profile startup notice**: when no profile is specified, Tachi prints to stderr: `No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).`
+- **Metadata consistency guard tests**: automated tests verify that every non-admin tool is properly classified into a bundle, every wildcard pattern matches real tools, and every write tool invalidates the read cache.
+- `standard_profile_direct_add_edge_call_is_rejected` integration test: confirms that raw admin tools cannot be called when a standard profile is active.
+
+### Changed
+
+- `tachi_complete` reclassified from **Observe** to **Remember** bundle. It writes eval data, so it belongs with write tools.
+- `tachi_complete` added to `CACHE_INVALIDATING_TOOLS` to prevent stale read cache after task completion.
+
+### Fixed
+
+- `CACHE_INVALIDATING_TOOLS` now includes `archive_memory`, `sync_memories`, `ghost_publish`, `ghost_whisper`, `ghost_subscribe`, `ghost_listen`, `ghost_ack`, `handoff_leave`, `handoff_check`, `post_card`, `update_card`, and `tachi_complete` — previously these write tools could leave stale data in the read cache.
+- Stale comments corrected (said "10 tools" → actually 12).
+
+### Tests
+
+- `cargo test -p memory-server -- profiles::tests` (14 tests)
+- `cargo test -p memory-server -- standard_profile_direct_add_edge` (1 integration test)
+
 ## [1.0.0] - 2026-05-01
 
 ### Added

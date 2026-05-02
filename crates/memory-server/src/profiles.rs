@@ -87,7 +87,7 @@ impl ToolProfile {
 
     /// Standard profile for IDE + CLI agents (Windsurf, Cursor, Antigravity,
     /// Trae, Codex standalone, Claude Code standalone). Enables all bundles but
-    /// intersects with a curated ~11-tool allow-list to keep the tool tray small.
+    /// intersects with a curated 12-tool allow-list to keep the tool tray small.
     const fn standard() -> Self {
         Self {
             observe: true,
@@ -247,7 +247,7 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "wiki_lint",
 ];
 
-/// Standard profile allow-list (~11 tools). Intersected with all bundles
+/// Standard profile allow-list (12 tools). Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Planning + context
@@ -468,7 +468,7 @@ pub(super) fn tool_visible(
         return true;
     }
 
-    // Curated minimal allow-lists: standard (10 tools) > delegate (6 tools).
+    // Curated minimal allow-lists: standard (12 tools) > delegate (7 tools).
     if profile.standard_minimal {
         if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
             return false;
