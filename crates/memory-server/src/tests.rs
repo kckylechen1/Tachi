@@ -2821,9 +2821,15 @@ async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
         "body: {body}"
     );
     assert_eq!(v["auto_approve"], json!("applied"), "body: {body}");
-    // The review sub-response must reflect the approve+enable transition.
+    // The review sub-response must reflect the approval transition. Discovery
+    // can still fail in local/CI environments, in which case review disables
+    // the MCP capability and reports it unhealthy.
     assert_eq!(v["review"]["review_status"], json!("approved"));
-    assert_eq!(v["review"]["enabled"], json!(true));
+    if v["review"]["health_status"] == json!("healthy") {
+        assert_eq!(v["review"]["enabled"], json!(true), "body: {body}");
+    } else {
+        assert_eq!(v["review"]["enabled"], json!(false), "body: {body}");
+    }
 }
 
 #[tokio::test]
