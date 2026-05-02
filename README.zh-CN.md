@@ -111,6 +111,8 @@ brew tap kckylechen1/tachi && brew install tachi
 }
 ```
 
+> **v1.0.1 起默认 profile 变更**：如果不设置 `TACHI_PROFILE`，Tachi 现在默认使用 `standard`（12 个精选工具），不再是 `admin`（全部 148 个工具）。大多数 Agent 用 `standard` 或 `coordinate` 就够了。只有需要直接访问 vault、hub 等底层工具时才设 `TACHI_PROFILE=admin`。
+>
 > **注意**：配置 `"TACHI_PROFILE": "coordinate"`（或 `"remember"`）权限，可保证 Cursor、Claude Desktop 等外部界面的工具侧边栏**不会**被海量 `tachi_skill_*` 强行霸屏。
 > 
 > **🤖 针对“脑力平平” Agent 的调教指南**：因为隐藏了展平的直调工具，某些依赖穷举列表的 IDE Agent 可能不知道如何调用框架。建议在你的 Cursor Rules（`.cursorrules`）或全局 System Prompt 中强制补充以下“死命令”：
