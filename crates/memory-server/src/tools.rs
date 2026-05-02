@@ -462,16 +462,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Ingest a URL or local file into the wiki knowledge base, deriving metadata and linking related entries."
-    )]
-    pub(crate) async fn tachi_wiki_ingest(
-        &self,
-        Parameters(params): Parameters<TachiWikiIngestParams>,
-    ) -> Result<String, String> {
-        handle_wiki_ingest(self, params).await
-    }
-
-    #[tool(
         description = "Search wiki entries under /wiki. Use this before debugging from scratch or when a prior lesson may exist."
     )]
     pub(crate) async fn tachi_wiki_search(
