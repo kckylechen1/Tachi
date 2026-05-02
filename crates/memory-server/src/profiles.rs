@@ -197,12 +197,14 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_plan",
     "tachi_unstick",
     "tachi_browse",
+    "tachi_board",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "save_memory",
     "remember",
     "tachi_wiki_write",
+    "tachi_wiki_ingest",
     "extract_facts",
     "run_skill",
     "ingest_event",
@@ -270,6 +272,7 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_dispatch",
     "tachi_complete",
     "approve_merge",
+    "tachi_board",
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
