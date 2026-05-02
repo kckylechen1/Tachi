@@ -12,6 +12,9 @@ const SETUP_API_KEYS: [(&str, &str); 5] = [
     ("REASONING_API_KEY", "GLM-5.1 reasoning lane"),
 ];
 
+const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
+    "No profile specified; defaulting to 'standard'. Set TACHI_PROFILE=admin to restore legacy full surface (148 tools).";
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct SetupItem {
     pub id: String,
@@ -2681,6 +2684,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 raw_profile
             ),
         }
+    } else {
+        eprintln!("{DEFAULT_STANDARD_PROFILE_NOTICE}");
     }
 
     // Spawn idle connection cleanup task
@@ -2992,7 +2997,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         server
             .active_tool_profile()
             .map(|profile| profile.as_str())
-            .unwrap_or_else(|| "admin".to_string())
+            .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str())
     );
 
     if cli.daemon {

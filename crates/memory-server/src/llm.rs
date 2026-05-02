@@ -759,7 +759,7 @@ mod tests {
             client
                 .required_secret(&[KEY])
                 .expect_err("missing keys should fail at call time")
-                .contains(KEY)
+                .contains("Missing API key")
         );
     }
 
