@@ -338,7 +338,7 @@ pub(super) fn filter_tool_defs(
         .collect()
 }
 
-fn tool_visible(
+pub(super) fn tool_visible(
     tool_name: &str,
     profile: Option<ToolProfile>,
     env_patterns: Option<&[String]>,
