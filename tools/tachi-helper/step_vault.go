@@ -121,6 +121,9 @@ func (s *vaultStep) handleEnter() (tea.Model, tea.Cmd) {
 		s.errMsg = ""
 		s.password.Focus()
 		return s, textinput.Blink
+
+	case vaultPhaseDone:
+		return s, stepDone()
 	}
 	return s, nil
 }

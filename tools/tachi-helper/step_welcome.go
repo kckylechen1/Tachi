@@ -34,29 +34,35 @@ func (s *welcomeStep) View() string {
 	logo := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(
 		strings.Join([]string{
 			"",
-			"  ╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸",
-			"      Tachi Setup Wizard",
-			"  ╺━━━━━━━━━━━━━━━━━━━━━━━━━━━━╸",
+			"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+			"    Tachi Setup Wizard",
+			"  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
 			"",
 		}, "\n"),
 	)
 
-	desc := lipgloss.NewStyle().Foreground(normal).Render(
-		"  This wizard will guide you through setting up Tachi:\n" +
-			"\n" +
-			"  1.  Check your Tachi installation\n" +
-			"  2.  Initialize the encrypted Vault\n" +
-			"  3.  Import API keys from .env files\n" +
-			"  4.  Register MCP servers\n" +
-			"  5.  Set up shell integration\n" +
-			"\n" +
-			"  Your API keys will be stored encrypted and never\n" +
-			"  committed to git.",
+	steps := []string{
+		"Check your Tachi installation",
+		"Initialize the encrypted Vault",
+		"Import API keys from .env files",
+		"Register MCP servers",
+		"Set up shell integration",
+	}
+
+	var stepList strings.Builder
+	stepList.WriteString("\n")
+	for i, s := range steps {
+		num := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(fmt.Sprintf("%d.", i+1))
+		stepList.WriteString(fmt.Sprintf("  %s  %s\n", num, s))
+	}
+
+	desc := lipgloss.NewStyle().Foreground(dimText).Render(
+		"\n  Your API keys will be stored encrypted and never\n  committed to git.",
 	)
 
 	enter := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(
 		fmt.Sprintf("\n  Press %s to start", "Enter"),
 	)
 
-	return logo + desc + enter
+	return logo + stepList.String() + desc + enter
 }

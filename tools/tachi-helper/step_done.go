@@ -27,8 +27,8 @@ func (s *doneStep) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (s *doneStep) View() string {
 	var sb strings.Builder
-	sb.WriteString("\n")
 
+	sb.WriteString("\n")
 	sb.WriteString(checkStyle.Render("  ✓ Tachi setup complete!") + "\n\n")
 	sb.WriteString("  ─────────────────────────────────────\n\n")
 
@@ -45,19 +45,19 @@ func (s *doneStep) View() string {
 
 	for _, item := range items {
 		sb.WriteString(fmt.Sprintf("  %-16s %s\n",
-			lipgloss.NewStyle().Foreground(dimText).Render(item.label+":"),
-			lipgloss.NewStyle().Foreground(normal).Render(item.value),
+			labelDimStyle.Render(item.label+":"),
+			valueStyle.Render(item.value),
 		))
 	}
 
 	sb.WriteString("\n  ─────────────────────────────────────\n\n")
 	sb.WriteString("  Next steps:\n\n")
-	sb.WriteString("  1. " + lipgloss.NewStyle().Foreground(bright).Render(`Run: eval "$(tachi env)"`) + "\n")
+	sb.WriteString("  1. " + lipgloss.NewStyle().Foreground(bright).Bold(true).Render(`Run: eval "$(tachi env)"`) + "\n")
 	sb.WriteString("     to load secrets into your current shell\n\n")
 	sb.WriteString("  2. Store more keys with your MCP client:\n")
-	sb.WriteString("     " + lipgloss.NewStyle().Foreground(dimText).Render(`tachi vault_set(name="KEY_NAME", value="secret")`) + "\n\n")
+	sb.WriteString("     " + codeBlockStyle.Render(`tachi vault_set(name="KEY", value="secret")`) + "\n\n")
 	sb.WriteString("  3. Remove .env files from your projects:\n")
-	sb.WriteString("     " + lipgloss.NewStyle().Foreground(dimText).Render(`git rm .env && echo ".env" >> .gitignore`) + "\n")
+	sb.WriteString("     " + codeBlockStyle.Render(`git rm .env && echo ".env" >> .gitignore`) + "\n")
 
 	sb.WriteString("\n\n" + hintStyle.Render("  q / esc: quit"))
 

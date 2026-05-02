@@ -51,19 +51,18 @@ func (s *shellStep) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "y", "Y":
+		case "y", "Y", "enter":
 			if s.phase == shellPhaseConfirm {
 				s.phase = shellPhaseWriting
 				return s, s.writeRC()
+			}
+			if s.phase == shellPhaseDone || s.phase == shellPhaseSkip {
+				return s, stepDone()
 			}
 		case "n", "N":
 			if s.phase == shellPhaseConfirm {
 				s.phase = shellPhaseSkip
 				return s, nil
-			}
-		case "enter":
-			if s.phase == shellPhaseDone || s.phase == shellPhaseSkip {
-				return s, stepDone()
 			}
 		}
 	}
@@ -76,15 +75,15 @@ func (s *shellStep) View() string {
 
 	switch s.phase {
 	case shellPhaseConfirm:
-		evalLine := fmt.Sprintf(`eval "$(tachi env)"`)
+		evalLine := `eval "$(tachi env)"`
 		sb.WriteString("  The following line will be appended to ")
-		sb.WriteString(lipgloss.NewStyle().Foreground(accent).Render(shortPath(s.state.ShellRC)))
+		sb.WriteString(lipgloss.NewStyle().Foreground(accent).Bold(true).Render(shortPath(s.state.ShellRC)))
 		sb.WriteString(":\n\n")
-		sb.WriteString("  " + lipgloss.NewStyle().Foreground(bright).Background(lipgloss.Color("#1F2937")).Padding(0, 1).Render(evalLine))
+		sb.WriteString("  " + codeBlockStyle.Render(evalLine))
 		sb.WriteString("\n\n")
 		sb.WriteString("  This loads your Vault secrets into the shell environment\n")
 		sb.WriteString("  on every terminal start, replacing .env files.\n\n")
-		sb.WriteString(hintStyle.Render("  y: add to " + s.state.ShellType + "rc  ·  n: skip"))
+		sb.WriteString(hintStyle.Render("  enter/y: add to " + s.state.ShellType + "rc  ·  n: skip"))
 
 	case shellPhaseWriting:
 		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") + " Writing to " + shortPath(s.state.ShellRC) + "...\n")
@@ -92,18 +91,18 @@ func (s *shellStep) View() string {
 	case shellPhaseSkip:
 		sb.WriteString(warnStyle.Render("  ⊘ Skipped") + " — shell rc not modified\n")
 		sb.WriteString("\n  You can add it manually later:\n")
-		sb.WriteString("  " + lipgloss.NewStyle().Foreground(dimText).Render(`eval "$(tachi env)"`))
+		sb.WriteString("  " + codeBlockStyle.Render(`eval "$(tachi env)"`))
 		sb.WriteString("\n\n" + hintStyle.Render("  Press Enter to continue"))
 
 	case shellPhaseDone:
 		if s.errMsg != "" {
 			sb.WriteString("  " + crossStyle.Render("✗ "+s.errMsg) + "\n")
 			sb.WriteString("\n  Add manually:\n")
-			sb.WriteString("  " + lipgloss.NewStyle().Foreground(dimText).Render(`eval "$(tachi env)"`))
+			sb.WriteString("  " + codeBlockStyle.Render(`eval "$(tachi env)"`))
 		} else {
 			sb.WriteString("  " + checkStyle.Render("✓ Shell integration added to "+shortPath(s.state.ShellRC)) + "\n")
-			sb.WriteString("\n  Run the following to activate now:\n")
-			sb.WriteString("  " + lipgloss.NewStyle().Foreground(bright).Background(lipgloss.Color("#1F2937")).Padding(0, 1).Render(`source `+s.state.ShellRC))
+			sb.WriteString("\n  Run to activate now:\n")
+			sb.WriteString("  " + codeBlockStyle.Render(`source `+s.state.ShellRC))
 		}
 		sb.WriteString("\n\n" + hintStyle.Render("  Press Enter to continue"))
 	}
