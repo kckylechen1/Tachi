@@ -170,6 +170,10 @@ impl ToolProfile {
     }
 }
 
+pub(super) const fn default_tool_profile() -> ToolProfile {
+    ToolProfile::standard()
+}
+
 const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task_brief",
     "tachi_progress_check",
@@ -349,7 +353,7 @@ pub(super) fn tool_visible(
         }
     }
 
-    let profile = profile.unwrap_or_else(ToolProfile::admin);
+    let profile = profile.unwrap_or_else(default_tool_profile);
     if profile.admin {
         return true;
     }
@@ -563,9 +567,10 @@ mod tests {
     }
 
     #[test]
-    fn omitted_profile_keeps_compatibility_admin_surface() {
+    fn omitted_profile_defaults_to_standard_surface() {
         let filtered = filter_tool_defs(
             vec![
+                test_tool("tachi_plan"),
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("hub_register"),
@@ -579,11 +584,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                "search_memory".to_string(),
-                "save_memory".to_string(),
-                "hub_register".to_string()
-            ]
+            vec!["tachi_plan".to_string()]
         );
     }
 

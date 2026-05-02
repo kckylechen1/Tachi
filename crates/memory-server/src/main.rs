@@ -485,7 +485,7 @@ impl MemoryServer {
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
             rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             agent_profile: Arc::new(StdRwLock::new(None)),
-            tool_profile: Arc::new(StdRwLock::new(None)),
+            tool_profile: Arc::new(StdRwLock::new(Some(crate::profiles::default_tool_profile()))),
             handoff_memos: Arc::new(StdMutex::new(Vec::new())),
         };
 
