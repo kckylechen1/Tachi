@@ -204,10 +204,7 @@ impl LlmClient {
 
     fn required_secret(&self, keys: &[&str]) -> Result<String, String> {
         self.first_secret(keys).ok_or_else(|| {
-            format!(
-                "Missing API key. Add one to Tachi Vault or set env var: {}",
-                keys.join(", ")
-            )
+            "Missing API key. Add one to Tachi Vault or set the appropriate env var.".to_string()
         })
     }
 
@@ -762,7 +759,7 @@ mod tests {
             client
                 .required_secret(&[KEY])
                 .expect_err("missing keys should fail at call time")
-                .contains(KEY)
+                .contains("Missing API key")
         );
     }
 

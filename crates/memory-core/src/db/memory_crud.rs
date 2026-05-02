@@ -24,6 +24,7 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
     entry.source = MemorySource::parse_or_external(&entry.source);
     entry.category = MemoryCategory::normalize(&entry.category).to_string();
     entry.scope = MemoryScope::normalize(&entry.scope).to_string();
+    entry.importance = entry.importance.clamp(0.0, 1.0);
     if entry.retention_policy.is_none() {
         if let Some(d) = default_retention_for(&entry.path, &entry.source) {
             entry.retention_policy = Some(d.to_string());
@@ -316,7 +317,10 @@ pub fn update_enrichment_fields(
 
     if rows_affected == 0 {
         tx.commit()?;
-        return Ok(false); // revision mismatch — entry was updated concurrently, discard enrichment
+        eprintln!(
+            "[enrichment] discarded stale enrichment for id={id}: revision {expected_revision} no longer current"
+        );
+        return Ok(false);
     }
 
     // Refresh FTS if summary was updated
@@ -459,8 +463,12 @@ pub fn search_fts(
 
 // ─── BULK FETCH ───────────────────────────────────────────────────────────────
 
+/// Maximum IDs per batch for IN clause queries (SQLite has a 999 parameter limit).
+const IN_BATCH_SIZE: usize = 900;
+
 /// Fetch multiple entries by their IDs in one query.
 /// Also hydrates vectors from memories_vec if available.
+/// Handles batching internally to stay under SQLite's 999 parameter limit.
 pub fn fetch_by_ids(
     conn: &Connection,
     ids: &[String],
@@ -470,52 +478,53 @@ pub fn fetch_by_ids(
         return Ok(HashMap::new());
     }
 
-    // Build a parameterised IN clause
-    let placeholders = ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let mut sql = format!(
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-         FROM memories WHERE id IN ({})",
-        placeholders
-    );
-    if !include_archived {
-        sql.push_str(" AND archived = 0");
-    }
-
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_entry)?;
-
     let mut out = HashMap::new();
-    for r in rows {
-        let entry = r?;
-        out.insert(entry.id.clone(), entry);
-    }
 
-    // Hydrate vectors from memories_vec (best-effort: table may not exist)
-    let vec_sql = format!(
-        "SELECT id, embedding FROM memories_vec WHERE id IN ({})",
-        placeholders
-    );
-    if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
-        if let Ok(vec_rows) = vec_stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
-            let id: String = row.get(0)?;
-            let blob: Vec<u8> = row.get(1)?;
-            Ok((id, blob))
-        }) {
-            for r in vec_rows.flatten() {
-                let (id, blob) = r;
-                if let Some(entry) = out.get_mut(&id) {
-                    // Deserialize f32 vector from blob
-                    if blob.len() % 4 == 0 {
-                        let vec: Vec<f32> = blob
-                            .chunks_exact(4)
-                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                            .collect();
-                        entry.vector = Some(vec);
+    for batch in ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = batch
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut sql = format!(
+            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+             FROM memories WHERE id IN ({})",
+            placeholders
+        );
+        if !include_archived {
+            sql.push_str(" AND archived = 0");
+        }
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), row_to_entry)?;
+
+        for r in rows {
+            let entry = r?;
+            out.insert(entry.id.clone(), entry);
+        }
+
+        // Hydrate vectors from memories_vec (best-effort: table may not exist)
+        let vec_sql = format!(
+            "SELECT id, embedding FROM memories_vec WHERE id IN ({})",
+            placeholders
+        );
+        if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
+            if let Ok(vec_rows) = vec_stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            }) {
+                for r in vec_rows.flatten() {
+                    let (id, blob) = r;
+                    if let Some(entry) = out.get_mut(&id) {
+                        if blob.len() % 4 == 0 {
+                            let vec: Vec<f32> = blob
+                                .chunks_exact(4)
+                                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                                .collect();
+                            entry.vector = Some(vec);
+                        }
                     }
                 }
             }
@@ -622,6 +631,7 @@ pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryErro
 
 /// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
 /// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
+/// Handles batching internally to stay under SQLite's 999 parameter limit.
 pub fn get_access_times(
     conn: &Connection,
     ids: &[String],
@@ -629,33 +639,38 @@ pub fn get_access_times(
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders: Vec<String> = ids
-        .iter()
-        .enumerate()
-        .map(|(i, _)| format!("?{}", i + 1))
-        .collect();
-    let sql = format!(
-        "SELECT memory_id, accessed_at FROM access_history WHERE memory_id IN ({}) ORDER BY accessed_at DESC",
-        placeholders.join(", ")
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let params_vec: Vec<&dyn rusqlite::ToSql> =
-        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let rows = stmt.query_map(params_vec.as_slice(), |row| {
-        let mem_id: String = row.get(0)?;
-        let at: String = row.get(1)?;
-        Ok((mem_id, at))
-    })?;
 
     let now = Utc::now();
     let mut result: HashMap<String, Vec<f64>> = HashMap::new();
-    for row in rows {
-        let (mem_id, at_str) = row?;
-        if let Ok(dt) = at_str.parse::<DateTime<Utc>>() {
-            let age_secs = (now - dt).num_seconds().max(1) as f64;
-            result.entry(mem_id).or_default().push(age_secs);
+
+    for batch in ids.chunks(IN_BATCH_SIZE) {
+        let placeholders: Vec<String> = batch
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
+        let sql = format!(
+            "SELECT memory_id, accessed_at FROM access_history WHERE memory_id IN ({}) ORDER BY accessed_at DESC",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            batch.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params_vec.as_slice(), |row| {
+            let mem_id: String = row.get(0)?;
+            let at: String = row.get(1)?;
+            Ok((mem_id, at))
+        })?;
+
+        for row in rows {
+            let (mem_id, at_str) = row?;
+            if let Ok(dt) = at_str.parse::<DateTime<Utc>>() {
+                let age_secs = (now - dt).num_seconds().max(1) as f64;
+                result.entry(mem_id).or_default().push(age_secs);
+            }
         }
     }
+
     Ok(result)
 }
 

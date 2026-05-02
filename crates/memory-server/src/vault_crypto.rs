@@ -69,6 +69,11 @@ pub fn create_verifier(key: &[u8; 32]) -> Result<String, String> {
 }
 
 /// Verify a password by decrypting the verifier blob.
+///
+/// Returns `Ok(true)` for correct password, `Ok(false)` for wrong password,
+/// and `Err` only for malformed input (e.g. invalid verifier format).
+/// This is intentional: callers should treat Ok(false) and Err differently —
+/// Ok(false) means "try again", Err means "the vault is corrupted".
 pub fn verify_password(key: &[u8; 32], verifier: &str) -> Result<bool, String> {
     let parts: Vec<&str> = verifier.splitn(2, ':').collect();
     if parts.len() != 2 {

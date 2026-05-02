@@ -922,6 +922,8 @@ fn sanitize_source_suffix_sql(s: &str) -> String {
     }
 }
 
+// SAFETY: table and column params must be literal strings only — this function
+// formats them directly into SQL DDL and is not injection-safe for dynamic input.
 fn ensure_column(
     conn: &Connection,
     table: &str,
