@@ -334,9 +334,7 @@ pub(crate) async fn handle_ghost_promote(
         // B9: keep `source` canonical ('ghost') and stash the publisher under
         // metadata.ghost.publisher so we don't fan the source vocabulary out.
         if let Some(map) = metadata.as_object_mut() {
-            let ghost_obj = map
-                .entry("ghost".to_string())
-                .or_insert_with(|| json!({}));
+            let ghost_obj = map.entry("ghost".to_string()).or_insert_with(|| json!({}));
             if let Some(g) = ghost_obj.as_object_mut() {
                 g.insert(
                     "publisher".to_string(),

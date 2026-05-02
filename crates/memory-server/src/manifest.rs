@@ -325,7 +325,7 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
         return Ok(report);
     }
 
-    // Re-assemble in original-encounter order; sort by path for stable output
+    // Re-assemble in original-encounter order, then sort for stable output
     // (matches populate_from_doctor's behaviour).
     let mut new_dbs: Vec<DbEntry> = order
         .into_iter()
