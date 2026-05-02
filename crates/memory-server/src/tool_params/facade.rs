@@ -276,6 +276,12 @@ pub(crate) struct TachiApproveMergeParams {
     /// Whether to remove the worktree after merge (default: true)
     #[serde(default = "default_true")]
     pub delete_worktree: bool,
+
+    /// Set to true to execute the merge. When false (default), runs a dry-run
+    /// preview (git merge --no-commit --no-ff) and returns the diff without
+    /// committing. Callers should preview first, then confirm with confirm=true.
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 // ─── Facade: task completion + eval ledger ───────────────────────────────────

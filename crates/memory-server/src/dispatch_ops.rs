@@ -490,6 +490,60 @@ pub(crate) async fn handle_approve_merge(
         .to_string();
 
     let strategy = params.strategy.as_deref().unwrap_or("recursive");
+
+    if !params.confirm {
+        // ── Preview mode: dry-run merge, return diff without committing ──
+        let merge_out = Command::new("git")
+            .args([
+                "-C", &repo_root,
+                "merge", "--strategy", strategy,
+                "--no-commit", "--no-ff", &branch,
+            ])
+            .output()
+            .await
+            .map_err(|e| format!("Merge preview failed: {e}"))?;
+
+        let merge_stdout = String::from_utf8_lossy(&merge_out.stdout).to_string();
+        let merge_stderr = String::from_utf8_lossy(&merge_out.stderr).to_string();
+
+        if !merge_out.status.success() {
+            return serde_json::to_string(&json!({
+                "preview": true,
+                "can_merge": false,
+                "branch": branch,
+                "error": merge_stderr,
+            }))
+            .map_err(|e| format!("serialize: {e}"));
+        }
+
+        // Get the diff of what would be merged
+        let diff_out = Command::new("git")
+            .args(["-C", &repo_root, "diff", "--stat", "HEAD"])
+            .output()
+            .await;
+        let diff_stat = diff_out
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        // Abort the merge to restore clean state
+        let _ = Command::new("git")
+            .args(["-C", &repo_root, "merge", "--abort"])
+            .output()
+            .await;
+
+        return serde_json::to_string(&json!({
+            "preview": true,
+            "can_merge": true,
+            "branch": branch,
+            "repo_root": repo_root,
+            "merge_output": merge_stdout.trim(),
+            "diff_stat": diff_stat.trim(),
+            "next_step": "Call approve_merge again with confirm=true to execute the merge.",
+        }))
+        .map_err(|e| format!("serialize: {e}"));
+    }
+
+    // ── Confirm mode: execute the real merge ──
     let merge_out = Command::new("git")
         .args(["-C", &repo_root, "merge", "--strategy", strategy, &branch])
         .output()

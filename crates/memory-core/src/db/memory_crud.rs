@@ -317,7 +317,10 @@ pub fn update_enrichment_fields(
 
     if rows_affected == 0 {
         tx.commit()?;
-        return Ok(false); // revision mismatch — entry was updated concurrently, discard enrichment
+        eprintln!(
+            "[enrichment] discarded stale enrichment for id={id}: revision {expected_revision} no longer current"
+        );
+        return Ok(false);
     }
 
     // Refresh FTS if summary was updated
