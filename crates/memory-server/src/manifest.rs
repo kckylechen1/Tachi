@@ -327,7 +327,10 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
 
     // Re-assemble in original-encounter order; sort by path for stable output
     // (matches populate_from_doctor's behaviour).
-    let mut new_dbs: Vec<DbEntry> = by_canon.into_values().collect();
+    let mut new_dbs: Vec<DbEntry> = order
+        .into_iter()
+        .filter_map(|k| by_canon.remove(&k))
+        .collect();
     new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
     manifest.dbs = new_dbs;
     manifest.generated_at = Utc::now().to_rfc3339();
@@ -467,12 +470,6 @@ impl Manifest {
             }
             let role = classify_role(f);
             let owner = derive_owner(&f.scope_hint);
-            // WalOrphan is permitted for write: a non-empty -wal sidecar is the
-            // *expected* state for any SQLite DB held open by a running daemon.
-            // SQLite performs WAL recovery automatically on next open, so the
-            // classification reflects "needs inspection" rather than corruption.
-            // Without this, a healthy DB held by the live daemon trips
-            // check_writable and self-locks the CLI (see PR-A).
             let allow_write = matches!(
                 f.classification,
                 DbClassification::Healthy | DbClassification::WalOrphan
@@ -499,7 +496,10 @@ impl Manifest {
             by_canon.insert(canon.clone(), entry);
             order.push(canon);
         }
-        let mut new_dbs: Vec<DbEntry> = by_canon.into_values().collect();
+        let mut new_dbs: Vec<DbEntry> = order
+            .into_iter()
+            .filter_map(|k| by_canon.remove(&k))
+            .collect();
         new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
         self.dbs = new_dbs;
         self.generated_at = Utc::now().to_rfc3339();
