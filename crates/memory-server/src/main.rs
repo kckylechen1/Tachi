@@ -10,6 +10,7 @@ mod capture_gate;
 mod clawdoctor;
 mod cli;
 mod cli_client;
+mod complete_ops;
 mod copilot_ops;
 mod daemon_lock;
 mod dispatch_ops;
@@ -250,6 +251,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "distill_trajectory",
     "wiki_lint",
     "tachi_wiki_write",
+    "tachi_wiki_ingest",
     // Facade tools (write / mixed)
     "tachi_save",
     "tachi_handoff",

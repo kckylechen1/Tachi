@@ -350,3 +350,21 @@ pub(crate) struct TachiCompleteParams {
     #[serde(default)]
     pub project: Option<String>,
 }
+
+// ─── Facade: task board (kanban) ─────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiBoardParams {
+    /// Filter by state: "working", "completed", "failed", "all" (default: "all")
+    #[serde(default)]
+    pub state_filter: Option<String>,
+
+    /// Maximum number of tasks to return (default: 20)
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+}
