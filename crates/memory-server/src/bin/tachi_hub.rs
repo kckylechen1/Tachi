@@ -3,6 +3,8 @@
 // Reads ~/.tachi/global/memory.db (or $TACHI_HOME/global/memory.db, or --db override)
 // and prints capability / pack / virtual binding info. Read-only by default.
 
+#![allow(clippy::print_literal, clippy::type_complexity)]
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

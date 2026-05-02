@@ -3,6 +3,34 @@
 // Rust MCP server using rmcp SDK to expose memory-core functionality.
 // Stateless design: each tool opens its own DB connection per-request.
 
+#![allow(
+    clippy::cast_abs_to_unsigned,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::cmp_owned,
+    clippy::collapsible_if,
+    clippy::collapsible_str_replace,
+    clippy::derivable_impls,
+    clippy::doc_overindented_list_items,
+    clippy::enum_variant_names,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::io_other_error,
+    clippy::let_and_return,
+    clippy::manual_async_fn,
+    clippy::manual_clamp,
+    clippy::manual_pattern_char_comparison,
+    clippy::manual_strip,
+    clippy::needless_range_loop,
+    clippy::needless_update,
+    clippy::ptr_arg,
+    clippy::redundant_closure,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_sort_by,
+    clippy::useless_conversion,
+    clippy::useless_format
+)]
+
 mod bootstrap;
 mod builtins;
 mod capability_ops;
@@ -250,6 +278,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "distill_trajectory",
     "wiki_lint",
     "tachi_wiki_write",
+    "tachi_wiki_ingest",
     // Facade tools (write / mixed)
     "tachi_save",
     "tachi_handoff",

@@ -263,6 +263,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Wiki utilities.
+    Wiki {
+        #[command(subcommand)]
+        action: WikiAction,
+    },
     /// List memories under a path prefix. Mirrors the `list_memories` MCP tool.
     List {
         /// Path prefix filter. Defaults to "/".
@@ -552,6 +557,22 @@ pub(crate) enum ManifestAction {
         /// Output JSON instead of human text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum WikiAction {
+    /// Export wiki entries to Markdown files.
+    Export {
+        /// Export format. Currently only "obsidian" is supported.
+        #[arg(long, default_value = "obsidian")]
+        format: String,
+        /// Output directory.
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+        /// Optional named project DB.
+        #[arg(long, default_value = "wiki")]
+        project: String,
     },
 }
 

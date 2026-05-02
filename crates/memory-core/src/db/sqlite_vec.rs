@@ -5,9 +5,15 @@ static SQLITE_VEC_AUTO_EXT_ONCE: Once = Once::new();
 
 pub fn register_sqlite_vec() {
     SQLITE_VEC_AUTO_EXT_ONCE.call_once(|| unsafe {
-        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
-        )));
+        let init_fn = std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite_vec::sqlite3_vec_init as *const ());
+        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(init_fn));
         if rc != rusqlite::ffi::SQLITE_OK {
             eprintln!("warning: sqlite-vec auto_extension registration failed (rc={rc})");
         }

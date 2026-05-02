@@ -222,6 +222,7 @@ pub fn release_event_claim(
 
 /// Update a memory row only when its revision matches `expected_revision`.
 /// Returns `Ok(true)` when updated, `Ok(false)` on revision mismatch.
+#[allow(clippy::too_many_arguments)]
 pub fn update_with_revision(
     conn: &mut Connection,
     id: &str,

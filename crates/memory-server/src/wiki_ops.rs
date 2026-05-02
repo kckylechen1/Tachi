@@ -1,7 +1,8 @@
 use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use memory_core::scorer::local_pagerank;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 fn default_checks() -> Vec<String> {
     vec![
@@ -9,6 +10,8 @@ fn default_checks() -> Vec<String> {
         "contradictions".to_string(),
         "stale".to_string(),
         "missing_edges".to_string(),
+        "dirty_data".to_string(),
+        "duplicates".to_string(),
     ]
 }
 
@@ -131,6 +134,563 @@ fn relation_exists(
         let matches_relation = relation.map(|rel| edge.relation == rel).unwrap_or(true);
         matches_nodes && matches_relation
     })
+}
+
+async fn source_for_path(source: &str) -> Result<String, String> {
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = reqwest::get(source)
+            .await
+            .map_err(|e| format!("fetch source URL: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("fetch source URL failed with status {}", response.status()));
+        }
+        response
+            .text()
+            .await
+            .map_err(|e| format!("read source response: {e}"))
+    } else {
+        tokio::fs::read_to_string(source)
+            .await
+            .map_err(|e| format!("read source file: {e}"))
+    }
+}
+
+fn compact_entry(entry: &MemoryEntry) -> Value {
+    json!({
+        "id": entry.id,
+        "path": entry.path,
+        "summary": entry.summary,
+    })
+}
+
+fn find_related_by_entities(
+    server: &MemoryServer,
+    project: &str,
+    entities: &[String],
+    exclude_id: &str,
+    limit: usize,
+) -> Vec<Value> {
+    let entity_set: HashSet<String> = entities
+        .iter()
+        .map(|entity| entity.trim().to_ascii_lowercase())
+        .filter(|entity| !entity.is_empty())
+        .collect();
+    if entity_set.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+
+    let entries = list_related_candidates(server, project, 5000).unwrap_or_default();
+
+    let mut related = entries
+        .into_iter()
+        .filter(|entry| entry.id != exclude_id)
+        .filter(|entry| {
+            entry
+                .entities
+                .iter()
+                .any(|entity| entity_set.contains(&entity.trim().to_ascii_lowercase()))
+        })
+        .collect::<Vec<_>>();
+    related.sort_by(|a, b| {
+        b.importance
+            .partial_cmp(&a.importance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.timestamp.cmp(&a.timestamp))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut seen = HashSet::new();
+    related
+        .into_iter()
+        .filter(|entry| seen.insert(entry.id.clone()))
+        .take(limit)
+        .map(|entry| compact_entry(&entry))
+        .collect()
+}
+
+fn list_related_candidates(
+    server: &MemoryServer,
+    project: &str,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, String> {
+    server
+        .with_named_project_store_read(project, |store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki list: {e}"))
+        })
+        .or_else(|_| {
+            server.with_global_store_read(|store| {
+                store
+                    .list_by_path("/wiki", limit, false)
+                    .map_err(|e| format!("wiki fallback list: {e}"))
+            })
+        })
+}
+
+fn list_wiki_entries(
+    server: &MemoryServer,
+    project: &str,
+    limit: usize,
+) -> Result<(Vec<MemoryEntry>, &'static str), String> {
+    match server.with_named_project_store_read(project, |store| {
+        store
+            .list_by_path("/wiki", limit, false)
+            .map_err(|e| format!("wiki list: {e}"))
+    }) {
+        Ok(entries) => Ok((entries, "named")),
+        Err(named_err) => server
+            .with_global_store_read(|store| {
+                store
+                    .list_by_path("/wiki", limit, false)
+                    .map_err(|e| format!("wiki fallback list: {e}"))
+            })
+            .map(|entries| (entries, "global"))
+            .map_err(|fallback_err| format!("{named_err}; {fallback_err}")),
+    }
+}
+
+pub(crate) fn add_related_entries_to_row(
+    row: &mut Value,
+    server: &MemoryServer,
+    project: &str,
+    limit: usize,
+) {
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let entities = obj
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let related = find_related_by_entities(server, project, &entities, &id, limit);
+    obj.insert("related_entries".to_string(), json!(related));
+}
+
+fn obsidian_file_stem(entry: &MemoryEntry) -> String {
+    let topic = entry.topic.trim();
+    if !topic.is_empty() {
+        return sanitize_safe_path_name(topic);
+    }
+    let summary = entry.summary.trim();
+    if !summary.is_empty() {
+        return sanitize_safe_path_name(summary);
+    }
+    sanitize_safe_path_name(&entry.id)
+}
+
+fn yaml_string_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+    let items = values
+        .iter()
+        .map(|value| format!("\"{}\"", value.replace('"', "\\\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{items}]")
+}
+
+fn obsidian_link_entities(text: &str, entities: &[String]) -> String {
+    let mut out = text.to_string();
+    let mut sorted = entities
+        .iter()
+        .map(|entity| entity.trim())
+        .filter(|entity| !entity.is_empty())
+        .collect::<Vec<_>>();
+    sorted.sort_by_key(|entity| std::cmp::Reverse(entity.len()));
+    sorted.dedup();
+
+    for entity in sorted {
+        let link = format!("[[{entity}]]");
+        if out.contains(&link) {
+            continue;
+        }
+        out = out.replace(entity, &link);
+    }
+    out
+}
+
+fn markdown_for_obsidian(entry: &MemoryEntry) -> String {
+    let mut body = String::new();
+    body.push_str("---\n");
+    body.push_str(&format!("id: \"{}\"\n", entry.id.replace('"', "\\\"")));
+    body.push_str(&format!("importance: {}\n", entry.importance));
+    body.push_str(&format!("keywords: {}\n", yaml_string_list(&entry.keywords)));
+    body.push_str(&format!("entities: {}\n", yaml_string_list(&entry.entities)));
+    body.push_str(&format!("tags: {}\n", yaml_string_list(&entry.keywords)));
+    body.push_str(&format!("timestamp: \"{}\"\n", entry.timestamp.replace('"', "\\\"")));
+    body.push_str(&format!("category: \"{}\"\n", entry.category.replace('"', "\\\"")));
+    body.push_str("---\n\n");
+    body.push_str(&obsidian_link_entities(&entry.text, &entry.entities));
+    if !entry.entities.is_empty() {
+        body.push_str("\n\n## See Also\n");
+        for entity in &entry.entities {
+            body.push_str(&format!("- [[{}]]\n", entity));
+        }
+    }
+    body
+}
+
+fn string_list_from_value(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn derive_ingest_fallback(source: &str, topic_hint: Option<&str>, content: &str) -> Value {
+    let title = topic_hint
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            content
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().trim_start_matches('#').trim().chars().take(80).collect())
+        })
+        .unwrap_or_else(|| {
+            Path::new(source)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("ingested-source")
+                .to_string()
+        });
+    let keywords = topic_hint
+        .map(|topic| {
+            topic
+                .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let entities = topic_hint
+        .filter(|topic| !topic.trim().is_empty())
+        .map(|topic| vec![topic.trim().to_string()])
+        .unwrap_or_default();
+    json!({
+        "title": title,
+        "topic": topic_hint.unwrap_or("ingest"),
+        "summary": content.chars().take(100).collect::<String>(),
+        "keywords": keywords,
+        "entities": entities,
+    })
+}
+
+async fn extract_ingest_metadata(
+    server: &MemoryServer,
+    source: &str,
+    topic_hint: Option<&str>,
+    content: &str,
+) -> Value {
+    #[cfg(test)]
+    {
+        let _ = server;
+        derive_ingest_fallback(source, topic_hint, content)
+    }
+
+    #[cfg(not(test))]
+    {
+        let system = "Extract wiki ingestion metadata. Return JSON only with keys: title, topic, summary, keywords, entities.";
+        let user = format!(
+            "Source: {source}\nTopic hint: {}\n\nContent:\n{}",
+            topic_hint.unwrap_or(""),
+            content.chars().take(8000).collect::<String>()
+        );
+        match server.llm.call_extract_llm(system, &user, None, 0.2, 800).await {
+            Ok(response) => match crate::llm::LlmClient::extract_json_payload(&response)
+                .ok()
+                .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
+            {
+                Some(value) => value,
+                None => derive_ingest_fallback(source, topic_hint, content),
+            },
+            Err(_) => derive_ingest_fallback(source, topic_hint, content),
+        }
+    }
+}
+
+pub(crate) async fn handle_wiki_ingest(
+    server: &MemoryServer,
+    params: TachiWikiIngestParams,
+) -> Result<String, String> {
+    let content = source_for_path(&params.source).await?;
+    if content.trim().is_empty() {
+        append_wiki_log(server, "ingest", &format!("{} | skipped empty source", params.source));
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_source",
+            "source": params.source,
+        }))
+        .map_err(|e| format!("serialize wiki_ingest: {e}"));
+    }
+
+    let metadata = extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
+    let title = metadata
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Ingested Source")
+        .to_string();
+    let topic = metadata
+        .get("topic")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or(params.topic.clone())
+        .unwrap_or_else(|| "ingest".to_string());
+    let summary = metadata
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(|value| value.chars().take(120).collect::<String>())
+        .unwrap_or_else(|| content.chars().take(100).collect());
+    let mut keywords = string_list_from_value(metadata.get("keywords"));
+    if !keywords.iter().any(|keyword| keyword == "ingest") {
+        keywords.push("ingest".to_string());
+    }
+    let entities = string_list_from_value(metadata.get("entities"));
+    let path = format!("/wiki/general/{}", sanitize_safe_path_name(&topic));
+    let id = uuid::Uuid::new_v4().to_string();
+    let timestamp = Utc::now().to_rfc3339();
+
+    let entry = MemoryEntry {
+        id: id.clone(),
+        path: path.clone(),
+        summary: summary.clone(),
+        text: content.clone(),
+        importance: 0.8,
+        timestamp: timestamp.clone(),
+        category: "experience".to_string(),
+        topic: topic.clone(),
+        keywords,
+        persons: Vec::new(),
+        entities: entities.clone(),
+        location: String::new(),
+        source: "mcp".to_string(),
+        scope: "general".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({
+            "wiki": true,
+            "wiki_title": title.clone(),
+            "ingest_source": params.source.clone(),
+            "allow_cross_project": true,
+        }),
+        vector: None,
+        retention_policy: Some("permanent".to_string()),
+        domain: Some("wiki".to_string()),
+    };
+
+    server.with_named_project_store("wiki", |store| {
+        store
+            .upsert(&entry)
+            .map_err(|e| format!("wiki ingest save: {e}"))
+    })?;
+
+    let mut related = Vec::new();
+    if params.update_related {
+        related = find_related_by_entities(server, "wiki", &entities, &id, 10);
+        for related_entry in &related {
+            let Some(target_id) = related_entry.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let edge = memory_core::MemoryEdge {
+                source_id: id.clone(),
+                target_id: target_id.to_string(),
+                relation: "references".to_string(),
+                weight: 0.6,
+                metadata: json!({
+                    "wiki_ingest": true,
+                    "shared_entities": entities.clone(),
+                }),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            let _ = server.with_named_project_store("wiki", |store| {
+                store.add_edge(&edge).map_err(|e| format!("wiki ingest edge: {e}"))
+            });
+        }
+    }
+
+    let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+        id: id.clone(),
+        text: content,
+        needs_embedding: true,
+        needs_summary: false,
+        target_db: DbScope::Project,
+        named_project: Some("wiki".to_string()),
+        foundry_agent_id: None,
+        foundry_path_prefix: None,
+        revision: 1,
+    });
+
+    append_wiki_log(
+        server,
+        "ingest",
+        &format!("{} | created {} at {}", params.source, id, path),
+    );
+
+    serde_json::to_string(&json!({
+        "status": "created",
+        "id": id,
+        "path": path,
+        "title": title,
+        "summary": summary,
+        "related_entries": related,
+    }))
+    .map_err(|e| format!("serialize wiki_ingest: {e}"))
+}
+
+pub(crate) fn export_wiki_obsidian(
+    server: &MemoryServer,
+    project: &str,
+    output: &Path,
+) -> Result<Value, String> {
+    let (entries, _) = list_wiki_entries(server, project, 100_000)?;
+
+    std::fs::create_dir_all(output).map_err(|e| format!("create export dir: {e}"))?;
+
+    let mut index: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut exported = 0usize;
+    for entry in entries {
+        if entry.path == "/wiki/_log" {
+            continue;
+        }
+        let relative_dir = entry
+            .path
+            .trim_start_matches("/wiki")
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(sanitize_safe_path_name)
+            .collect::<PathBuf>();
+        let target_dir = output.join(&relative_dir);
+        std::fs::create_dir_all(&target_dir).map_err(|e| format!("create entry dir: {e}"))?;
+        let file_stem = obsidian_file_stem(&entry);
+        let file_name = format!("{file_stem}.md");
+        let file_path = target_dir.join(&file_name);
+        std::fs::write(&file_path, markdown_for_obsidian(&entry))
+            .map_err(|e| format!("write export file {}: {e}", file_path.display()))?;
+        index
+            .entry(entry.path.clone())
+            .or_default()
+            .push((file_name, entry.summary.clone()));
+        exported += 1;
+    }
+
+    let mut index_md = String::from("# Wiki Index\n\n");
+    for (path, files) in &index {
+        index_md.push_str(&format!("## {path}\n"));
+        for (file, summary) in files {
+            let link = file.trim_end_matches(".md");
+            if summary.is_empty() {
+                index_md.push_str(&format!("- [[{link}]]\n"));
+            } else {
+                index_md.push_str(&format!("- [[{link}]] - {summary}\n"));
+            }
+        }
+        index_md.push('\n');
+    }
+    let index_path = output.join("_index.md");
+    std::fs::write(&index_path, index_md)
+        .map_err(|e| format!("write index {}: {e}", index_path.display()))?;
+
+    append_wiki_log(
+        server,
+        "export",
+        &format!("obsidian | {} entry(s) -> {}", exported, output.display()),
+    );
+
+    Ok(json!({
+        "status": "completed",
+        "format": "obsidian",
+        "output": output,
+        "count": exported,
+        "index": index_path,
+    }))
+}
+
+pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &str) {
+    let now = Utc::now().to_rfc3339();
+    let log_line = format!("## [{}] {} | {}", now, operation, details.trim());
+    let entry = MemoryEntry {
+        id: "wiki-operation-log".to_string(),
+        path: "/wiki/_log".to_string(),
+        summary: "Wiki operation log".to_string(),
+        text: log_line.clone(),
+        importance: 0.3,
+        timestamp: now,
+        category: "other".to_string(),
+        topic: "wiki_log".to_string(),
+        keywords: vec!["wiki".to_string(), "log".to_string()],
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        source: "mcp".to_string(),
+        scope: "general".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({"wiki_log": true}),
+        vector: None,
+        retention_policy: Some("durable".to_string()),
+        domain: Some("wiki".to_string()),
+    };
+
+    let append_result = server.with_named_project_store("wiki", |store| {
+        let mut entry = entry.clone();
+        if let Some(existing) = store
+            .get("wiki-operation-log")
+            .map_err(|e| format!("wiki_log get: {e}"))?
+        {
+            entry.text = format!("{}\n\n{}", existing.text.trim_end(), log_line);
+            entry.revision = existing.revision;
+        }
+        store
+            .upsert(&entry)
+            .map_err(|e| format!("wiki_log upsert: {e}"))
+    });
+
+    if append_result.is_err() {
+        let _ = server.with_global_store(|store| {
+            let mut entry = entry;
+            entry.metadata = json!({"wiki_log": true, "fallback_db": "global"});
+            if let Some(existing) = store
+                .get("wiki-operation-log")
+                .map_err(|e| format!("wiki_log fallback get: {e}"))?
+            {
+                entry.text = format!("{}\n\n{}", existing.text.trim_end(), log_line);
+                entry.revision = existing.revision;
+            }
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("wiki_log fallback upsert: {e}"))
+        });
+    }
 }
 
 #[derive(Clone)]
@@ -419,8 +979,9 @@ pub(crate) async fn handle_wiki_search(
         .as_deref()
         .map(resolve_wiki_category)
         .or_else(|| Some("/wiki".to_string()));
+    let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
 
-    let rows = search_memory_rows(
+    let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -434,11 +995,21 @@ pub(crate) async fn handle_wiki_search(
             graph_relation_filter: None,
             weights: params.weights,
             agent_role: None,
-            project: Some(params.project.unwrap_or_else(|| "wiki".to_string())),
+            project: Some(project_name.clone()),
             domain: None,
         },
     )
     .await?;
+
+    for row in rows.iter_mut().take(3) {
+        add_related_entries_to_row(row, server, &project_name, 5);
+    }
+
+    append_wiki_log(
+        server,
+        "search",
+        &format!("{} | {} result(s)", params.query, rows.len()),
+    );
 
     serde_json::to_string(&json!({
         "status": "completed",
@@ -459,16 +1030,14 @@ pub(crate) fn handle_wiki_browse(
             // Return category stats (counts per category)
             let mut categories = Vec::new();
             let mut total = 0usize;
+            let all_entries = list_related_candidates(server, &project_name, 5000).unwrap_or_default();
 
             for &cat_path in WIKI_CATEGORIES {
-                let count = server
-                    .with_named_project_store_read(&project_name, |store| {
-                        store
-                            .list_by_path(cat_path, 5000, false)
-                            .map(|entries| entries.len())
-                            .map_err(|e| format!("wiki_browse count: {e}"))
-                    })
-                    .unwrap_or(0);
+                let cat_prefix = format!("{cat_path}/");
+                let count = all_entries
+                    .iter()
+                    .filter(|entry| entry.path == cat_path || entry.path.starts_with(&cat_prefix))
+                    .count();
                 if count > 0 {
                     categories.push(json!({
                         "path": cat_path,
@@ -477,6 +1046,12 @@ pub(crate) fn handle_wiki_browse(
                     total += count;
                 }
             }
+
+            append_wiki_log(
+                server,
+                "browse",
+                &format!("stats | {} categor(ies), {} total", categories.len(), total),
+            );
 
             serde_json::to_string(&json!({
                 "status": "completed",
@@ -491,26 +1066,52 @@ pub(crate) fn handle_wiki_browse(
             let resolved_path = resolve_wiki_category(category);
             let limit = params.limit.max(1).min(500);
 
-            let entries = server.with_named_project_store_read(&project_name, |store| {
-                store
-                    .list_by_path(&resolved_path, limit, false)
-                    .map_err(|e| format!("wiki_browse list: {e}"))
-            })?;
+            let (entries, _) = list_wiki_entries(server, &project_name, 5000)?;
+            let resolved_prefix = format!("{resolved_path}/");
+            let entries = entries
+                .into_iter()
+                .filter(|entry| entry.path == resolved_path || entry.path.starts_with(&resolved_prefix))
+                .take(limit)
+                .collect::<Vec<_>>();
 
+            let include_related = limit <= 20;
             let slim_entries: Vec<Value> = entries
                 .iter()
                 .map(|entry| {
-                    json!({
+                    let mut value = json!({
                         "id": entry.id,
                         "path": entry.path,
                         "summary": entry.summary,
                         "topic": entry.topic,
                         "importance": entry.importance,
                         "keywords": entry.keywords,
+                        "entities": entry.entities,
                         "timestamp": entry.timestamp,
-                    })
+                        "related_entries": [],
+                    });
+                    if include_related {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert(
+                                "related_entries".to_string(),
+                                json!(find_related_by_entities(
+                                    server,
+                                    &project_name,
+                                    &entry.entities,
+                                    &entry.id,
+                                    5,
+                                )),
+                            );
+                        }
+                    }
+                    value
                 })
                 .collect();
+
+            append_wiki_log(
+                server,
+                "browse",
+                &format!("{} | {} entry(s)", resolved_path, slim_entries.len()),
+            );
 
             serde_json::to_string(&json!({
                 "status": "completed",
@@ -567,6 +1168,8 @@ pub(crate) async fn handle_wiki_lint(
     let mut stale_nodes = Vec::new();
     let mut contradiction_candidates = Vec::new();
     let mut missing_edge_hints = Vec::new();
+    let mut dirty_data = Vec::new();
+    let mut duplicates = Vec::new();
 
     let mut all_edges = Vec::<memory_core::MemoryEdge>::new();
     for (entry, scope) in &nodes {
@@ -608,11 +1211,24 @@ pub(crate) async fn handle_wiki_lint(
                 }
             }
         }
+        if checks.iter().any(|check| check == "dirty_data")
+            && (entry.text.contains("<think）")
+                || entry.summary.contains("<think）")
+                || entry.text.contains("<think>")
+                || entry.summary.contains("<think>"))
+        {
+            dirty_data.push(json!({
+                "id": entry.id,
+                "path": entry.path,
+                "issue": "think_tag_leak",
+                "db": scope.as_str(),
+            }));
+        }
     }
 
     if checks
         .iter()
-        .any(|check| check == "contradictions" || check == "missing_edges")
+        .any(|check| check == "contradictions" || check == "missing_edges" || check == "duplicates")
     {
         for i in 0..nodes.len() {
             for j in (i + 1)..nodes.len() {
@@ -627,6 +1243,16 @@ pub(crate) async fn handle_wiki_lint(
                     && !relation_exists(&all_edges, &left.id, &right.id, None)
                 {
                     missing_edge_hints.push(json!({
+                        "left_id": left.id,
+                        "right_id": right.id,
+                        "left_path": left.path,
+                        "right_path": right.path,
+                        "similarity": similarity,
+                        "db": nodes[i].1.as_str(),
+                    }));
+                }
+                if checks.iter().any(|check| check == "duplicates") && similarity > 0.95 {
+                    duplicates.push(json!({
                         "left_id": left.id,
                         "right_id": right.id,
                         "left_path": left.path,
@@ -653,6 +1279,11 @@ pub(crate) async fn handle_wiki_lint(
     }
 
     let skill_quality = refresh_skill_quality_guards(server)?;
+    append_wiki_log(
+        server,
+        "lint",
+        &format!("{} | {} node(s)", path_prefix, nodes.len()),
+    );
 
     serde_json::to_string(&json!({
         "path_prefix": path_prefix,
@@ -661,6 +1292,8 @@ pub(crate) async fn handle_wiki_lint(
         "stale_nodes": stale_nodes,
         "contradiction_candidates": contradiction_candidates,
         "missing_edge_hints": missing_edge_hints,
+        "dirty_data": dirty_data,
+        "duplicates": duplicates,
         "skill_quality": skill_quality,
     }))
     .map_err(|e| format!("serialize wiki_lint: {e}"))

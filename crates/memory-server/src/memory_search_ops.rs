@@ -269,7 +269,17 @@ pub(super) async fn search_memory_rows(
         return Ok(vec![]);
     }
 
-    if params.query_vec.is_none() && (server.global_vec_available || server.project_vec_available) {
+    let named_project_vec_available = if let Some(ref project_name) = params.project {
+        server
+            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if params.query_vec.is_none()
+        && (server.global_vec_available || server.project_vec_available || named_project_vec_available)
+    {
         match server.llm.embed_voyage(&params.query, "query").await {
             Ok(query_vec) => {
                 params.query_vec = Some(query_vec);

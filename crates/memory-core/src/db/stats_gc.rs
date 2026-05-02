@@ -93,6 +93,7 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
 ///   - permanent / pinned → never auto-archived (GC-exempt)
 ///   - ephemeral → more aggressive threshold (importance < 0.7 / < 0.5)
 ///   - durable (or NULL) → standard thresholds (importance < 0.5 / < 0.3)
+///
 /// Returns the number of memories archived.
 pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
     // Skip permanent and pinned memories entirely

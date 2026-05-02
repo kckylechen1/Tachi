@@ -53,6 +53,7 @@ pub fn get_state(
 }
 
 /// Save a derived item (causal extraction, distilled rule, etc.)
+#[allow(clippy::too_many_arguments)]
 pub fn save_derived(
     conn: &Connection,
     text: &str,
