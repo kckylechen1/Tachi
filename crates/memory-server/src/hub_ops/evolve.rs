@@ -49,7 +49,7 @@ pub(crate) async fn handle_skill_evolve(
         .unwrap_or("No specific feedback provided.");
 
     let evolution_prompt = format!(
-        r#"You are a skill prompt engineer. Your task is to improve the following skill prompt template.
+        r#"You are a senior prompt engineer. Your job is to diagnose why a skill prompt is underperforming and produce a strictly improved version.
 
 ## Current Skill
 - **Name:** {name}
@@ -67,23 +67,45 @@ pub(crate) async fn handle_skill_evolve(
 ## User Feedback
 {user_feedback}
 
-## Instructions
-1. Analyze the current prompt template for weaknesses (vagueness, missing constraints, poor structure).
-2. Consider the telemetry data — a low success rate or low rating indicates the prompt needs significant improvement.
-3. Produce an **improved** prompt template that:
-   - Preserves all existing `{{{{placeholder}}}}` variables
-   - Is more specific and structured
-   - Adds guardrails against common failure modes
-   - Improves output quality and consistency
-4. Also produce an improved description (1-2 sentences).
+## Analysis Process
+
+### Step 1: Diagnose from telemetry
+- High failure count → prompt likely has ambiguous instructions, missing constraints, or assumes context the model doesn't have.
+- Low avg rating but low failures → output quality issue: wrong format, too verbose, missing key details, or poor reasoning.
+- High fail streak → recent regression. Check if a dependency changed or an assumption broke.
+- Healthy stats (success > 90%, rating > 4.0) → make only surgical, conservative improvements.
+
+### Step 2: Read the prompt for common anti-patterns
+- Vague verbs ("handle", "process", "deal with") instead of specific actions ("extract", "classify", "generate")
+- Missing output format specification (no JSON schema, no example output)
+- No edge case handling (what if input is empty? malformed? too long?)
+- No constraints on output length or structure
+- Placeholders used but not explained (what does {{{{context}}}} contain?)
+- Missing "do NOT" instructions for common failure modes
+
+### Step 3: Produce the improved prompt
+- Preserve ALL existing `{{{{placeholder}}}}` variables exactly as-is (double-braced in template).
+- Add structure if missing: split into Context / Task / Constraints / Output Format sections.
+- Add explicit edge case handling: empty input, malformed data, missing fields.
+- Add output format specification: if the skill produces structured data, define the exact schema with an example.
+- Add negative constraints: what the model should NOT do (common failure modes from telemetry).
+- Keep the prompt concise — do not add padding or filler. Every sentence should earn its place.
+
+### Step 4: Quality checklist (verify before output)
+- All original placeholder variables are preserved
+- Output format is strictly defined (JSON schema or exact structure)
+- At least one edge case is handled explicitly
+- The prompt is shorter or equal length to original (unless structure demands more)
+- No vague instructions remain
+- Description accurately reflects what the improved skill does
 
 ## Output Format
-Respond with ONLY a JSON object (no markdown fences):
+Respond with ONLY a JSON object (no markdown fences, no commentary before or after):
 {{
   "prompt": "<improved prompt template>",
-  "description": "<improved description>",
+  "description": "<improved 1-2 sentence description>",
   "system": "<improved system prompt, or empty string to keep current>",
-  "reasoning": "<brief explanation of what was changed and why>"
+  "reasoning": "<diagnosis of the problem + what was changed and why, 3-5 sentences>"
 }}"#,
         name = cap.name,
         description = cap.description,
@@ -102,7 +124,7 @@ Respond with ONLY a JSON object (no markdown fences):
     let llm_response = server
         .llm
         .call_reasoning_llm(
-            "You are a skill prompt optimization engine. Output valid JSON only.",
+            "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.",
             &evolution_prompt,
             None,
             0.4,
