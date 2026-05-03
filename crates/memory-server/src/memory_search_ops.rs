@@ -242,11 +242,17 @@ pub(crate) async fn handle_save_memory(
                                 metadata: json!({
                                     "auto_link": true,
                                     "shared_entities": shared,
-                                    "valid_to": if supersedes { Some(now.clone()) } else { None },
                                 }),
                                 created_at: now.clone(),
                                 valid_from: String::new(),
-                                valid_to: if supersedes { Some(now.clone()) } else { None },
+                                // New supersedes/related_to edges are open-ended.
+                                // `get_edges` filters with `valid_to IS NULL OR valid_to > now`,
+                                // so setting valid_to = Some(now) at creation time would
+                                // immediately expire the edge and hide the supersession
+                                // from graph readers, repair, and explainability. Edges
+                                // are only closed/expired when the supersession is
+                                // explicitly reversed.
+                                valid_to: None,
                             };
                             let save_edge_action = |store: &mut MemoryStore| {
                                 store.add_edge(&edge).map_err(|e| format!("{}", e))?;

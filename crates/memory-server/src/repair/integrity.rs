@@ -32,8 +32,19 @@ impl RepairRule for IntegrityCheck {
 fn check(ctx: &mut DbContext) -> Result<RuleReport, RepairError> {
     let mut r = RuleReport::new("R5", "Integrity check", ctx.label.clone());
 
-    let integrity = run_pragma(ctx, "PRAGMA integrity_check;")?;
-    let quick = run_pragma(ctx, "PRAGMA quick_check;")?;
+    // Heavy corruption can fail PRAGMA preparation itself (e.g. an FTS5
+    // vtable constructor returns SQLITE_CORRUPT when its shadow tables are
+    // unreadable). Treat those Err paths as positive integrity findings so
+    // the rule reports `integrity_fail` instead of bubbling up an opaque
+    // RepairError that the dispatcher can't act on.
+    let integrity = match run_pragma(ctx, "PRAGMA integrity_check;") {
+        Ok(rows) => rows,
+        Err(e) => vec![format!("integrity_check failed to run: {e}")],
+    };
+    let quick = match run_pragma(ctx, "PRAGMA quick_check;") {
+        Ok(rows) => rows,
+        Err(e) => vec![format!("quick_check failed to run: {e}")],
+    };
 
     let integrity_ok = integrity
         .first()

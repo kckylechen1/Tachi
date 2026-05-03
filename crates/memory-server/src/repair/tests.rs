@@ -391,49 +391,61 @@ fn r5_integrity_detects_corruption() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "corrupt.db");
     insert_memory(&conn, "m1", "/x", "data", "{}", None, None);
+
+    // Pin page size and compact so the file layout is deterministic across
+    // SQLite versions, schema migrations, and host page-size differences.
+    // After this, the SQLite header is in page 1 (offset 0..4096) and page 2
+    // (offset 4096..8192) is the first b-tree interior/leaf page — corrupting
+    // it reliably surfaces via `PRAGMA integrity_check` while still allowing
+    // `Connection::open` to succeed (so we exercise the rule itself, not the
+    // open-failure short-circuit).
+    conn.execute_batch(
+        "PRAGMA journal_mode = DELETE;\n\
+         PRAGMA wal_checkpoint(TRUNCATE);\n\
+         PRAGMA page_size = 4096;\n\
+         VACUUM;",
+    )
+    .unwrap();
     drop(conn);
-    // Force WAL checkpoint then truncate so corruption is visible to a fresh open.
-    {
-        let c = Connection::open(&path).unwrap();
-        c.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA wal_checkpoint(TRUNCATE);")
-            .unwrap();
-    }
-    // Stomp on the middle of the file (avoid the SQLite header which would
-    // make the DB unopenable rather than corrupt).
+
+    // Stomp the entirety of page 2 (the first b-tree page after the SQLite
+    // header). This invalidates the page-type byte at offset 0 of the page
+    // (valid values are 0x02, 0x05, 0x0A, 0x0D) and obliterates every cell
+    // pointer and cell payload, so `PRAGMA integrity_check` must report at
+    // least one error regardless of which schema object happens to live on
+    // page 2 in this build.
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&path)
         .unwrap();
     let len = f.metadata().unwrap().len();
-    if len > 200 {
-        // Write enough corruption across multiple pages to guarantee detection
-        // even if schema changes shift the page layout.
-        f.seek(SeekFrom::Start(len / 3)).unwrap();
-        f.write_all(&[0xFFu8; 512]).unwrap();
-    }
+    assert!(
+        len >= 8192,
+        "VACUUMed DB must be at least 2 pages (got {len} bytes)"
+    );
+    f.seek(SeekFrom::Start(4096)).unwrap();
+    f.write_all(&[0xFFu8; 4096]).unwrap();
+    f.sync_all().unwrap();
     drop(f);
 
-    // open_ctx itself may fail (Connection::open returns NOTADB) on heavy
-    // corruption — accept that as a positive signal too.
-    let conn_res = Connection::open(&path);
-    if conn_res.is_err() {
-        return;
-    }
+    // The DB must still be openable — that's the whole point of pinning the
+    // header — so we deliberately don't accept `Connection::open` failure as
+    // success. If open fails we want the test to fail loudly: that means our
+    // corruption strategy regressed.
     let mut ctx = DbContext {
         label: "test".to_string(),
         path: path.clone(),
         schema_kind: "tachi".to_string(),
-        conn: conn_res.unwrap(),
+        conn: Connection::open(&path).expect("DB must remain openable after page-2 corruption"),
     };
-    // dry_run can either return Err (pragma fails) OR Ok with findings.
-    match IntegrityCheck.dry_run(&mut ctx) {
-        Err(_) => { /* corruption surfaced as Err — expected */ }
-        Ok(r) => assert!(
-            r.findings.iter().any(|f| f.kind == "integrity_fail") || !r.errors.is_empty(),
-            "expected corruption to surface, got {r:?}"
-        ),
-    }
+    let r = IntegrityCheck
+        .dry_run(&mut ctx)
+        .expect("integrity_check rule itself must not error");
+    assert!(
+        r.findings.iter().any(|f| f.kind == "integrity_fail"),
+        "expected exactly one integrity_fail finding, got {r:?}"
+    );
 }
 
 #[test]

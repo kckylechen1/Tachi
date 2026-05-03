@@ -390,7 +390,7 @@ fn collect_database_stats(target: ManifestDbTarget) -> DatabaseStats {
         return stats;
     };
 
-    let store = match MemoryStore::open_with_label(db_path, &target.label) {
+    let store = match MemoryStore::open_read_only(db_path) {
         Ok(store) => store,
         Err(e) => {
             stats.error = Some(format!("open DB failed: {e}"));

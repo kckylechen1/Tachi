@@ -7,10 +7,18 @@ use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
 pub struct RetentionBackfill;
 
 const RETENTION_RULES: &[(&str, &str, &str)] = &[
+    // Coordination records (handoff/kanban) are PINNED — they must survive
+    // GC so dispatch state machines can find their rows. This matches
+    // `default_retention_for` in types.rs and the schema.rs migration backfill.
+    (
+        "retention_null_pinned_coordination",
+        "pinned",
+        "category IN ('handoff', 'kanban') OR path LIKE '/handoff%' OR path LIKE '/kanban%'",
+    ),
     (
         "retention_null_ephemeral_ops",
         "ephemeral",
-        "category IN ('handoff', 'kanban', 'ghost') OR path LIKE '/handoff%' OR path LIKE '/kanban%' OR path LIKE '/ghost%'",
+        "category = 'ghost' OR path LIKE '/ghost%'",
     ),
     (
         "retention_null_permanent_knowledge",

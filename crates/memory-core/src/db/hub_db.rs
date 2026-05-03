@@ -143,10 +143,18 @@ pub fn hub_search(
     } else {
         let mut clauses = Vec::new();
         for term in terms {
+            // Escape SQL LIKE wildcards so a query containing `%` or `_`
+            // (or a literal `\`) matches only itself instead of every row.
+            // Pair with `ESCAPE '\'` in the LIKE clause below.
+            let escaped = term
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             clauses.push(
-                "(lower(id) LIKE ? OR lower(name) LIKE ? OR lower(description) LIKE ?)".to_string(),
+                "(lower(id) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\' OR lower(description) LIKE ? ESCAPE '\\')"
+                    .to_string(),
             );
-            let pattern = format!("%{}%", term);
+            let pattern = format!("%{}%", escaped);
             param_values.push(Box::new(pattern.clone()));
             param_values.push(Box::new(pattern.clone()));
             param_values.push(Box::new(pattern));
