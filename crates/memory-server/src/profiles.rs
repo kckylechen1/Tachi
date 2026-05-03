@@ -224,22 +224,12 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_dispatch",
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
-    "tachi_gh_issue_read",
-    "tachi_gh_issue_list",
-    "tachi_gh_issue_create",
-    "tachi_gh_pr_read",
-    "tachi_gh_pr_list",
-    "tachi_gh_repo_view",
+    "tachi_gh",
 ];
 
 /// GitHub MCP proxy tools — only exposed when Vault has GH_TOKEN.
 pub(super) const GH_TOOL_PATTERNS: &[&str] = &[
-    "tachi_gh_issue_read",
-    "tachi_gh_issue_list",
-    "tachi_gh_issue_create",
-    "tachi_gh_pr_read",
-    "tachi_gh_pr_list",
-    "tachi_gh_repo_view",
+    "tachi_gh",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -465,7 +455,7 @@ pub(super) fn filter_tool_defs(
 }
 
 /// GH tools visibility: require standard/coordinate/admin profile.
-fn tool_visible_gh(tool_name: &str, profile: Option<ToolProfile>) -> bool {
+fn tool_visible_gh(_tool_name: &str, profile: Option<ToolProfile>) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
     if profile.admin {
         return true;
@@ -895,12 +885,7 @@ mod tests {
                 test_tool("tachi_dispatch"),
                 test_tool("approve_merge"),
                 test_tool("tachi_board"),
-                test_tool("tachi_gh_issue_read"),
-                test_tool("tachi_gh_issue_list"),
-                test_tool("tachi_gh_pr_read"),
-                test_tool("tachi_gh_pr_list"),
-                test_tool("tachi_gh_repo_view"),
-                test_tool("tachi_gh_issue_create"),
+                test_tool("tachi_gh"),
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("tachi_unstick"),
@@ -937,16 +922,11 @@ mod tests {
 
     #[test]
     fn standard_profile_includes_gh_tools_when_token_present() {
-        // With GH token: GH read tools included, create excluded (not in standard)
+        // With GH token: unified GH tool included
         let filtered = filter_tool_defs(
             vec![
                 test_tool("tachi_plan"),
-                test_tool("tachi_gh_issue_read"),
-                test_tool("tachi_gh_issue_list"),
-                test_tool("tachi_gh_pr_read"),
-                test_tool("tachi_gh_pr_list"),
-                test_tool("tachi_gh_repo_view"),
-                test_tool("tachi_gh_issue_create"),
+                test_tool("tachi_gh"),
             ],
             Some(ToolProfile::standard()),
             None,
@@ -960,12 +940,7 @@ mod tests {
             names,
             vec![
                 "tachi_plan".to_string(),
-                "tachi_gh_issue_read".to_string(),
-                "tachi_gh_issue_list".to_string(),
-                "tachi_gh_pr_read".to_string(),
-                "tachi_gh_pr_list".to_string(),
-                "tachi_gh_repo_view".to_string(),
-                "tachi_gh_issue_create".to_string(),
+                "tachi_gh".to_string(),
             ]
         );
     }
@@ -990,7 +965,7 @@ mod tests {
                 test_tool("recall_context"),
                 test_tool("search_memory"),
                 // GH tools should be excluded even with token:
-                test_tool("tachi_gh_issue_list"),
+                test_tool("tachi_gh"),
             ],
             Some(ToolProfile::delegate()),
             None,

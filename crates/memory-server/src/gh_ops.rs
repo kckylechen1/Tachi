@@ -1,6 +1,6 @@
 use crate::tool_params::{
     GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrListParams, GhPrReadParams,
-    GhRepoViewParams,
+    GhRepoViewParams, TachiGhParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
@@ -273,4 +273,77 @@ pub(crate) async fn handle_gh_repo_view(
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
     .map_err(|e| format!("serialize: {e}"))?)
+}
+
+pub(crate) async fn handle_tachi_gh(
+    server: &MemoryServer,
+    params: TachiGhParams,
+) -> Result<String, String> {
+    match params.action.as_str() {
+        "repo_view" => {
+            handle_gh_repo_view(server, GhRepoViewParams { repo: params.repo }).await
+        }
+        "issue_list" => {
+            handle_gh_issue_list(
+                server,
+                GhIssueListParams {
+                    repo: params.repo,
+                    state: params.state.unwrap_or_else(|| "open".to_string()),
+                    labels: params.labels.first().cloned(),
+                    limit: params.limit.unwrap_or(30),
+                },
+            )
+            .await
+        }
+        "issue_read" => {
+            let number = params.number.ok_or("issue_read requires 'number' parameter")?;
+            handle_gh_issue_read(
+                server,
+                GhIssueReadParams {
+                    repo: params.repo,
+                    issue_number: number,
+                },
+            )
+            .await
+        }
+        "issue_create" => {
+            let title = params.title.ok_or("issue_create requires 'title' parameter")?;
+            handle_gh_issue_create(
+                server,
+                GhIssueCreateParams {
+                    repo: params.repo,
+                    title,
+                    body: params.body,
+                    labels: params.labels,
+                },
+            )
+            .await
+        }
+        "pr_list" => {
+            handle_gh_pr_list(
+                server,
+                GhPrListParams {
+                    repo: params.repo,
+                    state: params.state.unwrap_or_else(|| "open".to_string()),
+                    limit: params.limit.unwrap_or(30),
+                },
+            )
+            .await
+        }
+        "pr_read" => {
+            let number = params.number.ok_or("pr_read requires 'number' parameter")?;
+            handle_gh_pr_read(
+                server,
+                GhPrReadParams {
+                    repo: params.repo,
+                    pr_number: number,
+                },
+            )
+            .await
+        }
+        other => Err(format!(
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read",
+            other
+        )),
+    }
 }

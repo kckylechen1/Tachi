@@ -1,5 +1,32 @@
 use super::*;
 
+/// Unified GitHub facade — one tool for all GitHub operations.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiGhParams {
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read"
+    pub action: String,
+    /// Repository in "owner/repo" format
+    pub repo: String,
+    /// Issue or PR number (required for issue_read, pr_read)
+    #[serde(default)]
+    pub number: Option<u64>,
+    /// Issue title (required for issue_create)
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Issue/PR body (optional, used by issue_create)
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Labels (optional, used by issue_create and issue_list filter)
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Filter by state: "open", "closed", "merged", "all" (used by issue_list, pr_list)
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Maximum results (used by issue_list, pr_list, default: 30)
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
 /// Parameters for reading a GitHub issue
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct GhIssueReadParams {

@@ -28,10 +28,7 @@ use crate::foundry_runtime_ops::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
-use crate::gh_ops::{
-    handle_gh_issue_create, handle_gh_issue_list, handle_gh_issue_read, handle_gh_pr_list,
-    handle_gh_pr_read, handle_gh_repo_view,
-};
+use crate::gh_ops::handle_tachi_gh;
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
@@ -1704,60 +1701,12 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "Read a GitHub issue by number. Returns issue details as JSON. Requires GH_TOKEN in Vault."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read. Requires GH_TOKEN in Vault."
     )]
-    pub(crate) async fn tachi_gh_issue_read(
+    pub(crate) async fn tachi_gh(
         &self,
-        Parameters(params): Parameters<GhIssueReadParams>,
+        Parameters(params): Parameters<TachiGhParams>,
     ) -> Result<String, String> {
-        handle_gh_issue_read(self, params).await
-    }
-
-    #[tool(
-        description = "List GitHub issues in a repository. Filter by state and labels. Requires GH_TOKEN in Vault."
-    )]
-    pub(crate) async fn tachi_gh_issue_list(
-        &self,
-        Parameters(params): Parameters<GhIssueListParams>,
-    ) -> Result<String, String> {
-        handle_gh_issue_list(self, params).await
-    }
-
-    #[tool(description = "Create a new GitHub issue. Requires GH_TOKEN in Vault.")]
-    pub(crate) async fn tachi_gh_issue_create(
-        &self,
-        Parameters(params): Parameters<GhIssueCreateParams>,
-    ) -> Result<String, String> {
-        handle_gh_issue_create(self, params).await
-    }
-
-    #[tool(
-        description = "Read a GitHub pull request by number. Returns PR details as JSON. Requires GH_TOKEN in Vault."
-    )]
-    pub(crate) async fn tachi_gh_pr_read(
-        &self,
-        Parameters(params): Parameters<GhPrReadParams>,
-    ) -> Result<String, String> {
-        handle_gh_pr_read(self, params).await
-    }
-
-    #[tool(
-        description = "List GitHub pull requests in a repository. Filter by state. Requires GH_TOKEN in Vault."
-    )]
-    pub(crate) async fn tachi_gh_pr_list(
-        &self,
-        Parameters(params): Parameters<GhPrListParams>,
-    ) -> Result<String, String> {
-        handle_gh_pr_list(self, params).await
-    }
-
-    #[tool(
-        description = "View GitHub repository metadata (stars, forks, languages, etc). Requires GH_TOKEN in Vault."
-    )]
-    pub(crate) async fn tachi_gh_repo_view(
-        &self,
-        Parameters(params): Parameters<GhRepoViewParams>,
-    ) -> Result<String, String> {
-        handle_gh_repo_view(self, params).await
+        handle_tachi_gh(self, params).await
     }
 }
