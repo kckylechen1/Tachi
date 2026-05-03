@@ -87,10 +87,12 @@ impl ServerHandler for MemoryServer {
             }
 
             let env_patterns = current_exposed_tool_patterns();
+            let has_gh_token = crate::vault_ops::vault_has_secret(self, "GH_TOKEN");
             tools = crate::profiles::filter_tool_defs(
                 tools,
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
+                has_gh_token,
             );
 
             Ok(rmcp::model::ListToolsResult {

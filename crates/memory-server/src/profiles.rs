@@ -223,7 +223,17 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_handoff",
     "tachi_dispatch",
     "approve_merge",
-    // GitHub MCP proxy tools
+    // GitHub tools (bundle membership for classification; visibility gated by vault token)
+    "tachi_gh_issue_read",
+    "tachi_gh_issue_list",
+    "tachi_gh_issue_create",
+    "tachi_gh_pr_read",
+    "tachi_gh_pr_list",
+    "tachi_gh_repo_view",
+];
+
+/// GitHub MCP proxy tools — only exposed when Vault has GH_TOKEN.
+pub(super) const GH_TOOL_PATTERNS: &[&str] = &[
     "tachi_gh_issue_read",
     "tachi_gh_issue_list",
     "tachi_gh_issue_create",
@@ -279,12 +289,7 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_complete",
     "approve_merge",
     "tachi_board",
-    // GitHub read-only tools (no write — issue_create is coordinate-only)
-    "tachi_gh_issue_read",
-    "tachi_gh_issue_list",
-    "tachi_gh_pr_read",
-    "tachi_gh_pr_list",
-    "tachi_gh_repo_view",
+    // GitHub tools: conditionally added by has_gh_token, not in fixed list.
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
@@ -405,8 +410,8 @@ pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
         let token_profile = match token.to_ascii_lowercase().as_str() {
             "observe" | "read" | "reader" => ToolProfile::observe(),
             "remember" | "write" | "writer" | "agent" => ToolProfile::remember(),
-            "standard" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity"
-            | "claude" | "claude-code" | "codex" => ToolProfile::standard(),
+            "standard" | "ide" | "cursor" | "trae" | "windsurf" | "antigravity" | "claude"
+            | "claude-code" | "codex" => ToolProfile::standard(),
             "delegate" | "worker" | "subagent" => ToolProfile::delegate(),
             "coordinate" => ToolProfile::coordinate(),
             "companion" | "copilot" | "coach" => ToolProfile::remember()
@@ -440,11 +445,30 @@ pub(super) fn filter_tool_defs(
     tools: Vec<Tool>,
     profile: Option<ToolProfile>,
     env_patterns: Option<&[String]>,
+    has_gh_token: bool,
 ) -> Vec<Tool> {
     tools
         .into_iter()
-        .filter(|tool| tool_visible(tool.name.as_ref(), profile, env_patterns))
+        .filter(|tool| {
+            let name = tool.name.as_ref();
+            if matches_any_pattern(name, GH_TOOL_PATTERNS.iter().copied()) {
+                return has_gh_token && tool_visible_gh(name, profile);
+            }
+            tool_visible(name, profile, env_patterns)
+        })
         .collect()
+}
+
+/// GH tools visibility: require standard/coordinate/admin profile.
+fn tool_visible_gh(tool_name: &str, profile: Option<ToolProfile>) -> bool {
+    let profile = profile.unwrap_or_else(default_tool_profile);
+    if profile.admin {
+        return true;
+    }
+    if profile.standard_minimal {
+        return true;
+    }
+    profile.allows(ToolBundle::Coordinate)
 }
 
 #[cfg(test)]
@@ -609,14 +633,29 @@ mod tests {
         // IDE + CLI → standard
         assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::standard()));
         assert_eq!(parse_tool_profile("cursor"), Some(ToolProfile::standard()));
-        assert_eq!(parse_tool_profile("windsurf"), Some(ToolProfile::standard()));
-        assert_eq!(parse_tool_profile("antigravity"), Some(ToolProfile::standard()));
-        assert_eq!(parse_tool_profile("claude-code"), Some(ToolProfile::standard()));
+        assert_eq!(
+            parse_tool_profile("windsurf"),
+            Some(ToolProfile::standard())
+        );
+        assert_eq!(
+            parse_tool_profile("antigravity"),
+            Some(ToolProfile::standard())
+        );
+        assert_eq!(
+            parse_tool_profile("claude-code"),
+            Some(ToolProfile::standard())
+        );
         assert_eq!(parse_tool_profile("ide"), Some(ToolProfile::standard()));
         // Worker agents → delegate
-        assert_eq!(parse_tool_profile("delegate"), Some(ToolProfile::delegate()));
+        assert_eq!(
+            parse_tool_profile("delegate"),
+            Some(ToolProfile::delegate())
+        );
         assert_eq!(parse_tool_profile("worker"), Some(ToolProfile::delegate()));
-        assert_eq!(parse_tool_profile("subagent"), Some(ToolProfile::delegate()));
+        assert_eq!(
+            parse_tool_profile("subagent"),
+            Some(ToolProfile::delegate())
+        );
         // Framework agents → operate
         assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::operate()));
         assert_eq!(parse_tool_profile("hermes"), Some(ToolProfile::operate()));
@@ -664,6 +703,7 @@ mod tests {
             ],
             Some(ToolProfile::operate()),
             Some(&["search_memory".to_string(), "recall_*".to_string()]),
+            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -687,6 +727,7 @@ mod tests {
             ],
             Some(ToolProfile::coordinate()),
             None,
+            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -714,6 +755,7 @@ mod tests {
             ],
             Some(ToolProfile::remember()),
             None,
+            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -735,6 +777,7 @@ mod tests {
         for name in STANDARD_MINIMAL_TOOL_PATTERNS
             .iter()
             .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
+            .chain(GH_TOOL_PATTERNS.iter())
         {
             assert!(
                 route_names.contains(*name),
@@ -820,22 +863,20 @@ mod tests {
             ],
             None,
             None,
+            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
             .map(|tool| tool.name.into_owned())
             .collect();
-        assert_eq!(
-            names,
-            vec!["tachi_plan".to_string()]
-        );
+        assert_eq!(names, vec!["tachi_plan".to_string()]);
     }
 
     #[test]
     fn standard_profile_restricts_to_allow_list() {
+        // Without GH token: GH tools excluded
         let filtered = filter_tool_defs(
             vec![
-                // Standard tools (should pass)
                 test_tool("tachi_plan"),
                 test_tool("tachi_search"),
                 test_tool("tachi_web_search"),
@@ -849,15 +890,12 @@ mod tests {
                 test_tool("tachi_dispatch"),
                 test_tool("approve_merge"),
                 test_tool("tachi_board"),
-                // GitHub read-only tools (should pass)
                 test_tool("tachi_gh_issue_read"),
                 test_tool("tachi_gh_issue_list"),
                 test_tool("tachi_gh_pr_read"),
                 test_tool("tachi_gh_pr_list"),
                 test_tool("tachi_gh_repo_view"),
-                // GitHub write tool (should be excluded from standard)
                 test_tool("tachi_gh_issue_create"),
-                // Old tools now excluded:
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("tachi_unstick"),
@@ -866,6 +904,7 @@ mod tests {
             ],
             Some(ToolProfile::standard()),
             None,
+            false, // no GH token
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -887,11 +926,41 @@ mod tests {
                 "tachi_dispatch".to_string(),
                 "approve_merge".to_string(),
                 "tachi_board".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_profile_includes_gh_tools_when_token_present() {
+        // With GH token: GH read tools included, create excluded (not in standard)
+        let filtered = filter_tool_defs(
+            vec![
+                test_tool("tachi_plan"),
+                test_tool("tachi_gh_issue_read"),
+                test_tool("tachi_gh_issue_list"),
+                test_tool("tachi_gh_pr_read"),
+                test_tool("tachi_gh_pr_list"),
+                test_tool("tachi_gh_repo_view"),
+                test_tool("tachi_gh_issue_create"),
+            ],
+            Some(ToolProfile::standard()),
+            None,
+            true, // has GH token
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "tachi_plan".to_string(),
                 "tachi_gh_issue_read".to_string(),
                 "tachi_gh_issue_list".to_string(),
                 "tachi_gh_pr_read".to_string(),
                 "tachi_gh_pr_list".to_string(),
                 "tachi_gh_repo_view".to_string(),
+                "tachi_gh_issue_create".to_string(),
             ]
         );
     }
@@ -915,9 +984,12 @@ mod tests {
                 test_tool("hub_discover"),
                 test_tool("recall_context"),
                 test_tool("search_memory"),
+                // GH tools should be excluded even with token:
+                test_tool("tachi_gh_issue_list"),
             ],
             Some(ToolProfile::delegate()),
             None,
+            true, // even with GH token, delegate shouldn't see GH tools
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -943,9 +1015,7 @@ mod tests {
         assert_eq!(ToolProfile::delegate().as_str(), "delegate");
         // admin still wins over minimal flags if explicitly merged.
         assert_eq!(
-            ToolProfile::standard()
-                .merge(ToolProfile::admin())
-                .as_str(),
+            ToolProfile::standard().merge(ToolProfile::admin()).as_str(),
             "admin"
         );
         // standard wins over delegate if both set.

@@ -193,6 +193,23 @@ fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
         .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())
 }
 
+/// Lightweight check: vault is unlocked AND contains a secret with the given name.
+/// Does not decrypt or touch access stats.
+pub(crate) fn vault_has_secret(server: &MemoryServer, name: &str) -> bool {
+    if get_vault_key(server).is_err() {
+        return false;
+    }
+    let name_owned = name.to_string();
+    server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry(&name_owned)
+                .map(|opt| opt.is_some())
+                .map_err(|e| e.to_string())
+        })
+        .unwrap_or(false)
+}
+
 /// Check if vault is initialized.
 fn is_vault_initialized(server: &MemoryServer) -> Result<bool, String> {
     server
