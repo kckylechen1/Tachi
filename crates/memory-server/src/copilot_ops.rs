@@ -289,7 +289,14 @@ pub(crate) async fn handle_tachi_wiki_write(
     crate::wiki_ops::append_wiki_log(
         server,
         "write",
-        &format!("{} | {}", path, response.get("id").and_then(Value::as_str).unwrap_or("unknown")),
+        &format!(
+            "{} | {}",
+            path,
+            response
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
     );
     serde_json::to_string(&response).map_err(|e| format!("serialize wiki_write: {e}"))
 }
@@ -412,7 +419,8 @@ pub(crate) async fn handle_tachi_task_brief(
     let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
     let debug_checklist = build_debug_checklist(&wiki_rows);
 
-    let route_rec = build_route_recommendation(server, &params.task, params.project.as_deref()).await;
+    let route_rec =
+        build_route_recommendation(server, &params.task, params.project.as_deref()).await;
 
     serde_json::to_string(&json!({
         "status": "ok",
@@ -570,10 +578,7 @@ async fn build_route_recommendation(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let outcome = meta
-            .get("outcome")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let outcome = meta.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
         let entry = agent_stats.entry(agent).or_insert((0, 0));
         entry.1 += 1;
         if outcome == "success" {

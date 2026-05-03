@@ -1,9 +1,9 @@
+use crate::tool_params::{
+    GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrListParams, GhPrReadParams,
+    GhRepoViewParams,
+};
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
-use crate::tool_params::{
-    GhIssueReadParams, GhIssueListParams, GhIssueCreateParams,
-    GhPrReadParams, GhPrListParams, GhRepoViewParams,
-};
 use serde_json::json;
 use std::process::Command;
 
@@ -52,7 +52,12 @@ fn sanitize_output(text: &str, token: &str) -> String {
         sanitized = sanitized.replace(token, "[REDACTED]");
     }
     // Also strip common auth header patterns
-    let patterns = ["x-github-token", "Bearer gho_", "Bearer ghp_", "Bearer github_pat_"];
+    let patterns = [
+        "x-github-token",
+        "Bearer gho_",
+        "Bearer ghp_",
+        "Bearer github_pat_",
+    ];
     for pat in patterns {
         if let Some(pos) = sanitized.to_lowercase().find(&pat.to_lowercase()) {
             // Redact from the pattern to end of line or next whitespace
@@ -87,7 +92,9 @@ fn build_gh_command(server: &MemoryServer) -> Result<(Command, String), String> 
 
 /// Execute a gh command and return sanitized output, truncated to MAX_GH_OUTPUT_CHARS
 fn run_gh(mut cmd: Command, token: &str) -> Result<String, String> {
-    let output = cmd.output().map_err(|e| format!("Failed to execute `gh`: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to execute `gh`: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -233,7 +240,10 @@ pub(crate) async fn handle_gh_pr_list(
         .args(["--repo", &params.repo])
         .args(["--state", &params.state])
         .args(["--limit", &params.limit.to_string()])
-        .args(["--json", "number,title,state,author,labels,headRefName,createdAt"]);
+        .args([
+            "--json",
+            "number,title,state,author,labels,headRefName,createdAt",
+        ]);
 
     let output = run_gh(cmd, &token)?;
     Ok(serde_json::to_string(&json!({

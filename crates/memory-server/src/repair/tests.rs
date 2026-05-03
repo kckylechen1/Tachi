@@ -8,8 +8,8 @@ use tempfile::TempDir;
 use super::edges::OrphanRefs;
 use super::fts::FtsRebuild;
 use super::integrity::IntegrityCheck;
-use super::junk::JunkCleanup;
 use super::jobs::JobsPurge;
+use super::junk::JunkCleanup;
 use super::quarantine::QuarantineSweep;
 use super::retention::RetentionBackfill;
 use super::{DbContext, RepairRule};
@@ -205,12 +205,17 @@ fn r2_retention_backfill() {
         None,
         Some("foundry_distill"),
     );
-    conn.execute(
-        "UPDATE memories SET category='decision' WHERE id='n1'",
-        [],
-    )
-    .unwrap();
-    insert_memory(&conn, "f1", "/notes/f", "fallback", "{}", None, Some("manual"));
+    conn.execute("UPDATE memories SET category='decision' WHERE id='n1'", [])
+        .unwrap();
+    insert_memory(
+        &conn,
+        "f1",
+        "/notes/f",
+        "fallback",
+        "{}",
+        None,
+        Some("manual"),
+    );
     insert_memory(&conn, "n1", "/notes/n", "n", "{}", Some("durable"), None);
     drop(conn);
 
@@ -256,10 +261,16 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
         Some("durable"),
         None,
     );
-    conn.execute("UPDATE memories SET timestamp = ?2 WHERE id = ?1", ["dup-old", old])
-        .unwrap();
-    conn.execute("UPDATE memories SET timestamp = ?2 WHERE id = ?1", ["dup-new", new])
-        .unwrap();
+    conn.execute(
+        "UPDATE memories SET timestamp = ?2 WHERE id = ?1",
+        ["dup-old", old],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memories SET timestamp = ?2 WHERE id = ?1",
+        ["dup-new", new],
+    )
+    .unwrap();
     insert_memory(
         &conn,
         "cache-1",

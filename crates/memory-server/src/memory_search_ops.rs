@@ -278,7 +278,9 @@ pub(super) async fn search_memory_rows(
     };
 
     if params.query_vec.is_none()
-        && (server.global_vec_available || server.project_vec_available || named_project_vec_available)
+        && (server.global_vec_available
+            || server.project_vec_available
+            || named_project_vec_available)
     {
         match server.llm.embed_voyage(&params.query, "query").await {
             Ok(query_vec) => {

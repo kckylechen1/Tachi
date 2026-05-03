@@ -1,6 +1,6 @@
 use super::*;
 use crate::vault_ops::read_unlocked_vault_secret;
-use base64::{Engine, engine::general_purpose::STANDARD as B64};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Map as JsonMap;
 

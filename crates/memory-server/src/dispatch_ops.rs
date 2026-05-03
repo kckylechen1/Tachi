@@ -961,6 +961,10 @@ pub(crate) async fn handle_tachi_dispatch(
         let result = run_agent_subprocess(cmd, timeout).await;
 
         // Append subprocess_finished event to trajectory.jsonl
+        let full_output = match &result {
+            Ok(r) => r.output.clone(),
+            Err(e) => e.clone(),
+        };
         {
             let (exit_code, output_tail) = match &result {
                 Err(e) => (None, e.chars().take(200).collect::<String>()),
@@ -986,6 +990,12 @@ pub(crate) async fn handle_tachi_dispatch(
             }
         }
 
+        // Save full output to result.md for orchestrator eval
+        {
+            let result_path = workspace_dir.join("result.md");
+            let _ = std::fs::write(&result_path, &full_output);
+        }
+
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         tokio::time::sleep(Duration::from_secs(2)).await; // grace period for tachi_complete to propagate
 
@@ -995,25 +1005,38 @@ pub(crate) async fn handle_tachi_dispatch(
             Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
         );
         if !is_closed {
-            let (outcome, note) = match &result {
-                Err(e) => ("failure".to_string(), format!("Watchdog: {}", e)),
-                Ok(r) if r.exit_code.map(|c| c == 0).unwrap_or(false) => {
-                    let tail = tail_chars(&r.output, 500);
-                    ("partial".to_string(), format!("Watchdog: Agent exited 0 but did not call tachi_complete. Output tail: {}", tail))
-                }
-                Ok(r) => {
-                    let tail = tail_chars(&r.output, 500);
-                    (
+            let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
+
+            let (outcome, kanban_state_update, note) = if exited_ok {
+                // exit_code=0: sub-agent succeeded. Orchestrator will eval later.
+                let tail = tail_chars(&full_output, 500);
+                (
+                    "success".to_string(),
+                    "TASK_STATE_COMPLETED",
+                    format!("Watchdog: Agent exited 0. Output tail: {}", tail),
+                )
+            } else {
+                match &result {
+                    Err(e) => (
                         "failure".to_string(),
-                        format!(
-                            "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
-                            r.exit_code, tail
-                        ),
-                    )
+                        "TASK_STATE_FAILED",
+                        format!("Watchdog: {}", e),
+                    ),
+                    Ok(r) => {
+                        let tail = tail_chars(&r.output, 500);
+                        (
+                            "failure".to_string(),
+                            "TASK_STATE_FAILED",
+                            format!(
+                                "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
+                                r.exit_code, tail
+                            ),
+                        )
+                    }
                 }
             };
 
-            // System auto-recovery: force close the loop
+            // Close the loop on behalf of the sub-agent
             let _ = crate::complete_ops::handle_tachi_complete(
                 &server_clone,
                 crate::TachiCompleteParams {
@@ -1037,8 +1060,7 @@ pub(crate) async fn handle_tachi_dispatch(
             )
             .await;
 
-            // Update kanban to FAILED
-            let _ = update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None).await;
+            let _ = update_kanban_state(&server_clone, &d_id, kanban_state_update, None).await;
         }
 
         let should_cleanup = match &result {

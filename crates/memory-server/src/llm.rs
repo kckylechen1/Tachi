@@ -80,16 +80,46 @@ impl LlmClient {
         // Both lanes now fall back to the front-line Extract/SiliconFlow chain.
         // Dedicated DISTILL_*/REASONING_* env vars still override if set.
         let reasoning = Self::load_lane(
-            &["REASONING_API_KEY", "DISTILL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-            &["REASONING_BASE_URL", "DISTILL_BASE_URL", "EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL"],
-            &["REASONING_MODEL", "DISTILL_MODEL", "EXTRACT_MODEL", "SILICONFLOW_MODEL"],
+            &[
+                "REASONING_API_KEY",
+                "DISTILL_API_KEY",
+                "EXTRACT_API_KEY",
+                "SILICONFLOW_API_KEY",
+            ],
+            &[
+                "REASONING_BASE_URL",
+                "DISTILL_BASE_URL",
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+            ],
+            &[
+                "REASONING_MODEL",
+                "DISTILL_MODEL",
+                "EXTRACT_MODEL",
+                "SILICONFLOW_MODEL",
+            ],
             DEFAULT_REASONING_MODEL,
         )?;
 
         let distill = Self::load_lane(
-            &["DISTILL_API_KEY", "REASONING_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-            &["DISTILL_BASE_URL", "REASONING_BASE_URL", "EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL"],
-            &["DISTILL_MODEL", "REASONING_MODEL", "EXTRACT_MODEL", "SILICONFLOW_MODEL"],
+            &[
+                "DISTILL_API_KEY",
+                "REASONING_API_KEY",
+                "EXTRACT_API_KEY",
+                "SILICONFLOW_API_KEY",
+            ],
+            &[
+                "DISTILL_BASE_URL",
+                "REASONING_BASE_URL",
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+            ],
+            &[
+                "DISTILL_MODEL",
+                "REASONING_MODEL",
+                "EXTRACT_MODEL",
+                "SILICONFLOW_MODEL",
+            ],
             &reasoning.model,
         )?;
 
@@ -427,7 +457,10 @@ impl LlmClient {
         // Try Claude Code CLI first for higher-quality reasoning
         match Self::call_claude_cli(system, user).await {
             Ok(response) => {
-                tracing::info!("reasoning via claude-cli succeeded ({} chars)", response.len());
+                tracing::info!(
+                    "reasoning via claude-cli succeeded ({} chars)",
+                    response.len()
+                );
                 return Ok(response);
             }
             Err(e) => {
@@ -448,14 +481,14 @@ impl LlmClient {
     async fn call_claude_cli(system: &str, user: &str) -> Result<String, String> {
         use tokio::process::Command;
 
-        let prompt = format!(
-            "<system>\n{system}\n</system>\n\n{user}"
-        );
+        let prompt = format!("<system>\n{system}\n</system>\n\n{user}");
 
         let output = Command::new("claude")
             .arg("-p")
-            .arg("--output-format").arg("text")
-            .arg("--max-turns").arg("1")
+            .arg("--output-format")
+            .arg("text")
+            .arg("--max-turns")
+            .arg("1")
             .arg(&prompt)
             .output()
             .await
@@ -790,12 +823,10 @@ mod tests {
         let client = LlmClient::new().expect("client should not require API keys at startup");
 
         assert!(client.provider_secret_for_tests(&[KEY]).is_none());
-        assert!(
-            client
-                .required_secret(&[KEY])
-                .expect_err("missing keys should fail at call time")
-                .contains("Missing API key")
-        );
+        assert!(client
+            .required_secret(&[KEY])
+            .expect_err("missing keys should fail at call time")
+            .contains("Missing API key"));
     }
 
     #[test]

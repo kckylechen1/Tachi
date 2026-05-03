@@ -392,12 +392,7 @@ mod tests {
             "Voyage outage should still allow lexical fallback search",
             &["voyage", "fallback"],
         );
-        insert(
-            &mut conn,
-            "b",
-            "Unrelated operational note",
-            &["ops"],
-        );
+        insert(&mut conn, "b", "Unrelated operational note", &["ops"]);
 
         let opts = SearchOptions {
             top_k: 3,

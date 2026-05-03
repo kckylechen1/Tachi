@@ -52,9 +52,9 @@ impl RepairRule for RetentionBackfill {
                 already_claimed += count;
             }
             if count > 0 {
-                report.findings.push(
-                    Finding::new(*kind, count).with_detail(json!({"would_set": target})),
-                );
+                report
+                    .findings
+                    .push(Finding::new(*kind, count).with_detail(json!({"would_set": target})));
             }
         }
         Ok(report)
@@ -69,10 +69,9 @@ impl RepairRule for RetentionBackfill {
             );
             let changed = tx.execute(&sql, [])?;
             if changed > 0 {
-                report.findings.push(
-                    Finding::new(*kind, changed)
-                        .with_detail(json!({"applied": target})),
-                );
+                report
+                    .findings
+                    .push(Finding::new(*kind, changed).with_detail(json!({"applied": target})));
                 report.applied += changed;
             }
         }

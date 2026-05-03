@@ -511,11 +511,13 @@ pub fn fetch_by_ids(
             placeholders
         );
         if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
-            if let Ok(vec_rows) = vec_stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
-                let id: String = row.get(0)?;
-                let blob: Vec<u8> = row.get(1)?;
-                Ok((id, blob))
-            }) {
+            if let Ok(vec_rows) =
+                vec_stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                    let id: String = row.get(0)?;
+                    let blob: Vec<u8> = row.get(1)?;
+                    Ok((id, blob))
+                })
+            {
                 for r in vec_rows.flatten() {
                     let (id, blob) = r;
                     if let Some(entry) = out.get_mut(&id) {
