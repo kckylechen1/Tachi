@@ -77,20 +77,19 @@ impl LlmClient {
         )?;
 
         // ── Foundry LLM layer (Distill + Reasoning) ──
-        // Reasoning: REASONING_* → DISTILL_*  (Foundry internal fallback)
-        // Built before distill so distill can reference its model.
+        // Both lanes now fall back to the front-line Extract/SiliconFlow chain.
+        // Dedicated DISTILL_*/REASONING_* env vars still override if set.
         let reasoning = Self::load_lane(
-            &["REASONING_API_KEY", "DISTILL_API_KEY"],
-            &["REASONING_BASE_URL", "DISTILL_BASE_URL"],
-            &["REASONING_MODEL", "DISTILL_MODEL"],
+            &["REASONING_API_KEY", "DISTILL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            &["REASONING_BASE_URL", "DISTILL_BASE_URL", "EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL"],
+            &["REASONING_MODEL", "DISTILL_MODEL", "EXTRACT_MODEL", "SILICONFLOW_MODEL"],
             DEFAULT_REASONING_MODEL,
         )?;
 
-        // Distill: DISTILL_* → REASONING_*  (Foundry internal fallback)
         let distill = Self::load_lane(
-            &["DISTILL_API_KEY", "REASONING_API_KEY"],
-            &["DISTILL_BASE_URL", "REASONING_BASE_URL"],
-            &["DISTILL_MODEL", "REASONING_MODEL"],
+            &["DISTILL_API_KEY", "REASONING_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            &["DISTILL_BASE_URL", "REASONING_BASE_URL", "EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL"],
+            &["DISTILL_MODEL", "REASONING_MODEL", "EXTRACT_MODEL", "SILICONFLOW_MODEL"],
             &reasoning.model,
         )?;
 
