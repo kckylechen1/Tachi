@@ -263,6 +263,10 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "hub_call",
     "hub_disconnect",
     "wiki_lint",
+    // Vault session management (password-protected)
+    "vault_unlock",
+    "vault_lock",
+    "vault_status",
 ];
 
 /// Standard profile allow-list. Intersected with all bundles
@@ -290,6 +294,10 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "approve_merge",
     "tachi_board",
     // GitHub tools: conditionally added by has_gh_token, not in fixed list.
+    // Vault management (password-protected, safe in standard)
+    "vault_unlock",
+    "vault_lock",
+    "vault_status",
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
@@ -362,12 +370,9 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vault_get",
     "vault_init",
     "vault_list",
-    "vault_lock",
     "vault_remove",
     "vault_set",
     "vault_setup_rotation",
-    "vault_status",
-    "vault_unlock",
     "vc_bind",
     "vc_list",
     "vc_register",
