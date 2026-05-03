@@ -181,6 +181,71 @@ fn render_one(
     }
     println!();
 
+    // Dispatches section
+    println!("Dispatches (recent)");
+    if snapshot.dispatches.is_empty() {
+        println!("  (none)");
+    } else {
+        for d in &snapshot.dispatches {
+            let icon = match d.outcome.as_str() {
+                "completed" | "success" if d.reviewed => "[OK]",
+                "completed" | "success" => "[!] ",
+                "in_progress" => "[..]",
+                _ => "[X] ",
+            };
+            let review_tag = if !d.reviewed
+                && matches!(d.outcome.as_str(), "completed" | "success")
+            {
+                " unreviewed"
+            } else {
+                ""
+            };
+            println!(
+                "  {icon} {id:<12} {agent:<14} \"{task}\"  {outcome} {elapsed}{review}",
+                id = truncate(&d.dispatch_id, 12),
+                agent = truncate(&d.agent, 14),
+                task = truncate(&d.task, 40),
+                outcome = d.outcome,
+                elapsed = d.elapsed,
+                review = review_tag,
+            );
+        }
+    }
+    println!();
+
+    // Recent evals section
+    println!("Recent Evals");
+    if snapshot.recent_evals.is_empty() {
+        println!("  (none)");
+    } else {
+        for e in &snapshot.recent_evals {
+            let icon = match e.outcome.as_str() {
+                "success" => "[OK]",
+                "partial" => "[~] ",
+                _ => "[X] ",
+            };
+            let quality = e
+                .quality_score
+                .map(|q| format!("  quality={q:.2}"))
+                .unwrap_or_default();
+            println!(
+                "  {icon} {id:<24} {agent:<14} {outcome}{quality}",
+                id = truncate(&e.task_id, 24),
+                agent = truncate(&e.agent, 14),
+                outcome = e.outcome,
+            );
+        }
+    }
+    println!();
+
+    // Daily pipeline section
+    println!("Daily Pipeline");
+    match &snapshot.last_daily_report {
+        Some(p) => println!("  [OK] last report: {p}"),
+        None => println!("  (no daily reports yet)"),
+    }
+    println!();
+
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
     let total_orphan = snapshot.dbs.iter().filter(|d| d.orphan).count();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
@@ -200,6 +265,28 @@ struct StatusSnapshot {
     daemon: DaemonStatus,
     dbs: Vec<DbStatus>,
     manifest_path: String,
+    dispatches: Vec<DispatchStatus>,
+    recent_evals: Vec<RecentEval>,
+    last_daily_report: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DispatchStatus {
+    dispatch_id: String,
+    agent: String,
+    task: String,
+    outcome: String,
+    elapsed: String,
+    reviewed: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RecentEval {
+    task_id: String,
+    agent: String,
+    outcome: String,
+    quality_score: Option<f64>,
+    timestamp: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -303,10 +390,17 @@ fn collect_snapshot(
         }
     }
 
+    let dispatches = collect_dispatches(global_db_path);
+    let recent_evals = collect_recent_evals(global_db_path, project_db_path);
+    let last_daily_report = find_last_daily_report(app_home);
+
     StatusSnapshot {
         daemon,
         dbs,
         manifest_path: manifest_path.display().to_string(),
+        dispatches,
+        recent_evals,
+        last_daily_report,
     }
 }
 
@@ -379,6 +473,189 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max.saturating_sub(1)])
+    }
+}
+
+fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
+    let path_str = match global_db_path.to_str() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let store = match MemoryStore::open_with_label(path_str, "tachi-status") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let conn = store.connection();
+    let mut stmt = match conn.prepare(
+        "SELECT id, summary, text, metadata, created_at FROM memories \
+         WHERE path LIKE '/kanban/tasks/%' \
+         ORDER BY created_at DESC LIMIT 10",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let now = Utc::now();
+    let rows = match stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, summary, _text, meta_str, created_at) = match row {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let meta: serde_json::Value =
+            serde_json::from_str(&meta_str).unwrap_or(json!({}));
+        let agent = meta
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let outcome = meta
+            .get("state")
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "TASK_STATE_IN_PROGRESS" => "in_progress",
+                "TASK_STATE_COMPLETED" => "completed",
+                "TASK_STATE_FAILED" => "failed",
+                "TASK_STATE_CANCELED" => "aborted",
+                "TASK_STATE_INPUT_REQUIRED" => "partial",
+                other => other,
+            })
+            .unwrap_or("unknown")
+            .to_string();
+        let reviewed = meta
+            .get("reviewed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let elapsed = created_at
+            .parse::<DateTime<Utc>>()
+            .ok()
+            .map(|dt| format_elapsed(now - dt))
+            .unwrap_or_default();
+        let task = summary
+            .trim_start_matches(|c: char| !c.is_alphanumeric())
+            .chars()
+            .take(60)
+            .collect::<String>();
+        let dispatch_id = id.chars().take(12).collect();
+        out.push(DispatchStatus {
+            dispatch_id,
+            agent,
+            task,
+            outcome,
+            elapsed,
+            reviewed,
+        });
+    }
+    out
+}
+
+fn collect_recent_evals(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<RecentEval> {
+    let mut evals = Vec::new();
+    for db_path in std::iter::once(global_db_path).chain(project_db_path) {
+        let path_str = match db_path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let store = match MemoryStore::open_with_label(path_str, "tachi-status") {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let conn = store.connection();
+        let mut stmt = match conn.prepare(
+            "SELECT id, summary, metadata, created_at FROM memories \
+             WHERE path LIKE '/eval/2%' \
+             ORDER BY created_at DESC LIMIT 5",
+        ) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rows = match stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for row in rows {
+            let (id, _summary, meta_str, created_at) = match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let meta: serde_json::Value =
+                serde_json::from_str(&meta_str).unwrap_or(json!({}));
+            let agent = meta
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let outcome = meta
+                .get("outcome")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let quality_score = meta
+                .get("quality_score")
+                .and_then(|v| v.as_f64());
+            let task_id = id.chars().take(24).collect();
+            evals.push(RecentEval {
+                task_id,
+                agent,
+                outcome,
+                quality_score,
+                timestamp: created_at,
+            });
+        }
+    }
+    evals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    evals.truncate(5);
+    evals
+}
+
+fn find_last_daily_report(app_home: &Path) -> Option<String> {
+    let reports_dir = app_home.join("reports").join("daily");
+    let entries = std::fs::read_dir(&reports_dir).ok()?;
+    let mut files: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "md")
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        .collect();
+    files.sort();
+    files.last().map(|f| reports_dir.join(f).display().to_string())
+}
+
+fn format_elapsed(dur: chrono::Duration) -> String {
+    let secs = dur.num_seconds().max(0);
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 

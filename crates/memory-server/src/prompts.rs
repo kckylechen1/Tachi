@@ -258,3 +258,46 @@ pub const DAILY_HEALTH_PROMPT: &str = r#"你是 Tachi memory-server 的 Daily He
 4) total_entries/new_today/duplicate_count/stale_days 必须是数字；缺失或失败时用 0，并把原因放入 issues。
 5) 不要臆测不存在的 DB、条目或具体重复数量；没有证据时输出空数组。
 6) recommendations 和 action_items 使用简洁中文，聚焦具体维护动作。"#;
+
+/// Routing analysis prompt — evaluates agent eval stats and proposes routing adjustments.
+pub const ROUTING_ANALYSIS_PROMPT: &str = r#"你是 Tachi 的路由优化分析器。根据输入的 agent eval 统计数据，评估各 agent 的表现并提出路由调整建议。
+
+输入是最近 30 天的 eval 记录按 agent 聚合的统计。
+
+分析要点：
+1) 每个 agent 的 success_rate、avg_quality、total_evals
+2) 如果某 agent success_rate < 0.7 且样本 ≥ 5，标记为需要路由调整
+3) 如果某 agent success_rate > 0.9 且 avg_quality > 7，标记为优秀
+4) 如果有 agent 表现持续低于同类，建议将其任务路由到表现更好的 agent
+5) 路由调整建议需保守：只在数据充分且模式稳定时提出
+
+输出 JSON，不要 markdown 包裹，不要额外解释：
+{
+  "analysis_date": "YYYY-MM-DD",
+  "agents": [
+    {
+      "agent_id": "agent 名称",
+      "success_rate": 0.85,
+      "avg_quality": 7.2,
+      "total_evals": 20,
+      "recommendation": "maintain | improve_prompts | reduce_routing | increase_routing"
+    }
+  ],
+  "routing_proposals": [
+    {
+      "from_agent": "表现差的 agent",
+      "to_agent": "表现好的 agent",
+      "task_pattern": "失败集中的任务类型",
+      "reason": "具体理由，引用统计数据"
+    }
+  ],
+  "no_change_reason": "如果不需要调整，在此说明原因（数据不足/表现均衡/样本太少）"
+}
+
+规则：
+1) 只输出合法 JSON。
+2) agents 数组必须覆盖输入中的每个 agent。
+3) routing_proposals 为空时设为 []，并填写 no_change_reason。
+4) routing_proposals 非空时 no_change_reason 设为 null。
+5) recommendation 只能是枚举值之一。
+6) 不要编造不在输入中的 agent 或统计数据。"#;
