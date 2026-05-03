@@ -41,6 +41,7 @@ mod cli_client;
 mod complete_ops;
 mod copilot_ops;
 mod daemon_lock;
+mod daily_pipeline;
 mod dispatch_ops;
 mod dlq_ops;
 mod doctor;

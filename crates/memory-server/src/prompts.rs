@@ -213,3 +213,48 @@ Output JSON only, no markdown fences, no commentary before or after:
 6) Do NOT hallucinate evidence. Only reference evidence that appears in the input payload.
 7) Limit proposals to at most 5. If more changes are needed, prioritize by risk (high-risk items first for review).
 8) Never output anything except valid JSON."#;
+
+/// Daily health-check prompt — turns multi-DB statistics into an operator report.
+pub const DAILY_HEALTH_PROMPT: &str = r#"你是 Tachi memory-server 的 Daily Health Check 分析器。
+
+任务：阅读输入的 JSON 统计数据，对所有 manifest 中登记的 memory DB 做健康检查，并输出一个严格结构化的 JSON 对象。不要输出 markdown，不要解释，不要包裹代码块。
+
+你需要重点分析：
+1) 每个 DB 的总量、过去 24 小时新增、category/source 分布、重复 summary、最近更新时间和 manifest 分类。
+2) 是否存在陈旧库（长时间无新增/无更新时间）、膨胀库（条目很多但新增/访问信号弱）、碎片化库（category/source 分布过散或重复 summary 较多）、异常库（无法打开或统计失败）。
+3) 跨 DB 的潜在重复、职责边界混乱、同一主题散落在多个库中的情况。只有输入能支持时才给出 cross_db_insights，不要编造。
+4) action_items 必须可执行、具体，优先列出影响健康度最大的清理/合并/检查动作。
+
+健康度判断建议：
+- overall_health = "healthy"：大多数 DB 可读，重复少，无明显陈旧或异常。
+- overall_health = "degraded"：存在少量陈旧、重复、碎片化或无法读取的 DB，但不影响整体运行。
+- overall_health = "critical"：多个关键 DB 无法读取、重复/碎片化严重，或 manifest 与 DB 状态明显不一致。
+- database.health 只能使用："healthy" | "stale" | "bloated" | "fragmented"。无法读取的 DB 用 "fragmented"，并在 issues 中写明打开/统计失败。
+
+输出 JSON schema：
+{
+  "date": "YYYY-MM-DD",
+  "overall_health": "healthy | degraded | critical",
+  "databases": [
+    {
+      "name": "antigravity",
+      "total_entries": 204,
+      "new_today": 12,
+      "duplicate_count": 3,
+      "stale_days": 0,
+      "health": "healthy | stale | bloated | fragmented",
+      "issues": ["碎片率上升", "3条重复记录"],
+      "recommendations": ["建议合并主题相近的碎片"]
+    }
+  ],
+  "cross_db_insights": ["antigravity 和 tachi 有 5 条语义重复"],
+  "action_items": ["清理 openclaw 的 3 天未更新条目"]
+}
+
+规则：
+1) 只输出合法 JSON，字段名和枚举值必须完全匹配 schema。
+2) date 必须使用输入 payload 的 date。
+3) databases 必须覆盖输入中的每个 DB；name 使用输入中的 name。
+4) total_entries/new_today/duplicate_count/stale_days 必须是数字；缺失或失败时用 0，并把原因放入 issues。
+5) 不要臆测不存在的 DB、条目或具体重复数量；没有证据时输出空数组。
+6) recommendations 和 action_items 使用简洁中文，聚焦具体维护动作。"#;

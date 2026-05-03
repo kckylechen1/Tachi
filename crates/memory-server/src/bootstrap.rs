@@ -3092,6 +3092,23 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // the manifest watcher + per-DB workers.
         let _scheduler = scheduler;
 
+        {
+            let daily_server = server.clone();
+            tokio::spawn(async move {
+                loop {
+                    let next_run = crate::daily_pipeline::next_daily_run_time();
+                    tokio::time::sleep_until(next_run).await;
+                    match crate::daily_pipeline::run_daily_pipeline(&daily_server).await {
+                        Ok(report) => {
+                            eprintln!("[daily-pipeline] completed: {}", report.summary())
+                        }
+                        Err(e) => eprintln!("[daily-pipeline] failed: {e}"),
+                    }
+                }
+            });
+            eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
+        }
+
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         };

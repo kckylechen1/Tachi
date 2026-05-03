@@ -1,0 +1,826 @@
+use super::*;
+use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, TimeZone};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DailyPipelineReport {
+    pub date: String,
+    pub report_path: Option<String>,
+    pub health_check: DailyStageReport,
+    pub agent_evolution: DailyStageReport,
+    pub skill_evolution: DailyStageReport,
+}
+
+impl DailyPipelineReport {
+    pub(crate) fn summary(&self) -> String {
+        format!(
+            "date={} health={} agent_evolution={} skill_evolution={}",
+            self.date,
+            self.health_check.status,
+            self.agent_evolution.status,
+            self.skill_evolution.status
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct DailyStageReport {
+    pub status: String,
+    pub summary: String,
+    pub details: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DailyHealthPayload {
+    date: String,
+    generated_at: String,
+    manifest_path: String,
+    databases: Vec<DatabaseStats>,
+}
+
+#[derive(Debug, Clone)]
+struct ManifestDbTarget {
+    name: String,
+    label: String,
+    path: PathBuf,
+    role: String,
+    owner: String,
+    schema_kind: String,
+    allow_write: bool,
+    last_classification: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DatabaseStats {
+    name: String,
+    path: String,
+    role: String,
+    owner: String,
+    schema_kind: String,
+    allow_write: bool,
+    last_classification: String,
+    total_entries: i64,
+    new_today: i64,
+    duplicate_count: i64,
+    stale_days: i64,
+    groups: Vec<CategorySourceCount>,
+    duplicate_summaries: Vec<DuplicateSummary>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CategorySourceCount {
+    count: i64,
+    category: String,
+    source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DuplicateSummary {
+    summary: String,
+    count: i64,
+}
+
+#[derive(Debug, Clone)]
+struct EvalEvidenceRow {
+    id: String,
+    path: String,
+    summary: String,
+    text: String,
+    metadata: Value,
+    created_at: String,
+}
+
+pub(crate) async fn run_daily_pipeline(
+    server: &MemoryServer,
+) -> Result<DailyPipelineReport, String> {
+    let date = shanghai_today();
+    let app_home = tachi_app_home();
+    let (health_stage, health_json, report_path) =
+        run_health_check(server, &app_home, &date).await?;
+    let agent_stage = run_agent_evolution_stage(server, &app_home).await;
+    let skill_stage = run_skill_evolution_stage(server).await;
+
+    let report = DailyPipelineReport {
+        date: date.clone(),
+        report_path: Some(report_path.display().to_string()),
+        health_check: health_stage,
+        agent_evolution: agent_stage,
+        skill_evolution: skill_stage,
+    };
+
+    let markdown = render_daily_report_markdown(&report, &health_json);
+    if let Some(parent) = report_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("create daily report dir: {e}"))?;
+    }
+    tokio::fs::write(&report_path, &markdown)
+        .await
+        .map_err(|e| format!("write daily report: {e}"))?;
+
+    save_daily_health_wiki(server, &date, &markdown).await?;
+
+    Ok(report)
+}
+
+pub(crate) fn next_daily_run_time() -> tokio::time::Instant {
+    let tz = shanghai_offset();
+    let now_utc = Utc::now();
+    let now_local = now_utc.with_timezone(&tz);
+    let today_0400 = tz
+        .with_ymd_and_hms(
+            now_local.year(),
+            now_local.month(),
+            now_local.day(),
+            4,
+            0,
+            0,
+        )
+        .single()
+        .unwrap_or(now_local);
+    let next_local = if now_local < today_0400 {
+        today_0400
+    } else {
+        today_0400 + ChronoDuration::days(1)
+    };
+    let wait = (next_local.with_timezone(&Utc) - now_utc)
+        .to_std()
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    tokio::time::Instant::now() + wait
+}
+
+async fn run_health_check(
+    server: &MemoryServer,
+    app_home: &std::path::Path,
+    date: &str,
+) -> Result<(DailyStageReport, Value, PathBuf), String> {
+    let manifest_path = app_home.join("manifest.json");
+    let targets = load_manifest_targets(server, &manifest_path)?;
+    let mut databases = Vec::with_capacity(targets.len());
+
+    for target in targets {
+        let stats = tokio::task::spawn_blocking(move || collect_database_stats(target))
+            .await
+            .map_err(|e| format!("health stats worker join failed: {e}"))?;
+        databases.push(stats);
+    }
+
+    let payload = DailyHealthPayload {
+        date: date.to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        manifest_path: manifest_path.display().to_string(),
+        databases,
+    };
+    let user = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("serialize daily health payload: {e}"))?;
+    let raw = server
+        .llm
+        .call_reasoning_llm(crate::prompts::DAILY_HEALTH_PROMPT, &user, None, 0.2, 3000)
+        .await
+        .map_err(|e| format!("daily health LLM call failed: {e}"))?;
+    let health_json = parse_llm_json(&raw)?;
+    let overall = health_json
+        .get("overall_health")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let db_count = health_json
+        .get("databases")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    let report_path = app_home
+        .join("reports")
+        .join("daily")
+        .join(format!("{date}.md"));
+
+    Ok((
+        DailyStageReport {
+            status: overall.clone(),
+            summary: format!("Health check analyzed {db_count} database(s); overall={overall}"),
+            details: health_json.clone(),
+        },
+        health_json,
+        report_path,
+    ))
+}
+
+fn load_manifest_targets(
+    server: &MemoryServer,
+    manifest_path: &std::path::Path,
+) -> Result<Vec<ManifestDbTarget>, String> {
+    let manifest = crate::manifest::Manifest::load_or_empty(manifest_path);
+    let mut targets = manifest
+        .dbs
+        .into_iter()
+        .map(|entry| {
+            let path = PathBuf::from(&entry.path);
+            let name = manifest_db_name(&entry, &path);
+            let label = manifest_db_label(&entry, &path);
+            ManifestDbTarget {
+                name,
+                label,
+                path,
+                role: format!("{:?}", entry.role).to_ascii_lowercase(),
+                owner: entry.owner,
+                schema_kind: entry.schema_kind,
+                allow_write: entry.allow_write,
+                last_classification: entry.last_classification,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if targets.is_empty() {
+        targets.push(ManifestDbTarget {
+            name: "global".to_string(),
+            label: "global".to_string(),
+            path: server.global_db_path_buf(),
+            role: "global".to_string(),
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            allow_write: true,
+            last_classification: "unknown".to_string(),
+        });
+        if let Some(project_path) = server.project_db_path_buf() {
+            targets.push(ManifestDbTarget {
+                name: "project".to_string(),
+                label: project_path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("project")
+                    .to_string(),
+                path: project_path,
+                role: "project".to_string(),
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                allow_write: true,
+                last_classification: "unknown".to_string(),
+            });
+        }
+    }
+
+    Ok(targets)
+}
+
+fn collect_database_stats(target: ManifestDbTarget) -> DatabaseStats {
+    let mut stats = DatabaseStats {
+        name: target.name.clone(),
+        path: target.path.display().to_string(),
+        role: target.role,
+        owner: target.owner,
+        schema_kind: target.schema_kind,
+        allow_write: target.allow_write,
+        last_classification: target.last_classification,
+        total_entries: 0,
+        new_today: 0,
+        duplicate_count: 0,
+        stale_days: 0,
+        groups: Vec::new(),
+        duplicate_summaries: Vec::new(),
+        error: None,
+    };
+
+    let Some(db_path) = target.path.to_str() else {
+        stats.error = Some("DB path contains invalid UTF-8".to_string());
+        return stats;
+    };
+
+    let store = match MemoryStore::open_with_label(db_path, &target.label) {
+        Ok(store) => store,
+        Err(e) => {
+            stats.error = Some(format!("open DB failed: {e}"));
+            return stats;
+        }
+    };
+    let conn = store.connection();
+
+    let result = (|| -> Result<(), String> {
+        stats.total_entries = conn
+            .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))
+            .map_err(|e| format!("count memories: {e}"))?;
+        stats.new_today = conn
+            .query_row(
+                "SELECT count(*) FROM memories WHERE created_at > datetime('now', '-1 day')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count recent memories: {e}"))?;
+        stats.stale_days = conn
+            .query_row(
+                "SELECT COALESCE(CAST(julianday('now') - julianday(MAX(NULLIF(created_at, ''))) AS INTEGER), 0) FROM memories",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
+        let mut group_stmt = conn
+            .prepare("SELECT count(*), category, source FROM memories GROUP BY category, source")
+            .map_err(|e| format!("prepare category/source stats: {e}"))?;
+        let group_rows = group_stmt
+            .query_map([], |row| {
+                Ok(CategorySourceCount {
+                    count: row.get(0)?,
+                    category: row.get(1)?,
+                    source: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("query category/source stats: {e}"))?;
+        for row in group_rows {
+            stats
+                .groups
+                .push(row.map_err(|e| format!("read category/source row: {e}"))?);
+        }
+
+        let mut dup_stmt = conn
+            .prepare(
+                "SELECT summary, count(*) FROM memories
+                 WHERE trim(summary) <> ''
+                 GROUP BY summary HAVING count(*) > 1
+                 ORDER BY count(*) DESC LIMIT 20",
+            )
+            .map_err(|e| format!("prepare duplicate stats: {e}"))?;
+        let dup_rows = dup_stmt
+            .query_map([], |row| {
+                Ok(DuplicateSummary {
+                    summary: row.get(0)?,
+                    count: row.get(1)?,
+                })
+            })
+            .map_err(|e| format!("query duplicate stats: {e}"))?;
+        for row in dup_rows {
+            let duplicate = row.map_err(|e| format!("read duplicate row: {e}"))?;
+            stats.duplicate_count += duplicate.count.saturating_sub(1);
+            stats.duplicate_summaries.push(duplicate);
+        }
+
+        Ok(())
+    })();
+
+    if let Err(e) = result {
+        stats.error = Some(e);
+    }
+    stats
+}
+
+async fn run_agent_evolution_stage(
+    server: &MemoryServer,
+    app_home: &std::path::Path,
+) -> DailyStageReport {
+    let agents_dir = app_home.join("agents");
+    let agent_dirs = match list_agent_dirs(&agents_dir) {
+        Ok(dirs) if !dirs.is_empty() => dirs,
+        Ok(_) => {
+            return DailyStageReport {
+                status: "skipped".to_string(),
+                summary: "No agent directories found under TACHI_HOME/agents".to_string(),
+                details: json!({ "agents_dir": agents_dir.display().to_string() }),
+            };
+        }
+        Err(e) => {
+            return DailyStageReport {
+                status: "skipped".to_string(),
+                summary: format!("Could not inspect agent directories: {e}"),
+                details: json!({ "agents_dir": agents_dir.display().to_string(), "error": e }),
+            };
+        }
+    };
+
+    let eval_rows = collect_recent_eval_rows(server, 100).unwrap_or_default();
+    let mut results = Vec::new();
+    let mut completed = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for dir in agent_dirs {
+        let agent_id = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let documents = match collect_agent_documents(&dir) {
+            Ok(docs) => docs,
+            Err(e) => {
+                failed += 1;
+                results.push(json!({ "agent_id": agent_id, "status": "failed", "error": e }));
+                continue;
+            }
+        };
+        let evidence = evidence_for_agent(&agent_id, &eval_rows);
+
+        if documents.is_empty() || evidence.len() < 2 {
+            skipped += 1;
+            results.push(json!({
+                "agent_id": agent_id,
+                "status": "skipped",
+                "document_count": documents.len(),
+                "evidence_count": evidence.len(),
+                "reason": "insufficient documents or new eval evidence"
+            }));
+            continue;
+        }
+
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: agent_id.clone(),
+            display_name: Some(agent_id.clone()),
+            documents,
+            document_paths: Vec::new(),
+            evidence,
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: vec![
+                "Use recent eval evidence to propose conservative durable profile improvements."
+                    .to_string(),
+            ],
+            dry_run: false,
+        };
+
+        match crate::foundry_ops::handle_synthesize_agent_evolution(server, params).await {
+            Ok(raw) => {
+                completed += 1;
+                results.push(json!({
+                    "agent_id": agent_id,
+                    "status": "completed",
+                    "result": parse_json_or_raw(&raw)
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(json!({ "agent_id": agent_id, "status": "failed", "error": e }));
+            }
+        }
+    }
+
+    let status = if failed > 0 {
+        "degraded"
+    } else if completed > 0 {
+        "completed"
+    } else {
+        "skipped"
+    };
+
+    DailyStageReport {
+        status: status.to_string(),
+        summary: format!(
+            "Agent evolution completed={completed}, skipped={skipped}, failed={failed}"
+        ),
+        details: json!({ "results": results }),
+    }
+}
+
+async fn run_skill_evolution_stage(server: &MemoryServer) -> DailyStageReport {
+    let mut skills = Vec::<HubCapability>::new();
+    if let Ok(global) = server.with_global_store_read(|store| {
+        store
+            .hub_list(Some("skill"), false)
+            .map_err(|e| format!("hub list global skills: {e}"))
+    }) {
+        skills.extend(global);
+    }
+    if server.has_project_db() {
+        if let Ok(project) = server.with_project_store_read(|store| {
+            store
+                .hub_list(Some("skill"), false)
+                .map_err(|e| format!("hub list project skills: {e}"))
+        }) {
+            skills.extend(project);
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let low_health = skills
+        .into_iter()
+        .filter(|skill| seen.insert(skill.id.clone()))
+        .filter(|skill| {
+            !skill.health_status.eq_ignore_ascii_case("healthy") || skill.fail_streak > 3
+        })
+        .collect::<Vec<_>>();
+
+    if low_health.is_empty() {
+        return DailyStageReport {
+            status: "skipped".to_string(),
+            summary: "No low-health skills found".to_string(),
+            details: json!({ "skill_count": 0 }),
+        };
+    }
+
+    let mut results = Vec::new();
+    let mut previewed = 0usize;
+    let mut failed = 0usize;
+    for skill in low_health {
+        let params = SkillEvolveParams {
+            skill_id: skill.id.clone(),
+            feedback: Some(format!(
+                "Daily Pipeline dry-run evolution for low-health skill. health_status={}, fail_streak={}",
+                skill.health_status, skill.fail_streak
+            )),
+            auto_activate: false,
+            dry_run: true,
+        };
+        match crate::hub_ops::handle_skill_evolve(server, params).await {
+            Ok(raw) => {
+                previewed += 1;
+                results.push(json!({
+                    "skill_id": skill.id,
+                    "status": "previewed",
+                    "health_status": skill.health_status,
+                    "fail_streak": skill.fail_streak,
+                    "result": parse_json_or_raw(&raw)
+                }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(json!({
+                    "skill_id": skill.id,
+                    "status": "failed",
+                    "health_status": skill.health_status,
+                    "fail_streak": skill.fail_streak,
+                    "error": e
+                }));
+            }
+        }
+    }
+
+    DailyStageReport {
+        status: if failed > 0 { "degraded" } else { "completed" }.to_string(),
+        summary: format!("Skill evolution dry-run previews={previewed}, failed={failed}"),
+        details: json!({ "results": results }),
+    }
+}
+
+fn collect_recent_eval_rows(
+    server: &MemoryServer,
+    limit: usize,
+) -> Result<Vec<EvalEvidenceRow>, String> {
+    let collect = |store: &mut MemoryStore| -> Result<Vec<EvalEvidenceRow>, String> {
+        let mut stmt = store
+            .connection()
+            .prepare(
+                "SELECT id, path, summary, text, metadata, created_at
+                 FROM memories
+                 WHERE path LIKE '/eval/%'
+                   AND created_at > datetime('now', '-7 day')
+                 ORDER BY created_at DESC
+                 LIMIT ?1",
+            )
+            .map_err(|e| format!("prepare eval evidence query: {e}"))?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                let metadata_raw: String = row.get(4)?;
+                Ok(EvalEvidenceRow {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    summary: row.get(2)?,
+                    text: row.get(3)?,
+                    metadata: serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({})),
+                    created_at: row.get(5)?,
+                })
+            })
+            .map_err(|e| format!("query eval evidence: {e}"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("read eval evidence row: {e}"))?);
+        }
+        Ok(out)
+    };
+
+    let mut rows = server.with_global_store_read(collect)?;
+    if server.has_project_db() {
+        if let Ok(mut project_rows) = server.with_project_store_read(collect) {
+            rows.append(&mut project_rows);
+        }
+    }
+    Ok(rows)
+}
+
+fn evidence_for_agent(
+    agent_id: &str,
+    rows: &[EvalEvidenceRow],
+) -> Vec<AgentEvolutionEvidenceParams> {
+    rows.iter()
+        .filter(|row| {
+            row.metadata
+                .get("agent")
+                .and_then(Value::as_str)
+                .map(|agent| agent.eq_ignore_ascii_case(agent_id))
+                .unwrap_or_else(|| {
+                    row.text.contains(agent_id)
+                        || row.summary.contains(agent_id)
+                        || row.path.contains(agent_id)
+                })
+        })
+        .take(10)
+        .map(|row| AgentEvolutionEvidenceParams {
+            kind: "eval".to_string(),
+            title: Some(row.summary.clone()),
+            content: format!("created_at: {}\n{}", row.created_at, row.text),
+            source_ref: Some(row.id.clone()),
+            path: Some(row.path.clone()),
+            weight: 1.0,
+        })
+        .collect()
+}
+
+fn collect_agent_documents(
+    dir: &std::path::Path,
+) -> Result<Vec<AgentEvolutionDocumentParams>, String> {
+    let candidates = [
+        ("IDENTITY.md", "identity"),
+        ("AGENTS.md", "agents"),
+        ("LATEST_TRUTHS.md", "latest_truths"),
+        ("routing_policy.md", "routing_policy"),
+        ("tool_policy.md", "tool_policy"),
+        ("memory_policy.md", "memory_policy"),
+    ];
+    let mut docs = Vec::new();
+    for (file_name, kind) in candidates {
+        let path = dir.join(file_name);
+        if !path.is_file() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read agent document {}: {e}", path.display()))?;
+        if content.trim().is_empty() {
+            continue;
+        }
+        docs.push(AgentEvolutionDocumentParams {
+            kind: kind.to_string(),
+            path: Some(path.display().to_string()),
+            content,
+        });
+    }
+    Ok(docs)
+}
+
+fn list_agent_dirs(agents_dir: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    if !agents_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs = Vec::new();
+    for entry in std::fs::read_dir(agents_dir)
+        .map_err(|e| format!("read_dir {}: {e}", agents_dir.display()))?
+    {
+        let entry = entry.map_err(|e| format!("read agent dir entry: {e}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn render_daily_report_markdown(report: &DailyPipelineReport, health_json: &Value) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Tachi Daily Pipeline - {}\n\n", report.date));
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!(
+        "- Health Check: {}\n",
+        report.health_check.summary
+    ));
+    out.push_str(&format!(
+        "- Agent Evolution: {}\n",
+        report.agent_evolution.summary
+    ));
+    out.push_str(&format!(
+        "- Skill Evolution: {}\n\n",
+        report.skill_evolution.summary
+    ));
+
+    out.push_str("## Health Check\n\n");
+    out.push_str("```json\n");
+    out.push_str(&serde_json::to_string_pretty(health_json).unwrap_or_else(|_| "{}".to_string()));
+    out.push_str("\n```\n\n");
+
+    out.push_str("## Agent Evolution\n\n");
+    out.push_str("```json\n");
+    out.push_str(
+        &serde_json::to_string_pretty(&report.agent_evolution.details)
+            .unwrap_or_else(|_| "{}".to_string()),
+    );
+    out.push_str("\n```\n\n");
+
+    out.push_str("## Skill Evolution\n\n");
+    out.push_str("```json\n");
+    out.push_str(
+        &serde_json::to_string_pretty(&report.skill_evolution.details)
+            .unwrap_or_else(|_| "{}".to_string()),
+    );
+    out.push_str("\n```\n");
+    out
+}
+
+async fn save_daily_health_wiki(
+    server: &MemoryServer,
+    date: &str,
+    markdown: &str,
+) -> Result<(), String> {
+    let _ = server
+        .tachi_save(Parameters(TachiSaveParams {
+            text: markdown.to_string(),
+            id: None,
+            kind: Some("wiki".to_string()),
+            title: Some(format!("Tachi Daily Health {date}")),
+            summary: Some(format!("Daily Pipeline report for {date}")),
+            path: Some("/tachi/daily-health".to_string()),
+            importance: Some(0.85),
+            category: Some("experience".to_string()),
+            keywords: vec![
+                "tachi".to_string(),
+                "daily-pipeline".to_string(),
+                "health-check".to_string(),
+            ],
+            entities: vec!["Tachi".to_string()],
+            scope: Some("global".to_string()),
+            project: None,
+            domain: Some("wiki".to_string()),
+            retention_policy: Some("permanent".to_string()),
+            force: true,
+            topic: Some("daily-health".to_string()),
+        }))
+        .await?;
+    Ok(())
+}
+
+fn parse_llm_json(raw: &str) -> Result<Value, String> {
+    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    serde_json::from_str(stripped)
+        .or_else(|_| {
+            let start = stripped.find('{').unwrap_or(0);
+            let end = stripped
+                .rfind('}')
+                .map(|idx| idx + 1)
+                .unwrap_or(stripped.len());
+            serde_json::from_str(&stripped[start..end])
+        })
+        .map_err(|e| {
+            format!(
+                "parse daily health JSON: {e}; raw={}",
+                raw.chars().take(500).collect::<String>()
+            )
+        })
+}
+
+fn parse_json_or_raw(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| json!({ "raw": raw }))
+}
+
+fn manifest_db_name(entry: &crate::manifest::DbEntry, path: &std::path::Path) -> String {
+    if !entry.scope_hint.trim().is_empty() && entry.scope_hint != "unknown" {
+        return entry.scope_hint.clone();
+    }
+    if !entry.owner.trim().is_empty() && entry.owner != "tachi" {
+        return entry.owner.clone();
+    }
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+        .unwrap_or("memory")
+        .to_string()
+}
+
+fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -> String {
+    if matches!(entry.role, crate::manifest::DbRole::Global) {
+        return "global".to_string();
+    }
+    if matches!(entry.role, crate::manifest::DbRole::Project) {
+        return path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+    }
+    let name = manifest_db_name(entry, path);
+    name.split(':').last().unwrap_or(&name).to_string()
+}
+
+fn tachi_app_home() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    for key in ["TACHI_HOME", "SIGIL_HOME"] {
+        if let Ok(raw) = std::env::var(key) {
+            if raw == "~" {
+                return home;
+            }
+            if let Some(rest) = raw.strip_prefix("~/") {
+                return home.join(rest);
+            }
+            if !raw.trim().is_empty() {
+                return PathBuf::from(raw);
+            }
+        }
+    }
+    home.join(".tachi")
+}
+
+fn shanghai_today() -> String {
+    Utc::now()
+        .with_timezone(&shanghai_offset())
+        .format("%Y-%m-%d")
+        .to_string()
+}
+
+fn shanghai_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("valid Asia/Shanghai fixed offset")
+}
