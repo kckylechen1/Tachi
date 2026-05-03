@@ -49,6 +49,9 @@ pub(super) fn hub_discover_inner(
     let mut output: Vec<serde_json::Value> = Vec::new();
 
     for cap in &project_caps {
+        if params.enabled_only && !cap.enabled {
+            continue;
+        }
         seen.insert(cap.id.clone());
         let mut obj = serde_json::to_value(cap).unwrap_or(json!(null));
         if let Some(o) = obj.as_object_mut() {
@@ -63,6 +66,9 @@ pub(super) fn hub_discover_inner(
         output.push(obj);
     }
     for cap in &global_caps {
+        if params.enabled_only && !cap.enabled {
+            continue;
+        }
         if !seen.insert(cap.id.clone()) {
             continue;
         }

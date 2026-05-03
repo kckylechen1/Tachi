@@ -1797,10 +1797,40 @@ impl MemoryServer {
             "discover" => {
                 let discover_params = HubDiscoverParams {
                     query: params.query.clone(),
-                    cap_type: params.cap_type.clone(),
+                    cap_type: params
+                        .cap_type
+                        .clone()
+                        .or_else(|| Some("skill".to_string())),
                     enabled_only: params.enabled_only.unwrap_or(true),
                 };
-                handle_hub_discover(self, discover_params).await
+                let raw = handle_hub_discover(self, discover_params).await?;
+                let mut capabilities: Vec<Value> =
+                    serde_json::from_str(&raw).map_err(|e| format!("parse hub discover: {e}"))?;
+                let limit = params.limit.unwrap_or(10).max(1);
+                capabilities.truncate(limit);
+                let results = capabilities
+                    .into_iter()
+                    .map(|cap| {
+                        json!({
+                            "id": cap.get("id").cloned().unwrap_or(Value::Null),
+                            "name": cap.get("name").cloned().unwrap_or(Value::Null),
+                            "description": cap.get("description").cloned().unwrap_or(Value::Null),
+                            "cap_type": cap.get("cap_type").cloned().unwrap_or_else(|| cap.get("type").cloned().unwrap_or(Value::Null)),
+                            "enabled": cap.get("enabled").cloned().unwrap_or(Value::Null),
+                            "review_status": cap.get("review_status").cloned().unwrap_or(Value::Null),
+                            "health_status": cap.get("health_status").cloned().unwrap_or(Value::Null),
+                            "visibility": cap.get("visibility").cloned().unwrap_or(Value::Null),
+                            "callable": cap.get("callable").cloned().unwrap_or(Value::Null),
+                            "db": cap.get("db").cloned().unwrap_or(Value::Null),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::to_string(&json!({
+                    "query": params.query,
+                    "count": results.len(),
+                    "results": results,
+                }))
+                .map_err(|e| format!("serialize skill discover: {e}"))
             }
             "run" => {
                 let skill_id = params

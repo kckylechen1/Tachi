@@ -3828,6 +3828,63 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
                 text.contains("schema -> client serialization -> server deserialization")
             })
         })));
+    assert_eq!(
+        json["suggested_next_tools"],
+        json!([
+            "tachi_wiki(action='search')",
+            "tachi_skill(action='discover')",
+            "tachi_task(action='plan')",
+            "tachi_task(action='board')"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&make_skill_capability(
+                    "skill:tachi-tool-guide",
+                    "tachi-tool-guide",
+                    "Guide for choosing Tachi facade tools after tool surface consolidation.",
+                    "standard",
+                ))
+                .map_err(|e| format!("register failed: {e}"))
+        })
+        .expect("failed to register skill");
+
+    let response = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "discover".to_string(),
+            query: Some("tachi tool guide".to_string()),
+            cap_type: None,
+            enabled_only: Some(true),
+            limit: Some(5),
+            skill_id: None,
+            args: None,
+        }))
+        .await
+        .expect("tachi_skill discover should succeed");
+
+    let json: Value = serde_json::from_str(&response).expect("skill discover response json");
+    let results = json["results"]
+        .as_array()
+        .expect("skill discover should return results");
+    assert!(
+        results
+            .iter()
+            .any(|item| item["id"] == json!("skill:tachi-tool-guide")),
+        "expected tokenized query to find skill:tachi-tool-guide, got: {json}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|item| item.get("definition").is_none()),
+        "skill discover facade should not return full definitions: {json}"
+    );
 }
 
 #[tokio::test]

@@ -118,25 +118,44 @@ pub fn hub_list(
     Ok(caps)
 }
 
-/// Search hub capabilities by name/description using LIKE.
 pub fn hub_search(
     conn: &Connection,
     query: &str,
     cap_type: Option<&str>,
 ) -> Result<Vec<HubCapability>, MemoryError> {
-    let pattern = format!("%{}%", query);
+    let terms = query
+        .split_whitespace()
+        .map(|term| term.trim().to_ascii_lowercase())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
     let mut sql = String::from(
         "SELECT id, type, name, version, description, definition, enabled,
                 review_status, health_status, last_error, last_success_at, last_failure_at,
                 fail_streak, active_version, exposure_mode,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
          FROM hub_capabilities
-         WHERE (name LIKE ?1 OR description LIKE ?1)",
+         WHERE ",
     );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(pattern)];
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if terms.is_empty() {
+        sql.push_str("1 = 1");
+    } else {
+        let mut clauses = Vec::new();
+        for term in terms {
+            clauses.push(
+                "(lower(id) LIKE ? OR lower(name) LIKE ? OR lower(description) LIKE ?)".to_string(),
+            );
+            let pattern = format!("%{}%", term);
+            param_values.push(Box::new(pattern.clone()));
+            param_values.push(Box::new(pattern.clone()));
+            param_values.push(Box::new(pattern));
+        }
+        sql.push_str(&clauses.join(" AND "));
+    }
 
     if let Some(t) = cap_type {
-        sql.push_str(" AND type = ?2");
+        sql.push_str(" AND type = ?");
         param_values.push(Box::new(t.to_string()));
     }
     sql.push_str(" ORDER BY uses DESC, name ASC");

@@ -433,10 +433,10 @@ pub(crate) async fn handle_tachi_task_brief(
         "debug_checklist": debug_checklist,
         "route_recommendation": route_rec,
         "suggested_next_tools": [
-            "tachi_wiki_search",
-            "recall_context",
-            "recommend_skill",
-            "tachi_progress_check"
+            "tachi_wiki(action='search')",
+            "tachi_skill(action='discover')",
+            "tachi_task(action='plan')",
+            "tachi_task(action='board')"
         ],
     }))
     .map_err(|e| format!("serialize task_brief: {e}"))

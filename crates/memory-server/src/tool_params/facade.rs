@@ -416,6 +416,8 @@ pub(crate) struct TachiSkillParams {
     #[serde(default)]
     pub enabled_only: Option<bool>,
     #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
     pub skill_id: Option<String>,
     #[serde(default)]
     pub args: Option<serde_json::Value>,
