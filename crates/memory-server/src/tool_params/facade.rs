@@ -146,6 +146,10 @@ pub(crate) struct TachiSaveParams {
     /// Topic / subject area
     #[serde(default)]
     pub topic: Option<String>,
+
+    /// Source identifier (used when kind="facts" or kind="extract_facts")
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────
@@ -355,6 +359,133 @@ pub(crate) struct TachiCompleteParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+}
+
+// ─── Facade: wiki (search / browse / write) ──────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWikiParams {
+    /// Action: "search", "browse", or "write"
+    pub action: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub importance: Option<f64>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+// ─── Facade: skill (discover / run) ──────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiSkillParams {
+    /// Action: "discover" or "run"
+    pub action: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub cap_type: Option<String>,
+    #[serde(default)]
+    pub enabled_only: Option<bool>,
+    #[serde(default)]
+    pub skill_id: Option<String>,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+}
+
+// ─── Facade: task (plan / dispatch / board / merge) ──────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiTaskParams {
+    /// Action: "plan", "dispatch", "board", or "merge"
+    pub action: String,
+    // plan fields
+    #[serde(default)]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+    // dispatch fields
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub context_query: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub sandbox: Option<String>,
+    #[serde(default)]
+    pub inject_tachi_mcp: Option<bool>,
+    #[serde(default)]
+    pub inject_hub_mcps: Option<bool>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    // board fields
+    #[serde(default)]
+    pub state_filter: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    // merge fields
+    #[serde(default)]
+    pub worktree: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default = "default_true")]
+    pub delete_worktree: bool,
+    #[serde(default)]
+    pub confirm: bool,
 }
 
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────

@@ -919,6 +919,7 @@ async fn save_daily_health_wiki(
             retention_policy: Some("permanent".to_string()),
             force: true,
             topic: Some("daily-health".to_string()),
+            source: None,
         }))
         .await?;
     Ok(())

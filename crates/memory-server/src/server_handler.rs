@@ -111,12 +111,19 @@ impl ServerHandler for MemoryServer {
         async move {
             let name = params.name.as_ref();
             let env_patterns = current_exposed_tool_patterns();
+            let has_gh_token = crate::vault_ops::vault_has_secret(self, "GH_TOKEN");
 
-            if !crate::profiles::tool_visible(
-                name,
-                self.active_tool_profile(),
-                env_patterns.as_deref(),
-            ) {
+            let visible = if crate::profiles::is_gh_tool_name(name) {
+                crate::profiles::gh_tool_visible(name, self.active_tool_profile(), has_gh_token)
+            } else {
+                crate::profiles::tool_visible(
+                    name,
+                    self.active_tool_profile(),
+                    env_patterns.as_deref(),
+                )
+            };
+
+            if !visible {
                 return Err(tool_not_found_error());
             }
 

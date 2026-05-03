@@ -198,6 +198,9 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_unstick",
     "tachi_browse",
     "tachi_board",
+    "tachi_wiki",
+    "tachi_skill",
+    "tachi_task",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -211,6 +214,10 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     // Facade write tool
     "tachi_save",
     "tachi_complete",
+    // Facade wiki write (action=write)
+    "tachi_wiki",
+    // Facade skill run (action=run)
+    "tachi_skill",
 ];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -225,12 +232,12 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",
+    // Facade task dispatch/merge/board
+    "tachi_task",
 ];
 
 /// GitHub MCP proxy tools — only exposed when Vault has GH_TOKEN.
-pub(super) const GH_TOOL_PATTERNS: &[&str] = &[
-    "tachi_gh",
-];
+pub(super) const GH_TOOL_PATTERNS: &[&str] = &["tachi_gh"];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "section_build",
@@ -262,31 +269,21 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
 /// Standard profile allow-list. Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    // Planning + context
-    "tachi_plan",
-    "recall_context",
+    // Task facade (plan / dispatch / board / merge)
+    "tachi_task",
     // Unified search (wiki + memory)
     "tachi_search",
     // Live web search
     "tachi_web_search",
-    // Wiki browse
-    "tachi_browse",
-    // Unified save (wiki + memory + note)
+    // Wiki facade (search / browse / write)
+    "tachi_wiki",
+    // Unified save (wiki + memory + note + extract_facts)
     "tachi_save",
     // Unified handoff (leave + check)
     "tachi_handoff",
-    // Skill discovery + execution
-    "hub_discover",
-    "run_skill",
-    // Agent dispatch + task completion + merge
-    "tachi_dispatch",
-    "tachi_complete",
-    "approve_merge",
-    "tachi_board",
-    // GitHub tools: conditionally added by has_gh_token, not in fixed list.
-    // Vault management (password-protected, safe in standard)
-    "vault_unlock",
-    "vault_lock",
+    // Skill facade (discover + run)
+    "tachi_skill",
+    // Vault status (read-only, safe in standard)
     "vault_status",
 ];
 
@@ -455,6 +452,21 @@ pub(super) fn filter_tool_defs(
 }
 
 /// GH tools visibility: require standard/coordinate/admin profile.
+pub(super) fn is_gh_tool_name(tool_name: &str) -> bool {
+    matches_any_pattern(tool_name, GH_TOOL_PATTERNS.iter().copied())
+}
+
+pub(super) fn gh_tool_visible(
+    tool_name: &str,
+    profile: Option<ToolProfile>,
+    has_gh_token: bool,
+) -> bool {
+    if !is_gh_tool_name(tool_name) {
+        return false;
+    }
+    has_gh_token && tool_visible_gh(tool_name, profile)
+}
+
 fn tool_visible_gh(_tool_name: &str, profile: Option<ToolProfile>) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
     if profile.admin {
@@ -851,7 +863,7 @@ mod tests {
     fn omitted_profile_defaults_to_standard_surface() {
         let filtered = filter_tool_defs(
             vec![
-                test_tool("tachi_plan"),
+                test_tool("tachi_task"),
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("hub_register"),
@@ -864,7 +876,7 @@ mod tests {
             .into_iter()
             .map(|tool| tool.name.into_owned())
             .collect();
-        assert_eq!(names, vec!["tachi_plan".to_string()]);
+        assert_eq!(names, vec!["tachi_task".to_string()]);
     }
 
     #[test]
@@ -872,25 +884,32 @@ mod tests {
         // Without GH token: GH tools excluded
         let filtered = filter_tool_defs(
             vec![
-                test_tool("tachi_plan"),
+                test_tool("tachi_task"),
                 test_tool("tachi_search"),
                 test_tool("tachi_web_search"),
-                test_tool("tachi_browse"),
+                test_tool("tachi_wiki"),
                 test_tool("tachi_save"),
                 test_tool("tachi_handoff"),
-                test_tool("hub_discover"),
-                test_tool("run_skill"),
-                test_tool("recall_context"),
-                test_tool("tachi_complete"),
-                test_tool("tachi_dispatch"),
-                test_tool("approve_merge"),
-                test_tool("tachi_board"),
+                test_tool("tachi_skill"),
+                test_tool("vault_status"),
                 test_tool("tachi_gh"),
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("tachi_unstick"),
                 test_tool("get_memory"),
                 test_tool("post_card"),
+                // Old tools that should be excluded from standard
+                test_tool("tachi_plan"),
+                test_tool("recall_context"),
+                test_tool("tachi_browse"),
+                test_tool("hub_discover"),
+                test_tool("run_skill"),
+                test_tool("tachi_dispatch"),
+                test_tool("tachi_complete"),
+                test_tool("approve_merge"),
+                test_tool("tachi_board"),
+                test_tool("vault_unlock"),
+                test_tool("vault_lock"),
             ],
             Some(ToolProfile::standard()),
             None,
@@ -903,19 +922,14 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "tachi_plan".to_string(),
+                "tachi_task".to_string(),
                 "tachi_search".to_string(),
                 "tachi_web_search".to_string(),
-                "tachi_browse".to_string(),
+                "tachi_wiki".to_string(),
                 "tachi_save".to_string(),
                 "tachi_handoff".to_string(),
-                "hub_discover".to_string(),
-                "run_skill".to_string(),
-                "recall_context".to_string(),
-                "tachi_complete".to_string(),
-                "tachi_dispatch".to_string(),
-                "approve_merge".to_string(),
-                "tachi_board".to_string(),
+                "tachi_skill".to_string(),
+                "vault_status".to_string(),
             ]
         );
     }
@@ -924,10 +938,7 @@ mod tests {
     fn standard_profile_includes_gh_tools_when_token_present() {
         // With GH token: unified GH tool included
         let filtered = filter_tool_defs(
-            vec![
-                test_tool("tachi_plan"),
-                test_tool("tachi_gh"),
-            ],
+            vec![test_tool("tachi_task"), test_tool("tachi_gh")],
             Some(ToolProfile::standard()),
             None,
             true, // has GH token
@@ -938,10 +949,7 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![
-                "tachi_plan".to_string(),
-                "tachi_gh".to_string(),
-            ]
+            vec!["tachi_task".to_string(), "tachi_gh".to_string(),]
         );
     }
 

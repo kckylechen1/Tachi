@@ -1570,6 +1570,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             retention_policy: None,
             force: true,
             topic: Some("notes-test".to_string()),
+            source: None,
         }))
         .await
         .expect("tachi_save note should succeed");
@@ -1621,6 +1622,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 retention_policy: None,
                 force: true,
                 topic: None,
+                source: None,
             }))
             .await
             .expect_err("invalid note path should be rejected");
@@ -1659,6 +1661,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             retention_policy: None,
             force: true,
             topic: None,
+            source: None,
         }))
         .await
         .expect_err("symlink note leaf should be rejected");

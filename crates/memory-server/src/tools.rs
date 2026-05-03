@@ -1449,6 +1449,17 @@ impl MemoryServer {
     ) -> Result<String, String> {
         let kind = params.kind.as_deref().unwrap_or("").to_ascii_lowercase();
 
+        if kind == "facts" || kind == "extract_facts" {
+            let extract_params = ExtractFactsParams {
+                text: params.text.clone(),
+                source: params
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| "tachi_save".to_string()),
+            };
+            return handle_extract_facts(self, extract_params).await;
+        }
+
         // Detect scope=note: even if kind is empty, treat as note when scope="note"
         let scope_is_note = params
             .scope
@@ -1696,6 +1707,201 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiCompleteParams>,
     ) -> Result<String, String> {
         crate::complete_ops::handle_tachi_complete(self, params).await
+    }
+
+    // ─── Facade: wiki (search / browse / write) ─────────────────────────────
+
+    #[tool(
+        description = "Unified wiki facade: search, browse, or write wiki entries. Use action='search', 'browse', or 'write'."
+    )]
+    pub(crate) async fn tachi_wiki(
+        &self,
+        Parameters(params): Parameters<TachiWikiParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        match action.as_str() {
+            "search" => {
+                let query = params
+                    .query
+                    .clone()
+                    .ok_or_else(|| "query is required when action='search'".to_string())?;
+                let wiki_params = WikiSearchParams {
+                    query,
+                    path_prefix: None,
+                    category: params.category.clone(),
+                    top_k: params.top_k.unwrap_or(10),
+                    include_archived: false,
+                    agent_role: None,
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    weights: None,
+                };
+                handle_tachi_wiki_search(self, wiki_params).await
+            }
+            "browse" => {
+                let browse_params = WikiBrowseParams {
+                    category: params.category.clone(),
+                    limit: params.limit.unwrap_or(50),
+                    project: params.project.clone().unwrap_or_else(|| "wiki".to_string()),
+                };
+                handle_wiki_browse(self, browse_params)
+            }
+            "write" => {
+                let title = params
+                    .title
+                    .clone()
+                    .ok_or_else(|| "title is required when action='write'".to_string())?;
+                let text = params
+                    .text
+                    .clone()
+                    .ok_or_else(|| "text is required when action='write'".to_string())?;
+                let wiki_params = WikiWriteParams {
+                    title,
+                    text,
+                    path: params.path.clone(),
+                    topic: params.topic.clone(),
+                    summary: params.summary.clone(),
+                    category: params
+                        .category
+                        .clone()
+                        .unwrap_or_else(|| "experience".to_string()),
+                    keywords: params.keywords.clone(),
+                    entities: params.entities.clone(),
+                    importance: params.importance.unwrap_or(0.85),
+                    scope: params.scope.clone().unwrap_or_else(|| "global".to_string()),
+                    retention_policy: "permanent".to_string(),
+                    domain: params.domain.clone(),
+                    project: params.project.clone(),
+                    force: params.force,
+                };
+                handle_tachi_wiki_write(self, wiki_params).await
+            }
+            _ => Err(format!(
+                "Invalid action '{}'. Use 'search', 'browse', or 'write'.",
+                params.action
+            )),
+        }
+    }
+
+    // ─── Facade: skill (discover / run) ──────────────────────────────────────
+
+    #[tool(
+        description = "Unified skill facade: discover available skills or run a skill. Use action='discover' or 'run'."
+    )]
+    pub(crate) async fn tachi_skill(
+        &self,
+        Parameters(params): Parameters<TachiSkillParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        match action.as_str() {
+            "discover" => {
+                let discover_params = HubDiscoverParams {
+                    query: params.query.clone(),
+                    cap_type: params.cap_type.clone(),
+                    enabled_only: params.enabled_only.unwrap_or(true),
+                };
+                handle_hub_discover(self, discover_params).await
+            }
+            "run" => {
+                let skill_id = params
+                    .skill_id
+                    .clone()
+                    .ok_or_else(|| "skill_id is required when action='run'".to_string())?;
+                let run_params = RunSkillParams {
+                    skill_id,
+                    args: params.args.clone().unwrap_or(serde_json::Value::Null),
+                };
+                handle_run_skill(self, run_params).await
+            }
+            _ => Err(format!(
+                "Invalid action '{}'. Use 'discover' or 'run'.",
+                params.action
+            )),
+        }
+    }
+
+    // ─── Facade: task (plan / dispatch / board / merge) ─────────────────────
+
+    #[tool(
+        description = "Unified task facade: plan a task, dispatch to an agent, view the board, or merge a worktree. Use action='plan', 'dispatch', 'board', or 'merge'."
+    )]
+    pub(crate) async fn tachi_task(
+        &self,
+        Parameters(params): Parameters<TachiTaskParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        match action.as_str() {
+            "plan" => {
+                let task = params
+                    .task
+                    .clone()
+                    .ok_or_else(|| "task is required when action='plan'".to_string())?;
+                let brief_params = TaskBriefParams {
+                    task,
+                    agent_id: params.agent_id.clone(),
+                    project: params.project.clone(),
+                    path_prefix: params.path_prefix.clone(),
+                    domain: params.domain.clone(),
+                    top_k: params.top_k.unwrap_or(6),
+                };
+                handle_tachi_task_brief(self, brief_params).await
+            }
+            "dispatch" => {
+                let agent = params
+                    .agent
+                    .clone()
+                    .ok_or_else(|| "agent is required when action='dispatch'".to_string())?;
+                let task = params
+                    .task
+                    .clone()
+                    .ok_or_else(|| "task is required when action='dispatch'".to_string())?;
+                let dispatch_params = TachiDispatchParams {
+                    agent,
+                    task,
+                    cwd: params.cwd.clone(),
+                    skills: params.skills.clone(),
+                    context_query: params.context_query.clone(),
+                    model: params.model.clone(),
+                    timeout_secs: params.timeout_secs.unwrap_or(600),
+                    permission_profile: params.permission_profile.clone(),
+                    allowed_tools: params.allowed_tools.clone(),
+                    max_turns: params.max_turns,
+                    sandbox: params.sandbox.clone(),
+                    inject_tachi_mcp: params.inject_tachi_mcp,
+                    inject_hub_mcps: params.inject_hub_mcps,
+                    command: params.command.clone(),
+                    project: params.project.clone(),
+                    stage: params.stage.clone(),
+                };
+                crate::dispatch_ops::handle_tachi_dispatch(self, dispatch_params).await
+            }
+            "board" => {
+                let board_params = TachiBoardParams {
+                    state_filter: params.state_filter.clone(),
+                    limit: params.limit,
+                    project: params.project.clone(),
+                };
+                crate::dispatch_ops::handle_tachi_board(self, board_params).await
+            }
+            "merge" => {
+                let worktree = params
+                    .worktree
+                    .clone()
+                    .ok_or_else(|| "worktree is required when action='merge'".to_string())?;
+                let merge_params = TachiApproveMergeParams {
+                    worktree,
+                    branch: params.branch.clone(),
+                    strategy: params.strategy.clone(),
+                    delete_worktree: params.delete_worktree,
+                    confirm: params.confirm,
+                };
+                crate::dispatch_ops::handle_approve_merge(merge_params).await
+            }
+            _ => Err(format!(
+                "Invalid action '{}'. Use 'plan', 'dispatch', 'board', or 'merge'.",
+                params.action
+            )),
+        }
     }
 
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
