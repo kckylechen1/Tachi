@@ -255,6 +255,12 @@ pub(crate) struct TachiDispatchParams {
     /// Optional named project DB for context search
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Dispatch stage: "plan" injects plan-writing skill, "execute" injects execution skill,
+    /// "auto" injects plan skill + "plan first, wait for review" instruction.
+    /// Empty/unset = no automatic skill injection (backward compatible).
+    #[serde(default)]
+    pub stage: Option<String>,
 }
 
 // ─── Facade: worktree merge ──────────────────────────────────────────────────

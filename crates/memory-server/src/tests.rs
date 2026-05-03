@@ -88,8 +88,8 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
     let wiki_dir = temp_home.temp_home.join(".tachi/projects/wiki");
     std::fs::create_dir_all(&wiki_dir).expect("create wiki project dir");
     let wiki_db = wiki_dir.join("memory.db");
-    let mut store = MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db"))
-        .expect("open wiki project db");
+    let mut store =
+        MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db")).expect("open wiki project db");
     for entry in entries {
         store.upsert(&entry).expect("seed wiki project entry");
     }
@@ -178,12 +178,12 @@ async fn call_tool_via_server(
         params = params.with_arguments(arguments);
     }
 
-    let request = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
-        params,
-    ));
-    let (transport, mut receiver) = rmcp::transport::OneshotTransport::<rmcp::service::RoleServer>::new(
-        rmcp::model::ClientJsonRpcMessage::request(request, rmcp::model::RequestId::Number(1)),
-    );
+    let request =
+        rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
+    let (transport, mut receiver) =
+        rmcp::transport::OneshotTransport::<rmcp::service::RoleServer>::new(
+            rmcp::model::ClientJsonRpcMessage::request(request, rmcp::model::RequestId::Number(1)),
+        );
     let service = rmcp::service::serve_directly(server, transport, None);
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
@@ -245,8 +245,7 @@ fn hub_call_arguments_schema_and_deserialize_preserve_nested_tool_args() {
 async fn standard_profile_direct_add_edge_call_is_rejected() {
     let server = make_server();
     server.set_tool_profile(Some(
-        crate::profiles::parse_tool_profile("standard")
-            .expect("standard profile should parse"),
+        crate::profiles::parse_tool_profile("standard").expect("standard profile should parse"),
     ));
 
     let err = call_tool_via_server(server, "add_edge", None)
@@ -254,7 +253,9 @@ async fn standard_profile_direct_add_edge_call_is_rejected() {
         .expect_err("standard profile should not be able to call add_edge directly");
 
     assert!(
-        err.to_string().to_ascii_lowercase().contains("tool not found"),
+        err.to_string()
+            .to_ascii_lowercase()
+            .contains("tool not found"),
         "hidden tool calls should fail like missing tools, got: {err}"
     );
 }
@@ -1532,19 +1533,163 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         }))
         .await
         .expect("get_memory should succeed");
-    let fetched: serde_json::Value =
-        serde_json::from_str(&fetched_str).expect("memory JSON");
+    let fetched: serde_json::Value = serde_json::from_str(&fetched_str).expect("memory JSON");
     assert_eq!(fetched["category"], serde_json::json!("experience"));
-    let keywords = fetched["keywords"]
-        .as_array()
-        .expect("keywords array");
+    let keywords = fetched["keywords"].as_array().expect("keywords array");
     assert!(keywords.iter().any(|k| k == "eval"));
     let metadata = &fetched["metadata"];
     assert_eq!(metadata["agent"], serde_json::json!("claude-code"));
     assert_eq!(metadata["outcome"], serde_json::json!("success"));
     assert_eq!(metadata["cost_tokens"], serde_json::json!(1234));
-    assert_eq!(metadata["skills_used"][0], serde_json::json!("skill:superpowers"));
+    assert_eq!(
+        metadata["skills_used"][0],
+        serde_json::json!("skill:superpowers")
+    );
     assert!(metadata["diff"].as_str().unwrap().contains("+bar"));
+}
+
+#[tokio::test]
+async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let saved = server
+        .tachi_save(Parameters(TachiSaveParams {
+            text: "中文 note body for UTF-8 slug safety".to_string(),
+            id: None,
+            kind: None,
+            title: Some("中文 Note 标题".to_string()),
+            summary: Some("note summary".to_string()),
+            path: Some("brainstorm/demo.md".to_string()),
+            importance: Some(0.7),
+            category: None,
+            keywords: vec!["brainstorm".to_string()],
+            entities: Vec::new(),
+            scope: Some("note".to_string()),
+            project: None,
+            domain: None,
+            retention_policy: None,
+            force: true,
+            topic: Some("notes-test".to_string()),
+        }))
+        .await
+        .expect("tachi_save note should succeed");
+    let json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
+    let note_file = json["note_file"].as_str().expect("note file returned");
+    let note_path = json["note_path"].as_str().expect("note path returned");
+    assert_eq!(note_path, "brainstorm/demo.md");
+    let md = std::fs::read_to_string(note_file).expect("note markdown should exist");
+    assert!(md.contains("title: \"中文 Note 标题\""));
+    assert!(md.contains("中文 note body for UTF-8 slug safety"));
+
+    let id = json["id"].as_str().expect("memory id returned").to_string();
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get note memory");
+    let fetched_json: serde_json::Value = serde_json::from_str(&fetched).expect("memory JSON");
+    assert_eq!(
+        fetched_json["path"],
+        serde_json::json!("/notes/brainstorm/demo.md")
+    );
+    assert_ne!(fetched_json["scope"], serde_json::json!("note"));
+}
+
+#[tokio::test]
+async fn tachi_save_note_rejects_paths_outside_notes_root() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    for bad_path in ["/tmp/escape.md", "../escape.md", "brainstorm/../escape.md"] {
+        let err = server
+            .tachi_save(Parameters(TachiSaveParams {
+                text: "bad path should not be saved".to_string(),
+                id: None,
+                kind: Some("note".to_string()),
+                title: Some("bad path".to_string()),
+                summary: None,
+                path: Some(bad_path.to_string()),
+                importance: None,
+                category: None,
+                keywords: Vec::new(),
+                entities: Vec::new(),
+                scope: None,
+                project: None,
+                domain: None,
+                retention_policy: None,
+                force: true,
+                topic: None,
+            }))
+            .await
+            .expect_err("invalid note path should be rejected");
+        assert!(
+            err.contains("relative") || err.contains("notes root"),
+            "unexpected error for {bad_path}: {err}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn tachi_save_note_rejects_symlink_leaf() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let notes_dir = temp_home.temp_home.join(".tachi/notes/brainstorm");
+    std::fs::create_dir_all(&notes_dir).expect("create notes dir");
+    let outside = temp_home.temp_home.join("outside.md");
+    std::fs::write(&outside, "outside").expect("write outside target");
+    std::os::unix::fs::symlink(&outside, notes_dir.join("escape.md")).expect("create symlink");
+
+    let err = server
+        .tachi_save(Parameters(TachiSaveParams {
+            text: "must not follow symlink".to_string(),
+            id: None,
+            kind: Some("note".to_string()),
+            title: Some("symlink leaf".to_string()),
+            summary: None,
+            path: Some("brainstorm/escape.md".to_string()),
+            importance: None,
+            category: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            scope: None,
+            project: None,
+            domain: None,
+            retention_policy: None,
+            force: true,
+            topic: None,
+        }))
+        .await
+        .expect_err("symlink note leaf should be rejected");
+    assert!(
+        err.contains("notes root"),
+        "unexpected symlink rejection error: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside target should remain readable"),
+        "outside"
+    );
+}
+
+#[test]
+fn dispatch_run_cleanup_only_for_completed_success() {
+    assert!(crate::dispatch_ops::should_cleanup_run(
+        Some(0),
+        Some("TASK_STATE_COMPLETED")
+    ));
+    assert!(!crate::dispatch_ops::should_cleanup_run(
+        Some(0),
+        Some("TASK_STATE_FAILED")
+    ));
+    assert!(!crate::dispatch_ops::should_cleanup_run(
+        Some(0),
+        Some("TASK_STATE_INPUT_REQUIRED")
+    ));
+    assert!(!crate::dispatch_ops::should_cleanup_run(
+        Some(1),
+        Some("TASK_STATE_COMPLETED")
+    ));
 }
 
 #[tokio::test]
@@ -3468,9 +3613,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
 
     let log = server
         .with_named_project_store_read("wiki", |store| {
-            store
-                .get("wiki-operation-log")
-                .map_err(|e| e.to_string())
+            store.get("wiki-operation-log").map_err(|e| e.to_string())
         })
         .expect("read wiki log")
         .expect("wiki log should exist");
@@ -3604,7 +3747,9 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
     let created_id = json["id"].as_str().expect("created id");
     assert_eq!(json["status"], json!("created"));
     assert!(json["related_entries"].as_array().is_some_and(|items| {
-        items.iter().any(|item| item["id"] == "wiki-ingest-existing")
+        items
+            .iter()
+            .any(|item| item["id"] == "wiki-ingest-existing")
     }));
 
     let edges = server
@@ -3614,7 +3759,9 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
                 .map_err(|e| e.to_string())
         })
         .expect("read ingest edges");
-    assert!(edges.iter().any(|edge| edge.target_id == "wiki-ingest-existing"));
+    assert!(edges
+        .iter()
+        .any(|edge| edge.target_id == "wiki-ingest-existing"));
 }
 
 #[tokio::test]
@@ -3871,7 +4018,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     id: "wiki-duplicate-a".to_string(),
                     path: "/wiki/test/duplicate-a".to_string(),
                     summary: "duplicate a".to_string(),
-                    text: "Duplicate token sequence exact match for wiki lint duplicate detection.".to_string(),
+                    text: "Duplicate token sequence exact match for wiki lint duplicate detection."
+                        .to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
                     category: "fact".to_string(),
@@ -3895,7 +4043,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     id: "wiki-duplicate-b".to_string(),
                     path: "/wiki/test/duplicate-b".to_string(),
                     summary: "duplicate b".to_string(),
-                    text: "Duplicate token sequence exact match for wiki lint duplicate detection.".to_string(),
+                    text: "Duplicate token sequence exact match for wiki lint duplicate detection."
+                        .to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
                     category: "fact".to_string(),
@@ -4091,9 +4240,11 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
         "expected dirty data finding"
     );
     assert!(
-        json["duplicates"].as_array().unwrap().iter().any(|v| {
-            v["left_id"] == "wiki-duplicate-a" && v["right_id"] == "wiki-duplicate-b"
-        }),
+        json["duplicates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| { v["left_id"] == "wiki-duplicate-a" && v["right_id"] == "wiki-duplicate-b" }),
         "expected duplicate finding"
     );
 

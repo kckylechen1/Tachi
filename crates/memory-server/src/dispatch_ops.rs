@@ -1,13 +1,219 @@
-use crate::TachiDispatchParams;
-use crate::TachiBoardParams;
 use crate::MemoryServer;
-use crate::SearchMemoryParams;
 use crate::SaveMemoryParams;
+use crate::SearchMemoryParams;
+use crate::TachiBoardParams;
+use crate::TachiDispatchParams;
 use chrono::Utc;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
+
+// ─── Notes filesystem helpers ──────────────────────────────────────────────────
+
+const NOTE_SUBDIRS: &[&str] = &[
+    "inbox",
+    "brainstorm",
+    "dispatch",
+    "handoff",
+    "reflections",
+    "proposals",
+];
+
+/// Resolve the notes root directory: `$TACHI_HOME/notes/` or `~/.tachi/notes/`
+pub(crate) fn notes_root() -> PathBuf {
+    if let Ok(home) = std::env::var("TACHI_HOME") {
+        PathBuf::from(home).join("notes")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".tachi").join("notes")
+    } else {
+        std::env::temp_dir().join("tachi").join("notes")
+    }
+}
+
+/// Ensure standard subdirectories exist under the notes root.
+fn ensure_notes_dirs(root: &Path) -> Result<(), String> {
+    for dir in NOTE_SUBDIRS {
+        std::fs::create_dir_all(root.join(dir))
+            .map_err(|e| format!("Failed to create notes dir '{}': {e}", dir))?;
+    }
+    Ok(())
+}
+
+/// Resolve a note file path within the notes root.
+///
+/// Rules:
+/// - `None` or empty path → `inbox/<timestamp>-<slug>.md`
+/// - Relative path ending in `.md` → `notes/<path>`
+/// - Relative path not ending in `.md` → `notes/<path>/<timestamp>-<slug>.md`
+/// - Absolute paths are rejected (security: no escape from notes root)
+/// - `..` traversal is rejected
+fn resolve_note_path(
+    root: &Path,
+    user_path: Option<&str>,
+    slug: &str,
+    ts: &str,
+) -> Result<PathBuf, String> {
+    let default_file = format!("{}-{}.md", ts, slug);
+    let rel_path = match user_path {
+        None | Some("") => PathBuf::from("inbox").join(&default_file),
+        Some(p) => {
+            let candidate = Path::new(p);
+            let mut clean = PathBuf::new();
+            for component in candidate.components() {
+                match component {
+                    Component::Normal(part) => clean.push(part),
+                    Component::CurDir => {}
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                        return Err(format!(
+                            "Note paths must be relative and stay under notes root (got '{}').",
+                            p
+                        ));
+                    }
+                }
+            }
+            if p.ends_with(".md") {
+                clean
+            } else {
+                clean.join(&default_file)
+            }
+        }
+    };
+    let resolved = root.join(&rel_path);
+
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize notes root: {e}"))?;
+    let parent = resolved
+        .parent()
+        .ok_or_else(|| "Note path has no parent directory".to_string())?;
+    let relative_parent = rel_path
+        .parent()
+        .ok_or_else(|| "Note path has no relative parent".to_string())?;
+    let mut cursor = root.to_path_buf();
+    for component in relative_parent.components() {
+        if let Component::Normal(part) = component {
+            cursor.push(part);
+            if let Ok(meta) = std::fs::symlink_metadata(&cursor) {
+                if meta.file_type().is_symlink() {
+                    return Err("Note path escapes the notes root directory".to_string());
+                }
+            }
+        }
+    }
+    std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create note dir: {e}"))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize note parent: {e}"))?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err("Note path escapes the notes root directory".to_string());
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&resolved) {
+        if meta.file_type().is_symlink() {
+            return Err("Note path escapes the notes root directory".to_string());
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// Build a human-readable markdown note with frontmatter.
+fn build_note_markdown(
+    text: &str,
+    title: &str,
+    topic: Option<&str>,
+    category: Option<&str>,
+    keywords: &[String],
+    source: &str,
+) -> String {
+    let ts = Utc::now().to_rfc3339();
+    let kw_str = if keywords.is_empty() {
+        "[]".to_string()
+    } else {
+        format!(
+            "[{}]",
+            keywords
+                .iter()
+                .map(|k| format!("\"{}\"", k))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    format!(
+        "---\ntitle: \"{}\"\ncreated_at: \"{}\"\ntopic: \"{}\"\ncategory: \"{}\"\nkeywords: {}\nsource: \"{}\"\n---\n\n{}",
+        title.replace('"', "\\\""),
+        ts,
+        topic.unwrap_or("").replace('"', "\\\""),
+        category.unwrap_or("note").replace('"', "\\\""),
+        kw_str,
+        source.replace('"', "\\\""),
+        text,
+    )
+}
+
+/// Write a note to the filesystem and return the relative path + absolute path.
+pub(crate) fn write_note_file(
+    text: &str,
+    user_path: Option<&str>,
+    title: Option<&str>,
+    topic: Option<&str>,
+    category: Option<&str>,
+    keywords: &[String],
+) -> Result<(PathBuf, String), String> {
+    let root = notes_root();
+    ensure_notes_dirs(&root)?;
+
+    let now = Utc::now();
+    let ts = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+    let slug_source = title
+        .map(str::to_string)
+        .unwrap_or_else(|| text.chars().take(40).collect::<String>());
+    let slug: String = slug_source
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = {
+        let s: String = slug
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .take(6)
+            .collect::<Vec<_>>()
+            .join("-");
+        format!("{:.60}", s) // cap length
+    };
+
+    let abs_path = resolve_note_path(&root, user_path, &slug, &ts)?;
+
+    let note_title = title
+        .map(String::from)
+        .unwrap_or_else(|| slug.replace('-', " "));
+    let md = build_note_markdown(text, &note_title, topic, category, keywords, "tachi_save");
+
+    // Ensure parent dir exists
+    if let Some(parent) = abs_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create note parent dir: {e}"))?;
+    }
+
+    std::fs::write(&abs_path, &md).map_err(|e| format!("Failed to write note file: {e}"))?;
+
+    // Compute relative path from notes root
+    let rel = abs_path
+        .strip_prefix(&root)
+        .unwrap_or(&abs_path)
+        .to_string_lossy()
+        .to_string();
+
+    Ok((abs_path, rel))
+}
 
 // ─── Kanban helpers ────────────────────────────────────────────────────────────
 
@@ -70,8 +276,7 @@ async fn init_kanban_task(
     Ok(())
 }
 
-/// Check if a kanban task has been properly closed (completed/failed)
-async fn check_kanban_is_closed(server: &MemoryServer, dispatch_id: &str) -> bool {
+async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
     if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
         server,
@@ -96,17 +301,12 @@ async fn check_kanban_is_closed(server: &MemoryServer, dispatch_id: &str) -> boo
         for row in &rows {
             if let Some(meta) = row.get("metadata") {
                 if let Some(state) = meta.get("a2a_state").and_then(|v| v.as_str()) {
-                    return matches!(
-                        state,
-                        "TASK_STATE_COMPLETED"
-                            | "TASK_STATE_FAILED"
-                            | "TASK_STATE_CANCELED"
-                    );
+                    return Some(state.to_string());
                 }
             }
         }
     }
-    false
+    None
 }
 
 /// Update kanban task state
@@ -145,10 +345,7 @@ pub(crate) async fn update_kanban_state(
                 if let Some(eid) = eval_id {
                     obj.insert("eval_ledger_id".to_string(), json!(eid));
                 }
-                obj.insert(
-                    "updated_at".to_string(),
-                    json!(Utc::now().to_rfc3339()),
-                );
+                obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
             }
             crate::memory_search_ops::handle_save_memory(
                 server,
@@ -238,8 +435,7 @@ async fn generate_mcp_config(
             if !cap.enabled {
                 continue;
             }
-            let def: serde_json::Value =
-                serde_json::from_str(&cap.definition).unwrap_or_default();
+            let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             let transport = def.get("transport").and_then(|t| t.as_str()).unwrap_or("");
             if transport != "stdio" {
                 continue;
@@ -259,11 +455,7 @@ async fn generate_mcp_config(
                 .unwrap_or_default();
 
             // Derive server key from capability id: "mcp:context7" → "context7"
-            let key = cap
-                .id
-                .strip_prefix("mcp:")
-                .unwrap_or(&cap.id)
-                .to_string();
+            let key = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id).to_string();
 
             let mut entry = json!({ "command": command });
             if !args.is_empty() {
@@ -300,20 +492,54 @@ async fn generate_mcp_config(
     Ok(Some(config_path))
 }
 
-// ─── Prompt assembly ─────────────────────────────────────────────────────────
+// ─── Prompt assembly (v2) ─────────────────────────────────────────────────
 
-pub(crate) async fn assemble_prompt(
-    server: &MemoryServer,
-    params: &TachiDispatchParams,
-) -> String {
+/// Resolve effective skills list, applying stage-based defaults when the caller
+/// did not explicitly provide skills.
+fn resolve_effective_skills(params: &TachiDispatchParams) -> (Vec<String>, Option<String>) {
+    let stage = params.stage.as_deref().unwrap_or("").to_ascii_lowercase();
+    let auto_instruction = if stage == "auto" {
+        Some(
+            "IMPORTANT: Produce a plan first. Do NOT execute directly. \
+             Wait for the operator to review the plan and trigger the execute stage."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    if !params.skills.is_empty() {
+        return (params.skills.clone(), auto_instruction);
+    }
+
+    let skills = match stage.as_str() {
+        "plan" => vec!["skill:superpowers-writing-plans".to_string()],
+        "execute" => vec!["skill:superpowers-executing-plans".to_string()],
+        "auto" => vec!["skill:superpowers-writing-plans".to_string()],
+        _ => Vec::new(),
+    };
+
+    (skills, auto_instruction)
+}
+
+pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
     let mut parts: Vec<String> = Vec::new();
 
-    // 1. Context from memory/wiki
-    if let Some(ref query) = params.context_query {
+    // Resolve skills with stage defaults
+    let (effective_skills, extra_instruction) = resolve_effective_skills(params);
+
+    // 1. Context from memory/wiki (v2: default query = task if none provided)
+    let context_query = params
+        .context_query
+        .as_deref()
+        .unwrap_or(&params.task)
+        .to_string();
+
+    if !context_query.is_empty() {
         if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
             server,
             SearchMemoryParams {
-                query: query.clone(),
+                query: context_query.clone(),
                 query_vec: None,
                 top_k: 5,
                 path_prefix: None,
@@ -331,7 +557,7 @@ pub(crate) async fn assemble_prompt(
         .await
         {
             if !rows.is_empty() {
-                parts.push("## Relevant context from memory/wiki".to_string());
+                parts.push("## Relevant context from Tachi memory/wiki".to_string());
                 for row in &rows {
                     if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
                         let path = row
@@ -346,18 +572,70 @@ pub(crate) async fn assemble_prompt(
         }
     }
 
-    // 2. Skill definitions
-    for skill_id in &params.skills {
+    // 2. Skill definitions (effective = explicit + stage defaults)
+    for skill_id in &effective_skills {
         if let Ok(cap) = server.get_capability(skill_id).map_err(|e| format!("{e}")) {
-            let def: serde_json::Value =
-                serde_json::from_str(&cap.definition).unwrap_or_default();
+            let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             if let Some(prompt) = def.get("prompt").and_then(|v| v.as_str()) {
                 parts.push(format!("## Skill: {}\n{}", skill_id, prompt));
             }
         }
     }
 
-    // 3. Task itself
+    // 3. Avoidance: search for prior failures related to this task
+    let avoidance_query = format!("{} failure OR partial OR watchdog", params.task);
+    if let Ok(eval_rows) = crate::memory_search_ops::search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: avoidance_query,
+            query_vec: None,
+            top_k: 3,
+            path_prefix: Some("/eval".to_string()),
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.7),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: params.project.clone(),
+            domain: None,
+        },
+    )
+    .await
+    {
+        if !eval_rows.is_empty() {
+            parts.push("## Prior pitfalls / avoidance notes".to_string());
+            for row in &eval_rows {
+                if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
+                    let path = row
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    parts.push(format!(
+                        "- **{}**: {}",
+                        path,
+                        text.chars().take(300).collect::<String>()
+                    ));
+                }
+            }
+            parts.push(String::new());
+        }
+    }
+
+    // 4. Operating instructions
+    parts.push("## Operating instructions".to_string());
+    parts.push("- Use Tachi MCP tools if available for additional context.".to_string());
+    parts.push("- Call `tachi_complete` when done, including dispatch_id if provided.".to_string());
+    parts.push(String::new());
+
+    // 5. Extra instruction from stage (e.g. auto → "plan first")
+    if let Some(ref instr) = extra_instruction {
+        parts.push(instr.clone());
+        parts.push(String::new());
+    }
+
+    // 6. Task itself
     parts.push(format!("## Task\n{}", params.task));
 
     parts.join("\n\n")
@@ -368,10 +646,7 @@ pub(crate) async fn assemble_prompt(
 /// Resolve the effective permission profile: explicit param → "full" as default
 /// for dispatched agents (the whole point of dispatch is autonomous execution).
 fn resolve_permission_profile(params: &TachiDispatchParams) -> &str {
-    params
-        .permission_profile
-        .as_deref()
-        .unwrap_or("full")
+    params.permission_profile.as_deref().unwrap_or("full")
 }
 
 fn build_claude_command(
@@ -443,8 +718,7 @@ fn build_codex_command(
 
     if let Some(turns) = params.max_turns {
         // Codex doesn't have a direct --max-turns; use -c config override
-        cmd.arg("-c")
-            .arg(format!("max_turns={turns}"));
+        cmd.arg("-c").arg(format!("max_turns={turns}"));
     }
 
     if let Some(ref model) = params.model {
@@ -498,12 +772,7 @@ async fn run_agent_subprocess(
 
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
-        .map_err(|_| {
-            format!(
-                "Agent process timed out after {}s",
-                timeout.as_secs()
-            )
-        })?
+        .map_err(|_| format!("Agent process timed out after {}s", timeout.as_secs()))?
         .map_err(|e| format!("Agent process error: {e}"))?;
 
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -545,6 +814,16 @@ fn parse_claude_output(raw: &str) -> serde_json::Value {
     json!({"parsed": false, "text": raw})
 }
 
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&str>) -> bool {
+    exit_code == Some(0) && kanban_state == Some("TASK_STATE_COMPLETED")
+}
+
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -555,7 +834,9 @@ pub(crate) async fn handle_tachi_dispatch(
     let dispatch_id = format!(
         "{}-{}",
         now.format("%Y%m%dT%H%M%SZ"),
-        params.agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-")
+        params
+            .agent
+            .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
     );
 
     let agent_norm = params.agent.to_ascii_lowercase();
@@ -584,11 +865,50 @@ pub(crate) async fn handle_tachi_dispatch(
         None
     };
 
-    // 3. Assemble prompt & write plan file to workspace
+    // 3. Assemble prompt & write audit files to workspace
     let prompt = assemble_prompt(server, &params).await;
+    let (effective_skills_for_files, _) = resolve_effective_skills(&params);
     let plan_path = workspace_dir.join("plan.md");
-    std::fs::write(&plan_path, &prompt)
-        .map_err(|e| format!("Failed to write plan file: {e}"))?;
+    std::fs::write(&plan_path, &prompt).map_err(|e| format!("Failed to write plan file: {e}"))?;
+
+    // Write prompt.md (full assembled prompt for tracked run)
+    let prompt_md_path = workspace_dir.join("prompt.md");
+    std::fs::write(&prompt_md_path, &prompt)
+        .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
+
+    // Write context.md (summary of injected context/skills — for MVP, same as prompt)
+    let context_md_path = workspace_dir.join("context.md");
+    let context_summary = {
+        let mut sections = Vec::new();
+        sections.push(format!("# Dispatch Context: {}", dispatch_id));
+        sections.push(format!("Agent: {}", params.agent));
+        sections.push(format!(
+            "Stage: {}",
+            params.stage.as_deref().unwrap_or("none")
+        ));
+        sections.push(format!("Skills: {:?}", effective_skills_for_files));
+        sections.push(String::new());
+        sections.push(prompt.clone());
+        sections.join("\n\n")
+    };
+    std::fs::write(&context_md_path, &context_summary)
+        .map_err(|e| format!("Failed to write context.md: {e}"))?;
+
+    // Write trajectory.jsonl — initial dispatch_started event
+    let trajectory_path = workspace_dir.join("trajectory.jsonl");
+    {
+        let started_event = json!({
+            "event": "dispatch_started",
+            "dispatch_id": dispatch_id,
+            "agent": params.agent,
+            "stage": params.stage,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        let line = serde_json::to_string(&started_event)
+            .map_err(|e| format!("Failed to serialize started event: {e}"))?;
+        std::fs::write(&trajectory_path, format!("{}\n", line))
+            .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
+    }
 
     // 4. Initialize kanban task
     init_kanban_task(
@@ -621,6 +941,9 @@ pub(crate) async fn handle_tachi_dispatch(
     let d_id = dispatch_id.clone();
     let agent_for_watchdog = agent_norm.clone();
     let task_desc = params.task.clone();
+    let stage_for_traj = params.stage.clone();
+    let traj_path_for_spawn = trajectory_path.clone();
+    let workspace_dir_for_response = workspace_dir.clone();
 
     // Scope guard for MCP config cleanup (moved into spawned task)
     struct McpCleanup(Option<PathBuf>);
@@ -637,20 +960,56 @@ pub(crate) async fn handle_tachi_dispatch(
 
         let result = run_agent_subprocess(cmd, timeout).await;
 
+        // Append subprocess_finished event to trajectory.jsonl
+        {
+            let (exit_code, output_tail) = match &result {
+                Err(e) => (None, e.chars().take(200).collect::<String>()),
+                Ok(r) => (r.exit_code, tail_chars(&r.output, 500)),
+            };
+            let finished_event = json!({
+                "event": "subprocess_finished",
+                "dispatch_id": d_id,
+                "agent": agent_for_watchdog,
+                "stage": stage_for_traj,
+                "exit_code": exit_code,
+                "timestamp": Utc::now().to_rfc3339(),
+                "output_tail": output_tail,
+            });
+            if let Ok(line) = serde_json::to_string(&finished_event) {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&traj_path_for_spawn)
+                {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         tokio::time::sleep(Duration::from_secs(2)).await; // grace period for tachi_complete to propagate
 
-        let is_closed = check_kanban_is_closed(&server_clone, &d_id).await;
+        let kanban_state = get_kanban_state(&server_clone, &d_id).await;
+        let is_closed = matches!(
+            kanban_state.as_deref(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        );
         if !is_closed {
             let (outcome, note) = match &result {
                 Err(e) => ("failure".to_string(), format!("Watchdog: {}", e)),
                 Ok(r) if r.exit_code.map(|c| c == 0).unwrap_or(false) => {
-                    let tail = &r.output[r.output.len().saturating_sub(500)..];
+                    let tail = tail_chars(&r.output, 500);
                     ("partial".to_string(), format!("Watchdog: Agent exited 0 but did not call tachi_complete. Output tail: {}", tail))
                 }
                 Ok(r) => {
-                    let tail = &r.output[r.output.len().saturating_sub(500)..];
-                    ("failure".to_string(), format!("Watchdog: Agent crashed (exit {:?}). Stderr tail: {}", r.exit_code, tail))
+                    let tail = tail_chars(&r.output, 500);
+                    (
+                        "failure".to_string(),
+                        format!(
+                            "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
+                            r.exit_code, tail
+                        ),
+                    )
                 }
             };
 
@@ -682,8 +1041,11 @@ pub(crate) async fn handle_tachi_dispatch(
             let _ = update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None).await;
         }
 
-        // Cleanup workspace (keep on failure for debugging)
-        if is_closed {
+        let should_cleanup = match &result {
+            Ok(r) => should_cleanup_run(r.exit_code, kanban_state.as_deref()),
+            Err(_) => false,
+        };
+        if should_cleanup {
             let _ = std::fs::remove_dir_all(workspace_dir);
         }
     });
@@ -698,6 +1060,10 @@ pub(crate) async fn handle_tachi_dispatch(
         "agent": agent_norm,
         "message": "Task dispatched to background. You are unblocked. Use tachi_board to check status.",
         "plan_file": plan_path.to_string_lossy(),
+        "prompt_file": prompt_md_path.to_string_lossy(),
+        "context_file": context_md_path.to_string_lossy(),
+        "trajectory_file": trajectory_path.to_string_lossy(),
+        "run_dir": workspace_dir_for_response.to_string_lossy(),
     });
 
     serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
@@ -805,11 +1171,19 @@ pub(crate) async fn handle_approve_merge(
     };
 
     let repo_root_out = Command::new("git")
-        .args(["-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .args([
+            "-C",
+            worktree,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
         .output()
         .await
         .map_err(|e| format!("Failed to find repo root: {e}"))?;
-    let git_common_dir = String::from_utf8_lossy(&repo_root_out.stdout).trim().to_string();
+    let git_common_dir = String::from_utf8_lossy(&repo_root_out.stdout)
+        .trim()
+        .to_string();
     let repo_root = std::path::Path::new(&git_common_dir)
         .parent()
         .unwrap_or(std::path::Path::new(&git_common_dir))
@@ -822,9 +1196,14 @@ pub(crate) async fn handle_approve_merge(
         // ── Preview mode: dry-run merge, return diff without committing ──
         let merge_out = Command::new("git")
             .args([
-                "-C", &repo_root,
-                "merge", "--strategy", strategy,
-                "--no-commit", "--no-ff", &branch,
+                "-C",
+                &repo_root,
+                "merge",
+                "--strategy",
+                strategy,
+                "--no-commit",
+                "--no-ff",
+                &branch,
             ])
             .output()
             .await

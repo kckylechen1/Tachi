@@ -1,0 +1,17 @@
+## 完成总结
+
+所有5个必需的MVP功能均已实现并验证：
+
+1.  **Notes 层** (`tachi_save` 使用 `kind="note"` 或 `scope="note"`): 将带有 frontmatter 的 Markdown 写入 `~/.tachi/notes/` 并进行适当的路径处理（支持收件箱/规划/调度/交接/反思/提案子目录、安全防护），在数据库中索引，返回 `note_file`/`note_path`。
+
+2.  **Dispatch 阶段** (`TachiDispatchParams.stage`): `plan` → 注入规划技能，`execute` → 注入执行技能，`auto` → 注入规划技能 + “先规划”指令。
+
+3.  **`assemble_prompt_v2`**: 默认上下文查询来自任务，在 `/eval` 上进行规避搜索，以“来自 Tachi 记忆/wiki 的相关上下文”为标题，操作指令，阶段技能解析。
+
+4.  **`trajectory.jsonl` 审计文件**: 在调度时写入 `prompt.md`、`context.md` 和 `trajectory.jsonl`，并包含 `dispatch_started` 事件；在子进程完成后追加 `subprocess_finished` 事件。
+
+5.  **`post_complete_hooks`**: 自动保存 `lesson` 条目，针对失败/部分结果保存到 `/eval/lessons/<date>/<task_id>`；在 `pipeline` 状态中报告。
+
+**构建**：✅ 编译通过 | **测试**：✅ 255 个通过，0 个失败
+
+📄 报告路径：`/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/result.md`

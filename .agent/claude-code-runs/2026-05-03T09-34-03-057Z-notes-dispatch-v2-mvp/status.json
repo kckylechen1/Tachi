@@ -1,0 +1,14 @@
+{
+  "status": "completed",
+  "run_id": "2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp",
+  "started_at": "2026-05-03T09:34:03.057Z",
+  "completed_at": "2026-05-03T09:40:35.898Z",
+  "work_folder": "/Users/kckylechen/Desktop/Sigil",
+  "prompt_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/prompt.md",
+  "plan_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/plan.md",
+  "result_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/result.md",
+  "stdout_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/stdout.log",
+  "stderr_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-03T09-34-03-057Z-notes-dispatch-v2-mvp/stderr.log",
+  "result_written": true,
+  "exit_code": 0
+}

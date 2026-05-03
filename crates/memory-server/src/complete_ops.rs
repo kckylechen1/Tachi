@@ -9,6 +9,7 @@ use crate::hub_ops::handle_distill_trajectory;
 use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{DistillTrajectoryParams, SaveMemoryParams, TachiCompleteParams};
 use crate::MemoryServer;
+use serde_json::json;
 
 pub(crate) async fn handle_tachi_complete(
     server: &MemoryServer,
@@ -163,6 +164,7 @@ pub(crate) async fn handle_tachi_complete(
     let mut pipeline_status = serde_json::json!({
         "distill_trajectory": "skipped (no trajectory data)",
         "skill_evolve": "skipped",
+        "post_complete_hooks": "pending",
     });
 
     if let Some(ref trajectory) = params.trajectory {
@@ -216,13 +218,88 @@ pub(crate) async fn handle_tachi_complete(
             "aborted" => "TASK_STATE_CANCELED",
             _ => "TASK_STATE_FAILED",
         };
-        let _ = crate::dispatch_ops::update_kanban_state(
-            server,
-            did,
-            new_state,
-            Some(&eval_memory_id),
-        )
-        .await;
+        let _ =
+            crate::dispatch_ops::update_kanban_state(server, did, new_state, Some(&eval_memory_id))
+                .await;
+    }
+
+    // --- Post-complete hooks MVP ---
+    // On failure/partial with non-empty notes, auto-save a lesson learned entry
+    if matches!(outcome_norm.as_str(), "failure" | "partial") {
+        if let Some(ref notes) = params.notes {
+            if !notes.is_empty() {
+                let lesson_date = date.clone();
+                let lesson_task_id = task_id.clone();
+                let lesson_path = format!("/eval/lessons/{}/{}", lesson_date, lesson_task_id);
+                let lesson_text = format!(
+                    "Task: {}\nOutcome: {}\nAgent: {}\nSkills: {}\nDispatch ID: {}\n\nNotes:\n{}",
+                    params.task,
+                    outcome_norm,
+                    params.agent,
+                    params.skills_used.join(", "),
+                    params.dispatch_id.as_deref().unwrap_or("n/a"),
+                    notes,
+                );
+                let lesson_summary = format!(
+                    "[{}] Lesson: {}",
+                    if outcome_norm == "failure" {
+                        "✗"
+                    } else {
+                        "~"
+                    },
+                    params.task.chars().take(80).collect::<String>()
+                );
+                let lesson_params = SaveMemoryParams {
+                    text: lesson_text,
+                    summary: lesson_summary,
+                    path: lesson_path,
+                    importance: 0.75,
+                    category: "lesson".to_string(),
+                    topic: params.task.clone(),
+                    keywords: {
+                        let mut kw = vec!["lesson".to_string(), outcome_norm.clone()];
+                        kw.extend(params.skills_used.iter().cloned());
+                        kw
+                    },
+                    persons: Vec::new(),
+                    entities: params.skills_used.clone(),
+                    location: String::new(),
+                    scope: params
+                        .scope
+                        .clone()
+                        .unwrap_or_else(|| "project".to_string()),
+                    vector: None,
+                    id: None,
+                    force: true,
+                    auto_link: true,
+                    project: params.project.clone(),
+                    retention_policy: Some("durable".to_string()),
+                    domain: None,
+                    timestamp: None,
+                    metadata: Some(json!({
+                        "lesson": true,
+                        "dispatch_id": params.dispatch_id,
+                        "outcome": outcome_norm,
+                    })),
+                };
+                match handle_save_memory(server, lesson_params).await {
+                    Ok(_) => {
+                        pipeline_status["post_complete_hooks"] = json!("lesson_saved");
+                    }
+                    Err(e) => {
+                        eprintln!("[tachi_complete/post_hook] lesson save failed: {e}");
+                        pipeline_status["post_complete_hooks"] =
+                            json!(format!("lesson_save_failed: {e}"));
+                    }
+                }
+            } else {
+                pipeline_status["post_complete_hooks"] = json!("skipped (no notes)");
+            }
+        } else {
+            pipeline_status["post_complete_hooks"] = json!("skipped (no notes)");
+        }
+    } else {
+        pipeline_status["post_complete_hooks"] = json!("skipped (outcome not failure/partial)");
     }
 
     let review_bundle = serde_json::json!({

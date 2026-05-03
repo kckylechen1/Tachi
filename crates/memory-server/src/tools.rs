@@ -8,7 +8,7 @@
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
@@ -29,8 +29,8 @@ use crate::foundry_runtime_ops::{
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
 use crate::gh_ops::{
-    handle_gh_issue_read, handle_gh_issue_list, handle_gh_issue_create,
-    handle_gh_pr_read, handle_gh_pr_list, handle_gh_repo_view,
+    handle_gh_issue_create, handle_gh_issue_list, handle_gh_issue_read, handle_gh_pr_list,
+    handle_gh_pr_read, handle_gh_repo_view,
 };
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
@@ -45,8 +45,8 @@ use crate::hub_ops::{
     handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
-    CheckInboxParams, PostCardParams, UpdateCardParams, handle_check_inbox, handle_post_card,
-    handle_update_card,
+    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
+    UpdateCardParams,
 };
 use crate::memory_ops::{
     handle_archive_memory, handle_delete_domain, handle_delete_memory, handle_get_domain,
@@ -72,10 +72,10 @@ use crate::sandbox_ops::{
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::vault_ops::{
+    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
+    handle_vault_set, handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
     VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams, handle_vault_get, handle_vault_init,
-    handle_vault_list, handle_vault_lock, handle_vault_remove, handle_vault_set,
-    handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
+    VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::wiki_ops::{
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_search,
@@ -1452,9 +1452,18 @@ impl MemoryServer {
     ) -> Result<String, String> {
         let kind = params.kind.as_deref().unwrap_or("").to_ascii_lowercase();
 
+        // Detect scope=note: even if kind is empty, treat as note when scope="note"
+        let scope_is_note = params
+            .scope
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("note"))
+            .unwrap_or(false);
+
         // Auto-detect: title present → wiki, short text → note, otherwise → memory
         let resolved_kind = if kind.is_empty() {
-            if params.title.is_some() {
+            if scope_is_note {
+                "note"
+            } else if params.title.is_some() {
                 "wiki"
             } else if params.text.len() < 200 {
                 "note"
@@ -1496,21 +1505,60 @@ impl MemoryServer {
                 handle_tachi_wiki_write(self, wiki_params).await
             }
             "note" => {
+                let (abs_note_path, rel_note_path) = crate::dispatch_ops::write_note_file(
+                    &params.text,
+                    params.path.as_deref(),
+                    params.title.as_deref(),
+                    params.topic.as_deref(),
+                    params.category.as_deref(),
+                    &params.keywords,
+                )?;
+
+                let db_path = format!("/notes/{}", rel_note_path);
+                let db_scope = params
+                    .scope
+                    .as_deref()
+                    .filter(|s| !s.eq_ignore_ascii_case("note"))
+                    .unwrap_or("project")
+                    .to_string();
+
                 let remember_params = RememberParams {
                     text: params.text.clone(),
                     summary: params.summary.clone().unwrap_or_default(),
                     tags: params.keywords.clone(),
                     topic: params.topic.clone().unwrap_or_default(),
                     importance: params.importance,
-                    scope: params.scope.clone(),
+                    scope: Some(db_scope),
                     project: params.project.clone(),
-                    path: params.path.clone(),
-                    category: params.category.clone(),
+                    path: Some(db_path),
+                    category: Some(
+                        params
+                            .category
+                            .clone()
+                            .unwrap_or_else(|| "note".to_string()),
+                    ),
                     domain: params.domain.clone(),
-                    retention_policy: params.retention_policy.clone(),
+                    retention_policy: params
+                        .retention_policy
+                        .clone()
+                        .or_else(|| Some("durable".to_string())),
                     force: params.force,
                 };
-                handle_remember(self, remember_params).await
+                let mut result_str = handle_remember(self, remember_params).await?;
+
+                if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&result_str) {
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert(
+                            "note_file".to_string(),
+                            serde_json::json!(abs_note_path.to_string_lossy()),
+                        );
+                        obj.insert("note_path".to_string(), serde_json::json!(rel_note_path));
+                    }
+                    result_str = serde_json::to_string(&val)
+                        .map_err(|e| format!("serialize note result: {e}"))?;
+                }
+
+                Ok(result_str)
             }
             _ => {
                 // "memory" or any other value
@@ -1675,9 +1723,7 @@ impl MemoryServer {
         handle_gh_issue_list(self, params).await
     }
 
-    #[tool(
-        description = "Create a new GitHub issue. Requires GH_TOKEN in Vault."
-    )]
+    #[tool(description = "Create a new GitHub issue. Requires GH_TOKEN in Vault.")]
     pub(crate) async fn tachi_gh_issue_create(
         &self,
         Parameters(params): Parameters<GhIssueCreateParams>,
