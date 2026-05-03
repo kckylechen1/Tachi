@@ -100,6 +100,9 @@ pub(crate) async fn run_daily_pipeline(
     let app_home = tachi_app_home();
     let (health_stage, health_json, report_path) =
         run_health_check(server, &app_home, &date).await?;
+    if let Err(e) = run_truth_maintenance_stage(server, &app_home).await {
+        eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
+    }
     let agent_stage = run_agent_evolution_stage(server, &app_home).await;
     let skill_stage = run_skill_evolution_stage(server).await;
     let routing_stage = run_routing_analysis_stage(server, &date).await;
@@ -210,6 +213,102 @@ async fn run_health_check(
     ))
 }
 
+async fn run_truth_maintenance_stage(
+    server: &MemoryServer,
+    app_home: &std::path::Path,
+) -> Result<(), String> {
+    let targets = load_manifest_targets(server, &app_home.join("manifest.json"))?;
+    for target in targets.into_iter().filter(|target| target.allow_write) {
+        let target_db = if target.role == "global" {
+            DbScope::Global
+        } else {
+            DbScope::Project
+        };
+        run_truth_maintenance_for_target(server, target, target_db).await?;
+    }
+    Ok(())
+}
+
+async fn run_truth_maintenance_for_target(
+    server: &MemoryServer,
+    target: ManifestDbTarget,
+    target_db: DbScope,
+) -> Result<(), String> {
+    let Some(db_path) = target.path.to_str() else {
+        return Ok(());
+    };
+    let store = MemoryStore::open_with_label(db_path, &target.label)
+        .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
+    let conn = store.connection();
+    let named_project = match (target_db, server.project_db_path_buf()) {
+        (DbScope::Project, Some(default_path)) if default_path != target.path => {
+            Some(target.label.clone())
+        }
+        _ => None,
+    };
+
+    conn.execute(
+        "UPDATE memories
+         SET archived = 1, updated_at = datetime('now')
+         WHERE archived = 0
+           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned')
+           AND access_count = 0
+           AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
+        [],
+    )
+    .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id FROM memories
+             WHERE archived = 0
+               AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned')
+             ORDER BY access_count DESC, timestamp DESC
+             LIMIT 200",
+        )
+        .map_err(|e| format!("prepare promotion scan {}: {e}", target.label))?;
+    let ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query promotion scan {}: {e}", target.label))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    let entries = memory_core::db::fetch_by_ids(conn, &ids, false)
+        .map_err(|e| format!("fetch promotion candidates {}: {e}", target.label))?;
+
+    for entry in entries.values() {
+        let access_days = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
+                rusqlite::params![entry.id],
+                |row| row.get::<_, usize>(0),
+            )
+            .unwrap_or(0);
+        if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
+            continue;
+        }
+        conn.execute(
+            "UPDATE memories
+             SET importance = 0.7, retention_policy = 'durable', updated_at = datetime('now')
+             WHERE id = ?1",
+            rusqlite::params![entry.id],
+        )
+        .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
+        let _ = server.enrich_tx.try_send(EnrichmentItem {
+            id: entry.id.clone(),
+            text: entry.text.clone(),
+            needs_embedding: true,
+            needs_summary: false,
+            target_db,
+            named_project: named_project.clone(),
+            foundry_agent_id: None,
+            foundry_path_prefix: None,
+            revision: entry.revision,
+        });
+    }
+
+    Ok(())
+}
+
 fn load_manifest_targets(
     server: &MemoryServer,
     manifest_path: &std::path::Path,
@@ -291,7 +390,7 @@ fn collect_database_stats(target: ManifestDbTarget) -> DatabaseStats {
         return stats;
     };
 
-    let store = match MemoryStore::open_with_label(db_path, &target.label) {
+    let store = match MemoryStore::open_read_only(db_path) {
         Ok(store) => store,
         Err(e) => {
             stats.error = Some(format!("open DB failed: {e}"));

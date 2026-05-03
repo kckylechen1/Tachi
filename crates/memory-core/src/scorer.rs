@@ -214,7 +214,7 @@ pub fn rrf(rank: usize) -> f64 {
 }
 
 /// Weights for the hybrid scoring formula.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HybridWeights {
     pub semantic: f64,
     pub fts: f64,
@@ -224,13 +224,11 @@ pub struct HybridWeights {
 
 impl Default for HybridWeights {
     fn default() -> Self {
-        // Matches existing JS config defaults: semantic=0.4, lexical=0.3, symbolic=0.3
-        // Decay gets its own additive weight on top
         Self {
-            semantic: 0.40,
-            fts: 0.30,
+            semantic: 0.35,
+            fts: 0.25,
             symbolic: 0.20,
-            decay: 0.10,
+            decay: 0.20,
         }
     }
 }

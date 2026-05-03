@@ -408,8 +408,10 @@ fn probe_db(path: &Path) -> Result<(JobStatusHistogram, usize), String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
-    let store =
-        MemoryStore::open_with_label(path_str, "tachi-status").map_err(|e| format!("open: {e}"))?;
+    // Diagnostics must NOT take write locks or run schema migrations on
+    // potentially read-only DBs. `open_with_label` initializes/migrates
+    // the schema on every open; `open_read_only` skips that work.
+    let store = MemoryStore::open_read_only(path_str).map_err(|e| format!("open: {e}"))?;
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
@@ -481,7 +483,7 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
         Some(s) => s,
         None => return Vec::new(),
     };
-    let store = match MemoryStore::open_with_label(path_str, "tachi-status") {
+    let store = match MemoryStore::open_read_only(path_str) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -587,7 +589,7 @@ fn collect_recent_evals(
             Some(s) => s,
             None => continue,
         };
-        let store = match MemoryStore::open_with_label(path_str, "tachi-status") {
+        let store = match MemoryStore::open_read_only(path_str) {
             Ok(s) => s,
             Err(_) => continue,
         };

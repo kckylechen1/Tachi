@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-05-04
+
+Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v2 branch are fixed. No public CLI/tool surface changes, but several defaults are now safer.
+
+### ⚠️ BREAKING
+
+- **`tachi_dispatch` defaults to a permissioned sandbox.** Calls without `permission_profile` previously implied `"full"` (Claude `--dangerously-skip-permissions`, Codex `--dangerously-bypass-approvals-and-sandbox`). They now imply `"default"`. Pass `permission_profile: "full"` explicitly to opt back in to unsandboxed dispatches.
+- **`tachi repair --apply` no longer runs R8 (`duplicate_old`) by default.** R8's cross-path text-only PARTITION silently deleted legitimate distinct memories that happened to share identical text. Run R8 explicitly with `--rule R8` if you understand the trade-off.
+
+### Fixed
+
+- **R2 retention pins handoff/kanban records.** Coordination paths (`/handoff`, `/kanban`) and categories (`handoff`, `kanban`) are now backfilled to retention `pinned` instead of `ephemeral`, matching `default_retention_for` and the schema migration. Daemon coordination state no longer expires under retention sweeps.
+- **Kanban scope fallback.** `get_kanban_state` and `update_kanban_state` now fall back to the global store when the project store has no matching row, mirroring `resolve_write_scope` at write time. Daemon and no-project dispatches no longer get stuck in `TASK_STATE_WORKING` because their kanban entry was written globally and read locally.
+- **Auto-link `supersedes`/`related_to` edges stay open.** Edges are created with `valid_to=None` instead of `Some(now)`. The previous behavior caused `get_edges` to immediately filter the edge out as expired. Edges are still closed when the supersession is explicitly reversed.
+- **`hub_search` SQL-LIKE wildcard escaping.** Search terms have `\`, `%`, and `_` escaped before being wrapped in `%...%` patterns and all three LIKE clauses now use `ESCAPE '\'`. A query of `%` no longer matches every row in the Hub catalog.
+- **R5 (`integrity_check`) reports findings on heavy corruption.** When SQLite's FTS5 vtable constructor itself returns `SQLITE_CORRUPT` during PRAGMA preparation (rather than the PRAGMA returning a corruption message), R5 now records an `integrity_fail` finding so the dispatcher can act on it instead of bubbling an opaque `RepairError`.
+- **Diagnostics no longer take write locks.** `probe_db`, kanban listing, eval-ledger collection (status_ops), and the daily pipeline stats collector now open stores read-only. They no longer run schema migrations on databases the caller only intended to read.
+
+### For contributors
+
+- `repair::tests::r5_integrity_detects_corruption` is now deterministic — it pins `page_size=4096`, VACUUMs, and stomps the entirety of page 2 with `0xFF`. Verified 20/20 consecutive passes.
+
 ## [1.0.1] - 2026-05-02
 
 ### ⚠️ BREAKING

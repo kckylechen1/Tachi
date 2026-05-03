@@ -280,6 +280,11 @@ async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<St
     let path = format!("/kanban/tasks/{}", dispatch_id);
     // Use exact path SQL query instead of semantic search to avoid
     // Foundry inline-merge returning the wrong (merged) record.
+    //
+    // Scope resolution: `init_kanban_task` writes with scope="project", but
+    // `handle_save_memory` falls back to global when no project DB exists.
+    // We must mirror that fallback here so daemon/no-project dispatches don't
+    // get stuck in TASK_STATE_WORKING.
     let entries = server
         .with_project_store(|store| {
             store
@@ -287,6 +292,18 @@ async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<St
                 .map_err(|e| format!("kanban list_by_path: {e}"))
         })
         .unwrap_or_default();
+
+    let entries = if entries.is_empty() {
+        server
+            .with_global_store(|store| {
+                store
+                    .list_by_path(&path, 1, false)
+                    .map_err(|e| format!("kanban list_by_path (global): {e}"))
+            })
+            .unwrap_or_default()
+    } else {
+        entries
+    };
 
     for entry in &entries {
         if let Some(state) = entry.metadata.get("a2a_state").and_then(|v| v.as_str()) {
@@ -306,13 +323,30 @@ pub(crate) async fn update_kanban_state(
     let path = format!("/kanban/tasks/{}", dispatch_id);
     // Use exact path SQL query instead of semantic search to avoid
     // Foundry inline-merge returning the wrong (merged) record.
-    let entries = server
+    //
+    // Scope resolution: try project store first; fall back to global if no
+    // project DB exists. We must write the update back to the same store the
+    // entry was found in, otherwise we leave a stale row.
+    let project_entries = server
         .with_project_store(|store| {
             store
                 .list_by_path(&path, 1, false)
                 .map_err(|e| format!("kanban list_by_path: {e}"))
         })
         .unwrap_or_default();
+
+    let (entries, write_scope) = if project_entries.is_empty() {
+        let global_entries = server
+            .with_global_store(|store| {
+                store
+                    .list_by_path(&path, 1, false)
+                    .map_err(|e| format!("kanban list_by_path (global): {e}"))
+            })
+            .unwrap_or_default();
+        (global_entries, "global")
+    } else {
+        (project_entries, "project")
+    };
 
     if let Some(entry) = entries.first() {
         let mut meta = entry.metadata.clone();
@@ -336,7 +370,7 @@ pub(crate) async fn update_kanban_state(
                 persons: Vec::new(),
                 entities: Vec::new(),
                 location: String::new(),
-                scope: "project".to_string(),
+                scope: write_scope.to_string(),
                 vector: None,
                 id: Some(entry.id.clone()),
                 force: true,
@@ -614,10 +648,16 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
 
 // ─── Agent subprocess builders ───────────────────────────────────────────────
 
-/// Resolve the effective permission profile: explicit param → "full" as default
-/// for dispatched agents (the whole point of dispatch is autonomous execution).
+/// Resolve the effective permission profile.
+///
+/// Defaults to `"default"` (Claude prompts for confirmations; Codex uses the
+/// configured sandbox). Callers must explicitly pass `permission_profile:
+/// "full"` to opt into `--dangerously-skip-permissions` /
+/// `--dangerously-bypass-approvals-and-sandbox`. This is a deliberate safe
+/// default: the previous `"full"` default gave any caller of `tachi_dispatch`
+/// unsandboxed autonomous execution.
 fn resolve_permission_profile(params: &TachiDispatchParams) -> &str {
-    params.permission_profile.as_deref().unwrap_or("full")
+    params.permission_profile.as_deref().unwrap_or("default")
 }
 
 fn build_claude_command(

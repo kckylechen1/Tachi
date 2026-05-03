@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 
 use crate::error::MemoryError;
 use crate::types::{GraphExpandResult, MemoryEdge};
@@ -133,6 +134,28 @@ pub fn avg_importance(conn: &Connection) -> Result<f64, MemoryError> {
         |row| row.get(0),
     )?;
     Ok(avg)
+}
+
+/// Return IDs whose memory row has been superseded by a newer memory.
+pub fn get_superseded_ids(conn: &Connection, ids: &[String]) -> Result<HashSet<String>, MemoryError> {
+    if ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let mut out = HashSet::new();
+    for batch in ids.chunks(500) {
+        let placeholders = (1..=batch.len()).map(|i| format!("?{i}")).collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id FROM memories WHERE id IN ({}) AND superseded_by IS NOT NULL",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| row.get::<_, String>(0))?;
+        for row in rows {
+            out.insert(row?);
+        }
+    }
+    Ok(out)
 }
 
 /// BFS graph expansion from seed memory IDs.
