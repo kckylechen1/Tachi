@@ -105,7 +105,7 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
         revision: 1,
         vector: None,
         metadata,
-        retention_policy: None,
+        retention_policy: Some("ephemeral".to_string()),
         domain: None,
     }
 }

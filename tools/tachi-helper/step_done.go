@@ -40,6 +40,7 @@ func (s *doneStep) View() string {
 		{T("Vault", "密钥库"), fmt.Sprintf(T("initialized (%d keys)", "已初始化 (%d 个密钥)"), len(s.state.SelectedKeys))},
 		{T("Keys imported", "已导入密钥"), fmt.Sprintf("%d", len(s.state.SelectedKeys))},
 		{T("MCP servers", "MCP 服务器"), fmt.Sprintf(T("%d registered", "已注册 %d 个"), len(s.state.SelectedMCPs))},
+		{T("Backend", "后台"), foundryBackendSummary(s.state)},
 		{T("Shell", "Shell"), fmt.Sprintf("%s (%s)", s.state.ShellType, boolMark(s.state.RCModified))},
 	}
 
@@ -62,6 +63,21 @@ func (s *doneStep) View() string {
 	sb.WriteString("\n\n" + hintStyle.Render(T("  q / esc: quit", "  q / esc: 退出")))
 
 	return sb.String()
+}
+
+func foundryBackendSummary(state *State) string {
+	if len(state.FoundrySelections) == 0 {
+		return T("skipped", "已跳过")
+	}
+	fe := state.FoundrySelections["frontend_llm"]
+	fo := state.FoundrySelections["foundry_llm"]
+	if fe == "" && fo == "" {
+		return T("skipped", "已跳过")
+	}
+	if fe == fo {
+		return fe
+	}
+	return fmt.Sprintf(T("front: %s / foundry: %s", "前台: %s / 后台: %s"), fe, fo)
 }
 
 func boolMark(b bool) string {

@@ -192,32 +192,9 @@ async fn restart_openclaw() -> Result<String, String> {
     }
 }
 
-/// Publish a clawdoctor event to Ghost Whispers.
-async fn publish_event(server: &MemoryServer, event_type: &str, message: &str) {
-    let msg_id = uuid::Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339();
-    let payload = json!({
-        "event": event_type,
-        "message": message,
-        "timestamp": &timestamp,
-    });
-    let payload_str = serde_json::to_string(&payload).unwrap_or_default();
-
-    let result = server.with_global_store(|store| {
-        store
-            .ghost_publish_message(
-                &msg_id,
-                "clawdoctor",
-                &payload_str,
-                "clawdoctor",
-                &timestamp,
-            )
-            .map_err(|e| format!("ghost publish: {e}"))
-    });
-
-    if let Err(e) = result {
-        eprintln!("[clawdoctor] failed to publish ghost event: {}", e);
-    }
+/// Log a clawdoctor event to stderr.
+async fn publish_event(_server: &MemoryServer, event_type: &str, message: &str) {
+    eprintln!("[clawdoctor] event: {} — {}", event_type, message);
 }
 
 /// Save a clawdoctor incident as a memory entry for audit trail.

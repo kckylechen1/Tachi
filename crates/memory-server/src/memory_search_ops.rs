@@ -191,7 +191,7 @@ pub(crate) async fn handle_save_memory(
                             let edge = memory_core::MemoryEdge {
                                 source_id: auto_link_id.clone(),
                                 target_id: result.entry.id.clone(),
-                                relation: "related_to".to_string(),
+                                relation: "shares_entities".to_string(),
                                 weight: 0.5,
                                 metadata: json!({ "auto_link": true, "shared_entities": shared }),
                                 created_at: chrono::Utc::now().to_rfc3339(),

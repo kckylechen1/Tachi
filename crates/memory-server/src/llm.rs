@@ -45,6 +45,8 @@ impl LlmClient {
     const BASE_RETRY_DELAY_MS: u64 = 500;
 
     pub fn new() -> Result<Self, String> {
+        // ── Front-line LLM layer (Extract + Summary) ──
+        // Extract: EXTRACT_* → SILICONFLOW_*
         let extract = Self::load_lane(
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
@@ -56,49 +58,40 @@ impl LlmClient {
             DEFAULT_EXTRACT_MODEL,
         )?;
 
-        let distill = Self::load_lane(
-            &["DISTILL_API_KEY", "SUMMARY_API_KEY", "SILICONFLOW_API_KEY"],
+        // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
+        let summary = Self::load_lane(
+            &["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
-                "DISTILL_BASE_URL",
                 "SUMMARY_BASE_URL",
+                "EXTRACT_BASE_URL",
                 "SILICONFLOW_BASE_URL",
                 "EXTRACTOR_BASE_URL",
             ],
             &[
-                "DISTILL_MODEL",
                 "SUMMARY_MODEL",
+                "EXTRACT_MODEL",
                 "SILICONFLOW_MODEL",
                 "EXTRACTOR_MODEL",
             ],
             &extract.model,
         )?;
 
+        // ── Foundry LLM layer (Distill + Reasoning) ──
+        // Reasoning: REASONING_* → DISTILL_*  (Foundry internal fallback)
+        // Built before distill so distill can reference its model.
         let reasoning = Self::load_lane(
-            &["REASONING_API_KEY", "SILICONFLOW_API_KEY"],
-            &[
-                "REASONING_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-                "EXTRACTOR_BASE_URL",
-            ],
-            &["REASONING_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
+            &["REASONING_API_KEY", "DISTILL_API_KEY"],
+            &["REASONING_BASE_URL", "DISTILL_BASE_URL"],
+            &["REASONING_MODEL", "DISTILL_MODEL"],
             DEFAULT_REASONING_MODEL,
         )?;
 
-        let summary = Self::load_lane(
-            &["SUMMARY_API_KEY", "DISTILL_API_KEY", "SILICONFLOW_API_KEY"],
-            &[
-                "SUMMARY_BASE_URL",
-                "DISTILL_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-                "EXTRACTOR_BASE_URL",
-            ],
-            &[
-                "SUMMARY_MODEL",
-                "DISTILL_MODEL",
-                "SILICONFLOW_MODEL",
-                "EXTRACTOR_MODEL",
-            ],
-            &distill.model,
+        // Distill: DISTILL_* → REASONING_*  (Foundry internal fallback)
+        let distill = Self::load_lane(
+            &["DISTILL_API_KEY", "REASONING_API_KEY"],
+            &["DISTILL_BASE_URL", "REASONING_BASE_URL"],
+            &["DISTILL_MODEL", "REASONING_MODEL"],
+            &reasoning.model,
         )?;
 
         let http = reqwest::Client::builder()
@@ -366,6 +359,7 @@ impl LlmClient {
 
     /// Backward-compatible generic chat call.
     /// Defaults to the reasoning lane unless a caller uses a lane-specific helper.
+    #[allow(dead_code)]
     pub async fn call_llm(
         &self,
         system: &str,

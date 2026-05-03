@@ -269,55 +269,6 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_sandbox_exec_timestamp ON sandbox_exec_audit(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_sandbox_exec_capability ON sandbox_exec_audit(capability_id);
 
-        -- Ghost persistence: messages, subscriptions, cursors, topics, reflections.
-        CREATE TABLE IF NOT EXISTS ghost_messages (
-            id            TEXT PRIMARY KEY,
-            topic         TEXT NOT NULL,
-            topic_index   INTEGER NOT NULL,
-            payload       TEXT NOT NULL DEFAULT '{}',
-            publisher     TEXT NOT NULL DEFAULT '',
-            timestamp     TEXT NOT NULL DEFAULT '',
-            promoted      INTEGER NOT NULL DEFAULT 0,
-            importance    REAL NOT NULL DEFAULT 0.5,
-            created_at    TEXT NOT NULL DEFAULT ''
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ghost_topic_index_unique
-            ON ghost_messages(topic, topic_index);
-        CREATE INDEX IF NOT EXISTS idx_ghost_topic_index
-            ON ghost_messages(topic, topic_index DESC);
-        CREATE INDEX IF NOT EXISTS idx_ghost_messages_timestamp
-            ON ghost_messages(timestamp DESC);
-
-        CREATE TABLE IF NOT EXISTS ghost_subscriptions (
-            agent_id      TEXT NOT NULL,
-            topic         TEXT NOT NULL,
-            created_at    TEXT NOT NULL DEFAULT '',
-            updated_at    TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (agent_id, topic)
-        );
-        CREATE INDEX IF NOT EXISTS idx_ghost_subscriptions_topic
-            ON ghost_subscriptions(topic);
-
-        CREATE TABLE IF NOT EXISTS ghost_cursors (
-            agent_id        TEXT NOT NULL,
-            topic           TEXT NOT NULL,
-            last_seen_index INTEGER NOT NULL DEFAULT 0,
-            updated_at      TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (agent_id, topic)
-        );
-        CREATE INDEX IF NOT EXISTS idx_ghost_cursors_updated
-            ON ghost_cursors(updated_at DESC);
-
-        CREATE TABLE IF NOT EXISTS ghost_topics (
-            topic             TEXT PRIMARY KEY,
-            total_published   INTEGER NOT NULL DEFAULT 0,
-            last_message_time TEXT,
-            last_publisher    TEXT,
-            updated_at        TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS idx_ghost_topics_last_message
-            ON ghost_topics(last_message_time DESC);
-
         -- Pack registry: installed skill packs from external sources
         CREATE TABLE IF NOT EXISTS packs (
             id             TEXT PRIMARY KEY,
@@ -347,19 +298,6 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_projections_pack ON agent_projections(pack_id);
         CREATE INDEX IF NOT EXISTS idx_projections_agent ON agent_projections(agent);
-
-        CREATE TABLE IF NOT EXISTS ghost_reflections (
-            id          TEXT PRIMARY KEY,
-            agent_id    TEXT NOT NULL,
-            topic       TEXT,
-            summary     TEXT NOT NULL DEFAULT '',
-            metadata    TEXT NOT NULL DEFAULT '{}',
-            created_at  TEXT NOT NULL DEFAULT ''
-        );
-        CREATE INDEX IF NOT EXISTS idx_ghost_reflections_topic
-            ON ghost_reflections(topic);
-        CREATE INDEX IF NOT EXISTS idx_ghost_reflections_created
-            ON ghost_reflections(created_at DESC);
 
         -- Vault: encrypted secret storage configuration (exactly one row)
         CREATE TABLE IF NOT EXISTS vault_config (

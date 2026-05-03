@@ -1,0 +1,11 @@
+## 任务完成 ✅
+
+**总结**: 成功将 Tachi LLM 后端从 4 个独立通道迁移到三层架构：
+
+1.  **前台 LLM** (提取 + 总结): 所有 5 个 hub 调用点（技能执行、注册分析、安全扫描、MCP 技能执行、召回缓存）已从 `call_reasoning_llm` → `call_extract_llm` 降级
+2.  **熔炉 LLM** (推理 + 蒸馏): 备用链已收敛到 `DISTILL_* ↔ REASONING_*` 内部交叉备用
+3.  **总结备用链** 现在流向 `SUMMARY_* → EXTRACT_* → SILICONFLOW_*` (与前台保持一致)
+
+**结果**: `cargo test -p memory-server` — **255 个通过，0 个失败**。无构建警告。
+
+**报告路径**: `.agent/claude-code-runs/2026-05-03T09-02-19-750Z-llm-3layer-phase2/result.md`

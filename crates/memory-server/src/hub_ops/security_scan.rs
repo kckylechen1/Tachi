@@ -332,7 +332,7 @@ pub(super) async fn scan_skill_definition_with_llm(
 
     match server
         .llm
-        .call_reasoning_llm(
+        .call_extract_llm(
             crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
             &payload,
             Some(&model),

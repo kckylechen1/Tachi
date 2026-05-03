@@ -665,204 +665,6 @@ async fn proxy_call_requires_sandbox_policy_and_records_preflight_denial() {
 }
 
 #[tokio::test]
-async fn ghost_subscribe_evicts_least_recent_cursor_when_full() {
-    let server = make_server();
-
-    {
-        let mut state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
-        for i in 0..PUBSUB_MAX_CURSORS {
-            let agent_id = format!("agent-{i}");
-            state.cursors.insert(agent_id.clone(), HashMap::new());
-            state.cursor_recency.insert(agent_id, (i as u64) + 1);
-        }
-        state.cursor_seq = PUBSUB_MAX_CURSORS as u64;
-    }
-
-    let params = GhostSubscribeParams {
-        agent_id: "agent-new".to_string(),
-        topics: vec![],
-    };
-
-    let _ = server
-        .ghost_subscribe(Parameters(params))
-        .await
-        .expect("ghost_subscribe should succeed");
-
-    let state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
-    assert_eq!(state.cursors.len(), PUBSUB_MAX_CURSORS);
-    assert!(
-        !state.cursors.contains_key("agent-0"),
-        "expected least-recent agent to be evicted"
-    );
-    assert!(state.cursors.contains_key("agent-new"));
-    assert!(state.cursor_recency.contains_key("agent-new"));
-}
-
-#[tokio::test]
-async fn ghost_publish_subscribe_ack_roundtrip_persists_cursor() {
-    let server = make_server();
-
-    let publish = server
-        .ghost_publish(Parameters(GhostPublishParams {
-            topic: "ops-alerts".to_string(),
-            payload: json!({"text": "build failed"}),
-            publisher: "agent-a".to_string(),
-        }))
-        .await
-        .expect("ghost_publish should succeed");
-    let publish_json: serde_json::Value =
-        serde_json::from_str(&publish).expect("ghost_publish response should be JSON");
-    let message_id = publish_json["id"]
-        .as_str()
-        .expect("ghost_publish should return id")
-        .to_string();
-
-    let sub1 = server
-        .ghost_subscribe(Parameters(GhostSubscribeParams {
-            agent_id: "agent-b".to_string(),
-            topics: vec!["ops-alerts".to_string()],
-        }))
-        .await
-        .expect("ghost_subscribe should succeed");
-    let sub1_json: serde_json::Value =
-        serde_json::from_str(&sub1).expect("ghost_subscribe response should be JSON");
-    assert_eq!(sub1_json["new_count"], json!(1));
-    assert_eq!(sub1_json["messages"][0]["id"], json!(message_id));
-
-    let sub2 = server
-        .ghost_subscribe(Parameters(GhostSubscribeParams {
-            agent_id: "agent-b".to_string(),
-            topics: vec!["ops-alerts".to_string()],
-        }))
-        .await
-        .expect("ghost_subscribe second poll should succeed");
-    let sub2_json: serde_json::Value =
-        serde_json::from_str(&sub2).expect("ghost_subscribe second response should be JSON");
-    assert_eq!(sub2_json["new_count"], json!(0));
-
-    let ack = server
-        .ghost_ack(Parameters(GhostAckParams {
-            agent_id: "agent-b".to_string(),
-            topic: "ops-alerts".to_string(),
-            index: Some(1),
-            message_id: None,
-        }))
-        .await
-        .expect("ghost_ack should succeed");
-    let ack_json: serde_json::Value =
-        serde_json::from_str(&ack).expect("ghost_ack response should be JSON");
-    assert_eq!(ack_json["acknowledged_index"], json!(1));
-}
-
-#[tokio::test]
-async fn ghost_alias_whisper_listen_channels_roundtrip() {
-    let server = make_server();
-
-    let whisper = server
-        .ghost_whisper(Parameters(GhostPublishParams {
-            topic: "ghost-alias".to_string(),
-            payload: json!({"text": "hello from alias"}),
-            publisher: "agent-alias".to_string(),
-        }))
-        .await
-        .expect("ghost_whisper should succeed");
-    let whisper_json: serde_json::Value =
-        serde_json::from_str(&whisper).expect("ghost_whisper response should be JSON");
-    assert_eq!(whisper_json["topic"], json!("ghost-alias"));
-
-    let listen = server
-        .ghost_listen(Parameters(GhostSubscribeParams {
-            agent_id: "listener-alias".to_string(),
-            topics: vec!["ghost-alias".to_string()],
-        }))
-        .await
-        .expect("ghost_listen should succeed");
-    let listen_json: serde_json::Value =
-        serde_json::from_str(&listen).expect("ghost_listen response should be JSON");
-    assert_eq!(listen_json["new_count"], json!(1));
-
-    let channels = server
-        .ghost_channels()
-        .await
-        .expect("ghost_channels should succeed");
-    let channels_json: serde_json::Value =
-        serde_json::from_str(&channels).expect("ghost_channels response should be JSON");
-    let topics = channels_json["topics"]
-        .as_array()
-        .expect("ghost_channels should return topics array");
-    assert!(
-        topics.iter().any(|t| t["topic"] == json!("ghost-alias")),
-        "ghost channel list should include alias topic"
-    );
-}
-
-#[tokio::test]
-async fn ghost_promote_writes_memory_and_marks_message_promoted() {
-    let server = make_server();
-
-    let publish = server
-        .ghost_publish(Parameters(GhostPublishParams {
-            topic: "release".to_string(),
-            payload: json!({"text": "release 1.2.3 deployed"}),
-            publisher: "release-bot".to_string(),
-        }))
-        .await
-        .expect("ghost_publish should succeed");
-    let publish_json: serde_json::Value =
-        serde_json::from_str(&publish).expect("ghost_publish response should be JSON");
-    let message_id = publish_json["id"]
-        .as_str()
-        .expect("ghost_publish should return id")
-        .to_string();
-
-    let promote = server
-        .ghost_promote(Parameters(GhostPromoteParams {
-            message_id: message_id.clone(),
-            path: Some("/ghost/tests".to_string()),
-            importance: Some(0.9),
-        }))
-        .await
-        .expect("ghost_promote should succeed");
-    let promote_json: serde_json::Value =
-        serde_json::from_str(&promote).expect("ghost_promote response should be JSON");
-    let memory_id = promote_json["memory_id"]
-        .as_str()
-        .expect("ghost_promote should return memory_id")
-        .to_string();
-
-    let memory = server
-        .get_memory(Parameters(GetMemoryParams {
-            id: memory_id,
-            include_archived: false,
-            project: None,
-        }))
-        .await
-        .expect("get_memory should succeed");
-    let memory_json: serde_json::Value =
-        serde_json::from_str(&memory).expect("get_memory response should be JSON");
-    assert_eq!(memory_json["path"], json!("/ghost/tests"));
-    assert_eq!(memory_json["category"], json!("ghost"));
-
-    let reflected = server
-        .ghost_reflect(Parameters(GhostReflectParams {
-            agent_id: "agent-reflector".to_string(),
-            topic: Some("release".to_string()),
-            summary: "Release deployment pattern stabilized.".to_string(),
-            metadata: Some(json!({"source": "unit-test"})),
-            promote_rule: true,
-        }))
-        .await
-        .expect("ghost_reflect should succeed");
-    let reflected_json: serde_json::Value =
-        serde_json::from_str(&reflected).expect("ghost_reflect response should be JSON");
-    assert_eq!(reflected_json["promote_rule"], json!(true));
-    assert!(
-        reflected_json["rule_id"].is_string(),
-        "ghost_reflect should return promoted rule id"
-    );
-}
-
-#[tokio::test]
 async fn sync_memories_errors_if_agent_state_persist_fails() {
     let server = make_server();
 
@@ -3551,7 +3353,7 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
     let edges = server
         .with_global_store_read(|store| {
             store
-                .get_edges(&ids[0], "outgoing", Some("related_to"))
+                .get_edges(&ids[0], "outgoing", Some("similar_to"))
                 .map_err(|e| e.to_string())
         })
         .expect("load related edges");
@@ -3716,11 +3518,43 @@ async fn wiki_search_includes_related_entries_for_top_results() {
 }
 
 #[tokio::test]
+async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
+    let mut entry = make_entry("wiki-default-project-search");
+    entry.path = "/wiki/engineering/search-default".to_string();
+    entry.summary = "Default wiki project search".to_string();
+    entry.text = "UniqueDefaultWikiNeedle should be found in the named wiki project.".to_string();
+    entry.entities = vec!["UniqueDefaultWikiNeedle".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "UniqueDefaultWikiNeedle".to_string(),
+            scope: "wiki".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            category: None,
+            include_archived: false,
+        }))
+        .await
+        .expect("tachi_search wiki scope should succeed");
+
+    assert!(
+        response.contains("wiki-default-project-search"),
+        "expected facade wiki search to query the named wiki DB, got: {response}"
+    );
+}
+
+#[tokio::test]
 async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let mut entry = make_entry("wiki-export-entry");
     entry.path = "/wiki/engineering/debugging/export".to_string();
     entry.summary = "Export MCP lesson".to_string();
-    entry.text = "MCP export lesson references MCP explicitly.".to_string();
+    entry.text =
+        "MCP export lesson references MCP explicitly; [[MCP]] stays linked; MCPing stays plain."
+            .to_string();
     entry.topic = "export-mcp".to_string();
     entry.keywords = vec!["debugging".to_string()];
     entry.entities = vec!["MCP".to_string()];
@@ -3734,7 +3568,9 @@ async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let md_path = out_dir.join("engineering/debugging/export/export-mcp.md");
     let markdown = std::fs::read_to_string(&md_path).expect("read exported markdown");
     assert!(markdown.contains("tags: [\"debugging\"]"));
-    assert!(markdown.contains("[[MCP]] export lesson references [[MCP]] explicitly."));
+    assert!(markdown.contains(
+        "[[MCP]] export lesson references [[MCP]] explicitly; [[MCP]] stays linked; MCPing stays plain."
+    ));
     let index = std::fs::read_to_string(out_dir.join("_index.md")).expect("read index");
     assert!(index.contains("[[export-mcp]]"));
     let _ = std::fs::remove_dir_all(out_dir);
@@ -3749,9 +3585,12 @@ async fn tachi_wiki_ingest_creates_entry_and_related_edge() {
     existing.entities = vec!["IngestTopic".to_string()];
 
     let (server, home) = seed_wiki_project_entries(vec![existing]);
-    let source_path = home.temp_home.join("ingest-source.md");
-    std::fs::write(&source_path, "# Ingest source\nIngestTopic appears in this source.")
-        .expect("write ingest source");
+    let source_path = home.temp_home.join(".tachi/ingest-source.md");
+    std::fs::write(
+        &source_path,
+        "# Ingest source\nIngestTopic appears in this source.",
+    )
+    .expect("write ingest source");
 
     let response = server
         .tachi_wiki_ingest(Parameters(TachiWikiIngestParams {
@@ -4276,13 +4115,13 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
     let related_edges = server
         .with_global_store_read(|store| {
             store
-                .get_edges("skill-snapshot-a", "both", Some("related_to"))
+                .get_edges("skill-snapshot-a", "both", Some("merge_hint"))
                 .map_err(|e| e.to_string())
         })
         .expect("load related skill edges");
     assert!(
         !related_edges.is_empty(),
-        "expected skill graph related_to edge from quality guard"
+        "expected skill graph merge_hint edge from quality guard"
     );
 }
 
@@ -4934,7 +4773,7 @@ async fn test_pack_register_uses_tachi_pack_manifest_metadata() {
                 "description": "Pack metadata should come from manifest",
                 "source": "github:test/manifest-pack"
             },
-            "services": ["memory", "ghost"]
+            "services": ["memory"]
         })
         .to_string(),
     )
@@ -5885,47 +5724,6 @@ async fn vault_list_filters_by_secret_type() {
 }
 
 #[tokio::test]
-async fn ghost_reflect_creates_reflection_entry() {
-    let server = make_server();
-
-    let reflect = server
-        .ghost_reflect(Parameters(GhostReflectParams {
-            agent_id: "test-agent".to_string(),
-            summary: "Test reflection about recent interactions".to_string(),
-            topic: Some("testing".to_string()),
-            promote_rule: false,
-            metadata: None,
-        }))
-        .await
-        .expect("ghost_reflect should succeed");
-
-    let reflect_json: Value = serde_json::from_str(&reflect).unwrap();
-    assert!(reflect_json["reflection_id"].as_str().is_some());
-    assert_eq!(reflect_json["promote_rule"], false);
-}
-
-#[tokio::test]
-async fn ghost_reflect_with_promote_creates_rule() {
-    let server = make_server();
-
-    let reflect = server
-        .ghost_reflect(Parameters(GhostReflectParams {
-            agent_id: "test-agent".to_string(),
-            summary: "Important insight that should become a rule".to_string(),
-            topic: Some("rules".to_string()),
-            promote_rule: true,
-            metadata: None,
-        }))
-        .await
-        .expect("ghost_reflect with promote should succeed");
-
-    let reflect_json: Value = serde_json::from_str(&reflect).unwrap();
-    assert!(reflect_json["reflection_id"].as_str().is_some());
-    assert_eq!(reflect_json["promote_rule"], true);
-    assert!(reflect_json["rule_id"].as_str().is_some());
-}
-
-#[tokio::test]
 async fn kanban_update_to_expired_status_prevents_further_updates() {
     let server = make_server();
 
@@ -5979,33 +5777,6 @@ async fn kanban_update_to_expired_status_prevents_further_updates() {
         cards.iter().all(|c| c["id"].as_str().unwrap() != card_id),
         "expired card should not appear in inbox with open filter"
     );
-}
-
-#[tokio::test]
-async fn ghost_subscribe_respects_topic_filter() {
-    let server = make_server();
-
-    // Publish to specific topic
-    server
-        .ghost_publish(Parameters(GhostPublishParams {
-            topic: "filtered-topic".to_string(),
-            payload: json!({"message": "test"}),
-            publisher: "test-pub".to_string(),
-        }))
-        .await
-        .expect("ghost_publish should succeed");
-
-    // Subscribe to that topic
-    let sub = server
-        .ghost_subscribe(Parameters(GhostSubscribeParams {
-            agent_id: "test-sub".to_string(),
-            topics: vec!["filtered-topic".to_string()],
-        }))
-        .await
-        .expect("ghost_subscribe should succeed");
-
-    let sub_json: Value = serde_json::from_str(&sub).unwrap();
-    assert!(sub_json["messages"].as_array().is_some());
 }
 
 #[tokio::test]

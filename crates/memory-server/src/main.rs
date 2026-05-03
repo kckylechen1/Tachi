@@ -49,7 +49,7 @@ mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
-mod ghost_ops;
+mod gh_ops;
 mod graph_state_ops;
 mod handoff_ops;
 mod hub_helpers;
@@ -260,13 +260,6 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "sandbox_set_policy",
     "shell_set_policy",
     "tachi_init_project_db",
-    "ghost_reflect",
-    "ghost_promote",
-    "ghost_publish",
-    "ghost_whisper",
-    "ghost_subscribe",
-    "ghost_listen",
-    "ghost_ack",
     "handoff_leave",
     "handoff_check",
     "post_card",
@@ -363,8 +356,6 @@ struct MemoryServer {
     tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    // ─── Ghost Whispers (pub/sub) ───────────────────────────────────────────
-    pubsub: Arc<StdMutex<PubSubState>>,
     // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
     dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
     mcp_discovery_timeout: Duration,
@@ -511,7 +502,6 @@ impl MemoryServer {
             tool_cache: Arc::new(StdMutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            pubsub: Arc::new(StdMutex::new(PubSubState::new())),
             dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
@@ -632,30 +622,6 @@ impl MemoryServer {
 // generates code that uses these types through macro expansion.
 
 // Parameter and tool schema definitions moved to `tool_params.rs`.
-
-// ─── Ghost Whispers (Inter-Agent Pub/Sub) ─────────────────────────────────────
-
-const PUBSUB_RING_MAX: usize = 100;
-const PUBSUB_MAX_CURSORS: usize = 1000;
-
-struct PubSubState {
-    /// agent_id → (topic → last_seen_global_index)
-    cursors: HashMap<String, HashMap<String, usize>>,
-    /// agent_id → monotonic recency sequence (used for LRU cursor eviction)
-    cursor_recency: HashMap<String, u64>,
-    /// Monotonic sequence counter for cursor recency tracking
-    cursor_seq: u64,
-}
-
-impl PubSubState {
-    fn new() -> Self {
-        Self {
-            cursors: HashMap::new(),
-            cursor_recency: HashMap::new(),
-            cursor_seq: 0,
-        }
-    }
-}
 
 // MCP pool proxy methods are in mcp_pool.rs
 

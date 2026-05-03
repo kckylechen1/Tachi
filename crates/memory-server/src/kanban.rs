@@ -528,7 +528,7 @@ pub(crate) async fn handle_post_card(
         revision: 1,
         vector: None,
         metadata: metadata.clone(),
-        retention_policy: None,
+        retention_policy: Some("ephemeral".to_string()),
         domain: None,
     };
 

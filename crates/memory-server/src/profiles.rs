@@ -215,7 +215,6 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "check_inbox",
-    "ghost_*",
     "handoff_check",
     "handoff_leave",
     "post_card",
@@ -224,6 +223,13 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_handoff",
     "tachi_dispatch",
     "approve_merge",
+    // GitHub MCP proxy tools
+    "tachi_gh_issue_read",
+    "tachi_gh_issue_list",
+    "tachi_gh_issue_create",
+    "tachi_gh_pr_read",
+    "tachi_gh_pr_list",
+    "tachi_gh_repo_view",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -249,7 +255,7 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "wiki_lint",
 ];
 
-/// Standard profile allow-list (12 tools). Intersected with all bundles
+/// Standard profile allow-list. Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Planning + context
@@ -273,6 +279,12 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_complete",
     "approve_merge",
     "tachi_board",
+    // GitHub read-only tools (no write — issue_create is coordinate-only)
+    "tachi_gh_issue_read",
+    "tachi_gh_issue_list",
+    "tachi_gh_pr_read",
+    "tachi_gh_pr_list",
+    "tachi_gh_repo_view",
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
@@ -364,13 +376,6 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "extract_facts",
-    "ghost_ack",
-    "ghost_listen",
-    "ghost_promote",
-    "ghost_publish",
-    "ghost_reflect",
-    "ghost_subscribe",
-    "ghost_whisper",
     "handoff_check",
     "handoff_leave",
     "ingest_event",
@@ -644,9 +649,8 @@ mod tests {
 
     #[test]
     fn pattern_matching_supports_wildcards() {
-        assert!(tool_name_matches_pattern("ghost_publish", "ghost_*"));
         assert!(tool_name_matches_pattern("hub_call", "hub_*"));
-        assert!(!tool_name_matches_pattern("save_memory", "ghost_*"));
+        assert!(!tool_name_matches_pattern("save_memory", "hub_*"));
     }
 
     #[test]
@@ -656,7 +660,7 @@ mod tests {
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("recall_context"),
-                test_tool("ghost_publish"),
+                test_tool("post_card"),
             ],
             Some(ToolProfile::operate()),
             Some(&["search_memory".to_string(), "recall_*".to_string()]),
@@ -844,12 +848,20 @@ mod tests {
                 test_tool("tachi_complete"),
                 test_tool("tachi_dispatch"),
                 test_tool("approve_merge"),
+                test_tool("tachi_board"),
+                // GitHub read-only tools (should pass)
+                test_tool("tachi_gh_issue_read"),
+                test_tool("tachi_gh_issue_list"),
+                test_tool("tachi_gh_pr_read"),
+                test_tool("tachi_gh_pr_list"),
+                test_tool("tachi_gh_repo_view"),
+                // GitHub write tool (should be excluded from standard)
+                test_tool("tachi_gh_issue_create"),
                 // Old tools now excluded:
                 test_tool("search_memory"),
                 test_tool("save_memory"),
                 test_tool("tachi_unstick"),
                 test_tool("get_memory"),
-                test_tool("ghost_publish"),
                 test_tool("post_card"),
             ],
             Some(ToolProfile::standard()),
@@ -874,6 +886,12 @@ mod tests {
                 "tachi_complete".to_string(),
                 "tachi_dispatch".to_string(),
                 "approve_merge".to_string(),
+                "tachi_board".to_string(),
+                "tachi_gh_issue_read".to_string(),
+                "tachi_gh_issue_list".to_string(),
+                "tachi_gh_pr_read".to_string(),
+                "tachi_gh_pr_list".to_string(),
+                "tachi_gh_repo_view".to_string(),
             ]
         );
     }

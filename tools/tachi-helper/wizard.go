@@ -16,6 +16,7 @@ const (
 	stepVault
 	stepKeys
 	stepMCP
+	stepFoundry
 	stepShell
 	stepSummary
 	stepCount
@@ -25,12 +26,12 @@ type stepDoneMsg struct{}
 type stepBackMsg struct{}
 
 type wizard struct {
-	current stepID
-	steps   []step
-	state   *State
-	mcp     *MCPClient
-	width   int
-	height  int
+	current  stepID
+	steps    []step
+	state    *State
+	mcp      *MCPClient
+	width    int
+	height   int
 	quitting bool
 }
 
@@ -59,6 +60,7 @@ func newWizard() *wizard {
 	w.steps[stepVault] = newVaultStep(state)
 	w.steps[stepKeys] = newKeysStep(state)
 	w.steps[stepMCP] = newMCPStep(state)
+	w.steps[stepFoundry] = newFoundryStep(state)
 	w.steps[stepShell] = newShellStep(state)
 	w.steps[stepSummary] = newDoneStep(state)
 	return w
@@ -150,6 +152,7 @@ func (w *wizard) renderHeader(s step) string {
 		T("Vault", "密钥库"),
 		T("Keys", "密钥"),
 		T("MCP", "MCP"),
+		T("Backend", "后台"),
 		T("Shell", "Shell"),
 		T("Done", "完成"),
 	}

@@ -19,6 +19,8 @@
 //! - **R6** VACUUM INTO + atomic swap. Requires daemon to not be running.
 //! - **R7** Orphan reference cleanup (memory_edges, agent_known_state,
 //!   processed_events, access_history).
+//! - **R8** Deterministic junk cleanup (exact duplicate old versions,
+//!   foundry rerank cache records, empty JSON turn records).
 //!
 //! Exit codes: 0 clean (or successful dry-run with no findings), 1 if
 //! repairs were found and not applied, 2 if any rule errored.
@@ -34,6 +36,7 @@ pub mod edges;
 pub mod fts;
 pub mod integrity;
 pub mod inventory;
+pub mod junk;
 pub mod jobs;
 pub mod quarantine;
 pub mod report;
@@ -46,7 +49,7 @@ mod tests;
 pub use report::{Finding, ReportBuilder, RuleReport};
 
 /// Default ordered set of rules run when `--rule` is not supplied.
-const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7"];
+const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R8"];
 
 #[derive(Debug)]
 pub struct RepairExit {
@@ -229,6 +232,7 @@ pub async fn run_repair(
                 "R4" => Box::new(jobs::JobsPurge::default()),
                 "R5" => Box::new(integrity::IntegrityCheck),
                 "R7" => Box::new(edges::OrphanRefs),
+                "R8" => Box::new(junk::JunkCleanup),
                 // R6 deliberately not part of bulk sweep — too aggressive.
                 _ => continue,
             };

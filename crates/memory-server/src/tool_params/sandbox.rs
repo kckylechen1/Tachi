@@ -1,10 +1,5 @@
 use super::*;
 
-#[allow(dead_code)]
-fn default_ghost_reflect_promote_rule() -> bool {
-    true
-}
-
 fn default_access_level() -> String {
     "read".to_string()
 }
@@ -46,94 +41,6 @@ fn default_sandbox_policy_limit() -> usize {
 #[allow(dead_code)]
 fn default_sandbox_exec_audit_limit() -> usize {
     100
-}
-
-// ─── Ghost Whispers ─────────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhostPublishParams {
-    /// Topic to publish to (e.g. "build-status", "code-review")
-    pub topic: String,
-    /// Message payload (any JSON value)
-    pub payload: serde_json::Value,
-    /// Publisher agent identifier
-    pub publisher: String,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhostSubscribeParams {
-    /// Unique agent identifier for cursor tracking
-    pub agent_id: String,
-    /// Topics to subscribe to and poll for new messages
-    pub topics: Vec<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhostAckParams {
-    /// Unique agent identifier for cursor tracking
-    pub agent_id: String,
-    /// Topic to acknowledge
-    pub topic: String,
-    /// Optional explicit topic index to acknowledge up to
-    #[serde(default)]
-    pub index: Option<u64>,
-    /// Optional message id to acknowledge up to
-    #[serde(default)]
-    pub message_id: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhostReflectParams {
-    /// Agent generating the reflection
-    pub agent_id: String,
-    /// Optional topic scope for this reflection
-    #[serde(default)]
-    pub topic: Option<String>,
-    /// Reflection summary text
-    pub summary: String,
-    /// Optional structured metadata
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-    /// Whether to promote reflection into derived rules memory
-    #[serde(default = "default_ghost_reflect_promote_rule")]
-    pub promote_rule: bool,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhostPromoteParams {
-    /// Ghost message id to promote
-    pub message_id: String,
-    /// Optional memory path (default: /ghost/messages)
-    #[serde(default)]
-    pub path: Option<String>,
-    /// Optional promoted importance
-    #[serde(default)]
-    pub importance: Option<f64>,
-}
-
-// ─── Dead Letter Queue ──────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DlqListParams {
-    /// Filter by status: "pending", "retrying", "resolved", "abandoned"
-    #[serde(default)]
-    pub status_filter: Option<String>,
-    /// Max entries to return (default: 50)
-    #[serde(default)]
-    pub limit: Option<usize>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DlqRetryParams {
-    /// ID of the dead letter entry to retry
-    pub dead_letter_id: String,
 }
 
 // ─── Sandbox Access Rules ───────────────────────────────────────────────────

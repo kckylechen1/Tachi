@@ -326,6 +326,7 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
+    let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -340,13 +341,12 @@ pub(crate) async fn handle_tachi_wiki_search(
             graph_relation_filter: None,
             weights: None,
             agent_role: params.agent_role,
-            project: params.project.clone(),
+            project: Some(project_name.clone()),
             domain: params.domain,
         },
     )
     .await?;
 
-    let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
     for row in rows.iter_mut().take(3) {
         crate::wiki_ops::add_related_entries_to_row(row, server, &project_name, 5);
     }

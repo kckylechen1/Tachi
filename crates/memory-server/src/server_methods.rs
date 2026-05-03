@@ -738,7 +738,7 @@ impl MemoryServer {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1200) as u32;
             self.llm
-                .call_llm(system, &prompt, model, temperature, max_tokens)
+                .call_extract_llm(system, &prompt, model, temperature, max_tokens)
                 .await
                 .map_err(|e| {
                     rmcp::ErrorData::internal_error(format!("skill execution failed: {e}"), None)

@@ -4,6 +4,10 @@ use memory_core::scorer::local_pagerank;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+const WIKI_LOG_MAX_BYTES: usize = 256 * 1024;
+const WIKI_LOG_MAX_ENTRIES: usize = 200;
+const WIKI_LOG_ENTRY_MAX_BYTES: usize = 4096;
+
 fn default_checks() -> Vec<String> {
     vec![
         "orphans".to_string(),
@@ -136,20 +140,68 @@ fn relation_exists(
     })
 }
 
+fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
+    if std::env::var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+    {
+        return true;
+    }
+
+    let canonical_source = match std::fs::canonicalize(source_path) {
+        Ok(path) => path,
+        Err(_) => return false,
+    };
+    let cwd = std::env::current_dir().ok();
+    let home = dirs::home_dir();
+    let mut roots = Vec::new();
+    if let Some(cwd) = cwd {
+        roots.push(cwd);
+    }
+    for env_key in ["TACHI_HOME", "SIGIL_HOME"] {
+        if let Ok(path) = std::env::var(env_key) {
+            roots.push(PathBuf::from(path));
+        }
+    }
+    if let Some(home) = home {
+        roots.push(home.join(".tachi"));
+    }
+
+    roots
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .any(|root| canonical_source.starts_with(root))
+}
+
 async fn source_for_path(source: &str) -> Result<String, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let response = reqwest::get(source)
             .await
             .map_err(|e| format!("fetch source URL: {e}"))?;
         if !response.status().is_success() {
-            return Err(format!("fetch source URL failed with status {}", response.status()));
+            return Err(format!(
+                "fetch source URL failed with status {}",
+                response.status()
+            ));
         }
         response
             .text()
             .await
             .map_err(|e| format!("read source response: {e}"))
     } else {
-        tokio::fs::read_to_string(source)
+        let path = Path::new(source);
+        if !wiki_ingest_local_file_allowed(path) {
+            return Err(
+                "local wiki ingest is restricted to the current workspace or TACHI_HOME; set TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE=1 to override"
+                    .to_string(),
+            );
+        }
+        tokio::fs::read_to_string(path)
             .await
             .map_err(|e| format!("read source file: {e}"))
     }
@@ -303,23 +355,65 @@ fn yaml_string_list(values: &[String]) -> String {
 }
 
 fn obsidian_link_entities(text: &str, entities: &[String]) -> String {
-    let mut out = text.to_string();
     let mut sorted = entities
         .iter()
         .map(|entity| entity.trim())
         .filter(|entity| !entity.is_empty())
         .collect::<Vec<_>>();
-    sorted.sort_by_key(|entity| std::cmp::Reverse(entity.len()));
+    sorted.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     sorted.dedup();
 
-    for entity in sorted {
-        let link = format!("[[{entity}]]");
-        if out.contains(&link) {
-            continue;
+    let mut out = String::with_capacity(text.len());
+    let mut idx = 0usize;
+    while idx < text.len() {
+        if text[idx..].starts_with("[[") {
+            if let Some(end) = text[idx + 2..].find("]]") {
+                let end_idx = idx + 2 + end + 2;
+                out.push_str(&text[idx..end_idx]);
+                idx = end_idx;
+                continue;
+            }
         }
-        out = out.replace(entity, &link);
+
+        let mut matched: Option<&str> = None;
+        for entity in &sorted {
+            if text[idx..].starts_with(*entity) && is_entity_boundary(text, idx, idx + entity.len())
+            {
+                matched = Some(entity);
+                break;
+            }
+        }
+        if let Some(entity) = matched {
+            out.push_str("[[");
+            out.push_str(entity);
+            out.push_str("]]");
+            idx += entity.len();
+        } else if let Some(ch) = text[idx..].chars().next() {
+            out.push(ch);
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
     }
     out
+}
+
+fn is_entity_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before = if start == 0 {
+        None
+    } else {
+        text[..start].chars().next_back()
+    };
+    let after = if end >= text.len() {
+        None
+    } else {
+        text[end..].chars().next()
+    };
+    !before.is_some_and(is_entity_word_char) && !after.is_some_and(is_entity_word_char)
+}
+
+fn is_entity_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '-'
 }
 
 fn markdown_for_obsidian(entry: &MemoryEntry) -> String {
@@ -327,11 +421,23 @@ fn markdown_for_obsidian(entry: &MemoryEntry) -> String {
     body.push_str("---\n");
     body.push_str(&format!("id: \"{}\"\n", entry.id.replace('"', "\\\"")));
     body.push_str(&format!("importance: {}\n", entry.importance));
-    body.push_str(&format!("keywords: {}\n", yaml_string_list(&entry.keywords)));
-    body.push_str(&format!("entities: {}\n", yaml_string_list(&entry.entities)));
+    body.push_str(&format!(
+        "keywords: {}\n",
+        yaml_string_list(&entry.keywords)
+    ));
+    body.push_str(&format!(
+        "entities: {}\n",
+        yaml_string_list(&entry.entities)
+    ));
     body.push_str(&format!("tags: {}\n", yaml_string_list(&entry.keywords)));
-    body.push_str(&format!("timestamp: \"{}\"\n", entry.timestamp.replace('"', "\\\"")));
-    body.push_str(&format!("category: \"{}\"\n", entry.category.replace('"', "\\\"")));
+    body.push_str(&format!(
+        "timestamp: \"{}\"\n",
+        entry.timestamp.replace('"', "\\\"")
+    ));
+    body.push_str(&format!(
+        "category: \"{}\"\n",
+        entry.category.replace('"', "\\\"")
+    ));
     body.push_str("---\n\n");
     body.push_str(&obsidian_link_entities(&entry.text, &entry.entities));
     if !entry.entities.is_empty() {
@@ -365,7 +471,14 @@ fn derive_ingest_fallback(source: &str, topic_hint: Option<&str>, content: &str)
             content
                 .lines()
                 .find(|line| !line.trim().is_empty())
-                .map(|line| line.trim().trim_start_matches('#').trim().chars().take(80).collect())
+                .map(|line| {
+                    line.trim()
+                        .trim_start_matches('#')
+                        .trim()
+                        .chars()
+                        .take(80)
+                        .collect()
+                })
         })
         .unwrap_or_else(|| {
             Path::new(source)
@@ -417,7 +530,11 @@ async fn extract_ingest_metadata(
             topic_hint.unwrap_or(""),
             content.chars().take(8000).collect::<String>()
         );
-        match server.llm.call_extract_llm(system, &user, None, 0.2, 800).await {
+        match server
+            .llm
+            .call_extract_llm(system, &user, None, 0.2, 800)
+            .await
+        {
             Ok(response) => match crate::llm::LlmClient::extract_json_payload(&response)
                 .ok()
                 .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
@@ -436,7 +553,11 @@ pub(crate) async fn handle_wiki_ingest(
 ) -> Result<String, String> {
     let content = source_for_path(&params.source).await?;
     if content.trim().is_empty() {
-        append_wiki_log(server, "ingest", &format!("{} | skipped empty source", params.source));
+        append_wiki_log(
+            server,
+            "ingest",
+            &format!("{} | skipped empty source", params.source),
+        );
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "empty_source",
@@ -445,7 +566,8 @@ pub(crate) async fn handle_wiki_ingest(
         .map_err(|e| format!("serialize wiki_ingest: {e}"));
     }
 
-    let metadata = extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
+    let metadata =
+        extract_ingest_metadata(server, &params.source, params.topic.as_deref(), &content).await;
     let title = metadata
         .get("title")
         .and_then(Value::as_str)
@@ -530,7 +652,9 @@ pub(crate) async fn handle_wiki_ingest(
                 valid_to: None,
             };
             let _ = server.with_named_project_store("wiki", |store| {
-                store.add_edge(&edge).map_err(|e| format!("wiki ingest edge: {e}"))
+                store
+                    .add_edge(&edge)
+                    .map_err(|e| format!("wiki ingest edge: {e}"))
             });
         }
     }
@@ -635,7 +759,12 @@ pub(crate) fn export_wiki_obsidian(
 
 pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &str) {
     let now = Utc::now().to_rfc3339();
-    let log_line = format!("## [{}] {} | {}", now, operation, details.trim());
+    let log_line = format!(
+        "## [{}] {} | {}",
+        now,
+        operation,
+        compact_log_details(details.trim())
+    );
     let entry = MemoryEntry {
         id: "wiki-operation-log".to_string(),
         path: "/wiki/_log".to_string(),
@@ -667,7 +796,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
             .get("wiki-operation-log")
             .map_err(|e| format!("wiki_log get: {e}"))?
         {
-            entry.text = format!("{}\n\n{}", existing.text.trim_end(), log_line);
+            entry.text = compact_wiki_log(&existing.text, &log_line);
             entry.revision = existing.revision;
         }
         store
@@ -683,7 +812,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
                 .get("wiki-operation-log")
                 .map_err(|e| format!("wiki_log fallback get: {e}"))?
             {
-                entry.text = format!("{}\n\n{}", existing.text.trim_end(), log_line);
+                entry.text = compact_wiki_log(&existing.text, &log_line);
                 entry.revision = existing.revision;
             }
             store
@@ -691,6 +820,35 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
                 .map_err(|e| format!("wiki_log fallback upsert: {e}"))
         });
     }
+}
+
+fn compact_wiki_log(existing: &str, new_line: &str) -> String {
+    let mut entries = existing
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    entries.push(new_line.trim().to_string());
+    if entries.len() > WIKI_LOG_MAX_ENTRIES {
+        entries.drain(0..entries.len() - WIKI_LOG_MAX_ENTRIES);
+    }
+    while entries.join("\n\n").len() > WIKI_LOG_MAX_BYTES && entries.len() > 1 {
+        entries.remove(0);
+    }
+    entries.join("\n\n")
+}
+
+fn compact_log_details(details: &str) -> String {
+    if details.len() <= WIKI_LOG_ENTRY_MAX_BYTES {
+        return details.to_string();
+    }
+    let marker = "... [truncated]";
+    let mut end = WIKI_LOG_ENTRY_MAX_BYTES.saturating_sub(marker.len());
+    while end > 0 && !details.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &details[..end], marker)
 }
 
 #[derive(Clone)]
@@ -761,7 +919,7 @@ fn run_skill_quality_guards_for_scope(
                     graph_edges.push(memory_core::MemoryEdge {
                         source_id: left.id.clone(),
                         target_id: right.id.clone(),
-                        relation: "related_to".to_string(),
+                        relation: "merge_hint".to_string(),
                         weight: similarity.clamp(0.0, 1.0),
                         metadata: json!({
                             "source": "skill_quality_guard",
@@ -1030,7 +1188,8 @@ pub(crate) fn handle_wiki_browse(
             // Return category stats (counts per category)
             let mut categories = Vec::new();
             let mut total = 0usize;
-            let all_entries = list_related_candidates(server, &project_name, 5000).unwrap_or_default();
+            let all_entries =
+                list_related_candidates(server, &project_name, 5000).unwrap_or_default();
 
             for &cat_path in WIKI_CATEGORIES {
                 let cat_prefix = format!("{cat_path}/");
@@ -1070,7 +1229,9 @@ pub(crate) fn handle_wiki_browse(
             let resolved_prefix = format!("{resolved_path}/");
             let entries = entries
                 .into_iter()
-                .filter(|entry| entry.path == resolved_path || entry.path.starts_with(&resolved_prefix))
+                .filter(|entry| {
+                    entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)
+                })
                 .take(limit)
                 .collect::<Vec<_>>();
 

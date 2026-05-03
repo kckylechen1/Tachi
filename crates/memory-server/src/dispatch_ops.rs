@@ -407,12 +407,14 @@ fn build_claude_command(
         cmd.arg("--model").arg(model);
     }
 
-    // MCP config injection
+    // Prompt MUST come before --mcp-config because --mcp-config <configs...>
+    // is a varadic arg that swallows all subsequent positional args.
+    cmd.arg(prompt);
+
+    // MCP config injection (after prompt to avoid swallowing)
     if let Some(path) = mcp_config_path {
         cmd.arg("--mcp-config").arg(path);
     }
-
-    cmd.arg(prompt);
 
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(cwd);
@@ -680,8 +682,10 @@ pub(crate) async fn handle_tachi_dispatch(
             let _ = update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None).await;
         }
 
-        // Cleanup workspace
-        let _ = std::fs::remove_dir_all(workspace_dir);
+        // Cleanup workspace (keep on failure for debugging)
+        if is_closed {
+            let _ = std::fs::remove_dir_all(workspace_dir);
+        }
     });
 
     // 7. Immediately return — main agent is unblocked!

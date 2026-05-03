@@ -384,6 +384,35 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_uses_fts_when_vectors_are_available_but_query_vec_missing() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "a",
+            "Voyage outage should still allow lexical fallback search",
+            &["voyage", "fallback"],
+        );
+        insert(
+            &mut conn,
+            "b",
+            "Unrelated operational note",
+            &["ops"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            vec_available: true,
+            query_vec: None,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "voyage fallback", &opts).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].entry.id, "a");
+        assert!(results[0].score.fts > 0.0);
+    }
+
+    #[test]
     fn empty_query_returns_empty() {
         let mut conn = setup();
         insert(&mut conn, "x", "some text", &[]);

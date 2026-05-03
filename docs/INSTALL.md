@@ -106,7 +106,11 @@ For advanced setups, you can route different LLM tasks to different providers:
 | `SUMMARY_*` | Fast L0 summaries | MiniMax-M2.7 |
 | `REASONING_*` | Skill evolution, planning | GLM-5.1 |
 
-Each prefix supports `_API_KEY`, `_BASE_URL`, and `_MODEL` suffixes. Omitted lanes fall back to `SILICONFLOW_*`.
+Each prefix supports `_API_KEY`, `_BASE_URL`, and `_MODEL` suffixes.
+
+- **EXTRACT / SUMMARY** — if omitted, fall back to `SILICONFLOW_*`.
+- **DISTILL ↔ REASONING** — these two lanes cross-fallback to each other; they do *not* fall back to `SILICONFLOW_*`.
+  To use Foundry LLM features (distillation, skill evolution, planning), you must configure at least one of `DISTILL_*` or `REASONING_*`.
 
 ---
 

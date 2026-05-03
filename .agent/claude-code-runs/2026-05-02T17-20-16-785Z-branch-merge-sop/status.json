@@ -1,0 +1,14 @@
+{
+  "status": "completed",
+  "run_id": "2026-05-02T17-20-16-785Z-branch-merge-sop",
+  "started_at": "2026-05-02T17:20:16.785Z",
+  "completed_at": "2026-05-02T17:29:36.647Z",
+  "work_folder": "/Users/kckylechen/Desktop/Sigil",
+  "prompt_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-02T17-20-16-785Z-branch-merge-sop/prompt.md",
+  "plan_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-02T17-20-16-785Z-branch-merge-sop/plan.md",
+  "result_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-02T17-20-16-785Z-branch-merge-sop/result.md",
+  "stdout_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-02T17-20-16-785Z-branch-merge-sop/stdout.log",
+  "stderr_path": "/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-02T17-20-16-785Z-branch-merge-sop/stderr.log",
+  "result_written": true,
+  "exit_code": 0
+}

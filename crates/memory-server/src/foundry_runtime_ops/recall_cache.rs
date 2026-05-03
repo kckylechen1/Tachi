@@ -265,7 +265,7 @@ async fn resolve_recall_cache_queries(
     dedup_strings(queries)
 }
 
-/// Ask the reasoning lane for a single natural-language query that
+/// Ask the extract lane (front-line LLM) for a single natural-language query that
 /// represents the source memories' shared topic. Returns:
 ///   * `Ok(Some(query))` — non-empty trimmed query.
 ///   * `Ok(None)` — LLM returned empty/whitespace; caller decides fallback.
@@ -300,7 +300,7 @@ async fn generate_recall_cache_query_via_llm(
 
     let raw = server
         .llm
-        .call_reasoning_llm(
+        .call_extract_llm(
             RECALL_QUERY_LLM_SYSTEM,
             &user,
             None,

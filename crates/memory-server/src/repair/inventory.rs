@@ -1,5 +1,6 @@
 //! DB inventory helpers: walk the manifest, select by label, daemon-alive check.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::daemon_lock::{process_alive, read_pid_file};
@@ -35,6 +36,7 @@ pub fn label_for(entry: &DbEntry) -> String {
 /// files like openclaw_legacy `.sqlite`).
 pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
     let want = filter.map(|s| s.trim().to_string());
+    let mut seen = HashSet::new();
 
     manifest
         .dbs
@@ -53,6 +55,13 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
         .filter(|e| match &want {
             None => true,
             Some(w) => matches(e, w),
+        })
+        .filter(|e| {
+            let key = std::fs::canonicalize(&e.path)
+                .unwrap_or_else(|_| PathBuf::from(&e.path))
+                .to_string_lossy()
+                .to_string();
+            seen.insert(key)
         })
         .cloned()
         .collect()

@@ -84,7 +84,7 @@ pub(crate) async fn handle_run_skill(
 
         server
             .llm
-            .call_reasoning_llm(system, &resolved_prompt, model, temperature, max_tokens)
+            .call_extract_llm(system, &resolved_prompt, model, temperature, max_tokens)
             .await
     };
 

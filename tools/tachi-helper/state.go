@@ -20,6 +20,9 @@ type State struct {
 	RegisteredMCPs []string
 	SelectedMCPs   []string
 
+	// Foundry
+	FoundrySelections map[string]string
+
 	// Shell
 	ShellType string
 	ShellRC   string

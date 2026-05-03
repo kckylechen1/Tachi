@@ -28,9 +28,9 @@ use crate::foundry_runtime_ops::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
-use crate::ghost_ops::{
-    handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
-    handle_ghost_subscribe, handle_ghost_topics,
+use crate::gh_ops::{
+    handle_gh_issue_read, handle_gh_issue_list, handle_gh_issue_create,
+    handle_gh_pr_read, handle_gh_pr_list, handle_gh_repo_view,
 };
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
@@ -969,92 +969,6 @@ impl MemoryServer {
         handle_handoff_check(self, params).await
     }
 
-    // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
-
-    #[tool(
-        description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe."
-    )]
-    pub(crate) async fn ghost_publish(
-        &self,
-        Parameters(params): Parameters<GhostPublishParams>,
-    ) -> Result<String, String> {
-        handle_ghost_publish(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for ghost_publish. Send a ghost whisper to a topic."
-    )]
-    pub(crate) async fn ghost_whisper(
-        &self,
-        Parameters(params): Parameters<GhostPublishParams>,
-    ) -> Result<String, String> {
-        handle_ghost_publish(self, params).await
-    }
-
-    #[tool(
-        description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again."
-    )]
-    pub(crate) async fn ghost_subscribe(
-        &self,
-        Parameters(params): Parameters<GhostSubscribeParams>,
-    ) -> Result<String, String> {
-        handle_ghost_subscribe(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for ghost_subscribe. Listen for new whispers."
-    )]
-    pub(crate) async fn ghost_listen(
-        &self,
-        Parameters(params): Parameters<GhostSubscribeParams>,
-    ) -> Result<String, String> {
-        handle_ghost_subscribe(self, params).await
-    }
-
-    #[tool(
-        description = "List active Ghost Whispers topics with message counts and last message time."
-    )]
-    pub(crate) async fn ghost_topics(&self) -> Result<String, String> {
-        handle_ghost_topics(self).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for ghost_topics. List active whisper channels."
-    )]
-    pub(crate) async fn ghost_channels(&self) -> Result<String, String> {
-        handle_ghost_topics(self).await
-    }
-
-    #[tool(
-        description = "Acknowledge a Ghost topic cursor for an agent. Supports explicit index or message_id."
-    )]
-    pub(crate) async fn ghost_ack(
-        &self,
-        Parameters(params): Parameters<GhostAckParams>,
-    ) -> Result<String, String> {
-        handle_ghost_ack(self, params).await
-    }
-
-    #[tool(
-        description = "Write a Ghost reflection entry and optionally promote it into derived rules."
-    )]
-    pub(crate) async fn ghost_reflect(
-        &self,
-        Parameters(params): Parameters<GhostReflectParams>,
-    ) -> Result<String, String> {
-        handle_ghost_reflect(self, params).await
-    }
-
-    #[tool(
-        description = "Promote a Ghost message into long-term memory and mark the message as promoted."
-    )]
-    pub(crate) async fn ghost_promote(
-        &self,
-        Parameters(params): Parameters<GhostPromoteParams>,
-    ) -> Result<String, String> {
-        handle_ghost_promote(self, params).await
-    }
-
     // ─── Skill Chaining (Unix Pipe-Style Composition) ────────────────────────
 
     #[tool(
@@ -1737,5 +1651,67 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiCompleteParams>,
     ) -> Result<String, String> {
         crate::complete_ops::handle_tachi_complete(self, params).await
+    }
+
+    // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
+
+    #[tool(
+        description = "Read a GitHub issue by number. Returns issue details as JSON. Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_issue_read(
+        &self,
+        Parameters(params): Parameters<GhIssueReadParams>,
+    ) -> Result<String, String> {
+        handle_gh_issue_read(self, params).await
+    }
+
+    #[tool(
+        description = "List GitHub issues in a repository. Filter by state and labels. Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_issue_list(
+        &self,
+        Parameters(params): Parameters<GhIssueListParams>,
+    ) -> Result<String, String> {
+        handle_gh_issue_list(self, params).await
+    }
+
+    #[tool(
+        description = "Create a new GitHub issue. Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_issue_create(
+        &self,
+        Parameters(params): Parameters<GhIssueCreateParams>,
+    ) -> Result<String, String> {
+        handle_gh_issue_create(self, params).await
+    }
+
+    #[tool(
+        description = "Read a GitHub pull request by number. Returns PR details as JSON. Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_pr_read(
+        &self,
+        Parameters(params): Parameters<GhPrReadParams>,
+    ) -> Result<String, String> {
+        handle_gh_pr_read(self, params).await
+    }
+
+    #[tool(
+        description = "List GitHub pull requests in a repository. Filter by state. Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_pr_list(
+        &self,
+        Parameters(params): Parameters<GhPrListParams>,
+    ) -> Result<String, String> {
+        handle_gh_pr_list(self, params).await
+    }
+
+    #[tool(
+        description = "View GitHub repository metadata (stars, forks, languages, etc). Requires GH_TOKEN in Vault."
+    )]
+    pub(crate) async fn tachi_gh_repo_view(
+        &self,
+        Parameters(params): Parameters<GhRepoViewParams>,
+    ) -> Result<String, String> {
+        handle_gh_repo_view(self, params).await
     }
 }

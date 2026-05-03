@@ -305,7 +305,7 @@ async fn build_similarity_edges(
             let edge = memory_core::MemoryEdge {
                 source_id: entry.id.clone(),
                 target_id: result.entry.id.clone(),
-                relation: "related_to".to_string(),
+                relation: "similar_to".to_string(),
                 weight: result.score.final_score.clamp(0.15, 1.0),
                 metadata: json!({
                     "auto_ingest": true,

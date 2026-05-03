@@ -211,7 +211,7 @@ pub(crate) async fn handle_hub_register(
 
             tokio::spawn(async move {
                 match llm
-                    .call_reasoning_llm(
+                    .call_extract_llm(
                         crate::prompts::SKILL_ANALYSIS_PROMPT,
                         &prompt_text,
                         None,

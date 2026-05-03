@@ -17,8 +17,8 @@
 //!   3. Implementations may freely access `self.conn`, `self.db_label`,
 //!      etc. — those fields are `pub(crate)`.
 
+pub mod agent_state;
 pub mod audit;
-pub mod ghost;
 pub mod hub;
 pub mod pack;
 pub mod sandbox;

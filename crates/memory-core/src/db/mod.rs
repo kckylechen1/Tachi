@@ -4,7 +4,6 @@ mod common;
 mod domain;
 pub mod foundry_config;
 pub mod foundry_jobs;
-mod ghost;
 mod graph;
 mod hub_db;
 mod memory_crud;
@@ -22,11 +21,6 @@ pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
 pub use common::normalize_utc_iso_or_now;
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
-pub use ghost::{
-    ghost_fetch_messages_since, ghost_get_cursor, ghost_get_message, ghost_get_message_topic_index,
-    ghost_get_topic_total, ghost_insert_reflection, ghost_list_topics, ghost_mark_message_promoted,
-    ghost_publish_message, ghost_set_cursor, ghost_upsert_subscription,
-};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges, graph_expand,
     remove_edge, remove_edges_for_memory,
