@@ -424,6 +424,16 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        // Try Claude Code CLI first for higher-quality reasoning
+        match Self::call_claude_cli(system, user).await {
+            Ok(response) => {
+                tracing::info!("reasoning via claude-cli succeeded ({} chars)", response.len());
+                return Ok(response);
+            }
+            Err(e) => {
+                tracing::warn!("claude-cli reasoning failed, falling back to lane LLM: {e}");
+            }
+        }
         self.call_lane_llm(
             ChatLane::Reasoning,
             system,
@@ -433,6 +443,38 @@ impl LlmClient {
             max_tokens,
         )
         .await
+    }
+
+    async fn call_claude_cli(system: &str, user: &str) -> Result<String, String> {
+        use tokio::process::Command;
+
+        let prompt = format!(
+            "<system>\n{system}\n</system>\n\n{user}"
+        );
+
+        let output = Command::new("claude")
+            .arg("-p")
+            .arg("--output-format").arg("text")
+            .arg("--max-turns").arg("1")
+            .arg(&prompt)
+            .output()
+            .await
+            .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!(
+                "claude cli exited {}: {}",
+                output.status.code().unwrap_or(-1),
+                stderr.chars().take(500).collect::<String>()
+            ));
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if text.is_empty() {
+            return Err("claude cli returned empty output".to_string());
+        }
+        Ok(text)
     }
 
     pub async fn call_summary_llm(
