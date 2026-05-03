@@ -247,7 +247,8 @@ pub(crate) async fn handle_tachi_complete(
                         let mut stmt = conn
                             .prepare(
                                 "SELECT id, text, metadata FROM memories \
-                                 WHERE category = 'lesson' AND path LIKE '/eval/lessons/%' \
+                                 WHERE path LIKE '/eval/lessons/%' \
+                                   AND id NOT LIKE 'foundry:%' \
                                  ORDER BY created_at DESC LIMIT 30",
                             )
                             .map_err(|e| format!("lesson dedup query: {e}"))?;
