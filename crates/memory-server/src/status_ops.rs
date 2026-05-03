@@ -509,7 +509,7 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
     };
     let mut out = Vec::new();
     for row in rows {
-        let (id, summary, _text, meta_str, created_at) = match row {
+        let (id, summary, text, meta_str, created_at) = match row {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -521,7 +521,7 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
             .unwrap_or("unknown")
             .to_string();
         let outcome = meta
-            .get("state")
+            .get("a2a_state")
             .and_then(|v| v.as_str())
             .map(|s| match s {
                 "TASK_STATE_IN_PROGRESS" => "in_progress",
@@ -542,12 +542,29 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
             .ok()
             .map(|dt| format_elapsed(now - dt))
             .unwrap_or_default();
-        let task = summary
-            .trim_start_matches(|c: char| !c.is_alphanumeric())
+        let dispatch_id = meta
+            .get("dispatch_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&id)
             .chars()
-            .take(60)
-            .collect::<String>();
-        let dispatch_id = id.chars().take(12).collect();
+            .take(12)
+            .collect();
+        let task = meta
+            .get("task")
+            .and_then(|v| v.as_str())
+            .map(|s| s.chars().take(60).collect::<String>())
+            .or_else(|| {
+                text.lines()
+                    .find(|l| l.starts_with("Task: "))
+                    .map(|l| l.trim_start_matches("Task: ").chars().take(60).collect())
+            })
+            .unwrap_or_else(|| {
+                summary
+                    .trim_start_matches(|c: char| !c.is_alphanumeric())
+                    .chars()
+                    .take(60)
+                    .collect()
+            });
         out.push(DispatchStatus {
             dispatch_id,
             agent,
@@ -578,6 +595,8 @@ fn collect_recent_evals(
         let mut stmt = match conn.prepare(
             "SELECT id, summary, metadata, created_at FROM memories \
              WHERE path LIKE '/eval/2%' \
+               AND id NOT LIKE 'foundry:%' \
+               AND category = 'experience' \
              ORDER BY created_at DESC LIMIT 5",
         ) {
             Ok(s) => s,
