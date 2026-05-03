@@ -205,14 +205,6 @@ pub fn surprise_score(
     raw.clamp(0.0, 1.0)
 }
 
-/// Reciprocal Rank Fusion (RRF) score used to merge sorted lists.
-/// Standard k=60 constant. Reserved for future RRF-mode scoring.
-#[inline]
-#[allow(dead_code)]
-pub fn rrf(rank: usize) -> f64 {
-    1.0 / (60.0 + rank as f64 + 1.0)
-}
-
 /// Weights for the hybrid scoring formula.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HybridWeights {

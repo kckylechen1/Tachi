@@ -12,9 +12,12 @@ type State struct {
 	TachiMissing bool
 
 	// Keys
-	DotEnvFiles []string
-	FoundKeys   []EnvKey
+	DotEnvFiles  []string
+	FoundKeys    []EnvKey
 	SelectedKeys []string
+
+	// Providers
+	ProviderSelections map[string]ProviderSelection
 
 	// MCP
 	RegisteredMCPs []string
@@ -24,14 +27,23 @@ type State struct {
 	FoundrySelections map[string]string
 
 	// Shell
-	ShellType string
-	ShellRC   string
+	ShellType  string
+	ShellRC    string
 	RCModified bool
 }
 
 type EnvKey struct {
-	File    string
-	Name    string
-	Value   string
-	Masked  string
+	File   string
+	Name   string
+	Value  string
+	Masked string
+}
+
+type ProviderSelection struct {
+	CategoryID string
+	Name       string
+	ProviderID string
+	APIKeyEnv  string
+	Endpoint   string
+	Model      string
 }

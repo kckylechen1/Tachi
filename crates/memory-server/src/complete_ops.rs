@@ -9,7 +9,6 @@ use crate::hub_ops::handle_distill_trajectory;
 use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{DistillTrajectoryParams, SaveMemoryParams, TachiCompleteParams};
 use crate::MemoryServer;
-use rusqlite;
 use serde_json::json;
 
 pub(crate) async fn handle_tachi_complete(

@@ -2,7 +2,7 @@
 //!
 //! Background: `MemoryStore` (defined in `crate::lib`) is the single
 //! handle exposed to language bindings. Historically every domain
-//! (hub, ghost, sandbox, pack, vault, audit, …) added its thin
+//! (hub, sandbox, pack, vault, audit, …) added its thin
 //! delegation methods directly to the same `impl` block, which grew the
 //! root `lib.rs` past 1100 lines of repetitive shim code.
 //!

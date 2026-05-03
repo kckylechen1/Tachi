@@ -126,6 +126,63 @@ func TestMultiSelect(t *testing.T) {
 	}
 }
 
+func TestProviderEnvEntriesDefaults(t *testing.T) {
+	entries := providerEnvEntries(map[string]ProviderSelection{
+		"embedding": {
+			ProviderID: "voyage",
+			APIKeyEnv:  "VOYAGE_API_KEY",
+			Endpoint:   "https://api.voyageai.com/v1/embeddings",
+			Model:      "voyage-4",
+		},
+		"reasoning": {
+			ProviderID: "claude-code",
+		},
+		"agent": {
+			ProviderID: "claude-code",
+		},
+	})
+
+	if entries["EMBEDDING_PROVIDER"] != "voyage" {
+		t.Fatalf("EMBEDDING_PROVIDER = %q, want voyage", entries["EMBEDDING_PROVIDER"])
+	}
+	if _, ok := entries["VOYAGE_API_KEY"]; ok {
+		t.Fatalf("provider config should not write real API key slots")
+	}
+	if entries["TACHI_AGENT_BACKEND"] != "claude" {
+		t.Fatalf("TACHI_AGENT_BACKEND = %q, want claude", entries["TACHI_AGENT_BACKEND"])
+	}
+}
+
+func TestProviderEnvEntriesGLMReasoning(t *testing.T) {
+	entries := providerEnvEntries(map[string]ProviderSelection{
+		"reasoning": {
+			ProviderID: "glm-5.1",
+			APIKeyEnv:  "ZAI_API_KEY",
+			Endpoint:   "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+			Model:      "glm-5.1",
+		},
+		"agent": {
+			ProviderID: "glm-5.1-claude",
+			APIKeyEnv:  "ZAI_API_KEY",
+			Endpoint:   "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+			Model:      "glm-5.1",
+		},
+	})
+
+	if entries["REASONING_MODEL"] != "glm-5.1" {
+		t.Fatalf("REASONING_MODEL = %q, want glm-5.1", entries["REASONING_MODEL"])
+	}
+	if _, ok := entries["REASONING_API_KEY"]; ok {
+		t.Fatalf("provider config should not write alias API key refs")
+	}
+	if entries["TACHI_AGENT_BACKEND"] != "claude" {
+		t.Fatalf("TACHI_AGENT_BACKEND = %q, want claude", entries["TACHI_AGENT_BACKEND"])
+	}
+	if entries["TACHI_AGENT_MODEL"] != "glm-5.1" {
+		t.Fatalf("TACHI_AGENT_MODEL = %q, want glm-5.1", entries["TACHI_AGENT_MODEL"])
+	}
+}
+
 func TestFindTachi(t *testing.T) {
 	_, err := findTachi()
 	// Might not be in PATH on this machine, that's ok

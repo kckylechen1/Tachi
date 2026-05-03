@@ -142,13 +142,13 @@ pub(crate) async fn handle_gh_issue_read(
         ]);
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_issue_read",
         "repo": params.repo,
         "issue_number": params.issue_number,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_gh_issue_list(
@@ -169,12 +169,12 @@ pub(crate) async fn handle_gh_issue_list(
     }
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_issue_list",
         "repo": params.repo,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_gh_issue_create(
@@ -197,12 +197,12 @@ pub(crate) async fn handle_gh_issue_create(
     }
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_issue_create",
         "repo": params.repo,
         "result": output.trim(),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_gh_pr_read(
@@ -220,13 +220,13 @@ pub(crate) async fn handle_gh_pr_read(
         ]);
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_read",
         "repo": params.repo,
         "pr_number": params.pr_number,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_gh_pr_list(
@@ -246,12 +246,12 @@ pub(crate) async fn handle_gh_pr_list(
         ]);
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_list",
         "repo": params.repo,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_gh_repo_view(
@@ -267,12 +267,12 @@ pub(crate) async fn handle_gh_repo_view(
     ]);
 
     let output = run_gh(cmd, &token)?;
-    Ok(serde_json::to_string(&json!({
+    serde_json::to_string(&json!({
         "tool": "tachi_gh_repo_view",
         "repo": params.repo,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
     }))
-    .map_err(|e| format!("serialize: {e}"))?)
+    .map_err(|e| format!("serialize: {e}"))
 }
 
 pub(crate) async fn handle_tachi_gh(

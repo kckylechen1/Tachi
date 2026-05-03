@@ -34,6 +34,10 @@ func newKeysStep(state *State) *keysStep {
 func (s *keysStep) title() string { return T("Import API Keys", "导入 API 密钥") }
 func (s *keysStep) subtitle() string {
 	if len(s.state.FoundKeys) == 0 {
+		missing := requiredProviderKeys(s.state)
+		if len(missing) > 0 {
+			return fmt.Sprintf(T("Missing selected provider keys: %s", "缺少所选供应商密钥: %s"), strings.Join(missing, ", "))
+		}
 		return T("No .env files found to import", "未找到可导入的 .env 文件")
 	}
 	return fmt.Sprintf(T("Found %d keys in .env files — select which to import into Vault", "在 .env 文件中找到 %d 个密钥 — 选择要导入密钥库的密钥"), len(s.state.FoundKeys))
@@ -63,12 +67,27 @@ func (s *keysStep) Init() tea.Cmd {
 	}
 
 	// Build multi-select
+	requiredKeys := providerRequiredKeySet(s.state)
 	items := make([]string, len(s.state.FoundKeys))
 	for i, k := range s.state.FoundKeys {
 		items[i] = k.Masked
+		if requiredKeys[k.Name] {
+			items[i] += T(" (selected provider)", "（所选供应商）")
+		}
 	}
 	s.ms = newMultiSelect(items)
-	s.ms.SelectAll() // default: select all
+	if len(requiredKeys) > 0 {
+		for i, k := range s.state.FoundKeys {
+			if requiredKeys[k.Name] {
+				s.ms.selected[i] = true
+			}
+		}
+		if len(s.ms.selected) == 0 {
+			s.ms.SelectAll()
+		}
+	} else {
+		s.ms.SelectAll() // default: select all
+	}
 	s.phase = keysPhaseSelect
 	return nil
 }
@@ -94,12 +113,10 @@ func (s *keysStep) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				// Map selected indices back to key names
 				s.state.SelectedKeys = make([]string, 0)
-				for _, label := range selected {
-					for _, k := range s.state.FoundKeys {
-						if k.Masked == label {
-							s.state.SelectedKeys = append(s.state.SelectedKeys, k.Name)
-							break
-						}
+				for selectedIdx, item := range s.ms.items {
+					if s.ms.selected[selectedIdx] {
+						_ = item
+						s.state.SelectedKeys = append(s.state.SelectedKeys, s.state.FoundKeys[selectedIdx].Name)
 					}
 				}
 				s.phase = keysPhaseImporting
@@ -131,16 +148,27 @@ func (s *keysStep) View() string {
 	switch s.phase {
 	case keysPhaseSkip:
 		sb.WriteString(warnStyle.Render("  ⊘ "+T("Skipped", "已跳过")) + T(" — no keys to import\n", " — 没有密钥需要导入\n"))
+		missing := requiredProviderKeys(s.state)
+		if len(missing) > 0 {
+			sb.WriteString("\n  " + warnStyle.Render(T("Still missing selected provider keys:", "仍缺少所选供应商密钥:")) + "\n")
+			for _, key := range missing {
+				sb.WriteString("    " + key + "\n")
+			}
+		}
 		sb.WriteString("\n" + hintStyle.Render(T("  Press Enter to continue", "  按回车继续")))
 
 	case keysPhaseSelect:
 		sb.WriteString("  " + T("Select keys to import into Vault:", "选择要导入密钥库的密钥:") + "\n\n")
+		missing := requiredProviderKeys(s.state)
+		if len(missing) > 0 {
+			sb.WriteString("  " + warnStyle.Render(T("Needed by selected providers:", "所选供应商需要:")) + " " + strings.Join(missing, ", ") + "\n\n")
+		}
 		sb.WriteString(s.ms.View())
 		sb.WriteString(hintStyle.Render(T("\n  enter: import selected  ·  s: skip this step", "\n  回车: 导入选中  ·  s: 跳过此步骤")))
 
 	case keysPhaseImporting:
 		sb.WriteString("  " + lipgloss.NewStyle().Foreground(accent).Render("⠋") +
-			fmt.Sprintf(T(" Importing %d keys into Vault...", " 正在导入 %d 个密钥到密钥库..."), len(s.state.SelectedKeys))+"\n")
+			fmt.Sprintf(T(" Importing %d keys into Vault...", " 正在导入 %d 个密钥到密钥库..."), len(s.state.SelectedKeys)) + "\n")
 
 	case keysPhaseDone:
 		if s.errMsg != "" {

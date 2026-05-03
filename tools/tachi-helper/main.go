@@ -21,6 +21,7 @@ func main() {
 			fmt.Println("Runs an interactive wizard that helps you:")
 			fmt.Println("  • Check Tachi installation and health")
 			fmt.Println("  • Initialize / unlock the encrypted Vault")
+			fmt.Println("  • Choose API providers and endpoints")
 			fmt.Println("  • Import API keys from .env files into Vault")
 			fmt.Println("  • Register MCP servers (Exa, Tavily, Context7, etc.)")
 			fmt.Println("  • Add shell integration (eval \"$(tachi env)\")")

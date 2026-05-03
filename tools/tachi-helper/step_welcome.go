@@ -47,6 +47,7 @@ func (s *welcomeStep) View() string {
 	steps := []string{
 		T("Check your Tachi installation", "检查 Tachi 安装"),
 		T("Initialize the encrypted Vault", "初始化加密密钥库"),
+		T("Choose API providers and endpoints", "选择 API 供应商和端点"),
 		T("Import API keys from .env files", "从 .env 文件导入 API 密钥"),
 		T("Register MCP servers", "注册 MCP 服务器"),
 		T("Set up shell integration", "设置 Shell 集成"),

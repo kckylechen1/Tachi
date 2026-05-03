@@ -1514,7 +1514,7 @@ async fn run_vault_command(
             let salt = crate::vault_crypto::generate_salt();
             let key = crate::vault_crypto::derive_key(&password, &salt)?;
             let verifier = crate::vault_crypto::create_verifier(&key)?;
-            let salt_b64 = B64.encode(&salt);
+            let salt_b64 = B64.encode(salt);
             let now = chrono::Utc::now().to_rfc3339();
 
             let store = open_cli_store(global_db_path)?;
@@ -1695,7 +1695,7 @@ async fn run_vault_command(
             if entries.is_empty() {
                 println!("(no secrets stored)");
             } else {
-                println!("{:<30} {:<12} {}", "NAME", "TYPE", "DESCRIPTION");
+                println!("{:<30} {:<12} DESCRIPTION", "NAME", "TYPE");
                 for entry in &entries {
                     println!(
                         "{:<30} {:<12} {}",

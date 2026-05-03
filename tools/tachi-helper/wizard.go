@@ -14,6 +14,7 @@ const (
 	stepWelcome stepID = iota
 	stepDoctor
 	stepVault
+	stepProviders
 	stepKeys
 	stepMCP
 	stepFoundry
@@ -58,6 +59,7 @@ func newWizard() *wizard {
 	w.steps[stepWelcome] = newWelcomeStep()
 	w.steps[stepDoctor] = newDoctorStep(state)
 	w.steps[stepVault] = newVaultStep(state)
+	w.steps[stepProviders] = newProvidersStep(state)
 	w.steps[stepKeys] = newKeysStep(state)
 	w.steps[stepMCP] = newMCPStep(state)
 	w.steps[stepFoundry] = newFoundryStep(state)
@@ -150,6 +152,7 @@ func (w *wizard) renderHeader(s step) string {
 		T("Welcome", "欢迎"),
 		T("Health", "健康检查"),
 		T("Vault", "密钥库"),
+		T("Providers", "供应商"),
 		T("Keys", "密钥"),
 		T("MCP", "MCP"),
 		T("Backend", "后台"),
