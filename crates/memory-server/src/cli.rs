@@ -359,6 +359,11 @@ pub(crate) enum Commands {
         #[arg(long, global = true)]
         json: bool,
     },
+    /// Vault secret management (init, unlock, set, get, list, lock, status).
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
+    },
     /// Output vault secrets as `export KEY=VALUE` lines for shell injection.
     /// Replaces project .env files — pipe into shell with: eval "$(tachi env --keychain)"
     /// or add to .bashrc/.zshrc: eval "$(tachi env --keychain)".
@@ -600,4 +605,65 @@ pub(crate) enum HubAction {
         id: String,
     },
     Stats,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum VaultAction {
+    /// Initialize the vault with a master password.
+    Init,
+    /// Unlock the vault for this session.
+    Unlock {
+        /// Read password from stdin instead of prompting.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain (service: tachi-vault, account: default).
+        #[arg(long)]
+        keychain: bool,
+    },
+    /// Store a secret in the vault. Prompts for the value interactively
+    /// unless --value-stdin is set.
+    Set {
+        /// Secret name (e.g. GH_TOKEN, OPENAI_API_KEY).
+        name: String,
+        /// Secret type (default: api_key).
+        #[arg(long, default_value = "api_key")]
+        secret_type: String,
+        /// Optional description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Read vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read the secret value from stdin (first line) instead of prompting.
+        /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
+        #[arg(long)]
+        value_stdin: bool,
+    },
+    /// Get a secret value from the vault.
+    Get {
+        /// Secret name.
+        name: String,
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+    },
+    /// List all secret names in the vault (does not show values).
+    List {
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+    },
+    /// Lock the vault (clear cached key).
+    Lock,
+    /// Show vault status (initialized, locked/unlocked, entry count).
+    Status,
 }
