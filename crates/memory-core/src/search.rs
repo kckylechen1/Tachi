@@ -5,10 +5,13 @@
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    db::{fetch_by_ids, get_access_times, graph_expand, record_access, search_fts, search_vec},
+    db::{
+        fetch_by_ids, get_access_times, get_superseded_ids, graph_expand, record_access,
+        search_fts, search_vec,
+    },
     error::MemoryError,
     scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
     types::{MemoryEntry, SearchResult},
@@ -61,6 +64,31 @@ impl Default for SearchOptions {
             graph_expand_hops: 0,
             graph_relation_filter: None,
         }
+    }
+}
+
+fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
+    if opts.weights != HybridWeights::default() {
+        return opts.weights.clone();
+    }
+
+    let path = opts.path_prefix.as_deref().unwrap_or("");
+    if path.starts_with("/wiki") || path.starts_with("/behavior") || path.starts_with("/rules") {
+        HybridWeights {
+            decay: 0.02,
+            semantic: 0.48,
+            fts: 0.30,
+            symbolic: 0.20,
+        }
+    } else if path.starts_with("/events") || path.starts_with("/notes") {
+        HybridWeights {
+            decay: 0.25,
+            semantic: 0.35,
+            fts: 0.25,
+            symbolic: 0.15,
+        }
+    } else {
+        HybridWeights::default()
     }
 }
 
@@ -118,6 +146,29 @@ fn apply_mmr_diversity(
 
     selected.extend(deferred);
     selected
+}
+
+fn newest_by_shared_entity(entries: &HashMap<String, &MemoryEntry>) -> HashSet<String> {
+    let mut by_entity: HashMap<&str, Vec<&MemoryEntry>> = HashMap::new();
+    for entry in entries.values() {
+        for entity in &entry.entities {
+            let entity = entity.trim();
+            if !entity.is_empty() {
+                by_entity.entry(entity).or_default().push(*entry);
+            }
+        }
+    }
+
+    by_entity
+        .into_values()
+        .filter(|items| items.len() > 1)
+        .filter_map(|items| {
+            items
+                .into_iter()
+                .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
+                .map(|entry| entry.id.clone())
+        })
+        .collect()
 }
 
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
@@ -217,14 +268,31 @@ pub fn hybrid_search(
     let access_times = get_access_times(conn, &candidate_ids_vec).unwrap_or_default();
 
     // ── Hybrid scoring with ACT-R enhancement ─────────────────────────────────
-    let scores = hybrid_score(
+    let weights = resolve_weights(opts);
+    let mut scores = hybrid_score(
         &entries_ref,
         &vec_scores,
         &fts_scores,
         &symbolic_scores,
-        &opts.weights,
+        &weights,
         &access_times,
     );
+
+    let superseded_ids = get_superseded_ids(conn, &candidate_ids_vec).unwrap_or_default();
+    for id in &superseded_ids {
+        if let Some(score) = scores.get_mut(id) {
+            score.final_score *= 0.3;
+        }
+    }
+
+    let newest_by_entity = newest_by_shared_entity(&entries_ref);
+    for id in newest_by_entity {
+        if !superseded_ids.contains(&id) {
+            if let Some(score) = scores.get_mut(&id) {
+                score.final_score *= 1.08;
+            }
+        }
+    }
     // ── Sort and take top K ───────────────────────────────────────────────────
     let mut ranked: Vec<(&String, f64)> = scores
         .iter()

@@ -1,5 +1,36 @@
 use super::*;
 
+fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
+    entry.importance >= 0.5 || entry.vector.is_some()
+}
+
+fn path_root(path: &str) -> &str {
+    path.trim_matches('/').split('/').next().unwrap_or("")
+}
+
+fn is_newer_than(new_ts: &str, old_ts: &str) -> bool {
+    let new = chrono::DateTime::parse_from_rfc3339(new_ts);
+    let old = chrono::DateTime::parse_from_rfc3339(old_ts);
+    match (new, old) {
+        (Ok(new), Ok(old)) => new > old,
+        _ => new_ts > old_ts,
+    }
+}
+
+fn should_supersede(
+    new_entry: &MemoryEntry,
+    old_entry: &MemoryEntry,
+    shared_count: usize,
+    symbolic_score: f64,
+) -> bool {
+    matches!(new_entry.category.as_str(), "fact" | "preference")
+        && matches!(old_entry.category.as_str(), "fact" | "preference")
+        && is_newer_than(&new_entry.timestamp, &old_entry.timestamp)
+        && shared_count >= 2
+        && (new_entry.topic == old_entry.topic || symbolic_score > 0.3)
+        && path_root(&new_entry.path) == path_root(&old_entry.path)
+}
+
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
@@ -79,12 +110,14 @@ pub(crate) async fn handle_save_memory(
         }),
     );
 
+    let importance = params.importance.clamp(0.0, 1.0);
+
     let entry = MemoryEntry {
         id: id.clone(),
         path,
         summary,
         text: params.text,
-        importance: params.importance.clamp(0.0, 1.0),
+        importance,
         timestamp: timestamp.clone(),
         category,
         topic,
@@ -122,7 +155,7 @@ pub(crate) async fn handle_save_memory(
     // spawning a per-item task. The batcher accumulates items and calls
     // the Voyage API in batch (up to 128 per request), dramatically
     // reducing API calls when the agent saves multiple memories in sequence.
-    if needs_embedding || needs_summary {
+    if (needs_embedding || needs_summary) && should_enqueue_enrichment(&entry) {
         let _ = server.enrich_tx.try_send(super::EnrichmentItem {
             id: id.clone(),
             text: entry.text.clone(),
@@ -151,6 +184,7 @@ pub(crate) async fn handle_save_memory(
     if params.auto_link && !entry.entities.is_empty() {
         let auto_link_server = server.clone();
         let auto_link_id = id.clone();
+        let auto_link_entry = entry.clone();
         let auto_link_entities = entry.entities.clone();
         let auto_link_named_project = params.project.clone();
         let auto_link_target_db = target_db;
@@ -188,18 +222,44 @@ pub(crate) async fn handle_save_memory(
                             .filter(|e| auto_link_entities.contains(e))
                             .collect();
                         if !shared.is_empty() {
+                            let now = chrono::Utc::now().to_rfc3339();
+                            let supersedes = should_supersede(
+                                &auto_link_entry,
+                                &result.entry,
+                                shared.len(),
+                                result.score.symbolic,
+                            );
                             let edge = memory_core::MemoryEdge {
                                 source_id: auto_link_id.clone(),
                                 target_id: result.entry.id.clone(),
-                                relation: "shares_entities".to_string(),
-                                weight: 0.5,
-                                metadata: json!({ "auto_link": true, "shared_entities": shared }),
-                                created_at: chrono::Utc::now().to_rfc3339(),
+                                relation: if supersedes {
+                                    "supersedes"
+                                } else {
+                                    "related_to"
+                                }
+                                .to_string(),
+                                weight: if supersedes { 0.9 } else { 0.5 },
+                                metadata: json!({
+                                    "auto_link": true,
+                                    "shared_entities": shared,
+                                    "valid_to": if supersedes { Some(now.clone()) } else { None },
+                                }),
+                                created_at: now.clone(),
                                 valid_from: String::new(),
-                                valid_to: None,
+                                valid_to: if supersedes { Some(now.clone()) } else { None },
                             };
                             let save_edge_action = |store: &mut MemoryStore| {
-                                store.add_edge(&edge).map_err(|e| format!("{}", e))
+                                store.add_edge(&edge).map_err(|e| format!("{}", e))?;
+                                if supersedes {
+                                    store
+                                        .connection()
+                                        .execute(
+                                            "UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
+                                            rusqlite::params![auto_link_id, now, result.entry.id],
+                                        )
+                                        .map_err(|e| format!("{e}"))?;
+                                }
+                                Ok(())
                             };
                             let _ = if let Some(ref p) = auto_link_named_project {
                                 auto_link_server.with_named_project_store(p, save_edge_action)

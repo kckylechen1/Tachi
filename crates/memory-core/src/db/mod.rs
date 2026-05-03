@@ -22,8 +22,8 @@ pub use audit::{audit_log_insert, audit_log_list};
 pub use common::normalize_utc_iso_or_now;
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use graph::{
-    add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges, graph_expand,
-    remove_edge, remove_edges_for_memory,
+    add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
+    get_superseded_ids, graph_expand, remove_edge, remove_edges_for_memory,
 };
 pub use hub_db::{
     hub_delete, hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome,

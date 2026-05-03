@@ -37,6 +37,31 @@ fn resolve_domain(domain: Option<String>) -> Option<String> {
     })
 }
 
+fn is_lazy_source(source: &str) -> bool {
+    matches!(source, "extraction" | "auto" | "ingest_event")
+}
+
+fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
+    entry.importance >= 0.5 || entry.vector.is_some()
+}
+
+fn days_since(timestamp: &str) -> f64 {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|dt| (Utc::now() - dt.with_timezone(&Utc)).num_seconds().max(0) as f64 / 86_400.0)
+        .unwrap_or(0.0)
+}
+
+/// Calculate whether an accessed ephemeral memory should be promoted.
+pub(crate) fn calculate_promotion_score(entry: &MemoryEntry, access_days: usize) -> f64 {
+    let frequency = (access_days as f64).ln_1p() / 6.0_f64.ln_1p();
+    let age_days = days_since(&entry.timestamp);
+    let recency = (-0.693 * age_days / 14.0).exp();
+    let conceptual = (entry.keywords.len() as f64 / 5.0).min(1.0);
+
+    (frequency * 0.30 + recency * 0.25 + entry.importance * 0.25 + conceptual * 0.20)
+        .clamp(0.0, 1.0)
+}
+
 fn default_source_path_prefix(
     source_url: Option<&str>,
     source: Option<&str>,
@@ -133,6 +158,11 @@ fn build_ingest_entry(
         summary_from_text(&text)
     };
     let importance = importance.clamp(0.0, 1.0);
+    let retention_policy = if is_lazy_source(&source) && importance < 0.5 {
+        Some("ephemeral".to_string())
+    } else {
+        retention_policy
+    };
 
     MemoryEntry {
         id,
@@ -580,17 +610,19 @@ async fn ingest_structured_event(
         return Err(error);
     }
 
-    let _ = server.enrich_tx.try_send(super::EnrichmentItem {
-        id: entry_id.clone(),
-        text: entry.text.clone(),
-        needs_embedding: true,
-        needs_summary: true,
-        target_db,
-        named_project: named_project.clone(),
-        foundry_agent_id: None,
-        foundry_path_prefix: None,
-        revision: 1,
-    });
+    if should_enqueue_enrichment(&entry) {
+        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+            id: entry_id.clone(),
+            text: entry.text.clone(),
+            needs_embedding: true,
+            needs_summary: true,
+            target_db,
+            named_project: named_project.clone(),
+            foundry_agent_id: None,
+            foundry_path_prefix: None,
+            revision: 1,
+        });
+    }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);
 
@@ -655,9 +687,12 @@ pub(crate) async fn handle_extract_facts(
                         "extract_source": source.clone(),
                     }),
                 );
-                let Some(entry) = fact_to_entry(fact, "extraction", metadata) else {
+                let Some(mut entry) = fact_to_entry(fact, "extraction", metadata) else {
                     continue;
                 };
+                if is_lazy_source(&entry.source) && entry.importance < 0.5 {
+                    entry.retention_policy = Some("ephemeral".to_string());
+                }
                 if store.upsert(&entry).is_ok() {
                     saved += 1;
                 }
@@ -830,6 +865,10 @@ pub(crate) async fn handle_ingest_event(
                             ) else {
                                 continue;
                             };
+                            entry.source = "ingest_event".to_string();
+                            if is_lazy_source(&entry.source) && entry.importance < 0.5 {
+                                entry.retention_policy = Some("ephemeral".to_string());
+                            }
                             entry.domain = domain.clone();
                             if store.upsert(&entry).is_ok() {
                                 saved += 1;
@@ -862,6 +901,10 @@ pub(crate) async fn handle_ingest_event(
                             ) else {
                                 continue;
                             };
+                            entry.source = "ingest_event".to_string();
+                            if is_lazy_source(&entry.source) && entry.importance < 0.5 {
+                                entry.retention_policy = Some("ephemeral".to_string());
+                            }
                             entry.domain = domain.clone();
                             if store.upsert(&entry).is_ok() {
                                 saved += 1;
@@ -1077,17 +1120,19 @@ pub(crate) async fn handle_ingest_source(
     }
 
     for entry in &saved_entries {
-        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
-            id: entry.id.clone(),
-            text: entry.text.clone(),
-            needs_embedding: true,
-            needs_summary: params.auto_summarize,
-            target_db,
-            named_project: named_project.clone(),
-            foundry_agent_id: None,
-            foundry_path_prefix: None,
-            revision: 1,
-        });
+        if should_enqueue_enrichment(entry) {
+            let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+                id: entry.id.clone(),
+                text: entry.text.clone(),
+                needs_embedding: true,
+                needs_summary: params.auto_summarize,
+                target_db,
+                named_project: named_project.clone(),
+                foundry_agent_id: None,
+                foundry_path_prefix: None,
+                revision: 1,
+            });
+        }
     }
 
     if params.auto_link {

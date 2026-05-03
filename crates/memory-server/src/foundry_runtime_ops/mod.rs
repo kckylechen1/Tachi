@@ -101,7 +101,7 @@ fn default_capture_scope() -> String {
 }
 
 fn default_capture_importance() -> f64 {
-    0.7
+    0.3
 }
 
 // Re-export items so sibling modules (main.rs etc.) can use them

@@ -407,8 +407,10 @@ fn r5_integrity_detects_corruption() {
         .unwrap();
     let len = f.metadata().unwrap().len();
     if len > 200 {
-        f.seek(SeekFrom::Start(len / 2)).unwrap();
-        f.write_all(&[0xFFu8; 200]).unwrap();
+        // Write enough corruption across multiple pages to guarantee detection
+        // even if schema changes shift the page layout.
+        f.seek(SeekFrom::Start(len / 3)).unwrap();
+        f.write_all(&[0xFFu8; 512]).unwrap();
     }
     drop(f);
 

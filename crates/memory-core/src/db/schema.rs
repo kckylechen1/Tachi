@@ -68,7 +68,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             access_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
             revision     INTEGER NOT NULL DEFAULT 1,
-            metadata     TEXT NOT NULL DEFAULT '{}'
+            metadata     TEXT NOT NULL DEFAULT '{}',
+            superseded_by TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_memories_path        ON memories(path);
@@ -407,6 +408,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // Retention policy and domain columns for Issue #38 and #32
     ensure_column(conn, "memories", "retention_policy", "TEXT")?;
     ensure_column(conn, "memories", "domain", "TEXT")?;
+    ensure_column(conn, "memories", "superseded_by", "TEXT")?;
 
     // Temporal edge columns for memory_edges
     ensure_column(
@@ -481,6 +483,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_hub_cap_health_status ON hub_capabilities(health_status);
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
         CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
+        CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
     "#,
     )?;
 
@@ -739,6 +742,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             metadata     TEXT NOT NULL DEFAULT '{}',
             retention_policy TEXT,
             domain       TEXT,
+            superseded_by TEXT,
             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
@@ -752,12 +756,12 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             (id, path, summary, text, importance, timestamp, category, topic,
              keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain)
+             metadata, retention_policy, domain, superseded_by)
         SELECT
              id, path, summary, text, importance, timestamp, category, topic,
              keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain
+             metadata, retention_policy, domain, superseded_by
         FROM memories;
 
         DROP TABLE memories;
@@ -770,6 +774,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
         CREATE INDEX IF NOT EXISTS idx_memories_domain      ON memories(domain);
+        CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by);
 
         "#,
     )?;
