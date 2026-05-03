@@ -278,32 +278,19 @@ async fn init_kanban_task(
 
 async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
-    if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: dispatch_id.to_string(),
-            query_vec: None,
-            top_k: 1,
-            path_prefix: Some(path),
-            include_archived: false,
-            candidates_per_channel: 20,
-            mmr_threshold: Some(0.7),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            agent_role: None,
-            project: None,
-            domain: None,
-        },
-    )
-    .await
-    {
-        for row in &rows {
-            if let Some(meta) = row.get("metadata") {
-                if let Some(state) = meta.get("a2a_state").and_then(|v| v.as_str()) {
-                    return Some(state.to_string());
-                }
-            }
+    // Use exact path SQL query instead of semantic search to avoid
+    // Foundry inline-merge returning the wrong (merged) record.
+    let entries = server
+        .with_project_store(|store| {
+            store
+                .list_by_path(&path, 1, false)
+                .map_err(|e| format!("kanban list_by_path: {e}"))
+        })
+        .unwrap_or_default();
+
+    for entry in &entries {
+        if let Some(state) = entry.metadata.get("a2a_state").and_then(|v| v.as_str()) {
+            return Some(state.to_string());
         }
     }
     None
@@ -317,67 +304,51 @@ pub(crate) async fn update_kanban_state(
     eval_id: Option<&str>,
 ) -> Result<(), String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
-    let rows = crate::memory_search_ops::search_memory_rows(
-        server,
-        SearchMemoryParams {
-            query: dispatch_id.to_string(),
-            query_vec: None,
-            top_k: 1,
-            path_prefix: Some(path.clone()),
-            include_archived: false,
-            candidates_per_channel: 20,
-            mmr_threshold: Some(0.7),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            agent_role: None,
-            project: None,
-            domain: None,
-        },
-    )
-    .await?;
+    // Use exact path SQL query instead of semantic search to avoid
+    // Foundry inline-merge returning the wrong (merged) record.
+    let entries = server
+        .with_project_store(|store| {
+            store
+                .list_by_path(&path, 1, false)
+                .map_err(|e| format!("kanban list_by_path: {e}"))
+        })
+        .unwrap_or_default();
 
-    if let Some(row) = rows.first() {
-        if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
-            let mut meta = row.get("metadata").cloned().unwrap_or(json!({}));
-            if let Some(obj) = meta.as_object_mut() {
-                obj.insert("a2a_state".to_string(), json!(new_state));
-                if let Some(eid) = eval_id {
-                    obj.insert("eval_ledger_id".to_string(), json!(eid));
-                }
-                obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
+    if let Some(entry) = entries.first() {
+        let mut meta = entry.metadata.clone();
+        if let Some(obj) = meta.as_object_mut() {
+            obj.insert("a2a_state".to_string(), json!(new_state));
+            if let Some(eid) = eval_id {
+                obj.insert("eval_ledger_id".to_string(), json!(eid));
             }
-            crate::memory_search_ops::handle_save_memory(
-                server,
-                SaveMemoryParams {
-                    text: row
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    summary: format!("Kanban [{}]: {}", new_state, dispatch_id),
-                    path,
-                    importance: 0.7,
-                    category: "fact".to_string(),
-                    topic: "kanban".to_string(),
-                    keywords: vec!["kanban".to_string()],
-                    persons: Vec::new(),
-                    entities: Vec::new(),
-                    location: String::new(),
-                    scope: "project".to_string(),
-                    vector: None,
-                    id: Some(id.to_string()),
-                    force: true,
-                    auto_link: true,
-                    project: None,
-                    retention_policy: Some("durable".to_string()),
-                    domain: Some("system".to_string()),
-                    timestamp: None,
-                    metadata: Some(meta),
-                },
-            )
-            .await?;
+            obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
         }
+        crate::memory_search_ops::handle_save_memory(
+            server,
+            SaveMemoryParams {
+                text: entry.text.clone(),
+                summary: format!("Kanban [{}]: {}", new_state, dispatch_id),
+                path,
+                importance: 0.7,
+                category: "fact".to_string(),
+                topic: "kanban".to_string(),
+                keywords: vec!["kanban".to_string()],
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                scope: "project".to_string(),
+                vector: None,
+                id: Some(entry.id.clone()),
+                force: true,
+                auto_link: true,
+                project: None,
+                retention_policy: Some("durable".to_string()),
+                domain: Some("system".to_string()),
+                timestamp: None,
+                metadata: Some(meta),
+            },
+        )
+        .await?;
     }
     Ok(())
 }
