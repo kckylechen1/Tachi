@@ -238,6 +238,8 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_gh",
     // Facade task dispatch/merge/board
     "tachi_task",
+    // Tachi Shell — coordination/orchestration facade
+    "tachi_shell",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -270,6 +272,8 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
 /// Standard profile allow-list. Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Tachi Shell — skill-gated flow orchestration (primary user entry)
+    "tachi_shell",
     // Task facade (plan / dispatch / board / merge)
     "tachi_task",
     // Unified memory facade (search / save / extract_facts)

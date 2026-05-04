@@ -2062,4 +2062,16 @@ impl MemoryServer {
     ) -> Result<String, String> {
         handle_tachi_gh(self, params).await
     }
+
+    // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────
+
+    #[tool(
+        description = "Tachi Shell: skill-gated flow orchestration. Actions: 'brainstorm' | 'plan' | 'dispatch' | 'kanban' | 'status' | 'review' | 'ship'. Each stage-bearing action injects the required Superpowers meta skill SOP and writes an instruction.md packet under .tachi/runs/<flow_id>/."
+    )]
+    pub(crate) async fn tachi_shell(
+        &self,
+        Parameters(params): Parameters<TachiShellParams>,
+    ) -> Result<String, String> {
+        crate::shell_ops::handle_tachi_shell(self, params).await
+    }
 }

@@ -557,6 +557,68 @@ pub(crate) struct TachiTaskParams {
     pub confirm: bool,
 }
 
+// ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiShellParams {
+    /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
+    pub action: String,
+
+    /// Existing flow id to continue (optional). When omitted, a new flow_id is generated
+    /// for stage-bearing actions (brainstorm/plan/dispatch/review/ship).
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Free-form task / goal description. Required for brainstorm/plan/dispatch when no
+    /// existing flow_id is supplied.
+    #[serde(default)]
+    pub task: Option<String>,
+
+    /// Short title used to slug the flow_id when creating a new flow.
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Optional clanker backend hint for dispatch (e.g. "claude" | "codex" | "custom").
+    /// Forwarded to the underlying tachi_dispatch when async hook fires.
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Optional cwd override for downstream dispatch.
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// When true, attempt to spawn the underlying async dispatch immediately
+    /// (Phase 4). When false (MVP default), only the instruction.md artifact is
+    /// produced and the caller is expected to dispatch separately.
+    #[serde(default)]
+    pub async_dispatch: bool,
+
+    /// Project DB hint passed through to underlying handlers (kanban etc.).
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Filter for kanban (passed through to tachi_task board): "working" | "completed" | etc.
+    #[serde(default)]
+    pub state_filter: Option<String>,
+
+    /// Limit for kanban / status list views.
+    #[serde(default)]
+    pub limit: Option<usize>,
+
+    /// Free-form notes appended to the generated instruction.md (e.g. acceptance criteria).
+    #[serde(default)]
+    pub notes: Option<String>,
+
+    /// Validation commands to embed in the instruction packet.
+    #[serde(default)]
+    pub validation: Vec<String>,
+
+    /// Allowed scope (file globs / module names) to embed in the instruction packet.
+    #[serde(default)]
+    pub allowed_scope: Vec<String>,
+}
+
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
 #[allow(dead_code)]
