@@ -31,95 +31,6 @@ fn should_supersede(
         && path_root(&new_entry.path) == path_root(&old_entry.path)
 }
 
-fn preference_patterns() -> &'static [regex::Regex] {
-    static PATTERNS: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
-    PATTERNS.get_or_init(|| {
-        vec![
-            regex::Regex::new(r"(?i)\bi (?:like|love|enjoy|prefer)\s+([^.!?,;\n]{2,80})").unwrap(),
-            regex::Regex::new(r"(?i)\bmy favorite ([^.!?,;\n]{2,40}) is ([^.!?,;\n]{2,80})")
-                .unwrap(),
-            regex::Regex::new(
-                r"(?i)\bi(?:'ve| have) been (?:listening to|reading|watching)\s+([^.!?,;\n]{2,80})",
-            )
-            .unwrap(),
-            regex::Regex::new(r"(?i)\bi don'?t like\s+([^.!?,;\n]{2,80})").unwrap(),
-        ]
-    })
-}
-
-fn append_keyword_once(keywords: &mut Vec<String>, keyword: &str) {
-    let keyword = keyword.trim().to_ascii_lowercase();
-    if keyword.is_empty() {
-        return;
-    }
-    if !keywords
-        .iter()
-        .any(|existing| existing.eq_ignore_ascii_case(&keyword))
-    {
-        keywords.push(keyword);
-    }
-}
-
-fn append_preference_value_keywords(keywords: &mut Vec<String>, value: &str) {
-    let lower = value.to_ascii_lowercase();
-    if lower.contains("jazz")
-        || lower.contains("music")
-        || lower.contains("song")
-        || lower.contains("band")
-        || lower.contains("album")
-        || lower.contains("rock")
-        || lower.contains("classical")
-        || lower.contains("hip hop")
-    {
-        append_keyword_once(keywords, "music");
-    }
-    if lower.contains("book") || lower.contains("reading") || lower.contains("novel") {
-        append_keyword_once(keywords, "reading");
-    }
-    if lower.contains("movie")
-        || lower.contains("show")
-        || lower.contains("watching")
-        || lower.contains("anime")
-    {
-        append_keyword_once(keywords, "media");
-    }
-
-    for token in lower
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|token| token.len() > 1)
-        .filter(|token| !matches!(*token, "the" | "and" | "for" | "with" | "that" | "this"))
-        .take(6)
-    {
-        append_keyword_once(keywords, token);
-    }
-}
-
-pub(crate) fn preference_augmented_keywords(text: &str, mut keywords: Vec<String>) -> Vec<String> {
-    let mut matched = false;
-    for pattern in preference_patterns() {
-        for captures in pattern.captures_iter(text) {
-            matched = true;
-            for idx in 1..captures.len() {
-                if let Some(value) = captures.get(idx) {
-                    append_preference_value_keywords(&mut keywords, value.as_str());
-                }
-            }
-        }
-    }
-    if matched {
-        // LongMemEval preference questions rely heavily on symbolic matches.
-        append_keyword_once(&mut keywords, "preference");
-        append_keyword_once(&mut keywords, "likes");
-        if text.to_ascii_lowercase().contains("favorite") {
-            append_keyword_once(&mut keywords, "favorite");
-        }
-        if text.to_ascii_lowercase().contains("don't like") {
-            append_keyword_once(&mut keywords, "dislikes");
-        }
-    }
-    keywords
-}
-
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
@@ -200,7 +111,7 @@ pub(crate) async fn handle_save_memory(
     );
 
     let importance = params.importance.clamp(0.0, 1.0);
-    let keywords = preference_augmented_keywords(&params.text, params.keywords);
+    let keywords = params.keywords;
 
     let entry = MemoryEntry {
         id: id.clone(),
@@ -486,24 +397,12 @@ pub(super) async fn search_memory_rows(
         combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
     }
 
-    if let Some(desc) = memory_core::temporal_sort_desc(&params.query) {
-        combined_results.sort_by(|a, b| {
-            let a_ts = a.0.entry.timestamp.as_str();
-            let b_ts = b.0.entry.timestamp.as_str();
-            if desc {
-                b_ts.cmp(a_ts)
-            } else {
-                a_ts.cmp(b_ts)
-            }
-        });
-    } else {
-        combined_results.sort_by(|a, b| {
-            b.0.score
-                .final_score
-                .partial_cmp(&a.0.score.final_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    }
+    combined_results.sort_by(|a, b| {
+        b.0.score
+            .final_score
+            .partial_cmp(&a.0.score.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut seen_ids = HashSet::new();
     let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();

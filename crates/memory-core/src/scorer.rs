@@ -303,9 +303,8 @@ pub fn hybrid_score(
             .unwrap_or(0.0);
 
         let final_score = if weights.use_rrf {
-            // LongMemEval retrieval benefits from rank fusion because it
-            // rewards agreement across channels without overtrusting raw
-            // score calibration differences.
+            // Reciprocal Rank Fusion: rewards agreement across channels
+            // without overtrusting raw score calibration differences.
             let rrf_k = 60.0;
             let vec_part = vec_ranks
                 .as_ref()

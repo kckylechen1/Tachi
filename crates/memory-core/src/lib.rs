@@ -34,7 +34,7 @@ pub use pack::{
     AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackManifestMeta, PackOverlay,
 };
 pub use scorer::HybridWeights;
-pub use search::{hybrid_search, is_temporal_query, temporal_sort_desc, SearchOptions};
+pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,
     RetentionPolicy, SearchResult, StatsResult,

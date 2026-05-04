@@ -58,6 +58,7 @@ venv.bak/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak*
 
 # Local test data
 data/
