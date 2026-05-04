@@ -38,6 +38,7 @@ func (s *doneStep) View() string {
 	}{
 		{T("Tachi", "Tachi"), s.state.TachiVersion},
 		{T("Vault", "密钥库"), fmt.Sprintf(T("initialized (%d keys)", "已初始化 (%d 个密钥)"), len(s.state.SelectedKeys))},
+		{T("Providers", "供应商"), providerSummary(s.state)},
 		{T("Keys imported", "已导入密钥"), fmt.Sprintf("%d", len(s.state.SelectedKeys))},
 		{T("MCP servers", "MCP 服务器"), fmt.Sprintf(T("%d registered", "已注册 %d 个"), len(s.state.SelectedMCPs))},
 		{T("Backend", "后台"), foundryBackendSummary(s.state)},
@@ -63,6 +64,22 @@ func (s *doneStep) View() string {
 	sb.WriteString("\n\n" + hintStyle.Render(T("  q / esc: quit", "  q / esc: 退出")))
 
 	return sb.String()
+}
+
+func providerSummary(state *State) string {
+	if len(state.ProviderSelections) == 0 {
+		return T("defaults unchanged", "默认值未修改")
+	}
+	parts := make([]string, 0, 3)
+	for _, key := range []string{"embedding", "reasoning", "agent"} {
+		if sel, ok := state.ProviderSelections[key]; ok && sel.Name != "" {
+			parts = append(parts, sel.Name)
+		}
+	}
+	if len(parts) == 0 {
+		return T("defaults unchanged", "默认值未修改")
+	}
+	return strings.Join(parts, " / ")
 }
 
 func foundryBackendSummary(state *State) string {

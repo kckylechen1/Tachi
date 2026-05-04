@@ -1074,7 +1074,7 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
             .to_string();
     }
     let name = manifest_db_name(entry, path);
-    name.split(':').last().unwrap_or(&name).to_string()
+    name.split(':').next_back().unwrap_or(&name).to_string()
 }
 
 fn tachi_app_home() -> PathBuf {

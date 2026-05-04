@@ -60,7 +60,7 @@ fn path_validation_disabled() -> bool {
 /// Language bindings (NAPI, PyO3) will wrap this struct.
 ///
 /// Method definitions are split across `crate::store::*` extension modules
-/// (hub, ghost, sandbox, pack, vault, audit) to keep this file focused on
+/// (agent state, hub, sandbox, pack, vault, audit) to keep this file focused on
 /// core CRUD/search/maintenance. Fields are `pub(crate)` so those sibling
 /// modules can construct `MemoryStore` and access the connection directly;
 /// they remain private to the crate.
@@ -584,7 +584,7 @@ impl MemoryStore {
         db::get_state(&self.conn, namespace, key)
     }
 
-    // Hub, audit, ghost, sandbox, pack, and vault methods live in
+    // Hub, audit, agent state, sandbox, pack, and vault methods live in
     // `crate::store::*` extension modules so this file stays focused on core
     // CRUD/search/maintenance. They contribute to this same `impl MemoryStore`
     // block — the public API on `MemoryStore` is unchanged.

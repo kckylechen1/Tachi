@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -37,7 +35,7 @@ type modelLane struct {
 var defaultLanes = []modelLane{
 	{
 		id:    "embedding",
-		label: "Embedding",
+		label: T("Embedding Model", "Embedding 模型"),
 		presets: []providerPreset{
 			{"Voyage voyage-4", T("Default, high-quality embedding", "默认，高质量 embedding"), "VOYAGE_API_KEY", "", "voyage-4"},
 		},
@@ -45,7 +43,7 @@ var defaultLanes = []modelLane{
 	},
 	{
 		id:    "rerank",
-		label: "Rerank",
+		label: T("Rerank Model", "Rerank 模型"),
 		presets: []providerPreset{
 			{"Voyage rerank-2.5", T("High-quality reranker", "高质量 reranker"), "VOYAGE_API_KEY", "", "rerank-2.5"},
 			{T("Disabled", "关闭"), T("Skip rerank, use vector similarity only", "跳过 rerank，仅用向量相似度"), "", "", ""},
@@ -96,8 +94,8 @@ func (s *foundryStep) title() string {
 
 func (s *foundryStep) subtitle() string {
 	return T(
-		"Configure models for background tasks (embedding, rerank, LLM)",
-		"配置后台任务使用的模型（embedding、rerank、LLM）",
+		"Tune model lanes after choosing providers",
+		"选择供应商后微调模型通道",
 	)
 }
 
@@ -275,14 +273,16 @@ func (s *foundryStep) llmEnvEntries() map[string]string {
 		p := l.presets[l.selected]
 		switch l.id {
 		case "embedding":
-			// Embedding uses Voyage SDK, no BASE_URL/MODEL env vars needed
-			// VOYAGE_API_KEY is managed in the Keys step
+			if p.model != "" {
+				entries["EMBEDDING_MODEL"] = p.model
+			}
 
 		case "rerank":
 			if p.model == "" {
 				entries["VOYAGE_RERANK_ENABLED"] = "false"
 			} else {
 				entries["VOYAGE_RERANK_ENABLED"] = "true"
+				entries["VOYAGE_RERANK_MODEL"] = p.model
 			}
 
 		case "frontend_llm":
@@ -344,81 +344,4 @@ func (s *foundryStep) writeConfigEnv() tea.Cmd {
 		}
 		return foundryWriteDoneMsg{}
 	}
-}
-
-// ---------- config.env helpers ----------
-
-// readEnvKey reads a key from ~/.tachi/config.env without loading it into the process.
-func readEnvKey(key string) (string, bool) {
-	home, err := homeDir()
-	if err != nil {
-		return "", false
-	}
-	kvs, err := parseDotEnv(filepath.Join(home, ".tachi", "config.env"))
-	if err != nil {
-		return "", false
-	}
-	val, ok := kvs[key]
-	return val, ok
-}
-
-// upsertConfigEnvKeys adds or updates keys in ~/.tachi/config.env.
-func upsertConfigEnvKeys(entries map[string]string) error {
-	home, err := homeDir()
-	if err != nil {
-		return err
-	}
-	configPath := filepath.Join(home, ".tachi", "config.env")
-
-	existing, _ := os.ReadFile(configPath)
-	lines := strings.Split(string(existing), "\n")
-
-	updated := make(map[string]bool)
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		idx := strings.Index(trimmed, "=")
-		if idx < 1 {
-			continue
-		}
-		key := strings.TrimSpace(trimmed[:idx])
-		if val, ok := entries[key]; ok {
-			// Don't overwrite real API keys with $REF placeholders
-			if strings.HasPrefix(val, "$") {
-				updated[key] = true
-				continue
-			}
-			lines[i] = key + "=" + val
-			updated[key] = true
-		}
-	}
-
-	// Append any keys not already in the file
-	needsHeader := true
-	for key, val := range entries {
-		if updated[key] {
-			continue
-		}
-		// Don't write $REF placeholders — those mean "use the same key as..."
-		if strings.HasPrefix(val, "$") {
-			continue
-		}
-		if needsHeader {
-			lines = append(lines, "", "# Foundry model lane configuration")
-			needsHeader = false
-		}
-		lines = append(lines, key+"="+val)
-	}
-
-	return os.WriteFile(configPath, []byte(strings.Join(lines, "\n")), 0644)
-}
-
-func homeDir() (string, error) {
-	h, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("cannot determine home directory: %w", err)
-	}
-	return h, nil
 }

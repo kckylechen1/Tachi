@@ -32,10 +32,6 @@ pub enum PathRouting {
 pub enum PathRoutingError {
     /// A `/wiki/...` path was written to a non-wiki DB.
     WikiPathInNonWikiDb { path: String, db_label: String },
-    /// A project-scoped path was written to the global DB without opt-in.
-    /// Reserved for a future stricter routing mode; not currently emitted.
-    #[allow(dead_code)]
-    ProjectPathInGlobal { path: String, db_label: String },
 }
 
 impl fmt::Display for PathRoutingError {
@@ -44,12 +40,6 @@ impl fmt::Display for PathRoutingError {
             PathRoutingError::WikiPathInNonWikiDb { path, db_label } => write!(
                 f,
                 "wiki path {:?} cannot be written to non-wiki DB {:?} \
-                 (set metadata.allow_cross_project=true to override)",
-                path, db_label
-            ),
-            PathRoutingError::ProjectPathInGlobal { path, db_label } => write!(
-                f,
-                "project path {:?} cannot be written to global DB {:?} \
                  (set metadata.allow_cross_project=true to override)",
                 path, db_label
             ),
