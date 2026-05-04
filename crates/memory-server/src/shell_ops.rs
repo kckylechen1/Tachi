@@ -15,10 +15,11 @@
 
 use crate::{MemoryServer, TachiBoardParams, TachiDispatchParams, TachiShellParams};
 use chrono::Utc;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // ─── Stage / meta-skill mapping ──────────────────────────────────────────────
 
@@ -39,6 +40,23 @@ const STAGE_ACTIONS: &[&str] = &["brainstorm", "plan", "dispatch", "review", "sh
 
 // ─── Run-root resolution ─────────────────────────────────────────────────────
 
+fn cached_git_root() -> Option<&'static PathBuf> {
+    static GIT_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    GIT_ROOT
+        .get_or_init(|| {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| String::from_utf8(out.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        })
+        .as_ref()
+}
+
 /// Resolve the runs root directory.
 ///
 /// Order:
@@ -51,18 +69,8 @@ pub(crate) fn shell_runs_root() -> PathBuf {
     if let Ok(p) = std::env::var("TACHI_RUN_ROOT") {
         return PathBuf::from(p);
     }
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let root = s.trim();
-                if !root.is_empty() {
-                    return PathBuf::from(root).join(".tachi").join("runs");
-                }
-            }
-        }
+    if let Some(root) = cached_git_root() {
+        return root.join(".tachi").join("runs");
     }
     if let Ok(home) = std::env::var("TACHI_HOME") {
         return PathBuf::from(home).join("runs");
@@ -104,6 +112,20 @@ fn new_flow_id(title: Option<&str>, task: Option<&str>) -> String {
     format!("flow_{}_{}", stamp, slugify(&basis))
 }
 
+fn validate_flow_id(id: &str) -> Result<(), String> {
+    if !id.starts_with("flow_")
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("Invalid flow_id: '{}'", id));
+    }
+    Ok(())
+}
+
 // ─── Status / events helpers ─────────────────────────────────────────────────
 
 fn read_status(run_dir: &Path) -> Value {
@@ -140,20 +162,10 @@ fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
 /// Resolve the meta skill SOP file, falling back through several roots.
 fn resolve_meta_skill(rel_path: &str) -> Option<PathBuf> {
     // 1. repo root (git toplevel)
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-    {
-        if out.status.success() {
-            if let Ok(s) = String::from_utf8(out.stdout) {
-                let root = s.trim();
-                if !root.is_empty() {
-                    let p = PathBuf::from(root).join(rel_path);
-                    if p.exists() {
-                        return Some(p);
-                    }
-                }
-            }
+    if let Some(root) = cached_git_root() {
+        let p = root.join(rel_path);
+        if p.exists() {
+            return Some(p);
         }
     }
     // 2. cwd
@@ -177,7 +189,7 @@ struct InjectionResult {
     rel_path: Option<String>,
     source_path: Option<String>,
     injected_path: Option<String>,
-    sha256: Option<String>,
+    content_hash: Option<String>,
     loaded: bool,
     warning: Option<String>,
 }
@@ -191,7 +203,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
                 rel_path: None,
                 source_path: None,
                 injected_path: None,
-                sha256: None,
+                content_hash: None,
                 loaded: false,
                 warning: None,
             };
@@ -204,7 +216,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
             rel_path: Some(rel.to_string()),
             source_path: None,
             injected_path: None,
-            sha256: None,
+            content_hash: None,
             loaded: false,
             warning: Some(format!("create injected dir failed: {e}")),
         };
@@ -217,7 +229,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
                 rel_path: Some(rel.to_string()),
                 source_path: None,
                 injected_path: None,
-                sha256: None,
+                content_hash: None,
                 loaded: false,
                 warning: Some(format!(
                     "meta skill file '{}' not found in any known root",
@@ -234,7 +246,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
                 rel_path: Some(rel.to_string()),
                 source_path: Some(resolved.to_string_lossy().to_string()),
                 injected_path: None,
-                sha256: None,
+                content_hash: None,
                 loaded: false,
                 warning: Some(format!("read meta skill failed: {e}")),
             };
@@ -252,7 +264,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
             rel_path: Some(rel.to_string()),
             source_path: Some(resolved.to_string_lossy().to_string()),
             injected_path: None,
-            sha256: Some(digest),
+            content_hash: Some(digest),
             loaded: false,
             warning: Some(format!("write injected meta skill failed: {e}")),
         };
@@ -262,7 +274,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
         rel_path: Some(rel.to_string()),
         source_path: Some(resolved.to_string_lossy().to_string()),
         injected_path: Some(target.to_string_lossy().to_string()),
-        sha256: Some(digest),
+        content_hash: Some(digest),
         loaded: true,
         warning: None,
     }
@@ -293,8 +305,8 @@ fn build_instruction_md(
         if let Some(rel) = injection.rel_path.as_deref() {
             s.push_str(&format!(" (source: `{}`)", rel));
         }
-        if let Some(sha) = injection.sha256.as_deref() {
-            s.push_str(&format!(" sha256={}", &sha[..16]));
+        if let Some(hash) = injection.content_hash.as_deref() {
+            s.push_str(&format!(" fingerprint={}", &hash[..16]));
         }
         s.push('\n');
     } else if injection.required {
@@ -541,6 +553,7 @@ async fn handle_kanban_action(
 async fn handle_status_action(params: TachiShellParams) -> Result<String, String> {
     let runs_root = shell_runs_root();
     if let Some(flow_id) = params.flow_id.as_deref() {
+        validate_flow_id(flow_id)?;
         let run_dir = runs_root.join(flow_id);
         if !run_dir.exists() {
             return serde_json::to_string(&json!({
@@ -600,6 +613,7 @@ fn resolve_or_create_flow(
     let runs_root = shell_runs_root();
     std::fs::create_dir_all(&runs_root).map_err(|e| format!("create runs root: {e}"))?;
     if let Some(fid) = params.flow_id.clone() {
+        validate_flow_id(&fid)?;
         let run_dir = runs_root.join(&fid);
         let created = !run_dir.exists();
         std::fs::create_dir_all(&run_dir).map_err(|e| format!("create flow run dir: {e}"))?;
@@ -619,7 +633,7 @@ fn injection_to_json(inj: &InjectionResult) -> Value {
         "rel_path": inj.rel_path,
         "source_path": inj.source_path,
         "injected_path": inj.injected_path,
-        "sha256": inj.sha256,
+        "content_hash": inj.content_hash,
         "loaded": inj.loaded,
         "warning": inj.warning,
     })
@@ -660,7 +674,7 @@ fn advance_stage(
             "stage": stage,
             "rel_path": injection.rel_path,
             "injected_path": injection.injected_path,
-            "sha256": injection.sha256,
+            "content_hash": injection.content_hash,
             "loaded": injection.loaded,
             "warning": injection.warning,
         }),
@@ -746,7 +760,7 @@ mod tests {
             rel_path: Some("skill/x/SKILL.md".into()),
             source_path: Some("/abs/skill/x/SKILL.md".into()),
             injected_path: Some(".tachi/runs/flow_x/injected/superpowers-plan.md".into()),
-            sha256: Some("a".repeat(16)),
+            content_hash: Some("a".repeat(16)),
             loaded: true,
             warning: None,
         };
@@ -823,7 +837,7 @@ mod tests {
             rel_path: Some("skill/x".into()),
             source_path: None,
             injected_path: None,
-            sha256: None,
+            content_hash: None,
             loaded: false,
             warning: Some("missing".into()),
         };
@@ -836,6 +850,26 @@ mod tests {
         );
         let events = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
         assert!(events.contains("flow_created"));
+    }
+
+    #[test]
+    fn flow_id_rejects_path_traversal() {
+        for invalid in [
+            "../../etc",
+            "flow_../../etc",
+            "/tmp/evil",
+            "flow_/tmp/evil",
+            "flow_..",
+            "flow_bad/name",
+            "flow_bad\\name",
+            "notflow_20260505",
+        ] {
+            assert!(
+                validate_flow_id(invalid).is_err(),
+                "expected invalid flow_id to be rejected: {invalid}"
+            );
+        }
+        assert!(validate_flow_id("flow_20260505T000000Z_demo-1").is_ok());
     }
 
     #[tokio::test]
@@ -889,10 +923,16 @@ mod tests {
         };
         let out = handle_status_action(p).await.unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        let flows = v.get("flows").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let flows = v
+            .get("flows")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
         assert!(
-            flows.iter().any(|f| f.get("flow_id").and_then(|x| x.as_str())
-                == Some("flow_20260505T000000Z_demo")),
+            flows
+                .iter()
+                .any(|f| f.get("flow_id").and_then(|x| x.as_str())
+                    == Some("flow_20260505T000000Z_demo")),
             "expected demo flow in listing, got {v}"
         );
     }
