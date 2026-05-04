@@ -9,8 +9,11 @@ pub(super) fn is_active_global_rule(entry: &MemoryEntry) -> bool {
         == "ACTIVE"
 }
 
-pub(super) fn find_git_root() -> Option<PathBuf> {
-    let mut dir = std::env::current_dir().ok()?;
+pub(super) fn find_git_root_from(path: impl AsRef<std::path::Path>) -> Option<PathBuf> {
+    let mut dir = path.as_ref().canonicalize().ok()?;
+    if dir.is_file() {
+        dir.pop();
+    }
     loop {
         if dir.join(".git").exists() {
             return Some(dir);
@@ -19,6 +22,32 @@ pub(super) fn find_git_root() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+pub(super) fn find_git_root() -> Option<PathBuf> {
+    find_git_root_from(std::env::current_dir().ok()?)
+}
+
+pub(super) fn find_project_git_root() -> Option<PathBuf> {
+    for var in [
+        "TACHI_PROJECT_ROOT",
+        "TACHI_WORKSPACE_ROOT",
+        "PROJECT_ROOT",
+        "WORKSPACE_ROOT",
+        "WORKSPACE",
+        "PWD",
+    ] {
+        let Some(value) = std::env::var_os(var) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        if let Some(root) = find_git_root_from(PathBuf::from(value)) {
+            return Some(root);
+        }
+    }
+    find_git_root()
 }
 
 /// Check if a command is in the trusted allowlist for MCP server spawning.

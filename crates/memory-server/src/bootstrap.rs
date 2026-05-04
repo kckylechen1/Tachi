@@ -2570,7 +2570,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("SIGIL_HOME"))
         .map(|v| expand_user_path(&v))
         .unwrap_or_else(|_| home.join(".tachi"));
-    let git_root = find_git_root();
+    let git_root = find_project_git_root();
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
 

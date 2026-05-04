@@ -108,9 +108,9 @@ use crate::shared_defs::{
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
-    write_or_recover,
+    find_git_root, find_project_git_root, is_active_global_rule, is_trusted_command,
+    lock_or_recover, parse_env_bool, parse_env_u64, read_or_recover, sanitize_safe_path_name,
+    stable_hash, value_to_template_text, write_or_recover,
 };
 use crate::vault_ops::load_unlocked_api_key_secrets;
 
@@ -222,6 +222,7 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "wiki_browse",
     // Facade tools (read-only)
     "tachi_search",
+    "tachi_memory",
     "tachi_web_search",
     "tachi_plan",
     "tachi_unstick",
@@ -276,6 +277,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_wiki_ingest",
     // Facade tools (write / mixed)
     "tachi_save",
+    "tachi_memory",
     "tachi_handoff",
     "tachi_complete",
     "tachi_task",

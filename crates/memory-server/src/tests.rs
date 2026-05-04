@@ -3683,6 +3683,7 @@ async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
             domain: None,
             category: None,
             include_archived: false,
+            enable_rerank: false,
         }))
         .await
         .expect("tachi_search wiki scope should succeed");

@@ -1269,6 +1269,103 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
+        description = "Unified memory facade: search memories, save a new memory/note, or extract facts from text. Use action='search', 'save', or 'extract_facts'."
+    )]
+    pub(crate) async fn tachi_memory(
+        &self,
+        Parameters(params): Parameters<TachiMemoryParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        match action.as_str() {
+            "search" => {
+                let query = params
+                    .query
+                    .clone()
+                    .ok_or_else(|| "query is required when action='search'".to_string())?;
+                let search_params = TachiSearchParams {
+                    query,
+                    scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
+                    top_k: params.top_k,
+                    path_prefix: params.path_prefix.clone(),
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    category: params.category.clone(),
+                    include_archived: params.include_archived,
+                    enable_rerank: params.enable_rerank,
+                };
+                self.tachi_search(Parameters(search_params)).await
+            }
+            "save" => {
+                let text = params
+                    .text
+                    .clone()
+                    .ok_or_else(|| "text is required when action='save'".to_string())?;
+                // kind="wiki" should go through tachi_wiki — reject it here
+                if params
+                    .kind
+                    .as_deref()
+                    .map(|k| k.eq_ignore_ascii_case("wiki"))
+                    .unwrap_or(false)
+                {
+                    return Err(
+                        "kind='wiki' is not supported via tachi_memory. Use tachi_wiki with action='write' instead.".to_string()
+                    );
+                }
+                let save_params = TachiSaveParams {
+                    text,
+                    id: params.id.clone(),
+                    kind: params.kind.clone(),
+                    title: params.title.clone(),
+                    summary: params.summary.clone(),
+                    path: params.path.clone(),
+                    importance: params.importance,
+                    category: params.category.clone(),
+                    keywords: params.keywords.clone(),
+                    entities: params.entities.clone(),
+                    scope: params.scope.clone(),
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    retention_policy: params.retention_policy.clone(),
+                    force: params.force,
+                    topic: params.topic.clone(),
+                    source: params.source.clone(),
+                };
+                self.tachi_save(Parameters(save_params)).await
+            }
+            "extract_facts" => {
+                let text = params
+                    .text
+                    .clone()
+                    .ok_or_else(|| "text is required when action='extract_facts'".to_string())?;
+                let save_params = TachiSaveParams {
+                    text,
+                    id: params.id.clone(),
+                    kind: Some("extract_facts".to_string()),
+                    title: params.title.clone(),
+                    summary: params.summary.clone(),
+                    path: params.path.clone(),
+                    importance: params.importance,
+                    category: params.category.clone(),
+                    keywords: params.keywords.clone(),
+                    entities: params.entities.clone(),
+                    scope: params.scope.clone(),
+                    project: params.project.clone(),
+                    domain: params.domain.clone(),
+                    retention_policy: params.retention_policy.clone(),
+                    force: params.force,
+                    topic: params.topic.clone(),
+                    source: params.source.clone(),
+                };
+                self.tachi_save(Parameters(save_params)).await
+            }
+            _ => Err(format!(
+                "Invalid action '{}'. Use 'search', 'save', or 'extract_facts'.",
+                params.action
+            )),
+        }
+    }
+
+    #[tool(
         description = "Unified search across wiki and memory. Use scope to target 'wiki', 'memory', or 'all' (default)."
     )]
     pub(crate) async fn tachi_search(

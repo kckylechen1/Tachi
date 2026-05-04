@@ -156,6 +156,69 @@ pub(crate) struct TachiSaveParams {
     pub source: Option<String>,
 }
 
+// ─── Facade: unified memory (search / save / extract_facts) ──────────────────
+
+fn default_memory_top_k() -> usize {
+    6
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiMemoryParams {
+    /// Action: "search", "save", or "extract_facts"
+    pub action: String,
+
+    // --- search fields ---
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default = "default_memory_top_k")]
+    pub top_k: usize,
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub include_archived: bool,
+    #[serde(default)]
+    pub enable_rerank: bool,
+
+    // --- save fields ---
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub importance: Option<f64>,
+    #[serde(default)]
+    pub retention_policy: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub source: Option<String>,
+
+    // --- shared ---
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub domain: Option<String>,
+}
+
 // ─── Facade: unified handoff ─────────────────────────────────────────────────
 
 fn default_true() -> bool {

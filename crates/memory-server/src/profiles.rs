@@ -201,6 +201,8 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_wiki",
     "tachi_skill",
     "tachi_task",
+    // Unified memory facade (search action is read-only)
+    "tachi_memory",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -218,6 +220,8 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_wiki",
     // Facade skill run (action=run)
     "tachi_skill",
+    // Unified memory facade (save / extract_facts are write ops)
+    "tachi_memory",
 ];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -235,9 +239,6 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // Facade task dispatch/merge/board
     "tachi_task",
 ];
-
-/// GitHub MCP proxy tools — only exposed when Vault has GH_TOKEN.
-pub(super) const GH_TOOL_PATTERNS: &[&str] = &["tachi_gh"];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "section_build",
@@ -271,31 +272,27 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Task facade (plan / dispatch / board / merge)
     "tachi_task",
-    // Unified search (wiki + memory)
-    "tachi_search",
+    // Unified memory facade (search / save / extract_facts)
+    "tachi_memory",
     // Live web search
     "tachi_web_search",
     // Wiki facade (search / browse / write)
     "tachi_wiki",
-    // Unified save (wiki + memory + note + extract_facts)
-    "tachi_save",
-    // Unified handoff (leave + check)
-    "tachi_handoff",
     // Skill facade (discover + run)
     "tachi_skill",
     // Vault status (read-only, safe in standard)
     "vault_status",
+    // GitHub facade (token checked at call time, not at list time)
+    "tachi_gh",
 ];
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
 /// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
 const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    // Search + browse
-    "tachi_search",
+    // Unified memory facade (search + save)
+    "tachi_memory",
     "tachi_web_search",
     "tachi_browse",
-    // Save (if authorized)
-    "tachi_save",
     // Self-rescue when stuck
     "tachi_unstick",
     // Declare task completion
@@ -386,6 +383,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "synthesize_agent_evolution",
     "tachi_complete",
     "tachi_handoff",
+    "tachi_memory",
     "tachi_save",
     "tachi_wiki_write",
     "update_card",
@@ -437,55 +435,14 @@ pub(super) fn filter_tool_defs(
     tools: Vec<Tool>,
     profile: Option<ToolProfile>,
     env_patterns: Option<&[String]>,
-    has_gh_token: bool,
 ) -> Vec<Tool> {
     tools
         .into_iter()
         .filter(|tool| {
             let name = tool.name.as_ref();
-            if matches_any_pattern(name, GH_TOOL_PATTERNS.iter().copied()) {
-                return has_gh_token && tool_visible_gh(name, profile, env_patterns);
-            }
             tool_visible(name, profile, env_patterns)
         })
         .collect()
-}
-
-/// GH tools visibility: require standard/coordinate/admin profile.
-pub(super) fn is_gh_tool_name(tool_name: &str) -> bool {
-    matches_any_pattern(tool_name, GH_TOOL_PATTERNS.iter().copied())
-}
-
-pub(super) fn gh_tool_visible(
-    tool_name: &str,
-    profile: Option<ToolProfile>,
-    env_patterns: Option<&[String]>,
-    has_gh_token: bool,
-) -> bool {
-    if !is_gh_tool_name(tool_name) {
-        return false;
-    }
-    has_gh_token && tool_visible_gh(tool_name, profile, env_patterns)
-}
-
-fn tool_visible_gh(
-    tool_name: &str,
-    profile: Option<ToolProfile>,
-    env_patterns: Option<&[String]>,
-) -> bool {
-    if let Some(patterns) = env_patterns {
-        if !matches_any_pattern(tool_name, patterns.iter().map(String::as_str)) {
-            return false;
-        }
-    }
-    let profile = profile.unwrap_or_else(default_tool_profile);
-    if profile.admin {
-        return true;
-    }
-    if profile.standard_minimal {
-        return true;
-    }
-    profile.allows(ToolBundle::Coordinate)
 }
 
 #[cfg(test)]
@@ -720,7 +677,6 @@ mod tests {
             ],
             Some(ToolProfile::operate()),
             Some(&["search_memory".to_string(), "recall_*".to_string()]),
-            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -744,7 +700,6 @@ mod tests {
             ],
             Some(ToolProfile::coordinate()),
             None,
-            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -772,7 +727,6 @@ mod tests {
             ],
             Some(ToolProfile::remember()),
             None,
-            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -794,7 +748,6 @@ mod tests {
         for name in STANDARD_MINIMAL_TOOL_PATTERNS
             .iter()
             .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
-            .chain(GH_TOOL_PATTERNS.iter())
         {
             assert!(
                 route_names.contains(*name),
@@ -880,7 +833,6 @@ mod tests {
             ],
             None,
             None,
-            false,
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -891,15 +843,13 @@ mod tests {
 
     #[test]
     fn standard_profile_restricts_to_allow_list() {
-        // Without GH token: GH tools excluded
+        // tachi_gh is always visible (token checked at call time, not list time)
         let filtered = filter_tool_defs(
             vec![
                 test_tool("tachi_task"),
-                test_tool("tachi_search"),
+                test_tool("tachi_memory"),
                 test_tool("tachi_web_search"),
                 test_tool("tachi_wiki"),
-                test_tool("tachi_save"),
-                test_tool("tachi_handoff"),
                 test_tool("tachi_skill"),
                 test_tool("vault_status"),
                 test_tool("tachi_gh"),
@@ -909,6 +859,9 @@ mod tests {
                 test_tool("get_memory"),
                 test_tool("post_card"),
                 // Old tools that should be excluded from standard
+                test_tool("tachi_search"),
+                test_tool("tachi_save"),
+                test_tool("tachi_handoff"),
                 test_tool("tachi_plan"),
                 test_tool("recall_context"),
                 test_tool("tachi_browse"),
@@ -923,7 +876,6 @@ mod tests {
             ],
             Some(ToolProfile::standard()),
             None,
-            false, // no GH token
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -933,33 +885,13 @@ mod tests {
             names,
             vec![
                 "tachi_task".to_string(),
-                "tachi_search".to_string(),
+                "tachi_memory".to_string(),
                 "tachi_web_search".to_string(),
                 "tachi_wiki".to_string(),
-                "tachi_save".to_string(),
-                "tachi_handoff".to_string(),
                 "tachi_skill".to_string(),
                 "vault_status".to_string(),
+                "tachi_gh".to_string(),
             ]
-        );
-    }
-
-    #[test]
-    fn standard_profile_includes_gh_tools_when_token_present() {
-        // With GH token: unified GH tool included
-        let filtered = filter_tool_defs(
-            vec![test_tool("tachi_task"), test_tool("tachi_gh")],
-            Some(ToolProfile::standard()),
-            None,
-            true, // has GH token
-        );
-        let names: Vec<String> = filtered
-            .into_iter()
-            .map(|tool| tool.name.into_owned())
-            .collect();
-        assert_eq!(
-            names,
-            vec!["tachi_task".to_string(), "tachi_gh".to_string(),]
         );
     }
 
@@ -968,13 +900,15 @@ mod tests {
         let filtered = filter_tool_defs(
             vec![
                 // Delegate tools (should pass)
-                test_tool("tachi_search"),
+                test_tool("tachi_memory"),
                 test_tool("tachi_web_search"),
                 test_tool("tachi_browse"),
-                test_tool("tachi_save"),
                 test_tool("tachi_unstick"),
                 test_tool("tachi_complete"),
                 test_tool("run_skill"),
+                // Old tools that should be excluded from delegate
+                test_tool("tachi_search"),
+                test_tool("tachi_save"),
                 // Should be excluded:
                 test_tool("tachi_plan"),
                 test_tool("tachi_handoff"),
@@ -987,7 +921,6 @@ mod tests {
             ],
             Some(ToolProfile::delegate()),
             None,
-            true, // even with GH token, delegate shouldn't see GH tools
         );
         let names: Vec<String> = filtered
             .into_iter()
@@ -996,10 +929,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "tachi_search".to_string(),
+                "tachi_memory".to_string(),
                 "tachi_web_search".to_string(),
                 "tachi_browse".to_string(),
-                "tachi_save".to_string(),
                 "tachi_unstick".to_string(),
                 "tachi_complete".to_string(),
                 "run_skill".to_string(),
