@@ -75,6 +75,7 @@ mod sandbox_ops;
 mod server_handler;
 mod server_methods;
 mod shared_defs;
+mod shell_ops;
 mod skill_chain_ops;
 mod status_ops;
 mod tool_params;
@@ -283,6 +284,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
+    "tachi_shell",
 ];
 
 struct CachedResult {
