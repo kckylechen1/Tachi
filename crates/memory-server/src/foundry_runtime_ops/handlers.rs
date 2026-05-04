@@ -525,6 +525,7 @@ pub(crate) async fn handle_recall_context(
                 agent_role: params.agent_role.clone(),
                 project: params.project.clone(),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await?;
@@ -593,6 +594,7 @@ pub(crate) async fn handle_recall_context(
                 agent_role: None,
                 project: Some(params.wiki_project.clone()),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await
@@ -956,7 +958,10 @@ pub(crate) async fn handle_capture_session(
             timestamp: Utc::now().to_rfc3339(),
             category: normalize_category(&draft.category),
             topic,
-            keywords: dedup_strings(draft.keywords),
+            keywords: crate::memory_search_ops::preference_augmented_keywords(
+                &draft.text,
+                dedup_strings(draft.keywords),
+            ),
             persons: dedup_strings(draft.persons),
             entities: dedup_strings(draft.entities),
             location: draft.location.trim().to_string(),

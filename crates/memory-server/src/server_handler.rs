@@ -114,7 +114,12 @@ impl ServerHandler for MemoryServer {
             let has_gh_token = crate::vault_ops::vault_has_secret(self, "GH_TOKEN");
 
             let visible = if crate::profiles::is_gh_tool_name(name) {
-                crate::profiles::gh_tool_visible(name, self.active_tool_profile(), has_gh_token)
+                crate::profiles::gh_tool_visible(
+                    name,
+                    self.active_tool_profile(),
+                    env_patterns.as_deref(),
+                    has_gh_token,
+                )
             } else {
                 crate::profiles::tool_visible(
                     name,

@@ -107,6 +107,7 @@ pub(super) async fn process_recall_rerank_cache_job(
                 agent_role: agent_role.clone(),
                 project: project.clone(),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await?;

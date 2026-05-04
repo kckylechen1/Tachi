@@ -51,9 +51,8 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 /// Default ordered set of rules run when `--rule` is not supplied.
 ///
 /// R8 (junk cleanup) is intentionally **excluded** from the default sweep:
-/// `DUPLICATE_OLD_SQL` partitions only by `text`, so two distinct memories
-/// stored at different paths with identical text would have one silently
-/// deleted. R8 must be opted in explicitly via `--rule R8`.
+/// even with conservative duplicate matching, it is a destructive cleanup rule
+/// and must be opted in explicitly via `--rule R8`.
 const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7"];
 
 #[derive(Debug)]

@@ -296,6 +296,8 @@ async fn run_truth_maintenance_for_target(
         let _ = server.enrich_tx.try_send(EnrichmentItem {
             id: entry.id.clone(),
             text: entry.text.clone(),
+            summary: entry.summary.clone(),
+            keywords: entry.keywords.clone(),
             needs_embedding: true,
             needs_summary: false,
             target_db,
@@ -784,6 +786,14 @@ fn collect_eval_rows_30d(server: &MemoryServer) -> Result<Vec<EvalEvidenceRow>, 
                  FROM memories
                  WHERE path LIKE '/eval/%'
                    AND created_at > datetime('now', '-30 day')
+                   -- Exclude watchdog auto-close synthesized records; those
+                   -- attribute outcome to agent='watchdog/<backend>' with
+                   -- empty quality/trajectory/diff and would skew per-agent
+                   -- success-rate stats.
+                   AND (
+                       json_extract(metadata, '$.auto_synthesized') IS NULL
+                       OR json_extract(metadata, '$.auto_synthesized') = 0
+                   )
                  ORDER BY created_at DESC
                  LIMIT 500",
             )

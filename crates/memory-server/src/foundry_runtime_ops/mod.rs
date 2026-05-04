@@ -9,6 +9,8 @@ mod maintenance;
 mod recall;
 mod recall_cache;
 
+pub(crate) use recall::rerank_rows;
+
 #[cfg(test)]
 mod tests;
 

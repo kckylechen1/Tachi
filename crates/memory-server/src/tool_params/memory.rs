@@ -306,6 +306,9 @@ pub(crate) struct HybridWeightsParam {
     /// Decay weight (default: 0.1)
     #[serde(default = "default_weight_decay")]
     pub decay: f64,
+    /// Use Reciprocal Rank Fusion instead of linear weighted blending.
+    #[serde(default)]
+    pub use_rrf: bool,
 }
 
 #[allow(dead_code)]
@@ -363,6 +366,10 @@ pub(crate) struct SearchMemoryParams {
     /// NULL means no domain filtering.
     #[serde(default)]
     pub domain: Option<String>,
+
+    /// Enable adaptive Voyage reranking when top hybrid scores are close.
+    #[serde(default)]
+    pub enable_rerank: bool,
 }
 
 impl SearchMemoryParams {
@@ -374,6 +381,7 @@ impl SearchMemoryParams {
                 fts: w.fts,
                 symbolic: w.symbolic,
                 decay: w.decay,
+                use_rrf: w.use_rrf,
             },
             None => HybridWeights::default(),
         };

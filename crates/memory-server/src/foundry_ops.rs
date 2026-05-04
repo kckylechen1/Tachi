@@ -216,6 +216,7 @@ async fn build_evidence(
                 agent_role: None,
                 project: query.project.clone(),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await?;

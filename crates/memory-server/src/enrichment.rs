@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct EnrichmentItem {
     pub(super) id: String,
     pub(super) text: String,
+    pub(super) summary: String,
+    pub(super) keywords: Vec<String>,
     pub(super) needs_embedding: bool,
     pub(super) needs_summary: bool,
     pub(super) target_db: DbScope,
@@ -14,6 +16,24 @@ pub(super) struct EnrichmentItem {
     pub(super) foundry_agent_id: Option<String>,
     pub(super) foundry_path_prefix: Option<String>,
     pub(super) revision: i64,
+}
+
+fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&str>) -> String {
+    if item.text.len() <= 500 {
+        return item.text.clone();
+    }
+
+    let summary = generated_summary
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(item.summary.as_str())
+        .trim();
+    let keywords = item.keywords.join(", ");
+    let condensed = format!("{summary}\n{keywords}").trim().to_string();
+    if condensed.is_empty() {
+        item.text.clone()
+    } else {
+        condensed
+    }
 }
 
 /// Batch enrichment queue configuration.
@@ -75,41 +95,8 @@ impl MemoryServer {
         let batch_size = items.len();
         eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
 
-        // 1. Batch embedding for items that need it
-        let embed_indices: Vec<usize> = items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.needs_embedding)
-            .map(|(i, _)| i)
-            .collect();
-
-        let embed_texts: Vec<String> = embed_indices
-            .iter()
-            .map(|&i| items[i].text.clone())
-            .collect();
-
-        let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
-
-        if !embed_texts.is_empty() {
-            match self.llm.embed_voyage_batch(&embed_texts, "document").await {
-                Ok(vecs) => {
-                    for (vec_idx, &item_idx) in embed_indices.iter().enumerate() {
-                        if vec_idx < vecs.len() {
-                            embed_results[item_idx] = Some(vecs[vec_idx].clone());
-                        }
-                    }
-                    eprintln!(
-                        "[enrichment-batcher] batch embedded {} texts in 1 API call",
-                        embed_texts.len()
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
-                }
-            }
-        }
-
-        // 2. Generate summaries concurrently for items that need them
+        // 1. Generate summaries first so long-memory embeddings use condensed
+        // semantic text instead of noisy full sessions.
         let summary_futures: Vec<_> = items
             .iter()
             .enumerate()
@@ -132,6 +119,40 @@ impl MemoryServer {
                     "[enrichment-batcher] summary failed for {}: {e}",
                     items[idx].id
                 ),
+            }
+        }
+
+        // 2. Batch embedding for items that need it
+        let embed_indices: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_embedding)
+            .map(|(i, _)| i)
+            .collect();
+
+        let embed_texts: Vec<String> = embed_indices
+            .iter()
+            .map(|&i| embedding_input_for_item(&items[i], summaries[i].as_deref()))
+            .collect();
+
+        let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
+
+        if !embed_texts.is_empty() {
+            match self.llm.embed_voyage_batch(&embed_texts, "document").await {
+                Ok(vecs) => {
+                    for (vec_idx, &item_idx) in embed_indices.iter().enumerate() {
+                        if vec_idx < vecs.len() {
+                            embed_results[item_idx] = Some(vecs[vec_idx].clone());
+                        }
+                    }
+                    eprintln!(
+                        "[enrichment-batcher] batch embedded {} texts in 1 API call",
+                        embed_texts.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
+                }
             }
         }
 

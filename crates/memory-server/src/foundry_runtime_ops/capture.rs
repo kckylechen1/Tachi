@@ -194,6 +194,7 @@ pub(super) fn capture_search_options(
             fts: 0.0,
             symbolic: 0.0,
             decay: 0.0,
+            use_rrf: false,
         },
         record_access: false,
         domain: None,
@@ -286,6 +287,8 @@ pub(super) fn queue_capture_enrichment(
     let _ = server.enrich_tx.try_send(EnrichmentItem {
         id: entry.id.clone(),
         text: entry.text.clone(),
+        summary: entry.summary.clone(),
+        keywords: entry.keywords.clone(),
         needs_embedding: true,
         needs_summary,
         target_db,

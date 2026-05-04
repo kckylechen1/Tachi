@@ -106,7 +106,7 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
             "UPDATE memories SET archived = 1
              WHERE archived = 0
                AND last_access IS NOT NULL
-               AND last_access < datetime('now', '-' || ?1 || ' days')
+               AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
                AND importance < 0.5
                AND (retention_policy IS NULL OR retention_policy = 'durable')
                {exempt_clause}"
@@ -119,7 +119,7 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
             "UPDATE memories SET archived = 1
              WHERE archived = 0
                AND last_access IS NULL
-               AND timestamp < datetime('now', '-' || ?1 || ' days')
+               AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
                AND importance < 0.3
                AND (retention_policy IS NULL OR retention_policy = 'durable')
                {exempt_clause}"
@@ -132,7 +132,7 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
         "UPDATE memories SET archived = 1
          WHERE archived = 0
            AND last_access IS NOT NULL
-           AND last_access < datetime('now', '-' || ?1 || ' days')
+           AND unixepoch(last_access) < unixepoch('now', '-' || ?1 || ' days')
            AND importance < 0.7
            AND retention_policy = 'ephemeral'",
         params![stale_days],
@@ -142,7 +142,7 @@ pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64,
         "UPDATE memories SET archived = 1
          WHERE archived = 0
            AND last_access IS NULL
-           AND timestamp < datetime('now', '-' || ?1 || ' days')
+           AND unixepoch(timestamp) < unixepoch('now', '-' || ?1 || ' days')
            AND importance < 0.5
            AND retention_policy = 'ephemeral'",
         params![stale_days],

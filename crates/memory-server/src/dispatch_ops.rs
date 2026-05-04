@@ -313,12 +313,20 @@ async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -> Option<St
     None
 }
 
-/// Update kanban task state
+/// Update kanban task state.
+///
+/// `reviewed` flips the `metadata.reviewed` flag on the kanban row. The
+/// status dashboard surfaces completed/success dispatches without this
+/// flag as "unreviewed". Explicit `tachi_complete` calls should mark
+/// the task reviewed; the watchdog auto-close path must NOT, so human
+/// operators can still distinguish agent-closed tasks from auto-closed
+/// ones.
 pub(crate) async fn update_kanban_state(
     server: &MemoryServer,
     dispatch_id: &str,
     new_state: &str,
     eval_id: Option<&str>,
+    reviewed: Option<bool>,
 ) -> Result<(), String> {
     let path = format!("/kanban/tasks/{}", dispatch_id);
     // Use exact path SQL query instead of semantic search to avoid
@@ -354,6 +362,9 @@ pub(crate) async fn update_kanban_state(
             obj.insert("a2a_state".to_string(), json!(new_state));
             if let Some(eid) = eval_id {
                 obj.insert("eval_ledger_id".to_string(), json!(eid));
+            }
+            if let Some(flag) = reviewed {
+                obj.insert("reviewed".to_string(), json!(flag));
             }
             obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
         }
@@ -557,6 +568,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
                 agent_role: None,
                 project: params.project.clone(),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await
@@ -605,6 +617,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
             agent_role: None,
             project: params.project.clone(),
             domain: None,
+            enable_rerank: false,
         },
     )
     .await
@@ -774,6 +787,9 @@ async fn run_agent_subprocess(
 ) -> Result<DispatchResult, String> {
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
+    // If this task is dropped (daemon shutdown, spawning task cancelled, ...),
+    // tokio kills the child via SIGKILL instead of leaving it orphaned.
+    cmd.kill_on_drop(true);
 
     let start = std::time::Instant::now();
 
@@ -781,10 +797,21 @@ async fn run_agent_subprocess(
         .spawn()
         .map_err(|e| format!("Failed to spawn agent process: {e}"))?;
 
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| format!("Agent process timed out after {}s", timeout.as_secs()))?
-        .map_err(|e| format!("Agent process error: {e}"))?;
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(res) => res.map_err(|e| format!("Agent process error: {e}"))?,
+        Err(_) => {
+            // Timeout fired. `wait_with_output` consumed `child`, but the
+            // tokio::time::timeout cancellation path drops the future, which
+            // drops the inner Child — that triggers kill_on_drop and sends
+            // SIGKILL. To be explicit and avoid any future tokio behavior
+            // change, also flag the error clearly so the watchdog treats
+            // this as a failure rather than a crash.
+            return Err(format!(
+                "Agent process timed out after {}s (killed)",
+                timeout.as_secs()
+            ));
+        }
+    };
 
     let duration_ms = start.elapsed().as_millis() as u64;
     let exit_code = output.status.code();
@@ -870,6 +897,20 @@ pub(crate) async fn handle_tachi_dispatch(
     // 2. Generate MCP config if requested
     let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
     let inject_hub = params.inject_hub_mcps.unwrap_or(false);
+    // Codex's `codex exec` CLI does not consume an external mcp-config file
+    // the way Claude Code's `--mcp-config` does (see build_codex_command,
+    // where the generated config path is deliberately ignored). Failing
+    // loudly here is clearer than silently producing a config file the
+    // subprocess will never read.
+    if matches!(agent_norm.as_str(), "codex" | "codex-cli" | "openai")
+        && (inject_tachi || inject_hub)
+    {
+        return Err(
+            "inject_tachi_mcp / inject_hub_mcps are not supported for the codex backend. \
+             Configure MCP servers in ~/.codex/config.toml instead, or dispatch with agent='claude'."
+                .to_string(),
+        );
+    }
     let mcp_config_path = if inject_tachi || inject_hub {
         generate_mcp_config(server, &dispatch_id, inject_tachi, inject_hub).await?
     } else {
@@ -951,7 +992,6 @@ pub(crate) async fn handle_tachi_dispatch(
     let server_clone = server.clone();
     let d_id = dispatch_id.clone();
     let agent_for_watchdog = agent_norm.clone();
-    let task_desc = params.task.clone();
     let stage_for_traj = params.stage.clone();
     let traj_path_for_spawn = trajectory_path.clone();
     let workspace_dir_for_response = workspace_dir.clone();
@@ -1018,60 +1058,99 @@ pub(crate) async fn handle_tachi_dispatch(
         if !is_closed {
             let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
 
-            let (outcome, kanban_state_update, note) = if exited_ok {
-                // exit_code=0: sub-agent succeeded. Orchestrator will eval later.
+            if exited_ok {
+                // exit_code=0 but no tachi_complete: sub-agent forgot to
+                // close the loop, but we have no real evaluation. Do NOT
+                // synthesize a `success` eval — that would poison the nightly
+                // routing analysis with records whose agent is "watchdog/*"
+                // and whose quality/trajectory/diff are empty. Instead just
+                // close the kanban row as COMPLETED but leave `reviewed=false`
+                // so the status dashboard surfaces it as "unreviewed" and
+                // operators can decide whether to write a real eval.
                 let tail = tail_chars(&full_output, 500);
-                (
-                    "success".to_string(),
+                eprintln!(
+                    "[watchdog] dispatch {} exited 0 without tachi_complete; marking kanban COMPLETED as unreviewed. tail={}",
+                    d_id, tail
+                );
+                let _ = update_kanban_state(
+                    &server_clone,
+                    &d_id,
                     "TASK_STATE_COMPLETED",
-                    format!("Watchdog: Agent exited 0. Output tail: {}", tail),
+                    None,
+                    Some(false),
                 )
+                .await;
             } else {
-                match &result {
-                    Err(e) => (
-                        "failure".to_string(),
-                        "TASK_STATE_FAILED",
-                        format!("Watchdog: {}", e),
-                    ),
+                // Crash / timeout / error: record a failure eval so the
+                // failure is still visible in the ledger, but tag it as
+                // `auto_synthesized=true` so the daily routing analysis can
+                // exclude synthesized records from agent success-rate stats.
+                let note = match &result {
+                    Err(e) => format!("Watchdog: {}", e),
                     Ok(r) => {
                         let tail = tail_chars(&r.output, 500);
-                        (
-                            "failure".to_string(),
-                            "TASK_STATE_FAILED",
-                            format!(
-                                "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
-                                r.exit_code, tail
-                            ),
+                        format!(
+                            "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
+                            r.exit_code, tail
                         )
                     }
-                }
-            };
+                };
 
-            // Close the loop on behalf of the sub-agent
-            let _ = crate::complete_ops::handle_tachi_complete(
-                &server_clone,
-                crate::TachiCompleteParams {
-                    dispatch_id: Some(d_id.clone()),
-                    task: task_desc,
-                    agent: format!("watchdog/{}", agent_for_watchdog),
-                    outcome,
-                    notes: Some(note),
-                    task_id: None,
-                    duration_ms: None,
-                    skills_used: Vec::new(),
-                    cost_tokens: None,
-                    cost_usd: None,
-                    quality_score: None,
-                    trajectory: None,
-                    diff: None,
-                    worktree: None,
-                    scope: None,
+                let ts = Utc::now();
+                let eval_id = format!(
+                    "eval_ws_{}_{}",
+                    ts.format("%Y%m%dT%H%M%SZ"),
+                    d_id.chars().take(16).collect::<String>()
+                );
+                let metadata = json!({
+                    "task_id": eval_id,
+                    "agent": format!("watchdog/{}", agent_for_watchdog),
+                    "outcome": "failure",
+                    "dispatch_id": d_id,
+                    // Nightly routing analysis must exclude these so "fake"
+                    // failures attributed to the watchdog agent don't pollute
+                    // the real backend's success-rate.
+                    "auto_synthesized": true,
+                });
+                let save_params = SaveMemoryParams {
+                    text: note.clone(),
+                    summary: format!("Watchdog auto-close FAILURE: {}", d_id),
+                    path: format!("/eval/{}/{}", ts.format("%Y%m%d"), eval_id),
+                    importance: 0.4,
+                    category: "experience".to_string(),
+                    topic: "eval".to_string(),
+                    keywords: vec![
+                        "eval".to_string(),
+                        "watchdog".to_string(),
+                        "failure".to_string(),
+                        "auto_synthesized".to_string(),
+                    ],
+                    persons: Vec::new(),
+                    entities: Vec::new(),
+                    location: String::new(),
+                    scope: "project".to_string(),
+                    vector: None,
+                    id: Some(eval_id.clone()),
+                    force: true,
+                    auto_link: false,
                     project: None,
-                },
-            )
-            .await;
+                    retention_policy: Some("durable".to_string()),
+                    domain: Some("system".to_string()),
+                    timestamp: None,
+                    metadata: Some(metadata),
+                };
+                let _ =
+                    crate::memory_search_ops::handle_save_memory(&server_clone, save_params).await;
 
-            let _ = update_kanban_state(&server_clone, &d_id, kanban_state_update, None).await;
+                let _ = update_kanban_state(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_FAILED",
+                    Some(&eval_id),
+                    Some(false),
+                )
+                .await;
+            }
         }
 
         let should_cleanup = match &result {
@@ -1126,6 +1205,7 @@ pub(crate) async fn handle_tachi_board(
             agent_role: None,
             project: params.project.clone(),
             domain: None,
+            enable_rerank: false,
         },
     )
     .await?;

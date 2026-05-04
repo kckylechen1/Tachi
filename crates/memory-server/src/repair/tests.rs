@@ -299,16 +299,19 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     let mut ctx = open_ctx(&path, "test");
     let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
     let total: usize = dry.findings.iter().map(|f| f.count).sum();
-    assert_eq!(total, 3, "expected 3 junk candidates, got {dry:?}");
+    assert_eq!(total, 2, "expected 2 junk candidates, got {dry:?}");
 
     let app = JunkCleanup.apply(&mut ctx).unwrap();
-    assert_eq!(app.applied, 3);
+    assert_eq!(app.applied, 2);
 
     let remaining: i64 = ctx
         .conn
         .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(remaining, 1, "only the newest duplicate should remain");
+    assert_eq!(
+        remaining, 2,
+        "same text under different paths should be preserved"
+    );
 }
 
 #[test]

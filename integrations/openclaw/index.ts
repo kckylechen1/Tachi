@@ -886,16 +886,13 @@ export const memoryHybridBridgePlugin = {
         "vault_list",
         "List secrets in the Tachi vault.",
       );
-      registerTachiPassthrough(
-        "tachi_ghost_whisper",
-        "ghost_publish",
-        "Publish a Ghost whisper message.",
-      );
-      registerTachiPassthrough(
-        "tachi_ghost_listen",
-        "ghost_subscribe",
-        "Listen for Ghost whisper messages.",
-      );
+      // NOTE: `tachi_ghost_whisper` / `tachi_ghost_listen` used to forward to
+      // the server-side `ghost_publish` / `ghost_subscribe` tools, but those
+      // were removed when the standard tool surface shipped. Leaving the
+      // passthroughs registered here made the OpenClaw bridge advertise
+      // tools that always returned `tool not found`. Remove them — agents
+      // that want Ghost-style whispers should coordinate via memory / handoff
+      // instead.
       registerTachiPassthrough(
         "tachi_kanban_add",
         "post_card",

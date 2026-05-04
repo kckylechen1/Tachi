@@ -661,7 +661,9 @@ pub(crate) async fn handle_wiki_ingest(
 
     let _ = server.enrich_tx.try_send(super::EnrichmentItem {
         id: id.clone(),
-        text: content,
+        text: entry.text.clone(),
+        summary: entry.summary.clone(),
+        keywords: entry.keywords.clone(),
         needs_embedding: true,
         needs_summary: false,
         target_db: DbScope::Project,
@@ -1155,6 +1157,7 @@ pub(crate) async fn handle_wiki_search(
             agent_role: None,
             project: Some(project_name.clone()),
             domain: None,
+            enable_rerank: false,
         },
     )
     .await?;

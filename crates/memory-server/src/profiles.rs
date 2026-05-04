@@ -444,7 +444,7 @@ pub(super) fn filter_tool_defs(
         .filter(|tool| {
             let name = tool.name.as_ref();
             if matches_any_pattern(name, GH_TOOL_PATTERNS.iter().copied()) {
-                return has_gh_token && tool_visible_gh(name, profile);
+                return has_gh_token && tool_visible_gh(name, profile, env_patterns);
             }
             tool_visible(name, profile, env_patterns)
         })
@@ -459,15 +459,25 @@ pub(super) fn is_gh_tool_name(tool_name: &str) -> bool {
 pub(super) fn gh_tool_visible(
     tool_name: &str,
     profile: Option<ToolProfile>,
+    env_patterns: Option<&[String]>,
     has_gh_token: bool,
 ) -> bool {
     if !is_gh_tool_name(tool_name) {
         return false;
     }
-    has_gh_token && tool_visible_gh(tool_name, profile)
+    has_gh_token && tool_visible_gh(tool_name, profile, env_patterns)
 }
 
-fn tool_visible_gh(_tool_name: &str, profile: Option<ToolProfile>) -> bool {
+fn tool_visible_gh(
+    tool_name: &str,
+    profile: Option<ToolProfile>,
+    env_patterns: Option<&[String]>,
+) -> bool {
+    if let Some(patterns) = env_patterns {
+        if !matches_any_pattern(tool_name, patterns.iter().map(String::as_str)) {
+            return false;
+        }
+    }
     let profile = profile.unwrap_or_else(default_tool_profile);
     if profile.admin {
         return true;

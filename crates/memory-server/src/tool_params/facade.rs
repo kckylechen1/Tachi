@@ -43,6 +43,10 @@ pub(crate) struct TachiSearchParams {
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,
+
+    /// Enable adaptive Voyage reranking for close top results in memory search.
+    #[serde(default)]
+    pub enable_rerank: bool,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────

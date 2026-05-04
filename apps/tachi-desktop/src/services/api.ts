@@ -293,34 +293,72 @@ class TachiApi {
   }
 
   async ping(): Promise<void> {
-    await this.callTool('memory_stats', {});
+    // `vault_status` is a cheap, read-only tool exposed by the default
+    // `standard` tool profile. Previously we called `memory_stats` which
+    // only exists in `admin`, so the desktop app reported the daemon as
+    // offline on any out-of-the-box install.
+    await this.callTool('vault_status', {});
   }
 
   async fetchHubCapabilities(): Promise<HubCapability[]> {
-    const payload = await this.callTool('hub_discover', { enabled_only: false });
-    const capabilities = ensureArray<unknown>(payload).filter(isRecord);
-    return capabilities.map((capability) => capability as HubCapability);
+    // `hub_discover` is admin-only since the standard profile collapsed
+    // onto facades. `tachi_skill action=discover` is the standard-visible
+    // replacement and returns compact capability records.
+    const payload = await this.callToolSoft(
+      'tachi_skill',
+      { action: 'discover', enabled_only: false, limit: 200 },
+      [] as HubCapability[],
+    );
+    if (Array.isArray(payload)) {
+      return payload.filter(isRecord).map((capability) => capability as HubCapability);
+    }
+    // Some facade versions wrap the list under `capabilities` / `skills`.
+    if (isRecord(payload)) {
+      for (const key of ['capabilities', 'skills', 'results']) {
+        const inner = (payload as Record<string, unknown>)[key];
+        if (Array.isArray(inner)) {
+          return inner.filter(isRecord).map((capability) => capability as HubCapability);
+        }
+      }
+    }
+    return [];
   }
 
   async fetchRecentAuditLogs(limit = 30): Promise<AuditLogEntry[]> {
-    const payload = await this.callTool('tachi_audit_log', { limit });
+    // `tachi_audit_log` is admin-only and deliberately hidden from the
+    // default standard profile. Keep the method so the dashboard can
+    // still render the panel, but fall back to an empty list instead of
+    // crashing the whole Hub screen when the tool isn't exposed.
+    const payload = await this.callToolSoft('tachi_audit_log', { limit }, [] as AuditLogEntry[]);
     const entries = ensureArray<unknown>(payload).filter(isRecord);
     return entries.map((entry) => entry as AuditLogEntry);
   }
 
   async searchMemory(query: string, topK = 8): Promise<MemoryEntry[]> {
-    const payload = await this.callTool('search_memory', {
+    // `search_memory` is not in the standard allow-list; `tachi_search`
+    // is the unified facade that replaces it.
+    const payload = await this.callTool('tachi_search', {
       query,
       top_k: topK,
+      scope: 'all',
       include_archived: false,
     });
 
-    const results = ensureArray<unknown>(payload).filter(isRecord);
-    return results.map((entry) => entry as MemoryEntry);
+    // The facade can return either `[hits]` or `{ hits: [...] }` shapes
+    // depending on the version. Normalize.
+    const rows: unknown[] = Array.isArray(payload)
+      ? payload
+      : isRecord(payload) && Array.isArray((payload as Record<string, unknown>).hits)
+        ? ((payload as Record<string, unknown>).hits as unknown[])
+        : [];
+    return rows.filter(isRecord).map((entry) => entry as MemoryEntry);
   }
 
   async getGcStats(): Promise<GcStats> {
-    const payload = await this.callTool('memory_gc', {});
+    // `memory_gc` is admin-only. Soft-degrade so HubDashboard still
+    // renders with the "No GC stats yet." placeholder rather than
+    // failing its entire Promise.all.
+    const payload = await this.callToolSoft('memory_gc', {}, {} as GcStats);
     if (!isRecord(payload)) {
       return {};
     }
@@ -328,7 +366,14 @@ class TachiApi {
   }
 
   async fetchGhostTopics(): Promise<GhostTopicSnapshot> {
-    const payload = await this.callTool('ghost_topics', {});
+    // `ghost_topics` was removed server-side when the standard profile
+    // shipped. Keep the method as a no-op so the Ghost Whispers view
+    // renders an empty state instead of throwing.
+    const payload = await this.callToolSoft(
+      'ghost_topics',
+      {},
+      { active_topics: 0, topics: [] } as GhostTopicSnapshot,
+    );
     if (!isRecord(payload)) {
       return { active_topics: 0, topics: [] };
     }
@@ -353,18 +398,70 @@ class TachiApi {
   }
 
   async fetchKanbanCards(limit = 100): Promise<MemoryEntry[]> {
-    const payload = await this.callTool('list_memories', {
-      path_prefix: '/kanban',
-      include_archived: false,
+    // `list_memories` is not in the standard allow-list. `tachi_task`
+    // with action=board is the standard-visible kanban accessor.
+    const payload = await this.callTool('tachi_task', {
+      action: 'board',
+      state_filter: 'all',
       limit,
     });
 
-    return ensureArray<unknown>(payload).filter(isRecord).map((card) => card as MemoryEntry);
+    // tachi_task board returns { board, count, tasks: [...] }. Each task
+    // is already a compact summary row; we pass it through as a
+    // MemoryEntry-shaped record so downstream renderers don't change.
+    const tasks = isRecord(payload) && Array.isArray((payload as Record<string, unknown>).tasks)
+      ? ((payload as Record<string, unknown>).tasks as unknown[])
+      : Array.isArray(payload)
+        ? payload
+        : [];
+    return tasks.filter(isRecord).map((card) => {
+      const meta = card as Record<string, unknown>;
+      const dispatchId = toStringOrNull(meta.dispatch_id);
+      const id = dispatchId ?? toStringOrNull(meta.id) ?? `kanban-${Math.random().toString(16).slice(2)}`;
+      return {
+        ...meta,
+        id,
+        summary: toStringOrNull(meta.summary) ?? '',
+        path: `/kanban/tasks/${dispatchId ?? id}`,
+      } as MemoryEntry;
+    });
   }
 
   private async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
     const result = await this.sendRequest('tools/call', { name, arguments: args });
     return parseToolCallResult(result);
+  }
+
+  /**
+   * Call an MCP tool that may not be exposed under the active server profile
+   * (e.g. admin-only tools like `tachi_audit_log` / `memory_gc` invoked from
+   * the desktop Hub dashboard while the daemon runs with the default
+   * `standard` profile). On "tool not found" we return `fallback` instead
+   * of bubbling an error so the UI can render a graceful empty state.
+   *
+   * Genuine transport failures (`TachiOfflineError`) are still re-thrown so
+   * the daemon-offline banner can react.
+   */
+  private async callToolSoft<T>(
+    name: string,
+    args: Record<string, unknown>,
+    fallback: T,
+  ): Promise<T | unknown> {
+    try {
+      return await this.callTool(name, args);
+    } catch (error) {
+      if (isTachiOfflineError(error)) {
+        throw error;
+      }
+      const message = error instanceof Error ? error.message.toLowerCase() : '';
+      if (message.includes('tool not found') || message.includes('unknown tool')) {
+        return fallback;
+      }
+      // Unknown tool errors also come back as `-32602 invalid_request` in
+      // some transport layers; treat any error during a soft-optional call
+      // as a graceful empty rather than a UI-breaking throw.
+      return fallback;
+    }
   }
 
   private async sendRequest(method: string, params: unknown): Promise<unknown> {

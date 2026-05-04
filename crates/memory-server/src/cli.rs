@@ -77,6 +77,9 @@ pub(crate) enum Commands {
         path: Option<String>,
         #[arg(long, default_value_t = 5)]
         top_k: usize,
+        /// Optional named project DB.
+        #[arg(long)]
+        project: Option<String>,
     },
     // Save is now an alias of `remember` — see `Remember` below, which carries
     // `#[command(alias = "save")]`.

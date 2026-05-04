@@ -350,6 +350,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             agent_role: params.agent_role,
             project: Some(project_name.clone()),
             domain: params.domain,
+            enable_rerank: false,
         },
     )
     .await?;
@@ -394,6 +395,7 @@ pub(crate) async fn handle_tachi_task_brief(
             agent_role: params.agent_id.clone(),
             project: params.project.clone(),
             domain: params.domain.clone(),
+            enable_rerank: false,
         },
     )
     .await?;
@@ -413,6 +415,7 @@ pub(crate) async fn handle_tachi_task_brief(
             agent_role: params.agent_id.clone(),
             project: params.project.clone(),
             domain: params.domain.clone(),
+            enable_rerank: false,
         },
     )
     .await?;
@@ -487,6 +490,7 @@ pub(crate) async fn handle_tachi_progress_check(
             agent_role: params.agent_id.clone(),
             project: params.project.clone(),
             domain: params.domain.clone(),
+            enable_rerank: false,
         },
     )
     .await?;
@@ -553,6 +557,7 @@ async fn build_route_recommendation(
             agent_role: None,
             project: project.map(|s| s.to_string()),
             domain: None,
+            enable_rerank: false,
         },
     )
     .await

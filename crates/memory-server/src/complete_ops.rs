@@ -218,9 +218,18 @@ pub(crate) async fn handle_tachi_complete(
             "aborted" => "TASK_STATE_CANCELED",
             _ => "TASK_STATE_FAILED",
         };
-        let _ =
-            crate::dispatch_ops::update_kanban_state(server, did, new_state, Some(&eval_memory_id))
-                .await;
+        // Explicit tachi_complete represents a deliberate close — mark the
+        // kanban row reviewed so the status dashboard stops flagging it as
+        // an auto-closed, unreviewed dispatch. Watchdog auto-close keeps
+        // reviewed=false.
+        let _ = crate::dispatch_ops::update_kanban_state(
+            server,
+            did,
+            new_state,
+            Some(&eval_memory_id),
+            Some(true),
+        )
+        .await;
     }
 
     // --- Post-complete hooks MVP ---
@@ -300,16 +309,15 @@ pub(crate) async fn handle_tachi_complete(
                     existing_meta["last_seen"] = json!(Utc::now().to_rfc3339());
                     let updated_meta = serde_json::to_string(&existing_meta).unwrap_or_default();
                     let eid = existing_id.clone();
-                    let update_result =
-                        server.with_store_for_scope(lesson_db, |store| {
-                            store
-                                .connection()
-                                .execute(
-                                    "UPDATE memories SET metadata = ?1 WHERE id = ?2",
-                                    rusqlite::params![updated_meta, eid],
-                                )
-                                .map_err(|e| format!("lesson dedup update: {e}"))
-                        });
+                    let update_result = server.with_store_for_scope(lesson_db, |store| {
+                        store
+                            .connection()
+                            .execute(
+                                "UPDATE memories SET metadata = ?1 WHERE id = ?2",
+                                rusqlite::params![updated_meta, eid],
+                            )
+                            .map_err(|e| format!("lesson dedup update: {e}"))
+                    });
                     match update_result {
                         Ok(_) => {
                             pipeline_status["post_complete_hooks"] =
@@ -324,8 +332,7 @@ pub(crate) async fn handle_tachi_complete(
                 } else {
                     let lesson_date = date.clone();
                     let lesson_task_id = task_id.clone();
-                    let lesson_path =
-                        format!("/eval/lessons/{}/{}", lesson_date, lesson_task_id);
+                    let lesson_path = format!("/eval/lessons/{}/{}", lesson_date, lesson_task_id);
                     let lesson_text = format!(
                         "Task: {}\nOutcome: {}\nAgent: {}\nSkills: {}\nDispatch ID: {}\n\nNotes:\n{}",
                         params.task,

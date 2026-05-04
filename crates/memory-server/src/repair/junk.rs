@@ -21,7 +21,7 @@ const DUPLICATE_OLD_SQL: &str = r#"
         SELECT
             id,
             ROW_NUMBER() OVER (
-                PARTITION BY text
+                PARTITION BY text, path, scope, COALESCE(domain, '')
                 ORDER BY COALESCE(NULLIF(timestamp, ''), '') DESC, revision DESC, id DESC
             ) AS rn
         FROM memories

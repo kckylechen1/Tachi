@@ -239,7 +239,7 @@ pub(super) fn parse_session_capture_response(
         .collect())
 }
 
-pub(super) async fn rerank_rows(
+pub(crate) async fn rerank_rows(
     server: &MemoryServer,
     query: &str,
     rows: Vec<Value>,

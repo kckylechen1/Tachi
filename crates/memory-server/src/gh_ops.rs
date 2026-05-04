@@ -284,12 +284,20 @@ pub(crate) async fn handle_tachi_gh(
             handle_gh_repo_view(server, GhRepoViewParams { repo: params.repo }).await
         }
         "issue_list" => {
+            // gh CLI accepts `--label` multiple times or a single comma-separated
+            // value. We normalize to comma-separated to preserve all labels the
+            // caller passed; taking `.first()` silently dropped extras.
+            let labels_csv = if params.labels.is_empty() {
+                None
+            } else {
+                Some(params.labels.join(","))
+            };
             handle_gh_issue_list(
                 server,
                 GhIssueListParams {
                     repo: params.repo,
                     state: params.state.unwrap_or_else(|| "open".to_string()),
-                    labels: params.labels.first().cloned(),
+                    labels: labels_csv,
                     limit: params.limit.unwrap_or(30),
                 },
             )

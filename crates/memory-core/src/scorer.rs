@@ -4,7 +4,7 @@
 // and Python `store.py:hybrid_search` weighting logic.
 
 use crate::types::{HybridScore, MemoryEntry};
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use std::collections::HashMap;
 
 // Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
@@ -48,6 +48,7 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
         .last_access
         .as_ref()
         .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+        .or_else(|| leading_event_datetime(&entry.text))
         .unwrap_or_else(|| {
             entry
                 .timestamp
@@ -63,6 +64,27 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
     (recency * (1.0 + 0.2 * frequency)).max(importance_floor)
 }
 
+fn leading_event_datetime(text: &str) -> Option<chrono::DateTime<Utc>> {
+    let rest = text.trim_start().strip_prefix('[')?;
+    let date = rest.get(0..10)?;
+    if !matches!(
+        date.as_bytes(),
+        [d0, d1, d2, d3, b'-', m0, m1, b'-', day0, day1]
+            if d0.is_ascii_digit()
+                && d1.is_ascii_digit()
+                && d2.is_ascii_digit()
+                && d3.is_ascii_digit()
+                && m0.is_ascii_digit()
+                && m1.is_ascii_digit()
+                && day0.is_ascii_digit()
+                && day1.is_ascii_digit()
+    ) {
+        return None;
+    }
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    Some(date.and_hms_opt(12, 0, 0)?.and_utc())
+}
+
 /// ACT-R Base-Level Activation: B_i = ln(Σ t_j^(-d))
 /// Where t_j is the age of each access in seconds, d is the decay parameter.
 /// More frequent and more recent accesses → higher activation.
@@ -71,7 +93,10 @@ pub fn base_level_activation(access_ages_secs: &[f64], d: f64) -> f64 {
     if access_ages_secs.is_empty() {
         return 0.0;
     }
-    let sum: f64 = access_ages_secs.iter().map(|t| t.max(1.0).powf(-d)).sum();
+    let sum: f64 = access_ages_secs
+        .iter()
+        .map(|t| (t / 86_400.0).max(1.0 / 24.0).powf(-d))
+        .sum();
     if sum > 0.0 {
         sum.ln()
     } else {
@@ -87,7 +112,10 @@ pub fn decay_score_actr(entry: &MemoryEntry, access_ages: Option<&[f64]>) -> f64
             let bla = base_level_activation(ages, 0.5);
             // Normalize to [0, 1] range: BLA typically ranges from -5 to +5
             let normalized = (bla + 5.0) / 10.0;
-            normalized.clamp(0.0, 1.0).max(entry.importance * 0.3)
+            normalized
+                .clamp(0.0, 1.0)
+                .max(decay_score(entry))
+                .max(entry.importance * 0.3)
         }
         _ => decay_score(entry),
     }
@@ -212,6 +240,7 @@ pub struct HybridWeights {
     pub fts: f64,
     pub symbolic: f64,
     pub decay: f64,
+    pub use_rrf: bool,
 }
 
 impl Default for HybridWeights {
@@ -221,8 +250,19 @@ impl Default for HybridWeights {
             fts: 0.25,
             symbolic: 0.20,
             decay: 0.20,
+            use_rrf: true,
         }
     }
+}
+
+fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
+    let mut ranked = scores.iter().collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (id, _))| (id.clone(), idx + 1))
+        .collect()
 }
 
 /// Merge several scored lists into a single HybridScore per doc-id.
@@ -244,6 +284,9 @@ pub fn hybrid_score(
         .collect();
 
     let mut out: HashMap<String, HybridScore> = HashMap::new();
+    let vec_ranks = weights.use_rrf.then(|| rank_map(vec_scores));
+    let fts_ranks = weights.use_rrf.then(|| rank_map(fts_scores));
+    let symbolic_ranks = weights.use_rrf.then(|| rank_map(symbolic_scores));
 
     for id in all_ids {
         let vs = normalize(*vec_scores.get(id).unwrap_or(&0.0));
@@ -259,8 +302,30 @@ pub fn hybrid_score(
             })
             .unwrap_or(0.0);
 
-        let final_score =
-            weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds;
+        let final_score = if weights.use_rrf {
+            // LongMemEval retrieval benefits from rank fusion because it
+            // rewards agreement across channels without overtrusting raw
+            // score calibration differences.
+            let rrf_k = 60.0;
+            let vec_part = vec_ranks
+                .as_ref()
+                .and_then(|ranks| ranks.get(id))
+                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .unwrap_or(0.0);
+            let fts_part = fts_ranks
+                .as_ref()
+                .and_then(|ranks| ranks.get(id))
+                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .unwrap_or(0.0);
+            let symbolic_part = symbolic_ranks
+                .as_ref()
+                .and_then(|ranks| ranks.get(id))
+                .map(|rank| 0.5 / (rrf_k + *rank as f64))
+                .unwrap_or(0.0);
+            vec_part + fts_part + symbolic_part
+        } else {
+            weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds
+        };
 
         out.insert(
             id.clone(),
@@ -391,5 +456,41 @@ mod tests {
         entry.importance = 1.0;
         let s2 = decay_score(&entry);
         assert!(s2 >= 0.3, "importance floor violated: {s2}");
+    }
+
+    #[test]
+    fn actr_access_history_uses_day_scale() {
+        use chrono::Duration;
+        let entry = crate::types::MemoryEntry {
+            id: "test".into(),
+            path: "/".into(),
+            summary: "".into(),
+            text: "".into(),
+            importance: 0.7,
+            timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            category: "fact".into(),
+            topic: "".into(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: "".into(),
+            source: "".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::Value::Object(Default::default()),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+        };
+
+        let never = decay_score_actr(&entry, None);
+        let old = decay_score_actr(&entry, Some(&[60.0 * 86_400.0]));
+        let recent = decay_score_actr(&entry, Some(&[3_600.0, 7_200.0]));
+
+        assert!(old >= never, "old={old}, never={never}");
+        assert!(recent > old, "recent={recent}, old={old}");
     }
 }

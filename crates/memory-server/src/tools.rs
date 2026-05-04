@@ -1278,7 +1278,16 @@ impl MemoryServer {
         let scope = params.scope.to_ascii_lowercase();
         let mut parts = Vec::new();
 
-        if scope == "wiki" || scope == "all" {
+        // Normalize scope: "wiki", "memory", "all" are the valid subsystem selectors.
+        // "project", "global", "user" are DB-target hints that callers sometimes pass
+        // by analogy with save_memory's scope parameter. Treat them as "all".
+        let effective_scope = match scope.as_str() {
+            "wiki" | "memory" | "all" => scope.as_str(),
+            _ => "all",
+        };
+        let scope_remapped = effective_scope != scope.as_str();
+
+        if effective_scope == "wiki" || effective_scope == "all" {
             let wiki_params = WikiSearchParams {
                 query: params.query.clone(),
                 path_prefix: params.path_prefix.clone(),
@@ -1297,7 +1306,7 @@ impl MemoryServer {
             }
         }
 
-        if scope == "memory" || scope == "all" {
+        if effective_scope == "memory" || effective_scope == "all" {
             let mem_params = SearchMemoryParams {
                 query: params.query.clone(),
                 query_vec: None,
@@ -1312,6 +1321,7 @@ impl MemoryServer {
                 agent_role: None,
                 project: params.project.clone(),
                 domain: params.domain.clone(),
+                enable_rerank: params.enable_rerank,
             };
             let mem_result = handle_search_memory(self, mem_params).await;
             match mem_result {
@@ -1320,7 +1330,17 @@ impl MemoryServer {
             }
         }
 
-        Ok(parts.join("\n\n"))
+        let mut output = parts.join("\n\n");
+        if scope_remapped {
+            output = format!(
+                "> **Note**: scope='{}' was interpreted as 'all' (search both wiki and memory). \
+                 The `scope` parameter selects *which subsystems* to search (wiki/memory/all), \
+                 not which DB. Use the `project` parameter to target a specific project DB.\n\n{}",
+                scope, output
+            );
+        }
+
+        Ok(output)
     }
 
     #[tool(

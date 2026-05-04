@@ -167,6 +167,7 @@ pub(crate) async fn handle_memory_graph(
                 agent_role: None,
                 project: params.project.clone(),
                 domain: None,
+                enable_rerank: false,
             },
         )
         .await?;

@@ -614,6 +614,8 @@ async fn ingest_structured_event(
         let _ = server.enrich_tx.try_send(super::EnrichmentItem {
             id: entry_id.clone(),
             text: entry.text.clone(),
+            summary: entry.summary.clone(),
+            keywords: entry.keywords.clone(),
             needs_embedding: true,
             needs_summary: true,
             target_db,
@@ -1124,6 +1126,8 @@ pub(crate) async fn handle_ingest_source(
             let _ = server.enrich_tx.try_send(super::EnrichmentItem {
                 id: entry.id.clone(),
                 text: entry.text.clone(),
+                summary: entry.summary.clone(),
+                keywords: entry.keywords.clone(),
                 needs_embedding: true,
                 needs_summary: params.auto_summarize,
                 target_db,

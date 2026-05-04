@@ -1770,7 +1770,14 @@ async fn run_env_command(
     // 2. Prompt for password
     let password = if keychain {
         let output = std::process::Command::new("security")
-            .args(["find-generic-password", "-s", "tachi-vault", "-a", "default", "-w"])
+            .args([
+                "find-generic-password",
+                "-s",
+                "tachi-vault",
+                "-a",
+                "default",
+                "-w",
+            ])
             .output()?;
         if !output.status.success() {
             return Err(format!(
@@ -1823,7 +1830,12 @@ async fn run_env_command(
         }
 
         // --env-only: skip names that don't look like env vars (UPPER_SNAKE_CASE)
-        if env_only && !entry.name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+        if env_only
+            && !entry
+                .name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
             continue;
         }
 
@@ -1834,13 +1846,14 @@ async fn run_env_command(
             }
         }
 
-        let decrypted = match crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, e);
-                continue;
-            }
-        };
+        let decrypted =
+            match crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, e);
+                    continue;
+                }
+            };
         let value = match String::from_utf8(decrypted) {
             Ok(v) => v,
             Err(e) => {
@@ -1871,48 +1884,39 @@ async fn run_cli_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
-        Commands::Search { query, path, top_k } => {
-            let store = open_cli_store_read_only(db_path)?;
-            let path_prefix = path.clone();
-            let query_vec = if store.vec_available {
-                match crate::llm::LlmClient::new() {
-                    Ok(llm) => match llm.embed_voyage(&query, "query").await {
-                        Ok(vec) => Some(vec),
-                        Err(e) => {
-                            eprintln!(
-                                "[cli search] query embedding failed, falling back to lexical-only search: {e}"
-                            );
-                            None
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!(
-                            "[cli search] LLM client init failed, falling back to lexical-only search: {e}"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let results = store.search(
-                &query,
-                Some(SearchOptions {
-                    top_k,
-                    path_prefix,
-                    query_vec,
-                    record_access: false,
-                    ..Default::default()
-                }),
-            )?;
-            print_pretty_json(&json!({
-                "query": query,
-                "path": path,
-                "top_k": top_k,
-                "vector": store.vec_available,
-                "warnings": ["audit/access write skipped: database opened read-only"],
-                "results": results,
-            }))
+        Commands::Search {
+            query,
+            path,
+            top_k,
+            project,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("query".into(), json!(query));
+            if let Some(v) = &path {
+                args.insert("path_prefix".into(), json!(v));
+            }
+            args.insert("top_k".into(), json!(top_k));
+            if let Some(v) = &project {
+                args.insert("project".into(), json!(v));
+            }
+
+            let body = dispatch_cli_tool(
+                "search_memory",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: SearchMemoryParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid search_memory args: {e}"))?;
+                        crate::memory_search_ops::handle_search_memory(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
         }
         // `Commands::Save` was removed in favor of `Commands::Remember` which
         // carries `#[command(alias = "save")]`. The dispatcher therefore only
@@ -3031,7 +3035,14 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("not initialized")?;
 
             let output = std::process::Command::new("security")
-                .args(["find-generic-password", "-s", "tachi-vault", "-a", "default", "-w"])
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    "tachi-vault",
+                    "-a",
+                    "default",
+                    "-w",
+                ])
                 .output()?;
             if !output.status.success() {
                 return Err("keychain entry not found".into());

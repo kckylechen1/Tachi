@@ -1,0 +1,12 @@
+## Summary
+
+All 6 goals implemented successfully:
+
+1. **`tachi_wiki`** facade — search/browse/write wiki via single `action` param
+2. **`tachi_skill`** facade — discover/run skills via single `action` param
+3. **`tachi_task`** facade — plan/dispatch/board/merge via single `action` param (no complete)
+4. **`tachi_save`** enhanced — `kind="facts"` or `kind="extract_facts"` dispatches to `handle_extract_facts`
+5. **Standard profile** updated — 8 curated facades (tachi_task, tachi_search, tachi_web_search, tachi_wiki, tachi_save, tachi_handoff, tachi_skill, vault_status); 11 old tools removed
+6. **GH call_tool bug** fixed — now mirrors list_tools visibility check using `is_gh_tool_name` + `gh_tool_visible`
+
+**260 tests pass**, including all 15 profile bundle tests. Report at `.agent/claude-code-runs/2026-05-03T14-28-06-724Z-tool-facade-refine/result.md`.
