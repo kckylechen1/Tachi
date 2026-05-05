@@ -437,7 +437,7 @@ pub(crate) async fn handle_tachi_gh(
                 &params.repo,
                 number,
                 strategy,
-                params.dry_run.unwrap_or(!params.confirm),
+                effective_safe_merge_dry_run(params.confirm, params.dry_run),
                 params.flow_id.as_deref(),
             )
             .await
@@ -461,6 +461,10 @@ fn parse_merge_strategy(raw: Option<&str>) -> Result<MergeStrategy, String> {
             other
         )),
     }
+}
+
+fn effective_safe_merge_dry_run(confirm: bool, requested_dry_run: Option<bool>) -> bool {
+    !confirm || requested_dry_run.unwrap_or(false)
 }
 
 fn merge_strategy_flag(s: MergeStrategy) -> &'static str {
@@ -1120,6 +1124,16 @@ mod safe_merge_tests {
             MergeStrategy::Rebase
         );
         assert!(parse_merge_strategy(Some("foo")).is_err());
+    }
+
+    #[test]
+    fn safe_merge_effective_dry_run_requires_confirm() {
+        assert!(effective_safe_merge_dry_run(false, None));
+        assert!(effective_safe_merge_dry_run(false, Some(false)));
+        assert!(effective_safe_merge_dry_run(false, Some(true)));
+        assert!(!effective_safe_merge_dry_run(true, None));
+        assert!(!effective_safe_merge_dry_run(true, Some(false)));
+        assert!(effective_safe_merge_dry_run(true, Some(true)));
     }
 
     #[test]
