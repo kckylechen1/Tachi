@@ -538,7 +538,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Vault { action } = &command {
-        return super::vault_cli::run_vault_command(&global_db_path, action.clone()).await;
+        return super::vault_cli::run_vault_command(&global_db_path, &app_home, action.clone())
+            .await;
     }
 
     if let Commands::Env {
@@ -633,6 +634,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             *crate::write_or_recover(&server.vault_key, "vault_key") = Some(key);
             *crate::write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
                 Some(std::time::Instant::now());
+            let loaded = server.refresh_llm_provider_secrets_from_vault()?;
+            eprintln!("[vault] loaded {loaded} provider key(s) from unlocked vault");
             Ok(true)
         })();
 

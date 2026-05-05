@@ -21,6 +21,8 @@ mod subprocess;
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep
 // resolving symbols via `crate::dispatch_ops::<name>`.
 pub(crate) use board::handle_tachi_board;
+#[cfg(test)]
+pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;

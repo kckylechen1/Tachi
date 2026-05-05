@@ -19,6 +19,22 @@ pub(crate) struct DispatchResult {
     pub duration_ms: u64,
 }
 
+pub(crate) fn apply_unlocked_vault_env(cmd: &mut Command, server: &MemoryServer) -> usize {
+    let Ok(secrets) = server.unlocked_api_key_secrets_for_child_env() else {
+        return 0;
+    };
+
+    let mut injected = 0usize;
+    for (name, value) in secrets {
+        if std::env::var_os(&name).is_some() {
+            continue;
+        }
+        cmd.env(name, value);
+        injected += 1;
+    }
+    injected
+}
+
 pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String {
     let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
     let sanitized = agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
@@ -130,7 +146,7 @@ pub(crate) async fn handle_tachi_dispatch(
     .await?;
 
     // 5. Build command
-    let cmd = match agent_norm.as_str() {
+    let mut cmd = match agent_norm.as_str() {
         "claude" | "claude-code" | "claude-cli" => {
             build_claude_command(&params, &prompt, mcp_config_path.as_ref())
         }
@@ -145,6 +161,7 @@ pub(crate) async fn handle_tachi_dispatch(
             ));
         }
     };
+    let _ = apply_unlocked_vault_env(&mut cmd, server);
 
     // 6. Spawn background task with Watchdog
     let server_clone = server.clone();

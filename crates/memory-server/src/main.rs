@@ -614,6 +614,12 @@ impl MemoryServer {
         Ok(self.llm.set_provider_secrets(secrets))
     }
 
+    pub(crate) fn unlocked_api_key_secrets_for_child_env(
+        &self,
+    ) -> Result<Vec<(String, String)>, String> {
+        load_unlocked_api_key_secrets(self)
+    }
+
     /// Clone the foundry maintenance sender so external supervisors
     /// (e.g. the multi-DB FoundryScheduler) can re-inject jobs into the
     /// same in-process worker that handles enrichment-driven enqueues.
