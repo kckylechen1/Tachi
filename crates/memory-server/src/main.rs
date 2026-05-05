@@ -47,6 +47,9 @@ mod dlq_ops;
 mod doctor;
 mod doctor_ops;
 mod enrichment;
+mod facade_memory_ops;
+mod facade_save_ops;
+mod facade_search_ops;
 mod foundry_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
@@ -84,6 +87,7 @@ mod tools;
 mod utils;
 mod vault_crypto;
 mod vault_ops;
+mod web_search_ops;
 mod wiki_ops;
 
 use crate::builtins::seed_builtin_capabilities;
