@@ -26,3 +26,7 @@ pub(crate) use dispatch::handle_tachi_dispatch;
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use merge::handle_approve_merge;
+#[cfg(test)]
+pub(crate) use merge::{
+    evaluate_delete_worktree_safety, validate_static_merge_safety, worktree_equals_repo_root,
+};

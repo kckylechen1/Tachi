@@ -277,6 +277,7 @@ mod handoff_tests;
 mod hub_tests;
 mod kanban_tests;
 mod memory_tests;
+mod merge_tests;
 mod pack_tests;
 mod profile_tests;
 mod proxy_tests;
