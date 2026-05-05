@@ -46,8 +46,10 @@ impl MemoryStore {
         db::vault_delete_entry(&self.conn, name)
     }
 
-    /// Touch a secret (update accessed_at and increment access_count).
-    pub fn vault_touch_entry(&self, name: &str) -> Result<(), MemoryError> {
+    /// Touch a secret (update accessed_at and increment access_count). Returns
+    /// the post-touch access_count from a single UPDATE...RETURNING so callers
+    /// don't race a follow-up SELECT.
+    pub fn vault_touch_entry(&self, name: &str) -> Result<i64, MemoryError> {
         db::vault_touch_entry(&self.conn, name)
     }
 

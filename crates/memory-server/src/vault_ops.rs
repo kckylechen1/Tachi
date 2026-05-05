@@ -645,7 +645,7 @@ pub(crate) async fn handle_vault_get(
         let value = String::from_utf8(decrypted)
             .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
 
-        server
+        let new_access_count = server
             .with_global_store(|store| {
                 store
                     .vault_touch_entry(&target_name)
@@ -659,7 +659,7 @@ pub(crate) async fn handle_vault_get(
             "secret_type": entry.secret_type,
             "description": entry.description,
             "allowed_agents": entry.allowed_agents,
-            "access_count": entry.access_count + 1,
+            "access_count": new_access_count,
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();

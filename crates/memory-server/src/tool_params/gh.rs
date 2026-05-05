@@ -3,11 +3,11 @@ use super::*;
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read", "safe_merge"
     pub action: String,
     /// Repository in "owner/repo" format
     pub repo: String,
-    /// Issue or PR number (required for issue_read, pr_read)
+    /// Issue or PR number (required for issue_read, pr_read, safe_merge)
     #[serde(default)]
     pub number: Option<u64>,
     /// Issue title (required for issue_create)
@@ -25,6 +25,15 @@ pub(crate) struct TachiGhParams {
     /// Maximum results (used by issue_list, pr_list, default: 30)
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash")
+    #[serde(default)]
+    pub merge_strategy: Option<String>,
+    /// When true, safe_merge evaluates the gate but does NOT call `gh pr merge` even if Ready
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 /// Parameters for reading a GitHub issue

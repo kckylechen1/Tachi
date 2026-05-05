@@ -1000,6 +1000,158 @@ fn stage_state_for(stage: &str) -> &'static str {
     }
 }
 
+// ─── GitHub workflow state (status.json `github` block + events.jsonl) ──────
+//
+// Convoy / Touchy automation tracks GitHub-side state for a flow under a
+// dedicated `github` block in `status.json`, and emits typed events to
+// `events.jsonl`. Schema (all fields optional — partial updates are merged
+// into whatever is already present):
+//
+// ```json
+// {
+//   "github": {
+//     "repo": "owner/repo",
+//     "issue_number": 123,
+//     "issue_url": "https://github.com/owner/repo/issues/123",
+//     "pr_number": 456,
+//     "pr_url": "https://github.com/owner/repo/pull/456",
+//     "merge_state": "pending|blocked|ready|merged",
+//     "checks": { "state": "pending|success|failure", "updated_at": "..." },
+//     "review": { "state": "pending|approved|changes_requested|blocked",
+//                 "updated_at": "..." }
+//   }
+// }
+// ```
+//
+// Events use the existing `event: "<kind>"` discriminator already used by
+// `flow_created` / `stage_entered`, so downstream filters can grep by prefix:
+// every GitHub-related event begins with `github_`.
+
+/// Allow-list of GitHub event kinds that may be appended via
+/// `append_github_event`. Centralised so the `tachi_gh safe_merge` flow,
+/// future webhook bridges, and tests cannot drift.
+//
+// `dead_code` allow: production callers land in the follow-up commit that
+// wires `tachi_gh safe_merge` through this helper. Tests already exercise
+// every branch, and the helper is intentionally stable API surface.
+pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
+    "github_issue_created",
+    "github_issue_linked",
+    "github_issue_commented",
+    "github_pr_created",
+    "github_pr_updated",
+    "github_checks_polled",
+    "github_review_gate_passed",
+    "github_merge_blocked",
+    "github_pr_merged",
+];
+
+/// Allow-list of `merge_state` values surfaced in `status.github.merge_state`.
+/// Matches the section 五 schema. State machine intent:
+///
+/// - `pending`  — PR exists, gates still resolving (CI / review / mergeable)
+/// - `blocked`  — at least one gate is red or a bot review requested changes
+/// - `ready`    — all gates green, safe to merge (no automated merge yet)
+/// - `merged`   — `gh pr merge` (any strategy) succeeded
+pub(crate) const GITHUB_MERGE_STATES: &[&str] = &["pending", "blocked", "ready", "merged"];
+
+/// Recursively merge `patch` into `target` in-place. Object values are merged
+/// key-by-key (so a partial `{"checks": {"state": "success"}}` does not wipe
+/// `checks.updated_at`); non-object values are replaced wholesale; `null`
+/// values in `patch` clear the corresponding key in `target`.
+fn deep_merge(target: &mut Value, patch: Value) {
+    match (target, patch) {
+        (Value::Object(t), Value::Object(p)) => {
+            for (k, v) in p {
+                if v.is_null() {
+                    t.remove(&k);
+                } else if let Some(existing) = t.get_mut(&k) {
+                    deep_merge(existing, v);
+                } else {
+                    t.insert(k, v);
+                }
+            }
+        }
+        (slot, replacement) => {
+            *slot = replacement;
+        }
+    }
+}
+
+/// Merge a GitHub-state patch into `status.json`'s `github` block. Returns the
+/// resulting merged block so callers can echo it back to the agent. Creates
+/// the block (and `status.json` itself) if absent.
+///
+/// `patch` MUST be a JSON object; non-object input is rejected to avoid
+/// accidentally wiping the block with e.g. `Value::Null`.
+pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value, String> {
+    if !patch.is_object() {
+        return Err(format!(
+            "merge_github_status: patch must be a JSON object, got {}",
+            match &patch {
+                Value::Null => "null",
+                Value::Bool(_) => "bool",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => unreachable!(),
+            }
+        ));
+    }
+    if let Some(state) = patch.get("merge_state").and_then(|v| v.as_str()) {
+        if !GITHUB_MERGE_STATES.contains(&state) {
+            return Err(format!(
+                "merge_github_status: invalid merge_state '{}' (allowed: {:?})",
+                state, GITHUB_MERGE_STATES
+            ));
+        }
+    }
+    let mut status = read_status(run_dir);
+    if !status.is_object() {
+        status = json!({});
+    }
+    let obj = status.as_object_mut().expect("ensured object above");
+    let github = obj.entry("github".to_string()).or_insert_with(|| json!({}));
+    deep_merge(github, patch);
+    let merged = github.clone();
+    obj.insert("updated_at".into(), json!(Utc::now().to_rfc3339()));
+    write_status(run_dir, &Value::Object(obj.clone()))?;
+    Ok(merged)
+}
+
+/// Append a GitHub workflow event to `events.jsonl`. `kind` MUST be one of
+/// `GITHUB_EVENT_KINDS`; unknown kinds are rejected so we don't silently
+/// pollute the event stream. `payload` is merged into the event object after
+/// the standard `event`/`flow_id`/`timestamp` fields, but those three keys
+/// are reserved and cannot be overridden by the caller.
+pub(crate) fn append_github_event(
+    run_dir: &Path,
+    flow_id: &str,
+    kind: &str,
+    payload: Value,
+) -> Result<(), String> {
+    if !GITHUB_EVENT_KINDS.contains(&kind) {
+        return Err(format!(
+            "append_github_event: unknown kind '{}' (allowed: {:?})",
+            kind, GITHUB_EVENT_KINDS
+        ));
+    }
+    let mut event = serde_json::Map::new();
+    if let Value::Object(p) = payload {
+        for (k, v) in p {
+            // Reserve the framing keys so callers can't break grep filters.
+            if matches!(k.as_str(), "event" | "flow_id" | "timestamp") {
+                continue;
+            }
+            event.insert(k, v);
+        }
+    }
+    event.insert("event".into(), json!(kind));
+    event.insert("flow_id".into(), json!(flow_id));
+    event.insert("timestamp".into(), json!(Utc::now().to_rfc3339()));
+    append_event(run_dir, Value::Object(event))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1425,5 +1577,237 @@ mod tests {
             .filter(|v| v.get("event").and_then(|x| x.as_str()) == Some("convoy_slice_prepared"))
             .count();
         assert_eq!(prepared_count, 2);
+    }
+
+    // ─── GitHub status / events helpers ──────────────────────────────────
+
+    fn read_events_jsonl(run_dir: &Path) -> Vec<Value> {
+        let raw = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap_or_default();
+        raw.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Value>(l).expect("event line is JSON"))
+            .collect()
+    }
+
+    fn read_status_obj(run_dir: &Path) -> Value {
+        let raw = std::fs::read_to_string(run_dir.join("status.json")).unwrap_or_default();
+        serde_json::from_str(&raw).unwrap_or(json!({}))
+    }
+
+    #[test]
+    fn merge_github_status_creates_block_when_absent() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-create");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        let merged = merge_github_status(
+            &run_dir,
+            json!({
+                "repo": "kckylec/sigil",
+                "issue_number": 42,
+                "issue_url": "https://github.com/kckylec/sigil/issues/42",
+            }),
+        )
+        .expect("merge should succeed on empty status");
+
+        assert_eq!(merged["repo"], json!("kckylec/sigil"));
+        assert_eq!(merged["issue_number"], json!(42));
+
+        let on_disk = read_status_obj(&run_dir);
+        assert_eq!(on_disk["github"]["repo"], json!("kckylec/sigil"));
+        assert!(
+            on_disk["updated_at"].is_string(),
+            "merge_github_status must stamp top-level updated_at"
+        );
+    }
+
+    #[test]
+    fn merge_github_status_deep_merges_partial_patches() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-merge");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        // Seed: PR created with full checks block.
+        merge_github_status(
+            &run_dir,
+            json!({
+                "repo": "owner/repo",
+                "pr_number": 7,
+                "pr_url": "https://github.com/owner/repo/pull/7",
+                "merge_state": "pending",
+                "checks": { "state": "pending", "updated_at": "T0" },
+            }),
+        )
+        .unwrap();
+
+        // Patch: only the checks.state changes — checks.updated_at must
+        // survive (deep merge), and pr_number / repo must be untouched.
+        let merged = merge_github_status(
+            &run_dir,
+            json!({
+                "checks": { "state": "success", "updated_at": "T1" },
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(merged["repo"], json!("owner/repo"));
+        assert_eq!(merged["pr_number"], json!(7));
+        assert_eq!(merged["checks"]["state"], json!("success"));
+        assert_eq!(merged["checks"]["updated_at"], json!("T1"));
+        assert_eq!(merged["merge_state"], json!("pending"));
+
+        // Patch: advance merge_state without touching anything else.
+        let merged = merge_github_status(&run_dir, json!({ "merge_state": "ready" })).unwrap();
+        assert_eq!(merged["merge_state"], json!("ready"));
+        assert_eq!(merged["pr_number"], json!(7), "pr_number must persist");
+    }
+
+    #[test]
+    fn merge_github_status_null_value_clears_field() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-clear");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        merge_github_status(&run_dir, json!({ "issue_number": 1, "pr_number": 2 })).unwrap();
+        let merged = merge_github_status(&run_dir, json!({ "issue_number": null })).unwrap();
+        assert!(
+            merged.get("issue_number").is_none(),
+            "null patch value must remove the key, got: {merged}"
+        );
+        assert_eq!(merged["pr_number"], json!(2), "pr_number must persist");
+    }
+
+    #[test]
+    fn merge_github_status_rejects_non_object_patch() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-bad-shape");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let err = merge_github_status(&run_dir, json!("not-an-object"))
+            .expect_err("string patch must be rejected");
+        assert!(err.contains("must be a JSON object"), "got: {err}");
+        let err =
+            merge_github_status(&run_dir, json!(null)).expect_err("null patch must be rejected");
+        assert!(err.contains("must be a JSON object"), "got: {err}");
+    }
+
+    #[test]
+    fn merge_github_status_rejects_invalid_merge_state() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-bad-state");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let err = merge_github_status(&run_dir, json!({ "merge_state": "exploded" }))
+            .expect_err("invalid merge_state must be rejected");
+        assert!(err.contains("invalid merge_state"), "got: {err}");
+        // No status.json should have been written.
+        assert!(
+            !run_dir.join("status.json").exists(),
+            "rejected patch must not partially write status.json"
+        );
+    }
+
+    #[test]
+    fn append_github_event_writes_typed_event_with_framing() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-event");
+        std::fs::create_dir_all(&run_dir).unwrap();
+
+        append_github_event(
+            &run_dir,
+            "flow-abc",
+            "github_pr_created",
+            json!({ "pr_number": 99, "pr_url": "https://github.com/o/r/pull/99" }),
+        )
+        .unwrap();
+        append_github_event(
+            &run_dir,
+            "flow-abc",
+            "github_checks_polled",
+            json!({ "state": "pending" }),
+        )
+        .unwrap();
+
+        let events = read_events_jsonl(&run_dir);
+        assert_eq!(events.len(), 2, "two events expected, got: {events:?}");
+
+        assert_eq!(events[0]["event"], json!("github_pr_created"));
+        assert_eq!(events[0]["flow_id"], json!("flow-abc"));
+        assert_eq!(events[0]["pr_number"], json!(99));
+        assert!(
+            events[0]["timestamp"].is_string(),
+            "event must carry an RFC3339 timestamp"
+        );
+
+        assert_eq!(events[1]["event"], json!("github_checks_polled"));
+        assert_eq!(events[1]["state"], json!("pending"));
+    }
+
+    #[test]
+    fn append_github_event_rejects_unknown_kind() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-bad-kind");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let err = append_github_event(&run_dir, "flow", "github_nukes_launched", json!({}))
+            .expect_err("unknown kind must be rejected");
+        assert!(err.contains("unknown kind"), "got: {err}");
+        assert!(
+            !run_dir.join("events.jsonl").exists(),
+            "rejected event must not be partially written"
+        );
+    }
+
+    #[test]
+    fn append_github_event_reserved_keys_cannot_be_overridden() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-reserved");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        append_github_event(
+            &run_dir,
+            "real-flow",
+            "github_pr_merged",
+            json!({
+                "event": "spoofed",
+                "flow_id": "spoofed",
+                "timestamp": "spoofed",
+                "merge_sha": "deadbeef",
+            }),
+        )
+        .unwrap();
+        let events = read_events_jsonl(&run_dir);
+        assert_eq!(events[0]["event"], json!("github_pr_merged"));
+        assert_eq!(events[0]["flow_id"], json!("real-flow"));
+        assert_ne!(events[0]["timestamp"], json!("spoofed"));
+        assert_eq!(events[0]["merge_sha"], json!("deadbeef"));
+    }
+
+    #[test]
+    fn github_block_coexists_with_existing_status_fields() {
+        let _root = temp_runs_root();
+        let run_dir = _root.join("flow-gh-coexist");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // Pre-seed a status.json that mimics a flow already in `dispatch`.
+        write_status(
+            &run_dir,
+            &json!({
+                "flow_id": "flow-coexist",
+                "stage": "dispatch",
+                "state": "dispatch_ready",
+                "history": [{"stage": "dispatch", "from": "plan", "at": "T0"}],
+            }),
+        )
+        .unwrap();
+
+        merge_github_status(
+            &run_dir,
+            json!({ "repo": "o/r", "pr_number": 1, "merge_state": "pending" }),
+        )
+        .unwrap();
+
+        let on_disk = read_status_obj(&run_dir);
+        // Pre-existing fields must survive.
+        assert_eq!(on_disk["flow_id"], json!("flow-coexist"));
+        assert_eq!(on_disk["stage"], json!("dispatch"));
+        assert_eq!(on_disk["history"][0]["stage"], json!("dispatch"));
+        // New github block was added.
+        assert_eq!(on_disk["github"]["repo"], json!("o/r"));
+        assert_eq!(on_disk["github"]["pr_number"], json!(1));
     }
 }
