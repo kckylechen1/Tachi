@@ -282,6 +282,7 @@ mod pack_tests;
 mod profile_tests;
 mod proxy_tests;
 mod sandbox_tests;
+mod shell_tests;
 mod skill_tests;
 mod vault_tests;
 mod vc_tests;
