@@ -1,3 +1,9 @@
+# Agent run logs
+.agent/
+
+# Tachi runtime artifacts
+.tachi/
+
 # Environment variables
 .env
 .env.local
