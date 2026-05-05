@@ -112,10 +112,11 @@ fn new_flow_id(title: Option<&str>, task: Option<&str>) -> String {
         .or(task)
         .map(|s| s.to_string())
         .unwrap_or_else(|| "flow".to_string());
-    format!("flow_{}_{}", stamp, slugify(&basis))
+    let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
+    format!("flow_{}_{}_{}", stamp, slugify(&basis), suffix)
 }
 
-fn validate_flow_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
     if !id.starts_with("flow_")
         || id.contains('/')
         || id.contains('\\')
@@ -127,6 +128,11 @@ fn validate_flow_id(id: &str) -> Result<(), String> {
         return Err(format!("Invalid flow_id: '{}'", id));
     }
     Ok(())
+}
+
+pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
+    validate_flow_id(flow_id)?;
+    Ok(shell_runs_root().join(flow_id))
 }
 
 fn validate_slice_id(id: &str) -> Result<(), String> {

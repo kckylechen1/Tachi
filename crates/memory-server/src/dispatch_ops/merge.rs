@@ -28,11 +28,28 @@ pub(crate) fn worktree_equals_repo_root(worktree: &str, repo_root: &str) -> bool
     normalize_path_for_compare(worktree) == normalize_path_for_compare(repo_root)
 }
 
+pub(crate) fn validate_merge_branch_name(branch: &str) -> Result<(), String> {
+    let trimmed = branch.trim();
+    if trimmed.is_empty() {
+        return Err("Branch name must be non-empty.".to_string());
+    }
+    if trimmed.starts_with('-') {
+        return Err(format!(
+            "Refusing branch '{branch}' because refs beginning with '-' can be interpreted as git options."
+        ));
+    }
+    if trimmed != branch {
+        return Err("Branch name must not contain leading or trailing whitespace.".to_string());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_static_merge_safety(
     branch: &str,
     worktree: &str,
     repo_root: &str,
 ) -> Result<(), String> {
+    validate_merge_branch_name(branch)?;
     if is_protected_branch(branch) {
         return Err(format!(
             "Refusing to merge protected branch '{branch}'. Use a feature branch instead."
@@ -242,6 +259,25 @@ pub(crate) async fn handle_approve_merge(
 
     let repo_root = resolve_repo_root_from_worktree(&worktree).await?;
     validate_static_merge_safety(&branch, &worktree, &repo_root)?;
+    let worktree_head = {
+        let out = Command::new("git")
+            .args(["-C", &worktree, "rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to get worktree HEAD branch: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "Failed to resolve worktree HEAD branch: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    if branch != worktree_head {
+        return Err(format!(
+            "Refusing to merge branch '{branch}' from worktree '{worktree}' because the worktree HEAD is '{worktree_head}'. Pass the worktree's current branch or check out the intended branch first."
+        ));
+    }
     ensure_repo_root_is_clean(&repo_root).await?;
 
     let strategy = params.strategy.as_deref().unwrap_or("recursive");
@@ -264,6 +300,7 @@ pub(crate) async fn handle_approve_merge(
                 strategy,
                 "--no-commit",
                 "--no-ff",
+                "--",
                 &branch,
             ])
             .output()
@@ -274,15 +311,20 @@ pub(crate) async fn handle_approve_merge(
         let merge_stderr = String::from_utf8_lossy(&merge_out.stderr).to_string();
 
         if !merge_out.status.success() {
-            let _ = Command::new("git")
+            let abort_out = Command::new("git")
                 .args(["-C", &repo_root, "merge", "--abort"])
                 .output()
                 .await;
+            let abort_error = abort_out
+                .ok()
+                .filter(|out| !out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stderr).trim().to_string());
             return serde_json::to_string(&json!({
                 "preview": true,
                 "can_merge": false,
                 "branch": branch,
                 "error": merge_stderr,
+                "abort_error": abort_error,
                 "repo_root": repo_root,
                 "safety_warnings": safety_warnings,
                 "requires_human_review": requires_human_review,
@@ -298,10 +340,26 @@ pub(crate) async fn handle_approve_merge(
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default();
 
-        let _ = Command::new("git")
+        let abort_out = Command::new("git")
             .args(["-C", &repo_root, "merge", "--abort"])
             .output()
             .await;
+        if !abort_out.map(|out| out.status.success()).unwrap_or(false) {
+            return serde_json::to_string(&json!({
+                "preview": true,
+                "can_merge": true,
+                "branch": branch,
+                "repo_root": repo_root,
+                "merge_output": merge_stdout.trim(),
+                "diff_stat": diff_stat.trim(),
+                "safety_warnings": safety_warnings,
+                "requires_human_review": true,
+                "delete_worktree_requested": params.delete_worktree,
+                "delete_worktree_allowed": false,
+                "error": "Merge preview succeeded but git merge --abort failed; repository may still be in a merge state. Resolve manually before retrying.",
+            }))
+            .map_err(|e| format!("serialize: {e}"));
+        }
 
         return serde_json::to_string(&json!({
             "preview": true,
@@ -320,7 +378,15 @@ pub(crate) async fn handle_approve_merge(
     }
 
     let merge_out = Command::new("git")
-        .args(["-C", &repo_root, "merge", "--strategy", strategy, &branch])
+        .args([
+            "-C",
+            &repo_root,
+            "merge",
+            "--strategy",
+            strategy,
+            "--",
+            &branch,
+        ])
         .output()
         .await
         .map_err(|e| format!("Merge command failed: {e}"))?;

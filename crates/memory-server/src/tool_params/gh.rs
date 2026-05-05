@@ -28,9 +28,13 @@ pub(crate) struct TachiGhParams {
     /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash")
     #[serde(default)]
     pub merge_strategy: Option<String>,
-    /// When true, safe_merge evaluates the gate but does NOT call `gh pr merge` even if Ready
+    /// When true, safe_merge evaluates the gate but does NOT call `gh pr merge` even if Ready.
+    /// Defaults to true unless confirm=true is supplied.
     #[serde(default)]
-    pub dry_run: bool,
+    pub dry_run: Option<bool>,
+    /// Explicit confirmation required to execute `gh pr merge` when the gate is Ready.
+    #[serde(default)]
+    pub confirm: bool,
     /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/
     #[serde(default)]
     pub flow_id: Option<String>,
