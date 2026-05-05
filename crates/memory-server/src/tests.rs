@@ -83,6 +83,24 @@ fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
     (server, temp_home)
 }
 
+fn shell_params(action: &str) -> TachiShellParams {
+    TachiShellParams {
+        action: action.to_string(),
+        flow_id: None,
+        task: None,
+        title: None,
+        agent: None,
+        cwd: None,
+        async_dispatch: false,
+        project: None,
+        state_filter: None,
+        limit: None,
+        notes: None,
+        validation: Vec::new(),
+        allowed_scope: Vec::new(),
+    }
+}
+
 fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHomeGuard) {
     let (server, temp_home) = make_server_with_temp_home();
     let wiki_dir = temp_home.temp_home.join(".tachi/projects/wiki");
@@ -1631,6 +1649,52 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
             "unexpected error for {bad_path}: {err}"
         );
     }
+}
+
+#[test]
+fn write_note_file_falls_back_when_slug_has_no_ascii_tokens() {
+    let _temp_home = TempHomeGuard::new();
+
+    let (abs_path, rel_path) = crate::notes_ops::write_note_file(
+        "body for non-ascii title",
+        None,
+        Some("中文 标题"),
+        Some("notes-test"),
+        Some("note"),
+        &[],
+    )
+    .expect("write note file");
+
+    assert!(abs_path.exists(), "note path should exist: {abs_path:?}");
+    assert!(
+        rel_path.starts_with("inbox/"),
+        "unexpected note path: {rel_path}"
+    );
+    assert!(
+        rel_path.ends_with("-note.md"),
+        "non-ascii title should use note slug fallback: {rel_path}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_shell_rejects_invalid_action() {
+    let server = make_server();
+    let err = crate::shell_ops::handle_tachi_shell(&server, shell_params("launch"))
+        .await
+        .expect_err("invalid shell action should fail");
+    assert!(err.contains("Invalid action"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+async fn tachi_shell_status_rejects_invalid_flow_id() {
+    let server = make_server();
+    let mut params = shell_params("status");
+    params.flow_id = Some("../flow_escape".to_string());
+
+    let err = crate::shell_ops::handle_tachi_shell(&server, params)
+        .await
+        .expect_err("invalid flow id should fail");
+    assert!(err.contains("Invalid flow_id"), "unexpected error: {err}");
 }
 
 #[cfg(unix)]
@@ -3624,6 +3688,38 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
 }
 
 #[tokio::test]
+async fn wiki_browse_large_limit_keeps_related_entries_empty() {
+    let mut alpha = make_entry("wiki-large-limit-alpha");
+    alpha.path = "/wiki/engineering/scale/alpha".to_string();
+    alpha.summary = "Alpha scale".to_string();
+    alpha.text = "Alpha scale lesson for MCP".to_string();
+    alpha.entities = vec!["MCP".to_string()];
+
+    let mut beta = make_entry("wiki-large-limit-beta");
+    beta.path = "/wiki/engineering/scale/beta".to_string();
+    beta.summary = "Beta scale".to_string();
+    beta.text = "Beta scale lesson for MCP".to_string();
+    beta.entities = vec!["MCP".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
+
+    let response = server
+        .wiki_browse(Parameters(WikiBrowseParams {
+            category: Some("engineering/scale".to_string()),
+            limit: 21,
+            project: "wiki".to_string(),
+        }))
+        .await
+        .expect("wiki browse should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki browse json");
+    let entries = json["entries"].as_array().expect("entries array");
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry["related_entries"]
+        .as_array()
+        .is_some_and(|related| related.is_empty())));
+}
+
+#[tokio::test]
 async fn wiki_search_includes_related_entries_for_top_results() {
     let mut alpha = make_entry("wiki-search-alpha");
     alpha.path = "/wiki/engineering/debugging/search-alpha".to_string();
@@ -4518,6 +4614,86 @@ async fn recommend_capability_skips_hidden_capabilities_by_default() {
         .filter_map(|row| row["id"].as_str())
         .collect::<Vec<_>>();
     assert!(ids.contains(&"skill:hidden-playbook"));
+}
+
+#[tokio::test]
+async fn recommend_capability_limit_zero_normalizes_to_one() {
+    let server = make_server();
+    let first = make_skill_capability(
+        "skill:incident-first",
+        "incident-first",
+        "Handle incident response runbooks and playbooks.",
+        "listed",
+    );
+    let second = make_skill_capability(
+        "skill:incident-second",
+        "incident-second",
+        "Handle incident retrospectives and follow-up actions.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&first).map_err(|e| e.to_string())?;
+            store.hub_register(&second).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("register capabilities");
+
+    let result = server
+        .recommend_capability(Parameters(RecommendCapabilityParams {
+            query: "incident response".to_string(),
+            host: None,
+            cap_type: Some("skill".to_string()),
+            limit: 0,
+            include_hidden: false,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_capability should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(json["count"], json!(1));
+    assert_eq!(json["recommendations"].as_array().expect("array").len(), 1);
+}
+
+#[tokio::test]
+async fn list_agent_evolution_proposals_empty_result_accepts_zero_limit() {
+    let server = make_server();
+
+    let result = crate::foundry_ops::handle_list_agent_evolution_proposals(
+        &server,
+        ListAgentEvolutionProposalsParams {
+            agent_id: "codex".to_string(),
+            status: None,
+            limit: 0,
+        },
+    )
+    .await
+    .expect("empty proposal list should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(json["agent_id"], json!("codex"));
+    assert_eq!(json["count"], json!(0));
+    assert_eq!(json["proposals"].as_array().expect("array").len(), 0);
+}
+
+#[tokio::test]
+async fn review_agent_evolution_proposal_rejects_invalid_status() {
+    let server = make_server();
+
+    let err = crate::foundry_ops::handle_review_agent_evolution_proposal(
+        &server,
+        ReviewAgentEvolutionProposalParams {
+            proposal_id: "proposal-1".to_string(),
+            status: "maybe".to_string(),
+            note: None,
+        },
+    )
+    .await
+    .expect_err("invalid review status should fail");
+    assert!(
+        err.contains("Invalid review status"),
+        "unexpected error: {err}"
+    );
 }
 
 #[tokio::test]

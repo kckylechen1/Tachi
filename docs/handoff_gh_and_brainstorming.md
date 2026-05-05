@@ -56,6 +56,6 @@
 
 ## 相关参考
 - `docs/TACHI_HUB_MCP_AND_HOST_PLAYBOOK.md` — Vault/凭据/强制策略的完整讨论
-- `docs/code-review-superpowers.md` — Superpowers 框架的实战审查案例
+- `docs/archive/code-review-superpowers.md` — Superpowers 框架的实战审查案例
 - Tachi 记忆 ID `791983b9` — gh-native-mcp 架构蓝图（含 Codex 完整审查意见）
 - Tachi 记忆 ID `2ea61d7a` — Hub-Driven Brainstorming 宏观架构设计 V0.2

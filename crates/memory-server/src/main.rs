@@ -478,18 +478,21 @@ impl MemoryServer {
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
         // Build hot-swap state before moving project_store into the struct
-        let hot_project_db = Arc::new(StdRwLock::new(project_store.as_ref().map(|s| {
-            ProjectDbState {
-                store: Arc::clone(s),
-                rw_gate: project_rw_gate
-                    .clone()
-                    .expect("project_rw_gate must exist if project_store exists"),
-                db_path: project_db_path
-                    .clone()
-                    .expect("project_db_path must exist if project_store exists"),
-                vec_available: project_vec_available,
-            }
-        })));
+        let hot_project_db = Arc::new(StdRwLock::new(
+            match (
+                project_store.as_ref(),
+                project_rw_gate.clone(),
+                project_db_path.clone(),
+            ) {
+                (Some(store), Some(rw_gate), Some(db_path)) => Some(ProjectDbState {
+                    store: Arc::clone(store),
+                    rw_gate,
+                    db_path,
+                    vec_available: project_vec_available,
+                }),
+                _ => None,
+            },
+        ));
 
         let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
