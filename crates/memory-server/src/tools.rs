@@ -1584,10 +1584,20 @@ impl MemoryServer {
             .map(|s| s.eq_ignore_ascii_case("note"))
             .unwrap_or(false);
 
-        // Auto-detect: title present → wiki, short text → note, otherwise → memory
+        // Auto-detect: explicit DB-style path (starts with '/') signals memory,
+        // wiki when caller provides a title, otherwise short text is treated as
+        // a quick note. Path shape wins over text length so callers passing
+        // memory paths like "/scratch/foo" don't get bounced to the note writer.
+        let path_looks_like_db_path = params
+            .path
+            .as_deref()
+            .map(|p| p.starts_with('/'))
+            .unwrap_or(false);
         let resolved_kind = if kind.is_empty() {
             if scope_is_note {
                 "note"
+            } else if path_looks_like_db_path {
+                "memory"
             } else if params.title.is_some() {
                 "wiki"
             } else if params.text.len() < 200 {
