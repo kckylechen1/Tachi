@@ -193,8 +193,7 @@ fn render_one(
                 "in_progress" => "[..]",
                 _ => "[X] ",
             };
-            let review_tag = if !d.reviewed
-                && matches!(d.outcome.as_str(), "completed" | "success")
+            let review_tag = if !d.reviewed && matches!(d.outcome.as_str(), "completed" | "success")
             {
                 " unreviewed"
             } else {
@@ -515,8 +514,7 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let meta: serde_json::Value =
-            serde_json::from_str(&meta_str).unwrap_or(json!({}));
+        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
         let agent = meta
             .get("agent")
             .and_then(|v| v.as_str())
@@ -579,10 +577,7 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
     out
 }
 
-fn collect_recent_evals(
-    global_db_path: &Path,
-    project_db_path: Option<&Path>,
-) -> Vec<RecentEval> {
+fn collect_recent_evals(global_db_path: &Path, project_db_path: Option<&Path>) -> Vec<RecentEval> {
     let mut evals = Vec::new();
     for db_path in std::iter::once(global_db_path).chain(project_db_path) {
         let path_str = match db_path.to_str() {
@@ -620,8 +615,7 @@ fn collect_recent_evals(
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let meta: serde_json::Value =
-                serde_json::from_str(&meta_str).unwrap_or(json!({}));
+            let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
             let agent = meta
                 .get("agent")
                 .and_then(|v| v.as_str())
@@ -632,9 +626,7 @@ fn collect_recent_evals(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string();
-            let quality_score = meta
-                .get("quality_score")
-                .and_then(|v| v.as_f64());
+            let quality_score = meta.get("quality_score").and_then(|v| v.as_f64());
             let task_id = id.chars().take(24).collect();
             evals.push(RecentEval {
                 task_id,
@@ -655,16 +647,13 @@ fn find_last_daily_report(app_home: &Path) -> Option<String> {
     let entries = std::fs::read_dir(&reports_dir).ok()?;
     let mut files: Vec<String> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "md")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
         .filter_map(|e| e.file_name().to_str().map(String::from))
         .collect();
     files.sort();
-    files.last().map(|f| reports_dir.join(f).display().to_string())
+    files
+        .last()
+        .map(|f| reports_dir.join(f).display().to_string())
 }
 
 fn format_elapsed(dur: chrono::Duration) -> String {

@@ -22,7 +22,7 @@ mod subprocess;
 // resolving symbols via `crate::dispatch_ops::<name>`.
 pub(crate) use board::handle_tachi_board;
 pub(crate) use dispatch::handle_tachi_dispatch;
-pub(crate) use kanban_helpers::update_kanban_state;
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
+pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use merge::handle_approve_merge;
