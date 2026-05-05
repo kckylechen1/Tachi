@@ -25,6 +25,8 @@ pub(crate) use board::handle_tachi_board;
 pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
+pub(crate) use dispatch::new_dispatch_id;
+#[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use merge::handle_approve_merge;
