@@ -623,3 +623,35 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
         "expected skill graph merge_hint edge from quality guard"
     );
 }
+
+#[tokio::test]
+async fn wiki_browse_large_limit_keeps_related_entries_empty() {
+    let mut alpha = make_entry("wiki-large-limit-alpha");
+    alpha.path = "/wiki/engineering/scale/alpha".to_string();
+    alpha.summary = "Alpha scale".to_string();
+    alpha.text = "Alpha scale lesson for MCP".to_string();
+    alpha.entities = vec!["MCP".to_string()];
+
+    let mut beta = make_entry("wiki-large-limit-beta");
+    beta.path = "/wiki/engineering/scale/beta".to_string();
+    beta.summary = "Beta scale".to_string();
+    beta.text = "Beta scale lesson for MCP".to_string();
+    beta.entities = vec!["MCP".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
+
+    let response = server
+        .wiki_browse(Parameters(WikiBrowseParams {
+            category: Some("engineering/scale".to_string()),
+            limit: 21,
+            project: "wiki".to_string(),
+        }))
+        .await
+        .expect("wiki browse should succeed");
+    let json: Value = serde_json::from_str(&response).expect("wiki browse json");
+    let entries = json["entries"].as_array().expect("entries array");
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry["related_entries"]
+        .as_array()
+        .is_some_and(|related| related.is_empty())));
+}
