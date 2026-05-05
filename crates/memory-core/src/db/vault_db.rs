@@ -197,13 +197,19 @@ pub fn vault_delete_entry(conn: &Connection, name: &str) -> Result<bool, MemoryE
     Ok(rows > 0)
 }
 
-pub fn vault_touch_entry(conn: &Connection, name: &str) -> Result<(), MemoryError> {
+pub fn vault_touch_entry(conn: &Connection, name: &str) -> Result<i64, MemoryError> {
     let now = now_utc_iso();
-    conn.execute(
-        "UPDATE vault_entries SET accessed_at = ?1, access_count = access_count + 1 WHERE name = ?2",
-        params![now, name],
+    // Use RETURNING so the caller can report the actual post-touch count
+    // without a follow-up SELECT (which races concurrent gets and yields a
+    // stale "previous + 1" value).
+    let mut stmt = conn.prepare(
+        "UPDATE vault_entries
+            SET accessed_at = ?1, access_count = access_count + 1
+          WHERE name = ?2
+        RETURNING access_count",
     )?;
-    Ok(())
+    let count: i64 = stmt.query_row(params![now, name], |row| row.get(0))?;
+    Ok(count)
 }
 
 pub fn vault_insert_audit(

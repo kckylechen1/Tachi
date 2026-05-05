@@ -201,6 +201,13 @@ pub(crate) async fn handle_save_memory(
                             &query,
                             Some(memory_core::SearchOptions {
                                 top_k: 5,
+                                // Auto-link is a write-side side effect that
+                                // probes related memories by entity. It must
+                                // NOT bump access stats: doing so inflates
+                                // ACT-R frequency / blocks `access_count = 0`
+                                // prune / biases promotion ranking on entries
+                                // the user never read.
+                                record_access: false,
                                 ..Default::default()
                             }),
                         )

@@ -616,9 +616,15 @@ pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryErro
     let now = now_utc_iso();
     let tx = conn.unchecked_transaction()?;
     for id in ids {
+        // NOTE: do NOT bump `updated_at` or `revision` here. record_access is
+        // a pure read-side accounting bump; treating it as a content mutation
+        // spuriously invalidates downstream caches (SDK consumers key off
+        // `updated_at`) and conflates read frequency with content change.
+        // Optimistic-concurrency guards (`update_with_revision`,
+        // `update_enrichment_fields`) gate on `revision` and are unaffected.
         tx.execute(
             "UPDATE memories
-             SET access_count = access_count + 1, last_access = ?1, updated_at = ?1
+             SET access_count = access_count + 1, last_access = ?1
              WHERE id = ?2",
             params![&now, id],
         )?;
