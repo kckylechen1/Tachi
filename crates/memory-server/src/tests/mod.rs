@@ -98,6 +98,7 @@ fn shell_params(action: &str) -> TachiShellParams {
         notes: None,
         validation: Vec::new(),
         allowed_scope: Vec::new(),
+        slices: Vec::new(),
     }
 }
 

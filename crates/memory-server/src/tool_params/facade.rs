@@ -561,6 +561,27 @@ pub(crate) struct TachiTaskParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiShellDispatchSliceParams {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub validation: Vec<String>,
+    #[serde(default)]
+    pub allowed_scope: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiShellParams {
     /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
     pub action: String,
@@ -617,6 +638,9 @@ pub(crate) struct TachiShellParams {
     /// Allowed scope (file globs / module names) to embed in the instruction packet.
     #[serde(default)]
     pub allowed_scope: Vec<String>,
+
+    #[serde(default)]
+    pub slices: Vec<TachiShellDispatchSliceParams>,
 }
 
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────

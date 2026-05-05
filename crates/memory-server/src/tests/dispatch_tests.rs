@@ -161,3 +161,23 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
         ])
     );
 }
+
+#[test]
+fn dispatch_ids_are_unique_within_same_second() {
+    let now = chrono::Utc::now();
+    let id_a = crate::dispatch_ops::new_dispatch_id(now, "my agent/here");
+    let id_b = crate::dispatch_ops::new_dispatch_id(now, "my agent/here");
+    assert_ne!(
+        id_a, id_b,
+        "same second + same agent must still produce unique IDs"
+    );
+    let prefix = format!("{}-my-agent-here", now.format("%Y%m%dT%H%M%SZ"));
+    assert!(
+        id_a.starts_with(&prefix),
+        "id_a should start with expected prefix: {id_a}"
+    );
+    assert!(
+        id_b.starts_with(&prefix),
+        "id_b should start with expected prefix: {id_b}"
+    );
+}

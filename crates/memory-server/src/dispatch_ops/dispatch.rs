@@ -19,6 +19,13 @@ pub(crate) struct DispatchResult {
     pub duration_ms: u64,
 }
 
+pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String {
+    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let sanitized = agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
+    let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
+    format!("{}-{}-{}", timestamp, sanitized, suffix)
+}
+
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -26,13 +33,7 @@ pub(crate) async fn handle_tachi_dispatch(
     params: TachiDispatchParams,
 ) -> Result<String, String> {
     let now = Utc::now();
-    let dispatch_id = format!(
-        "{}-{}",
-        now.format("%Y%m%dT%H%M%SZ"),
-        params
-            .agent
-            .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
-    );
+    let dispatch_id = new_dispatch_id(now, &params.agent);
 
     let agent_norm = params.agent.to_ascii_lowercase();
     let timeout = Duration::from_secs(params.timeout_secs);
