@@ -216,7 +216,10 @@ async fn vault_rotation_prefix_get_round_robin_works() {
 #[tokio::test]
 async fn vault_auto_lock_expires_cached_key() {
     let mut server = make_server();
-    server.vault_auto_lock_after_secs = 1;
+    // Use a longer timeout than the slowest CI step between init/set so the
+    // setup itself does not race the auto-lock; the test then forces
+    // expiration by rewinding `vault_unlock_time` below.
+    server.vault_auto_lock_after_secs = 30;
 
     server
         .vault_init(Parameters(VaultInitParams {
@@ -239,7 +242,7 @@ async fn vault_auto_lock_expires_cached_key() {
         .expect("vault_set should succeed");
 
     *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
-        Some(Instant::now() - Duration::from_secs(2));
+        Some(Instant::now() - Duration::from_secs(60));
 
     let err = server
         .vault_get(Parameters(VaultGetParams {
