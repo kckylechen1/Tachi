@@ -13,7 +13,10 @@
 //! This module deliberately does **not** re-implement clanker dispatch,
 //! kanban, or skill discovery — it composes existing infra.
 
-use crate::{MemoryServer, TachiBoardParams, TachiDispatchParams, TachiShellParams};
+use crate::{
+    MemoryServer, TachiBoardParams, TachiDispatchParams, TachiShellDispatchSliceParams,
+    TachiShellParams,
+};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -122,6 +125,20 @@ fn validate_flow_id(id: &str) -> Result<(), String> {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return Err(format!("Invalid flow_id: '{}'", id));
+    }
+    Ok(())
+}
+
+fn validate_slice_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("Invalid convoy slice id: '{}'", id));
     }
     Ok(())
 }
@@ -461,6 +478,19 @@ async fn handle_dispatch_action(
 
     advance_stage(&run_dir, &flow_id, "dispatch", &task, &injection, created)?;
 
+    if !params.slices.is_empty() {
+        return handle_convoy_dispatch_action(
+            server,
+            params,
+            &flow_id,
+            &run_dir,
+            created,
+            &injection,
+            &instr_path,
+        )
+        .await;
+    }
+
     // Phase 4 hook: optionally invoke the existing async dispatcher.
     let mut dispatch_id: Option<String> = None;
     let mut dispatch_error: Option<String> = None;
@@ -548,6 +578,247 @@ async fn handle_dispatch_action(
         "created": created,
     });
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+}
+
+async fn handle_convoy_dispatch_action(
+    server: &MemoryServer,
+    params: TachiShellParams,
+    flow_id: &str,
+    run_dir: &Path,
+    created: bool,
+    injection: &InjectionResult,
+    parent_instr_path: &Path,
+) -> Result<String, String> {
+    let parent_task = params
+        .task
+        .as_deref()
+        .ok_or_else(|| "'task' is required for action='dispatch'".to_string())?;
+    let convoy_superpowers = vec![
+        "superpowers/executing-plans",
+        "superpowers/subagent-driven-development",
+        "superpowers/dispatching-parallel-agents",
+        "superpowers/using-git-worktrees",
+    ];
+    let mut parent_instruction = build_instruction_md(
+        flow_id,
+        "dispatch",
+        parent_task,
+        injection,
+        params.notes.as_deref(),
+        &params.validation,
+        &params.allowed_scope,
+    );
+    parent_instruction.push_str("## Required Superpowers\n\n");
+    for contract in &convoy_superpowers {
+        parent_instruction.push_str(&format!("- `{}`\n", contract));
+    }
+    parent_instruction.push('\n');
+    std::fs::write(parent_instr_path, parent_instruction)
+        .map_err(|e| format!("write convoy parent instruction.md: {e}"))?;
+    let mut seen = std::collections::HashSet::new();
+    let mut slice_records = Vec::new();
+    let mut dispatch_ids = Vec::new();
+    let mut async_fired = false;
+
+    for (idx, slice) in params.slices.iter().enumerate() {
+        let slice_id = resolve_slice_id(idx, slice)?;
+        if !seen.insert(slice_id.clone()) {
+            return Err(format!("Duplicate convoy slice id: '{}'", slice_id));
+        }
+
+        let slice_task = slice
+            .task
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(parent_task);
+        let slice_agent = slice
+            .agent
+            .clone()
+            .or_else(|| params.agent.clone())
+            .unwrap_or_else(|| "claude".to_string());
+        let slice_cwd = slice.cwd.clone().or_else(|| params.cwd.clone());
+        let slice_validation = if slice.validation.is_empty() {
+            params.validation.clone()
+        } else {
+            slice.validation.clone()
+        };
+        let slice_allowed_scope = if slice.allowed_scope.is_empty() {
+            params.allowed_scope.clone()
+        } else {
+            slice.allowed_scope.clone()
+        };
+        let slice_notes = slice.notes.as_deref().or(params.notes.as_deref());
+        let slice_dir = run_dir.join("slices").join(&slice_id);
+        std::fs::create_dir_all(slice_dir.join("artifacts"))
+            .map_err(|e| format!("create convoy slice dir: {e}"))?;
+
+        let task_packet = match slice.title.as_deref() {
+            Some(title) if !title.trim().is_empty() => {
+                format!(
+                    "Convoy slice `{}` — {}\n\n{}",
+                    slice_id,
+                    title.trim(),
+                    slice_task
+                )
+            }
+            _ => format!("Convoy slice `{}`\n\n{}", slice_id, slice_task),
+        };
+        let mut instruction = build_instruction_md(
+            flow_id,
+            "dispatch",
+            &task_packet,
+            injection,
+            slice_notes,
+            &slice_validation,
+            &slice_allowed_scope,
+        );
+        instruction.push_str("## Required Superpowers\n\n");
+        for contract in &convoy_superpowers {
+            instruction.push_str(&format!("- `{}`\n", contract));
+        }
+        instruction.push('\n');
+        let slice_instr_path = slice_dir.join("instruction.md");
+        std::fs::write(&slice_instr_path, instruction)
+            .map_err(|e| format!("write convoy slice instruction.md: {e}"))?;
+
+        append_event(
+            run_dir,
+            json!({
+                "event": "convoy_slice_prepared",
+                "flow_id": flow_id,
+                "slice_id": slice_id,
+                "agent": slice_agent,
+                "cwd": slice_cwd,
+                "instruction_path": slice_instr_path.to_string_lossy(),
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        )?;
+
+        let mut dispatch_id = None;
+        let mut dispatch_error = None;
+        if params.async_dispatch {
+            let prompt = format!(
+                "You are executing Tachi flow `{flow_id}`, convoy slice `{slice_id}`.\n\n\
+                 Read and follow these injected SOP files before changing code:\n\
+                 - {injected}\n\n\
+                 Then read the full slice instruction packet:\n\
+                 - {instr}\n\n\
+                 Parent flow instruction packet:\n\
+                 - {parent_instr}\n\n\
+                 Original slice task:\n\n{task}\n",
+                flow_id = flow_id,
+                slice_id = slice_id,
+                injected = injection.injected_path.as_deref().unwrap_or("(none)"),
+                instr = slice_instr_path.to_string_lossy(),
+                parent_instr = parent_instr_path.to_string_lossy(),
+                task = slice_task,
+            );
+            let dp = TachiDispatchParams {
+                agent: slice_agent.clone(),
+                task: prompt,
+                cwd: slice_cwd.clone(),
+                skills: Vec::new(),
+                context_query: None,
+                model: None,
+                timeout_secs: 600,
+                permission_profile: None,
+                allowed_tools: Vec::new(),
+                max_turns: None,
+                sandbox: None,
+                inject_tachi_mcp: None,
+                inject_hub_mcps: None,
+                command: Vec::new(),
+                project: params.project.clone(),
+                stage: Some(format!("execute:{}", slice_id)),
+            };
+            match crate::dispatch_ops::handle_tachi_dispatch(server, dp).await {
+                Ok(s) => {
+                    async_fired = true;
+                    if let Ok(v) = serde_json::from_str::<Value>(&s) {
+                        if let Some(d) = v.get("dispatch_id").and_then(|d| d.as_str()) {
+                            dispatch_ids.push(d.to_string());
+                            dispatch_id = Some(d.to_string());
+                        }
+                    }
+                }
+                Err(e) => {
+                    dispatch_error = Some(e);
+                }
+            }
+        }
+
+        if let Some(d) = dispatch_id.as_deref() {
+            append_event(
+                run_dir,
+                json!({
+                    "event": "convoy_dispatch_spawned",
+                    "flow_id": flow_id,
+                    "slice_id": slice_id,
+                    "dispatch_id": d,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            )?;
+        }
+
+        slice_records.push(json!({
+            "slice_id": slice_id,
+            "title": slice.title,
+            "agent": slice_agent,
+            "cwd": slice_cwd,
+            "instruction_path": slice_instr_path.to_string_lossy(),
+            "dispatch_id": dispatch_id,
+            "dispatch_error": dispatch_error,
+        }));
+    }
+
+    let mut status = read_status(run_dir);
+    if let Some(obj) = status.as_object_mut() {
+        let arr = obj.entry("dispatch_ids").or_insert_with(|| json!([]));
+        if let Some(a) = arr.as_array_mut() {
+            for d in &dispatch_ids {
+                a.push(json!(d));
+            }
+        }
+        obj.insert(
+            "convoy".to_string(),
+            json!({
+                "mode": "parallel",
+                "slice_count": slice_records.len(),
+                "slices": slice_records,
+                "updated_at": Utc::now().to_rfc3339(),
+            }),
+        );
+    }
+    write_status(run_dir, &status)?;
+
+    let resp = json!({
+        "flow_id": flow_id,
+        "stage": "dispatch",
+        "run_dir": run_dir.to_string_lossy(),
+        "instruction_path": parent_instr_path.to_string_lossy(),
+        "injected_skill": injection_to_json(injection),
+        "async": async_fired,
+        "convoy": true,
+        "dispatch_ids": dispatch_ids,
+        "slices": status.get("convoy").and_then(|v| v.get("slices")).cloned().unwrap_or_else(|| json!([])),
+        "created": created,
+    });
+    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+}
+
+fn resolve_slice_id(idx: usize, slice: &TachiShellDispatchSliceParams) -> Result<String, String> {
+    let basis = slice
+        .id
+        .as_deref()
+        .or(slice.title.as_deref())
+        .or(slice.task.as_deref())
+        .unwrap_or("slice");
+    let mut id = slugify(basis);
+    if id == "flow" || id == "slice" {
+        id = format!("slice-{}", idx + 1);
+    }
+    validate_slice_id(&id)?;
+    Ok(id)
 }
 
 async fn handle_kanban_action(
@@ -733,20 +1004,43 @@ fn stage_state_for(stage: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    fn temp_runs_root() -> PathBuf {
+    fn runs_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    struct RunsRootGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        path: PathBuf,
+    }
+
+    impl std::ops::Deref for RunsRootGuard {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.path
+        }
+    }
+
+    fn temp_runs_root() -> RunsRootGuard {
+        let guard = runs_env_lock().lock().unwrap();
         let d = std::env::temp_dir().join(format!(
             "tachi-shell-test-{}",
             Utc::now().format("%Y%m%dT%H%M%S%fZ")
         ));
         std::fs::create_dir_all(&d).unwrap();
-        // SAFETY: tests in this module are serialized by setting/unsetting
-        // env vars sequentially within a single test. CI runs cargo test
-        // single-threaded by default for env-coupled tests is not guaranteed,
-        // so we keep each test self-contained and use unique dirs.
+        // SAFETY: `set_var` is unsafe on edition 2021 because it can race with
+        // other threads reading the same env key. This call is safe because:
+        //   1. The `runs_env_lock` mutex is held for the entire lifetime of
+        //      `RunsRootGuard`, serialising all `temp_runs_root()` callers.
+        //   2. The `Drop` impl restores the original value under the same lock.
+        //   3. No other code path mutates `TACHI_RUN_ROOT`.
         unsafe {
             std::env::set_var("TACHI_RUN_ROOT", &d);
         }
-        d
+        RunsRootGuard {
+            _guard: guard,
+            path: d,
+        }
     }
 
     #[test]
@@ -839,6 +1133,7 @@ mod tests {
             notes: None,
             validation: vec![],
             allowed_scope: vec![],
+            slices: vec![],
         };
         let (fid, dir, created) = resolve_or_create_flow(&p, "hello").unwrap();
         assert!(created);
@@ -863,6 +1158,7 @@ mod tests {
             notes: None,
             validation: vec![],
             allowed_scope: vec![],
+            slices: vec![],
         };
         let (fid, dir, _created) = resolve_or_create_flow(&p, "t").unwrap();
         let inj = InjectionResult {
@@ -922,6 +1218,7 @@ mod tests {
             notes: None,
             validation: vec![],
             allowed_scope: vec![],
+            slices: vec![],
         };
         let out = handle_status_action(p).await.unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -953,6 +1250,7 @@ mod tests {
             notes: None,
             validation: vec![],
             allowed_scope: vec![],
+            slices: vec![],
         };
         let out = handle_status_action(p).await.unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
@@ -968,5 +1266,186 @@ mod tests {
                     == Some("flow_20260505T000000Z_demo")),
             "expected demo flow in listing, got {v}"
         );
+    }
+
+    #[test]
+    fn resolve_slice_id_uses_explicit_id() {
+        let slice = TachiShellDispatchSliceParams {
+            id: Some("my-slice".into()),
+            task: Some("do thing".into()),
+            title: Some("My Slice".into()),
+            agent: None,
+            cwd: None,
+            notes: None,
+            validation: Vec::new(),
+            allowed_scope: Vec::new(),
+        };
+        assert_eq!(resolve_slice_id(0, &slice).unwrap(), "my-slice");
+    }
+
+    #[test]
+    fn resolve_slice_id_falls_back_to_title() {
+        let slice = TachiShellDispatchSliceParams {
+            id: None,
+            task: Some("do thing".into()),
+            title: Some("Hello World".into()),
+            agent: None,
+            cwd: None,
+            notes: None,
+            validation: Vec::new(),
+            allowed_scope: Vec::new(),
+        };
+        assert_eq!(resolve_slice_id(0, &slice).unwrap(), "hello-world");
+    }
+
+    #[test]
+    fn resolve_slice_id_falls_back_to_task() {
+        let slice = TachiShellDispatchSliceParams {
+            id: None,
+            task: Some("Refactor Core".into()),
+            title: None,
+            agent: None,
+            cwd: None,
+            notes: None,
+            validation: Vec::new(),
+            allowed_scope: Vec::new(),
+        };
+        assert_eq!(resolve_slice_id(0, &slice).unwrap(), "refactor-core");
+    }
+
+    #[test]
+    fn resolve_slice_id_falls_back_to_index() {
+        let slice = TachiShellDispatchSliceParams {
+            id: None,
+            task: None,
+            title: None,
+            agent: None,
+            cwd: None,
+            notes: None,
+            validation: Vec::new(),
+            allowed_scope: Vec::new(),
+        };
+        assert_eq!(resolve_slice_id(3, &slice).unwrap(), "slice-4");
+    }
+
+    #[test]
+    fn resolve_slice_id_rejects_traversal() {
+        for invalid in ["../../etc", "slice/evil", "slice\\bad", "slice..whoops"] {
+            assert!(
+                validate_slice_id(invalid).is_err(),
+                "expected invalid slice id to be rejected: {invalid}"
+            );
+        }
+        assert!(validate_slice_id("alpha-1").is_ok());
+    }
+
+    #[tokio::test]
+    async fn convoy_dispatch_creates_slice_dirs_and_status() {
+        let _root = temp_runs_root();
+        let server = {
+            let db_path = std::env::temp_dir().join(format!(
+                "memory-server-convoy-test-{}.sqlite",
+                uuid::Uuid::new_v4()
+            ));
+            crate::MemoryServer::new(db_path, None).expect("test server")
+        };
+        let params = TachiShellParams {
+            action: "dispatch".into(),
+            flow_id: None,
+            task: Some("parent task".into()),
+            title: Some("convoy test".into()),
+            agent: None,
+            cwd: None,
+            async_dispatch: false,
+            project: None,
+            state_filter: None,
+            limit: None,
+            notes: None,
+            validation: vec![],
+            allowed_scope: vec![],
+            slices: vec![
+                TachiShellDispatchSliceParams {
+                    id: Some("alpha".into()),
+                    task: Some("slice alpha task".into()),
+                    title: Some("Alpha Slice".into()),
+                    agent: None,
+                    cwd: None,
+                    notes: None,
+                    validation: Vec::new(),
+                    allowed_scope: Vec::new(),
+                },
+                TachiShellDispatchSliceParams {
+                    id: Some("beta".into()),
+                    task: Some("slice beta task".into()),
+                    title: None,
+                    agent: None,
+                    cwd: None,
+                    notes: None,
+                    validation: Vec::new(),
+                    allowed_scope: Vec::new(),
+                },
+            ],
+        };
+        let out = handle_tachi_shell(&server, params).await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v.get("convoy").and_then(|x| x.as_bool()), Some(true));
+        assert_eq!(v.get("async").and_then(|x| x.as_bool()), Some(false));
+        assert_eq!(
+            v.get("dispatch_ids")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len()),
+            Some(0)
+        );
+        let slices = v
+            .get("slices")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(slices.len(), 2);
+        let response_superpowers = v
+            .get("required_superpowers")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(response_superpowers
+            .iter()
+            .any(|x| x.as_str() == Some("superpowers/dispatching-parallel-agents")));
+        assert!(response_superpowers
+            .iter()
+            .any(|x| x.as_str() == Some("superpowers/using-git-worktrees")));
+
+        let run_dir = PathBuf::from(v.get("run_dir").unwrap().as_str().unwrap());
+        let alpha_instruction_path = run_dir.join("slices/alpha/instruction.md");
+        assert!(alpha_instruction_path.exists());
+        assert!(run_dir.join("slices/beta/instruction.md").exists());
+        let alpha_instruction = std::fs::read_to_string(alpha_instruction_path).unwrap();
+        assert!(alpha_instruction.contains("## Required Superpowers"));
+        assert!(alpha_instruction.contains("superpowers/dispatching-parallel-agents"));
+        assert!(alpha_instruction.contains("superpowers/using-git-worktrees"));
+
+        let status = read_status(&run_dir);
+        let convoy = status.get("convoy").unwrap();
+        assert_eq!(
+            convoy.get("mode").and_then(|x| x.as_str()),
+            Some("parallel")
+        );
+        assert_eq!(convoy.get("slice_count").and_then(|x| x.as_u64()), Some(2));
+        let status_superpowers = convoy
+            .get("required_superpowers")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(status_superpowers
+            .iter()
+            .any(|x| x.as_str() == Some("superpowers/subagent-driven-development")));
+
+        let events_raw = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+        let prepared_count = events_raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("event").and_then(|x| x.as_str()) == Some("convoy_slice_prepared"))
+            .count();
+        assert_eq!(prepared_count, 2);
     }
 }
