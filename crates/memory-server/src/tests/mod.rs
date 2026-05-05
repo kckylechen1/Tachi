@@ -270,18 +270,18 @@ fn make_skill_capability(
     }
 }
 
-mod memory_tests;
-mod wiki_tests;
-mod hub_tests;
-mod skill_tests;
-mod vc_tests;
-mod vault_tests;
-mod sandbox_tests;
-mod kanban_tests;
-mod dispatch_tests;
-mod handoff_tests;
-mod profile_tests;
-mod pack_tests;
-mod facade_tests;
-mod proxy_tests;
 mod bootstrap_tests;
+mod dispatch_tests;
+mod facade_tests;
+mod handoff_tests;
+mod hub_tests;
+mod kanban_tests;
+mod memory_tests;
+mod pack_tests;
+mod profile_tests;
+mod proxy_tests;
+mod sandbox_tests;
+mod skill_tests;
+mod vault_tests;
+mod vc_tests;
+mod wiki_tests;

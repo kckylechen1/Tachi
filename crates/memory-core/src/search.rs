@@ -503,5 +503,4 @@ mod tests {
         // FTS5 with empty query should produce no FTS results; vec channel also empty
         assert!(results.is_empty());
     }
-
 }

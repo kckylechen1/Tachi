@@ -352,9 +352,7 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
         "expected tokenized query to find skill:tachi-tool-guide, got: {json}"
     );
     assert!(
-        results
-            .iter()
-            .all(|item| item.get("definition").is_none()),
+        results.iter().all(|item| item.get("definition").is_none()),
         "skill discover facade should not return full definitions: {json}"
     );
 }
