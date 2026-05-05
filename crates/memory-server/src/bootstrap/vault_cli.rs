@@ -1,9 +1,11 @@
 use super::*;
+use std::path::Path;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
 
 pub(super) async fn run_vault_command(
     global_db_path: &PathBuf,
+    app_home: &Path,
     action: crate::cli::VaultAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::cli::VaultAction;
@@ -11,6 +13,17 @@ pub(super) async fn run_vault_command(
 
     match action {
         VaultAction::Status => {
+            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+                let out = crate::cli_client::call_daemon_tool(
+                    &info,
+                    "vault_status",
+                    serde_json::Map::new(),
+                )
+                .await?;
+                println!("{out}");
+                return Ok(());
+            }
+
             let store = open_cli_store_read_only(global_db_path)?;
             let initialized = store
                 .vault_get_config()
@@ -72,9 +85,20 @@ pub(super) async fn run_vault_command(
         }
 
         VaultAction::Lock => {
+            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+                let out = crate::cli_client::call_daemon_tool(
+                    &info,
+                    "vault_lock",
+                    serde_json::Map::new(),
+                )
+                .await?;
+                println!("{out}");
+                return Ok(());
+            }
+
             println!("Vault lock is a runtime operation (affects the running daemon).");
             println!(
-                "The CLI operates statelessly — vault is only 'unlocked' during command execution."
+                "No running daemon was detected; stateless CLI commands do not keep the vault unlocked."
             );
             Ok(())
         }
@@ -83,13 +107,22 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
         } => {
+            let password = read_vault_password(stdin_password, keychain)?;
+
+            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+                let mut args = serde_json::Map::new();
+                args.insert("password".to_string(), serde_json::json!(password));
+                let out = crate::cli_client::call_daemon_tool(&info, "vault_unlock", args).await?;
+                println!("{out}");
+                return Ok(());
+            }
+
             let store = open_cli_store_read_only(global_db_path)?;
             let config = store
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
 
-            let password = read_vault_password(stdin_password, keychain)?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -98,7 +131,7 @@ pub(super) async fn run_vault_command(
             if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
                 return Err("Wrong password".into());
             }
-            println!("Vault password verified. Vault is accessible.");
+            println!("Vault password verified. No running daemon was detected; this CLI verification is stateless.");
             Ok(())
         }
 
