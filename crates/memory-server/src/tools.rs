@@ -1640,7 +1640,7 @@ impl MemoryServer {
                 handle_tachi_wiki_write(self, wiki_params).await
             }
             "note" => {
-                let (abs_note_path, rel_note_path) = crate::dispatch_ops::write_note_file(
+                let (abs_note_path, rel_note_path) = crate::notes_ops::write_note_file(
                     &params.text,
                     params.path.as_deref(),
                     params.title.as_deref(),
