@@ -49,10 +49,19 @@ pub(crate) async fn handle_tachi_memory(
                     "kind='wiki' is not supported via tachi_memory. Use tachi_wiki with action='write' instead.".to_string()
                 );
             }
+            let scope_is_note = params
+                .scope
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case("note"))
+                .unwrap_or(false);
+            let kind = params
+                .kind
+                .clone()
+                .or_else(|| (!scope_is_note).then(|| "memory".to_string()));
             let save_params = TachiSaveParams {
                 text,
                 id: params.id.clone(),
-                kind: params.kind.clone(),
+                kind,
                 title: params.title.clone(),
                 summary: params.summary.clone(),
                 path: params.path.clone(),

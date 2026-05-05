@@ -976,7 +976,11 @@ mod safe_merge_tests {
 
     #[tokio::test]
     async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
         // Force shell_runs_root() to the tempdir via env override.
         std::env::set_var("TACHI_RUN_ROOT", tmp.path());
         let client = MockGhClient::new()
@@ -997,7 +1001,11 @@ mod safe_merge_tests {
         assert_eq!(status["github"]["pr_number"], 42);
         let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
         assert!(events.contains("\"github_review_gate_passed\""));
-        std::env::remove_var("TACHI_RUN_ROOT");
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
     }
 
     #[tokio::test]

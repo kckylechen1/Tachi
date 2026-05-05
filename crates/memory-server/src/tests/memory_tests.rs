@@ -167,6 +167,95 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
     }
 }
 
+#[tokio::test]
+async fn tachi_memory_save_with_title_stays_memory() {
+    let server = make_server();
+
+    let saved = server
+        .tachi_memory(Parameters(TachiMemoryParams {
+            action: "save".to_string(),
+            query: None,
+            scope: None,
+            top_k: 6,
+            path_prefix: None,
+            category: Some("fact".to_string()),
+            include_archived: false,
+            enable_rerank: false,
+            text: Some("A one-line memory fact with a title should not become wiki.".to_string()),
+            title: Some("Memory title only".to_string()),
+            summary: Some("Memory title only".to_string()),
+            topic: Some("memory-boundary".to_string()),
+            keywords: vec!["memory-boundary".to_string()],
+            entities: Vec::new(),
+            importance: Some(0.7),
+            retention_policy: None,
+            kind: None,
+            path: Some("/facts/memory-boundary".to_string()),
+            id: None,
+            force: true,
+            source: None,
+            project: None,
+            domain: None,
+        }))
+        .await
+        .expect("tachi_memory save should succeed");
+    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
+    assert!(saved_json.get("wiki_path").is_none());
+
+    let id = saved_json["id"].as_str().expect("memory id").to_string();
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get memory");
+    let fetched_json: serde_json::Value = serde_json::from_str(&fetched).expect("memory JSON");
+    assert_eq!(fetched_json["path"], json!("/facts/memory-boundary"));
+    assert_ne!(fetched_json["metadata"]["wiki"], json!(true));
+}
+
+#[tokio::test]
+async fn tachi_search_memory_scope_excludes_wiki_rows() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut memory = make_entry("plain-memory-row");
+            memory.path = "/facts/plain".to_string();
+            memory.text = "UniqueBoundaryNeedle belongs in plain memory.".to_string();
+            memory.summary = "Plain memory row".to_string();
+            store.upsert(&memory).map_err(|e| e.to_string())?;
+
+            let mut wiki = make_entry("wiki-row-should-not-appear");
+            wiki.path = "/wiki/general/boundary".to_string();
+            wiki.text = "UniqueBoundaryNeedle belongs in wiki.".to_string();
+            wiki.summary = "Wiki row".to_string();
+            wiki.domain = Some("wiki".to_string());
+            wiki.metadata = json!({"wiki": true});
+            store.upsert(&wiki).map_err(|e| e.to_string())
+        })
+        .expect("seed boundary entries");
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "UniqueBoundaryNeedle".to_string(),
+            scope: "memory".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            category: None,
+            include_archived: false,
+            enable_rerank: false,
+        }))
+        .await
+        .expect("memory scoped search");
+
+    assert!(response.contains("plain-memory-row"));
+    assert!(!response.contains("wiki-row-should-not-appear"));
+}
+
 #[test]
 fn write_note_file_falls_back_when_slug_has_no_ascii_tokens() {
     let _temp_home = TempHomeGuard::new();

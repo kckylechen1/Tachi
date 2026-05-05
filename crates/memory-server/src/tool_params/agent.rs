@@ -93,6 +93,27 @@ pub(crate) struct HandoffCheckParams {
     pub acknowledge: bool,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct HandoffPromoteIssueParams {
+    /// Handoff memo ID to promote (with or without "handoff:" prefix)
+    pub memo_id: String,
+    /// GitHub repo in "owner/repo" format
+    pub repo: String,
+    /// Issue title (defaults to first 120 chars of memo summary)
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Issue labels (defaults to ["handoff"])
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Shell flow ID for artifact linkage (writes status.json + events.jsonl)
+    #[serde(default)]
+    pub flow_id: Option<String>,
+    /// Force re-promote even if memo already has a GitHub issue link
+    #[serde(default)]
+    pub force: bool,
+}
+
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
 #[allow(dead_code)]

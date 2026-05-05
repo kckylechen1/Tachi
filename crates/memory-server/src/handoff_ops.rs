@@ -1,4 +1,7 @@
 use super::*;
+use crate::gh_ops::CliGhClient;
+use crate::gh_safe_merge::GhClient;
+use crate::shell_ops::{append_github_event, merge_github_status, shell_runs_root};
 
 const HANDOFF_PATH: &str = "/handoff";
 const HANDOFF_MEMORY_LIMIT: usize = 50;
@@ -260,6 +263,57 @@ fn upsert_acknowledged_entry(
         .map_err(|e| format!("Failed to acknowledge handoff memory: {e}"))
 }
 
+fn normalize_handoff_memo_id(id: &str) -> String {
+    id.strip_prefix("handoff:").unwrap_or(id).to_string()
+}
+
+fn issue_number_from_url(url: &str) -> Option<u64> {
+    url.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn handoff_issue_body(memo: &HandoffMemo) -> String {
+    let steps = if memo.next_steps.is_empty() {
+        "_No next steps supplied._".to_string()
+    } else {
+        memo.next_steps
+            .iter()
+            .map(|step| format!("- [ ] {step}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let context = memo
+        .context
+        .as_ref()
+        .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()))
+        .unwrap_or_else(|| "null".to_string());
+    format!(
+        "## Handoff summary\n{}\n\n## Next steps\n{}\n\n## Context\n```json\n{}\n```\n\nSource: `handoff:{}` from `{}` at `{}`.",
+        memo.summary, steps, context, memo.id, memo.from_agent, memo.created_at
+    )
+}
+
+fn upsert_promoted_entry(
+    store: &mut MemoryStore,
+    mut entry: MemoryEntry,
+    issue: serde_json::Value,
+) -> Result<(), String> {
+    let metadata = entry
+        .metadata
+        .as_object_mut()
+        .ok_or_else(|| "handoff metadata must be an object".to_string())?;
+    metadata.insert("status".into(), json!("promoted"));
+    metadata.insert("github".into(), issue);
+    metadata.insert("promoted".into(), json!(true));
+    entry.retention_policy = Some("durable".to_string());
+    entry.vector = None;
+    store
+        .upsert(&entry)
+        .map_err(|e| format!("Failed to update promoted handoff memory: {e}"))
+}
+
 pub(crate) async fn handle_handoff_leave(
     server: &MemoryServer,
     params: HandoffLeaveParams,
@@ -339,6 +393,225 @@ pub(crate) async fn handle_handoff_check(
     Ok(result)
 }
 
+fn existing_issue_url(entry: &MemoryEntry) -> Option<String> {
+    entry
+        .metadata
+        .get("github")
+        .and_then(|gh| gh.get("issue_url"))
+        .and_then(|v| v.as_str())
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+}
+
+fn upsert_promoting_entry(store: &mut MemoryStore, mut entry: MemoryEntry) -> Result<(), String> {
+    let metadata = entry
+        .metadata
+        .as_object_mut()
+        .ok_or_else(|| "handoff metadata must be an object".to_string())?;
+    metadata.insert("status".into(), json!("promoting"));
+    metadata.insert("promoting_at".into(), json!(Utc::now().to_rfc3339()));
+    entry.vector = None;
+    store
+        .upsert(&entry)
+        .map_err(|e| format!("Failed to mark handoff as promoting: {e}"))
+}
+
+fn revert_promoting_entry(
+    store: &mut MemoryStore,
+    mut entry: MemoryEntry,
+    previous_status: &str,
+) -> Result<(), String> {
+    let metadata = entry
+        .metadata
+        .as_object_mut()
+        .ok_or_else(|| "handoff metadata must be an object".to_string())?;
+    metadata.insert("status".into(), json!(previous_status));
+    metadata.remove("promoting_at");
+    entry.vector = None;
+    store
+        .upsert(&entry)
+        .map_err(|e| format!("Failed to revert promoting status: {e}"))
+}
+
+async fn promote_handoff_issue_with_client<C: GhClient>(
+    server: &MemoryServer,
+    client: &C,
+    params: HandoffPromoteIssueParams,
+) -> Result<String, String> {
+    let memo_id = normalize_handoff_memo_id(&params.memo_id);
+    let entry_id = format!("handoff:{memo_id}");
+    let entry = server.with_global_store_read(|store| {
+        store
+            .get(&entry_id)
+            .map_err(|e| format!("Failed to read handoff memory: {e}"))?
+            .ok_or_else(|| format!("Handoff memo not found: {memo_id}"))
+    })?;
+
+    // ── Dedup: return existing issue link unless force=true ──────────
+    if !params.force {
+        if let Some(url) = existing_issue_url(&entry) {
+            let issue_number = entry
+                .metadata
+                .get("github")
+                .and_then(|gh| gh.get("issue_number"))
+                .cloned();
+            return serde_json::to_string(&json!({
+                "status": "already_promoted",
+                "memo_id": memo_id,
+                "entry_id": entry_id,
+                "issue_url": url,
+                "issue_number": issue_number,
+                "hint": "Pass force=true to create a new issue anyway.",
+            }))
+            .map_err(|e| format!("serialize: {e}"));
+        }
+    }
+
+    // ── Mark promoting (intermediate state before GitHub call) ───────
+    let previous_status = entry
+        .metadata
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending")
+        .to_string();
+    let entry_for_promoting = entry.clone();
+    server.with_global_store(|store| upsert_promoting_entry(store, entry_for_promoting))?;
+
+    let memo = memo_from_entry(&entry);
+    let title = params
+        .title
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| memo.summary.chars().take(120).collect());
+    let labels = if params.labels.is_empty() {
+        vec!["handoff".to_string()]
+    } else {
+        params.labels.clone()
+    };
+    let body = handoff_issue_body(&memo);
+
+    // ── Create GitHub issue ─────────────────────────────────────────
+    let issue = match client
+        .issue_create(&params.repo, &title, Some(&body), &labels)
+        .await
+    {
+        Ok(issue) => issue,
+        Err(gh_err) => {
+            // Revert promoting state so the memo is not stuck
+            let revert_entry = server
+                .with_global_store_read(|store| {
+                    store
+                        .get(&entry_id)
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| "entry disappeared during promote".to_string())
+                })
+                .unwrap_or(entry.clone());
+            let _ = server.with_global_store(|store| {
+                revert_promoting_entry(store, revert_entry, &previous_status)
+            });
+            return Err(format!("GitHub issue creation failed: {gh_err}"));
+        }
+    };
+
+    let issue_number = if issue.number == 0 {
+        issue_number_from_url(&issue.url)
+    } else {
+        Some(issue.number)
+    };
+    let promoted_at = Utc::now().to_rfc3339();
+    let promoted_by = resolve_from_agent(server);
+    let github = json!({
+        "repo": params.repo,
+        "issue_number": issue_number,
+        "issue_url": issue.url,
+        "issue_title": issue.title,
+        "issue_state": issue.state,
+        "labels": labels,
+        "promoted_at": promoted_at,
+        "promoted_by": promoted_by,
+        "source": {
+            "kind": "handoff",
+            "memo_id": memo.id,
+            "entry_id": entry_id.clone(),
+        },
+    });
+
+    // ── Persist promoted status back to memory ──────────────────────
+    // Re-read entry (it was updated to "promoting" earlier)
+    let promoted_entry = server
+        .with_global_store_read(|store| {
+            store
+                .get(&entry_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "entry disappeared during promote".to_string())
+        })
+        .unwrap_or(entry.clone());
+    if let Err(write_err) = server
+        .with_global_store(|store| upsert_promoted_entry(store, promoted_entry, github.clone()))
+    {
+        // GitHub issue was created but memory write-back failed.
+        // Return a recovery payload so the caller can retry or manually reconcile.
+        return serde_json::to_string(&json!({
+            "status": "partial_failure",
+            "memo_id": memo_id,
+            "entry_id": entry_id,
+            "issue_url": issue.url,
+            "issue_number": issue_number,
+            "github": github,
+            "error": format!("GitHub issue created but memory write-back failed: {write_err}"),
+            "recovery": {
+                "action": "promote_issue",
+                "memo_id": memo_id,
+                "force": true,
+                "hint": "Re-run with force=true to overwrite the stale promoting state.",
+            },
+        }))
+        .map_err(|e| format!("serialize: {e}"));
+    }
+
+    let mut status_patch = None;
+    let mut event_persisted = false;
+    if let Some(flow_id) = params.flow_id.filter(|value| !value.trim().is_empty()) {
+        let run_dir = shell_runs_root().join(&flow_id);
+        let patch = json!({
+            "issue": github.clone(),
+        });
+        status_patch = Some(merge_github_status(&run_dir, patch)?);
+        append_github_event(
+            &run_dir,
+            &flow_id,
+            "github_issue_created",
+            json!({
+                "repo": github["repo"],
+                "issue_number": github["issue_number"],
+                "issue_url": github["issue_url"],
+                "source": github["source"],
+            }),
+        )?;
+        event_persisted = true;
+    }
+
+    serde_json::to_string(&json!({
+        "status": "promoted",
+        "memo_id": memo_id,
+        "entry_id": entry_id,
+        "issue_url": github["issue_url"],
+        "issue_number": github["issue_number"],
+        "github": github,
+        "status_patch": status_patch,
+        "event_persisted": event_persisted,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(crate) async fn handle_handoff_promote_issue(
+    server: &MemoryServer,
+    params: HandoffPromoteIssueParams,
+) -> Result<String, String> {
+    let client = CliGhClient { server };
+    promote_handoff_issue_with_client(server, &client, params).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,8 +627,7 @@ mod tests {
     }
 
     fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        crate::shell_ops::tachi_run_root_env_lock()
     }
 
     fn test_server(db_path: std::path::PathBuf) -> MemoryServer {
@@ -524,6 +796,79 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+        let db_path =
+            std::env::temp_dir().join(format!("handoff-promote-{}.sqlite", uuid::Uuid::new_v4()));
+        let run_root =
+            std::env::temp_dir().join(format!("handoff-promote-runs-{}", uuid::Uuid::new_v4()));
+        let flow_id = "handoff-promote-flow";
+        std::fs::create_dir_all(run_root.join(flow_id)).expect("create run dir");
+        std::env::set_var("TACHI_RUN_ROOT", &run_root);
+
+        let server = test_server(db_path.clone());
+        let left = server
+            .handoff_leave(Parameters(HandoffLeaveParams {
+                summary: "Promote this memo".to_string(),
+                next_steps: vec!["Create a tracked GitHub issue".to_string()],
+                target_agent: Some("next-agent".to_string()),
+                context: Some(json!({"risk": "medium"})),
+            }))
+            .await
+            .expect("leave handoff");
+        let left_json: serde_json::Value = serde_json::from_str(&left).expect("leave json");
+        let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+        let client = crate::gh_safe_merge::MockGhClient::new();
+
+        let promoted = promote_handoff_issue_with_client(
+            &server,
+            &client,
+            HandoffPromoteIssueParams {
+                memo_id: memo_id.clone(),
+                repo: "owner/repo".to_string(),
+                title: None,
+                labels: vec!["task".to_string()],
+                flow_id: Some(flow_id.to_string()),
+                force: false,
+            },
+        )
+        .await
+        .expect("promote handoff");
+        let promoted_json: serde_json::Value =
+            serde_json::from_str(&promoted).expect("promote json");
+        assert_eq!(promoted_json["issue_number"], json!(1000));
+        assert_eq!(promoted_json["event_persisted"], json!(true));
+
+        let stored = server
+            .with_global_store_read(|store| {
+                store
+                    .get(&format!("handoff:{memo_id}"))
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "missing promoted handoff".to_string())
+            })
+            .expect("read promoted handoff");
+        assert_eq!(stored.metadata["status"], json!("promoted"));
+        assert_eq!(stored.metadata["github"]["issue_number"], json!(1000));
+        assert_eq!(stored.retention_policy.as_deref(), Some("durable"));
+
+        let status = std::fs::read_to_string(run_root.join(flow_id).join("status.json"))
+            .expect("read status");
+        assert!(status.contains("https://github.com/owner/repo/issues/1000"));
+        let events = std::fs::read_to_string(run_root.join(flow_id).join("events.jsonl"))
+            .expect("read events");
+        assert!(events.contains("github_issue_created"));
+
+        if let Some(root) = original_run_root {
+            std::env::set_var("TACHI_RUN_ROOT", root);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(run_root);
+    }
+
     #[test]
     fn resolve_from_agent_falls_back_to_profile_env_then_unknown() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -543,5 +888,205 @@ mod tests {
         } else {
             std::env::remove_var("TACHI_PROFILE");
         }
+    }
+
+    #[tokio::test]
+    async fn promote_dedup_returns_already_promoted_without_force() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+        let db_path =
+            std::env::temp_dir().join(format!("handoff-dedup-{}.sqlite", uuid::Uuid::new_v4()));
+        let run_root =
+            std::env::temp_dir().join(format!("handoff-dedup-runs-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("TACHI_RUN_ROOT", &run_root);
+
+        let server = test_server(db_path.clone());
+        let left = server
+            .handoff_leave(Parameters(HandoffLeaveParams {
+                summary: "Dedup test memo".to_string(),
+                next_steps: vec!["step".to_string()],
+                target_agent: None,
+                context: None,
+            }))
+            .await
+            .expect("leave");
+        let left_json: serde_json::Value = serde_json::from_str(&left).expect("json");
+        let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+        let client = crate::gh_safe_merge::MockGhClient::new();
+
+        // First promote succeeds
+        let first = promote_handoff_issue_with_client(
+            &server,
+            &client,
+            HandoffPromoteIssueParams {
+                memo_id: memo_id.clone(),
+                repo: "owner/repo".to_string(),
+                title: None,
+                labels: vec![],
+                flow_id: None,
+                force: false,
+            },
+        )
+        .await
+        .expect("first promote");
+        let first_json: serde_json::Value = serde_json::from_str(&first).expect("json");
+        assert_eq!(first_json["status"], json!("promoted"));
+
+        // Second promote (no force) returns already_promoted
+        let second = promote_handoff_issue_with_client(
+            &server,
+            &client,
+            HandoffPromoteIssueParams {
+                memo_id: memo_id.clone(),
+                repo: "owner/repo".to_string(),
+                title: None,
+                labels: vec![],
+                flow_id: None,
+                force: false,
+            },
+        )
+        .await
+        .expect("second promote");
+        let second_json: serde_json::Value = serde_json::from_str(&second).expect("json");
+        assert_eq!(second_json["status"], json!("already_promoted"));
+        assert!(second_json["issue_url"].as_str().is_some());
+        assert!(second_json["hint"].as_str().unwrap().contains("force=true"));
+
+        if let Some(root) = original_run_root {
+            std::env::set_var("TACHI_RUN_ROOT", root);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(run_root);
+    }
+
+    #[tokio::test]
+    async fn promote_force_creates_new_issue_even_if_already_promoted() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+        let db_path =
+            std::env::temp_dir().join(format!("handoff-force-{}.sqlite", uuid::Uuid::new_v4()));
+        let run_root =
+            std::env::temp_dir().join(format!("handoff-force-runs-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("TACHI_RUN_ROOT", &run_root);
+
+        let server = test_server(db_path.clone());
+        let left = server
+            .handoff_leave(Parameters(HandoffLeaveParams {
+                summary: "Force re-promote test".to_string(),
+                next_steps: vec![],
+                target_agent: None,
+                context: None,
+            }))
+            .await
+            .expect("leave");
+        let left_json: serde_json::Value = serde_json::from_str(&left).expect("json");
+        let memo_id = left_json["memo_id"].as_str().expect("memo id").to_string();
+        let client = crate::gh_safe_merge::MockGhClient::new();
+
+        // First promote
+        let first = promote_handoff_issue_with_client(
+            &server,
+            &client,
+            HandoffPromoteIssueParams {
+                memo_id: memo_id.clone(),
+                repo: "owner/repo".to_string(),
+                title: None,
+                labels: vec![],
+                flow_id: None,
+                force: false,
+            },
+        )
+        .await
+        .expect("first promote");
+        let first_json: serde_json::Value = serde_json::from_str(&first).expect("json");
+        let first_issue_number = first_json["issue_number"].as_u64().expect("issue number");
+
+        // Force re-promote creates a new issue with a different number
+        let second = promote_handoff_issue_with_client(
+            &server,
+            &client,
+            HandoffPromoteIssueParams {
+                memo_id: memo_id.clone(),
+                repo: "owner/repo".to_string(),
+                title: None,
+                labels: vec![],
+                flow_id: None,
+                force: true,
+            },
+        )
+        .await
+        .expect("force promote");
+        let second_json: serde_json::Value = serde_json::from_str(&second).expect("json");
+        assert_eq!(second_json["status"], json!("promoted"));
+        let second_issue_number = second_json["issue_number"].as_u64().expect("issue number");
+        assert_ne!(first_issue_number, second_issue_number);
+
+        if let Some(root) = original_run_root {
+            std::env::set_var("TACHI_RUN_ROOT", root);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(run_root);
+    }
+
+    #[test]
+    fn promoting_intermediate_state_is_set_before_issue_creation() {
+        let mut store = test_store();
+        let memo = HandoffMemo {
+            id: "memo-promoting".to_string(),
+            from_agent: "agent-a".to_string(),
+            target_agent: None,
+            summary: "test promoting state".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: Utc::now().to_rfc3339(),
+            acknowledged: false,
+        };
+        let entry = test_entry(memo);
+        store.upsert(&entry).expect("upsert");
+
+        upsert_promoting_entry(&mut store, entry.clone()).expect("mark promoting");
+        let stored = store
+            .get("handoff:memo-promoting")
+            .expect("get")
+            .expect("exists");
+        assert_eq!(stored.metadata["status"], json!("promoting"));
+        assert!(stored.metadata["promoting_at"].as_str().is_some());
+
+        revert_promoting_entry(&mut store, stored, "pending").expect("revert");
+        let reverted = store
+            .get("handoff:memo-promoting")
+            .expect("get")
+            .expect("exists");
+        assert_eq!(reverted.metadata["status"], json!("pending"));
+        assert!(reverted.metadata.get("promoting_at").is_none());
+    }
+
+    #[test]
+    fn existing_issue_url_extracts_from_metadata() {
+        let mut entry = test_entry(HandoffMemo {
+            id: "memo-url".to_string(),
+            from_agent: "a".to_string(),
+            target_agent: None,
+            summary: "s".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: Utc::now().to_rfc3339(),
+            acknowledged: false,
+        });
+        assert!(existing_issue_url(&entry).is_none());
+
+        let md = entry.metadata.as_object_mut().expect("obj");
+        md.insert(
+            "github".into(),
+            json!({"issue_url": "https://github.com/o/r/issues/42"}),
+        );
+        assert_eq!(
+            existing_issue_url(&entry).as_deref(),
+            Some("https://github.com/o/r/issues/42")
+        );
     }
 }

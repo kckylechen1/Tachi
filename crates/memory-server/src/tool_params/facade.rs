@@ -228,7 +228,7 @@ fn default_true() -> bool {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiHandoffParams {
-    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos
+    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos, "promote_issue" to create a GitHub issue from a memo
     pub action: String,
 
     /// Summary of what was accomplished (required when action="leave")
@@ -254,6 +254,30 @@ pub(crate) struct TachiHandoffParams {
     /// Whether to acknowledge retrieved memos (used when action="check", default: true)
     #[serde(default = "default_true")]
     pub acknowledge: bool,
+
+    /// Handoff memo ID to promote (required for action="promote_issue", with or without "handoff:" prefix)
+    #[serde(default)]
+    pub memo_id: Option<String>,
+
+    /// GitHub repo in "owner/repo" format (required for action="promote_issue")
+    #[serde(default)]
+    pub repo: Option<String>,
+
+    /// Issue title override (used by action="promote_issue"; defaults to memo summary truncated to 120 chars)
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Issue labels (used by action="promote_issue"; defaults to ["handoff"])
+    #[serde(default)]
+    pub labels: Vec<String>,
+
+    /// Shell flow ID for artifact linkage (optional for action="promote_issue"; writes status.json + events.jsonl)
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Force re-promote even if memo already has a GitHub issue link (used by action="promote_issue")
+    #[serde(default)]
+    pub force: bool,
 }
 
 // ─── Facade: agent dispatch ───────────────────────────────────────────────────

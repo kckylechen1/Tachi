@@ -46,10 +46,10 @@ pub(crate) async fn handle_tachi_save(
     let resolved_kind = if kind.is_empty() {
         if scope_is_note {
             "note"
-        } else if path_looks_like_db_path {
-            "memory"
         } else if params.title.is_some() {
             "wiki"
+        } else if path_looks_like_db_path {
+            "memory"
         } else if params.text.len() < 200 {
             "note"
         } else {
