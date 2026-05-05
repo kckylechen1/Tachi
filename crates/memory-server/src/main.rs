@@ -63,6 +63,7 @@ mod mcp_pool;
 mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
+mod notes_ops;
 mod pack_ops;
 mod pipeline_ops;
 mod profiles;
