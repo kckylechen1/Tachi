@@ -179,7 +179,11 @@ pub(crate) fn write_note_file(
             .take(6)
             .collect::<Vec<_>>()
             .join("-");
-        format!("{:.60}", s) // cap length
+        if s.is_empty() {
+            "note".to_string()
+        } else {
+            format!("{:.60}", s) // cap length
+        }
     };
 
     let abs_path = resolve_note_path(&root, user_path, &slug, &ts)?;

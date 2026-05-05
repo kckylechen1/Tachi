@@ -794,11 +794,17 @@ async fn process_memory_distill_job(
                 buckets.len()
             );
             buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-            buckets.into_iter().next().expect("non-empty")
+            match buckets.into_iter().next() {
+                Some(bucket) => bucket,
+                None => return Ok(DistillOutcome::Skipped(SKIP_NO_COHERENT_BUCKET.to_string())),
+            }
         }
     } else {
         buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-        buckets.into_iter().next().expect("non-empty")
+        match buckets.into_iter().next() {
+            Some(bucket) => bucket,
+            None => return Ok(DistillOutcome::Skipped(SKIP_NO_COHERENT_BUCKET.to_string())),
+        }
     };
 
     let quality_flags = distill_quality_flags(&source_entries);

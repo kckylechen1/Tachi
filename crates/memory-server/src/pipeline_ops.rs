@@ -8,6 +8,10 @@ fn merge_optional_metadata(metadata: Option<serde_json::Value>) -> serde_json::V
     }
 }
 
+fn serialize_json(value: serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(&value).map_err(|e| format!("Failed to serialize response: {e}"))
+}
+
 fn summary_from_text(text: &str) -> String {
     text.chars().take(100).collect()
 }
@@ -510,11 +514,10 @@ async fn ingest_structured_event(
             "empty_structured_event",
             &format!("{}:{}", params.conversation_id, params.turn_id),
         );
-        return Ok(serde_json::to_string(&json!({
+        return serialize_json(json!({
             "status": "skipped",
             "reason": "No structured event content to persist"
-        }))
-        .unwrap());
+        }));
     }
 
     let event_hash = stable_hash(&format!(
@@ -544,12 +547,11 @@ async fn ingest_structured_event(
         &event_id,
     )?;
     if !claimed {
-        return Ok(serde_json::to_string(&json!({
+        return serialize_json(json!({
             "status": "skipped",
             "reason": "Event already processed",
             "hash": event_hash
-        }))
-        .unwrap());
+        }));
     }
 
     let path_prefix = params.path_prefix.clone().unwrap_or_else(|| {
@@ -651,26 +653,24 @@ pub(crate) async fn handle_extract_facts(
     let facts = match server.llm.extract_facts(&params.text).await {
         Ok(facts) => facts,
         Err(err) => {
-            return Ok(serde_json::to_string(&serde_json::json!({
+            return serialize_json(serde_json::json!({
                 "status": "failed",
                 "reason": "llm_extraction_failed",
                 "error": err,
                 "source": source,
                 "facts_extracted": 0,
                 "facts_saved": 0
-            }))
-            .unwrap());
+            }));
         }
     };
 
     if facts.is_empty() {
-        return Ok(serde_json::to_string(&serde_json::json!({
+        return serialize_json(serde_json::json!({
             "status": "completed",
             "source": source,
             "facts_extracted": 0,
             "facts_saved": 0
-        }))
-        .unwrap());
+        }));
     }
 
     let count = facts.len();
@@ -703,13 +703,12 @@ pub(crate) async fn handle_extract_facts(
         })
         .map_err(|e| format!("DB write failed: {e}"))?;
 
-    Ok(serde_json::to_string(&serde_json::json!({
+    serialize_json(serde_json::json!({
         "status": "completed",
         "source": source,
         "facts_extracted": count,
         "facts_saved": saved
     }))
-    .unwrap())
 }
 
 pub(crate) async fn handle_ingest(
@@ -803,11 +802,10 @@ pub(crate) async fn handle_ingest_event(
             "empty_event_content",
             &format!("{}:{}", params.conversation_id, params.turn_id),
         );
-        return Ok(serde_json::to_string(&serde_json::json!({
+        return serialize_json(serde_json::json!({
             "status": "skipped",
             "reason": "No content to process"
-        }))
-        .unwrap());
+        }));
     }
 
     let claimed = claim_ingest_event(
@@ -819,12 +817,11 @@ pub(crate) async fn handle_ingest_event(
         &format!("{}:{}", params.conversation_id, params.turn_id),
     )?;
     if !claimed {
-        return Ok(serde_json::to_string(&serde_json::json!({
+        return serialize_json(serde_json::json!({
             "status": "skipped",
             "reason": "Event already processed",
             "hash": event_hash
-        }))
-        .unwrap());
+        }));
     }
 
     let server = server.clone();
@@ -964,11 +961,10 @@ pub(crate) async fn handle_ingest_event(
             }
         }
     });
-    Ok(serde_json::to_string(&serde_json::json!({
+    serialize_json(serde_json::json!({
         "status": "ingestion queued",
         "hash": event_hash
     }))
-    .unwrap())
 }
 
 pub(crate) async fn handle_ingest_source(
@@ -996,11 +992,10 @@ pub(crate) async fn handle_ingest_source(
                 .or(params.source_url.as_deref())
                 .unwrap_or("/"),
         );
-        return Ok(serde_json::to_string(&json!({
+        return serialize_json(json!({
             "status": "skipped",
             "reason": "No source content to ingest"
-        }))
-        .unwrap());
+        }));
     }
 
     let domain = resolve_domain(params.domain.clone());
@@ -1033,12 +1028,11 @@ pub(crate) async fn handle_ingest_source(
         &path_prefix,
     )?;
     if !claimed {
-        return Ok(serde_json::to_string(&json!({
+        return serialize_json(json!({
             "status": "skipped",
             "reason": "Source already processed",
             "hash": event_hash,
-        }))
-        .unwrap());
+        }));
     }
 
     let chunks = if params.auto_chunk {

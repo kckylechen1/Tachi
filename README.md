@@ -86,8 +86,14 @@
 ### 新近理路（Tool Surface Bundles）
 
 - **不再强迫四选一**：MCP 暴露面今由可叠加之 surface bundles 统辖：`observe`、`remember`、`coordinate`、`operate`、`admin`。
-- **灵核见其所当见**：新接入之灵核宜显式择 `remember`、`coordinate` 或 `operate`；Antigravity 可取 `coordinate`；OpenClaw 走 `openclaw` / `operate` 之别名。v1.0.1 起，未指明者**默认 `standard`（12 精要工具）**，不再循 `admin` 旧制。若需全量 148 工具（含 vault、hub 等底层法器），须显式设 `TACHI_PROFILE=admin`。
-- **万宝楼居上，不使杂乱**：`recommend_*`、`prepare_capability_bundle`、`run_skill` 归入常用灵核之正道；`hub` / `pack` / `vc` / `vault` 等治道法器收于 `admin`，不再裸露于常途。
+- **灵核见其所当见**：新接入之灵核宜走 `standard`，或按宿主取 `coordinate` / `operate`；Antigravity 可取 `coordinate`；OpenClaw 走 `openclaw` / `operate` 之别名。未指明者**默认 `standard`**，不再循 `admin` 旧制。若需全量底层法器（含 vault、hub、pack、vc 等），须显式设 `TACHI_PROFILE=admin`。
+- **万宝楼居上，不使杂乱**：`recommend_*`、`prepare_capability_bundle`、`run_skill`、`tachi_task`、`tachi_shell` 归入常用灵核之正道；`hub` / `pack` / `vc` / `vault` 等治道法器收于 `admin`，不再裸露于常途。
+
+### 今时架构（Core / Server / Surface）
+
+- **`memory-core`** 掌 SQLite 库藏、迁移、混合检索、图谱、domain、pack、vault 元数据与 `sqlite-vec`。
+- **`memory-server`** 掌 MCP 与 CLI、Profile 过滤、Hub 路由、dispatch / task / shell 工作流、Wiki、Vault 加密、daemon lock 与 Foundry 后台工务。
+- **宿主接入** 应先择 `TACHI_PROFILE=standard`、`coordinate` 或 `operate`；唯维护与治理场景使用 `admin`。
 
 ---
 

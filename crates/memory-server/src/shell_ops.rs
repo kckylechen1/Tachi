@@ -347,6 +347,18 @@ fn build_instruction_md(
     }
     s.push('\n');
 
+    if stage == "ship" {
+        s.push_str("## Release Flow\n\n");
+        s.push_str("Follow this PR-first release sequence unless the human explicitly authorizes a direct push to the protected branch:\n\n");
+        s.push_str("1. Finish the feature branch.\n");
+        s.push_str("2. Run tests and required verification.\n");
+        s.push_str("3. Push the feature branch.\n");
+        s.push_str("4. Open a PR.\n");
+        s.push_str("5. Pass the PR gate: CI checks and review gate.\n");
+        s.push_str("6. Merge the PR.\n");
+        s.push_str("7. Deploy / release.\n\n");
+    }
+
     s.push_str("## Expected Outputs\n\n");
     s.push_str("Write all artifacts under the run directory:\n\n");
     s.push_str("- `result.md` — what was done, decisions taken, blockers\n");
@@ -780,6 +792,27 @@ mod tests {
         assert!(s.contains("cargo test"));
         assert!(s.contains("crates/memory-server/**"));
         assert!(s.contains("be careful"));
+    }
+
+    #[test]
+    fn ship_instruction_includes_pr_first_release_flow() {
+        let inj = InjectionResult {
+            required: true,
+            rel_path: Some("skill/x/SKILL.md".into()),
+            source_path: None,
+            injected_path: Some(".tachi/runs/flow_x/injected/superpowers-ship.md".into()),
+            content_hash: Some("b".repeat(16)),
+            loaded: true,
+            warning: None,
+        };
+        let s = build_instruction_md("flow_x", "ship", "ship it", &inj, None, &[], &[]);
+        assert!(s.contains("## Release Flow"));
+        assert!(s.contains("Push the feature branch"));
+        assert!(s.contains("Open a PR"));
+        assert!(s.contains("Pass the PR gate"));
+        assert!(s.contains("CI checks"));
+        assert!(s.contains("Merge the PR"));
+        assert!(!s.contains("direct push to the protected branch:\n\n1. Merge"));
     }
 
     #[test]

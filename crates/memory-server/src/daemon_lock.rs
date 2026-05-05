@@ -122,6 +122,10 @@ impl Drop for DaemonLock {
         // best-effort so a future operator inspection does not see a stale
         // PID for an exited process.
         let fd = self.file.as_raw_fd();
+        // SAFETY: `fd` comes from a live `File` owned by this `DaemonLock`.
+        // `flock(LOCK_UN)` does not dereference Rust memory and only requests
+        // kernel unlock for that descriptor. Errors are intentionally ignored
+        // during drop because the fd close also releases any held flock.
         unsafe {
             libc::flock(fd, libc::LOCK_UN);
         }
@@ -136,6 +140,8 @@ enum FlockOutcome {
 
 fn try_flock_exclusive(file: &File) -> Result<FlockOutcome, std::io::Error> {
     let fd = file.as_raw_fd();
+    // SAFETY: `fd` is borrowed from a valid open `File`. The call only passes
+    // integer flags to the OS and does not hand Rust pointers across FFI.
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {
         Ok(FlockOutcome::Acquired)
@@ -175,6 +181,9 @@ pub fn process_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
     }
+    // SAFETY: `kill(pid, 0)` performs an existence/permission probe and does
+    // not deliver a signal. `pid` is range-checked above to avoid special
+    // process-group semantics for non-positive values.
     let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
     if rc == 0 {
         return true;

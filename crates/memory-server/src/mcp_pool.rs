@@ -461,7 +461,14 @@ impl MemoryServer {
                     (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
                 );
             }
-            sems.get(server_name).unwrap().0.clone()
+            sems.get(server_name)
+                .map(|(semaphore, _)| Arc::clone(semaphore))
+                .ok_or_else(|| {
+                    rmcp::ErrorData::internal_error(
+                        format!("semaphore missing after initialization for {server_name}"),
+                        None,
+                    )
+                })?
         };
         let _permit = semaphore
             .acquire()

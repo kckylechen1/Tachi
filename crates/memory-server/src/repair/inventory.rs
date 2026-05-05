@@ -91,7 +91,7 @@ fn matches(e: &DbEntry, want: &str) -> bool {
 pub fn resolve_one(manifest: &Manifest, want: &str) -> Option<DbEntry> {
     let hits = select_dbs(manifest, Some(want));
     if hits.len() == 1 {
-        Some(hits.into_iter().next().unwrap())
+        hits.into_iter().next()
     } else {
         None
     }

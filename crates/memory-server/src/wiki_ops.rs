@@ -105,7 +105,9 @@ fn set_skill_quality_metadata(def: &mut Value, patch: Value) {
     if !def.is_object() {
         *def = json!({});
     }
-    let obj = def.as_object_mut().expect("def should be object");
+    let Some(obj) = def.as_object_mut() else {
+        return;
+    };
     let quality = obj.entry("quality_guard").or_insert_with(|| json!({}));
     if !quality.is_object() {
         *quality = json!({});
@@ -983,13 +985,14 @@ fn run_skill_quality_guards_for_scope(
             if !new_def.is_object() {
                 new_def = json!({});
             }
-            let obj = new_def.as_object_mut().expect("object");
-            let policy = obj.entry("policy").or_insert_with(|| json!({}));
-            if !policy.is_object() {
-                *policy = json!({});
-            }
-            if let Some(policy_obj) = policy.as_object_mut() {
-                policy_obj.insert("visibility".to_string(), json!("hidden"));
+            if let Some(obj) = new_def.as_object_mut() {
+                let policy = obj.entry("policy").or_insert_with(|| json!({}));
+                if !policy.is_object() {
+                    *policy = json!({});
+                }
+                if let Some(policy_obj) = policy.as_object_mut() {
+                    policy_obj.insert("visibility".to_string(), json!("hidden"));
+                }
             }
             set_skill_quality_metadata(
                 &mut new_def,

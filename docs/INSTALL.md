@@ -6,6 +6,12 @@
 
 Tachi is a local-first context and memory database for AI agents. It runs as an MCP (Model Context Protocol) server that gives you persistent memory, hybrid search, a capability hub, encrypted vault, inter-agent messaging, and more — all from a single binary with zero external database dependencies.
 
+Current architecture:
+
+- `memory-core` owns SQLite storage, migrations, hybrid search, graph/domain state, packs, vault metadata, and sqlite-vec integration.
+- `memory-server` owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, and Foundry background work.
+- Hosts should connect through the profile-based MCP surface instead of exposing every low-level tool by default.
+
 ---
 
 ## Step 1: Install the Tachi Binary
@@ -57,7 +63,8 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "<your-voyage-api-key>"
+        "VOYAGE_API_KEY": "<your-voyage-api-key>",
+        "TACHI_PROFILE": "standard"
       }
     }
   }
@@ -75,7 +82,8 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
         "VOYAGE_API_KEY": "<your-voyage-api-key>",
         "SILICONFLOW_API_KEY": "<your-siliconflow-key>",
         "SILICONFLOW_BASE_URL": "https://api.siliconflow.cn/v1/chat/completions",
-        "SILICONFLOW_MODEL": "Qwen/Qwen3.5-27B"
+        "SILICONFLOW_MODEL": "Qwen/Qwen3.5-27B",
+        "TACHI_PROFILE": "standard"
       }
     }
   }
@@ -122,11 +130,12 @@ After configuring, restart your agent and run:
 Search my memory for "test"
 ```
 
-If Tachi is working, you will see a response from the `search_memory` tool (even if no results are found yet). If the tool is not available, check:
+If Tachi is working, you will see a response from `tachi_search` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
 
 1. The MCP config file path is correct for your agent
 2. The `tachi` binary is on your PATH
-3. Your VOYAGE_API_KEY is set (embedding is required for save operations)
+3. Your `TACHI_PROFILE` is appropriate for the host (`standard`, `coordinate`, `operate`, or `admin`)
+4. Your `VOYAGE_API_KEY` is set (embedding is required for save operations)
 
 ---
 
@@ -158,9 +167,9 @@ This will:
 
 ---
 
-## Available MCP Tools (120+)
+## Available MCP Tools
 
-Once connected, Tachi exposes 120+ MCP tools organized into layers. Most hosts should use a profile so they see a compact task-focused surface instead of the full admin catalog.
+Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` catalog is intentionally large; most hosts should use `standard`, `coordinate`, or `operate` so agents see a compact task-focused surface.
 
 ### Core Memory
 `save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
@@ -211,7 +220,7 @@ Once connected, Tachi exposes 120+ MCP tools organized into layers. Most hosts s
 `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`
 
 ### Facade & Delegation
-`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `approve_merge`, `tachi_complete`
+`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`
 *(Aliases for real tools: `tachi_task_brief`, `tachi_progress_check`)*
 
 ### Wiki System
@@ -224,13 +233,13 @@ Once connected, Tachi exposes 120+ MCP tools organized into layers. Most hosts s
 
 Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select an additive surface bundle:
 
-- `standard` — Curated Tool Surface v2 for IDEs and CLI agents (11 tools: tachi_search, tachi_save, run_skill, tachi_dispatch, etc.)
+- `standard` — Curated Tool Surface v2 for IDEs and CLI agents (core facade tools such as `tachi_search`, `tachi_save`, `run_skill`, `recommend_skill`, `tachi_task`, and `tachi_shell`)
 - `delegate` — Minimal surface for worker agents spawned by `tachi_dispatch` (7 tools)
 - `observe` — Read-only memory + capability recommendation
 - `remember` — `observe` + `save_memory`, `extract_facts`, `run_skill`
 - `coordinate` — `remember` + ghost / kanban / handoff tools
 - `operate` — `remember` + runtime hooks and gateway/evolution helpers
-- `admin` — Full surface (120+ tools)
+- `admin` — Full surface for maintenance and development
 
 Host aliases:
 
@@ -245,7 +254,7 @@ tachi --profile standard
 TACHI_PROFILE=claude-code tachi
 ```
 
-If no profile is specified, Tachi keeps the historical `admin` default for compatibility. New host integrations should explicitly set a profile like `standard`.
+If no profile is specified, Tachi defaults to `standard`. Set `TACHI_PROFILE=admin` only for maintenance sessions that need the full low-level catalog.
 
 ---
 

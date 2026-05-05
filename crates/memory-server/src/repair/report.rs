@@ -150,7 +150,10 @@ impl ReportBuilder {
             "open_errors": self.open_errors.iter().map(|(l, m)| json!({"db": l, "error": m})).collect::<Vec<_>>(),
             "reports": self.rule_reports,
         });
-        println!("{}", serde_json::to_string_pretty(&body).unwrap());
+        match serde_json::to_string_pretty(&body) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(err) => eprintln!("failed to render repair report JSON: {err}"),
+        }
         exit
     }
 

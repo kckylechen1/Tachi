@@ -5,6 +5,11 @@ static SQLITE_VEC_AUTO_EXT_ONCE: Once = Once::new();
 
 pub fn register_sqlite_vec() {
     SQLITE_VEC_AUTO_EXT_ONCE.call_once(|| unsafe {
+        // SAFETY: `sqlite_vec::sqlite3_vec_init` is the sqlite-vec extension
+        // entrypoint with the same C ABI shape that SQLite expects for
+        // `sqlite3_auto_extension`. The crate exposes it as a function item, so
+        // the cast only erases/rebuilds the function pointer type required by
+        // rusqlite's FFI binding. Registration is guarded by `Once`.
         let init_fn = std::mem::transmute::<
             *const (),
             unsafe extern "C" fn(
