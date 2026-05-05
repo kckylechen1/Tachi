@@ -93,6 +93,19 @@ pub(crate) struct HandoffCheckParams {
     pub acknowledge: bool,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct HandoffPromoteIssueParams {
+    pub memo_id: String,
+    pub repo: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub flow_id: Option<String>,
+}
+
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
 #[allow(dead_code)]

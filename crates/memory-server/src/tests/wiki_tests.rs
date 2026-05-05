@@ -182,6 +182,55 @@ async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
 }
 
 #[tokio::test]
+async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
+    let server = make_server();
+
+    let response = server
+        .tachi_save(Parameters(TachiSaveParams {
+            text: "A routed wiki entry should be stored as wiki when title and /wiki path are both present.".to_string(),
+            id: None,
+            kind: None,
+            title: Some("Routing Boundary Wiki".to_string()),
+            summary: Some("Routing boundary wiki".to_string()),
+            path: Some("/wiki/agent/tachi/routing-boundary".to_string()),
+            importance: Some(0.85),
+            category: Some("experience".to_string()),
+            keywords: vec!["routing".to_string()],
+            entities: Vec::new(),
+            scope: Some("global".to_string()),
+            project: None,
+            domain: None,
+            retention_policy: Some("permanent".to_string()),
+            force: true,
+            topic: Some("routing-boundary".to_string()),
+            source: None,
+        }))
+        .await
+        .expect("tachi_save wiki route should succeed");
+    let json: serde_json::Value = serde_json::from_str(&response).expect("save JSON");
+    assert_eq!(
+        json["wiki_path"],
+        json!("/wiki/agent/tachi/routing-boundary")
+    );
+
+    let id = json["id"].as_str().expect("wiki id").to_string();
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get wiki memory");
+    let fetched_json: serde_json::Value = serde_json::from_str(&fetched).expect("memory JSON");
+    assert_eq!(fetched_json["metadata"]["wiki"], json!(true));
+    assert_eq!(
+        fetched_json["metadata"]["wiki_title"],
+        json!("Routing Boundary Wiki")
+    );
+}
+
+#[tokio::test]
 async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let mut entry = make_entry("wiki-export-entry");
     entry.path = "/wiki/engineering/debugging/export".to_string();

@@ -9,6 +9,30 @@ use crate::memory_search_ops::handle_search_memory;
 use crate::tool_params::*;
 use crate::MemoryServer;
 
+fn is_wiki_row(row: &serde_json::Value) -> bool {
+    row.get("path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|path| path == "/wiki" || path.starts_with("/wiki/"))
+        || row
+            .get("metadata")
+            .and_then(|metadata| metadata.get("wiki"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        || row
+            .get("domain")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
+}
+
+fn filter_memory_rows(raw: String, top_k: usize) -> String {
+    let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
+        return raw;
+    };
+    rows.retain(|row| !is_wiki_row(row));
+    rows.truncate(top_k);
+    serde_json::to_string(&rows).unwrap_or(raw)
+}
+
 pub(crate) async fn handle_tachi_search(
     server: &MemoryServer,
     params: TachiSearchParams,
@@ -48,7 +72,7 @@ pub(crate) async fn handle_tachi_search(
         let mem_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
-            top_k: params.top_k,
+            top_k: params.top_k.saturating_mul(3).max(params.top_k),
             path_prefix: params.path_prefix.clone(),
             include_archived: params.include_archived,
             candidates_per_channel: 20,
@@ -63,7 +87,10 @@ pub(crate) async fn handle_tachi_search(
         };
         let mem_result = handle_search_memory(server, mem_params).await;
         match mem_result {
-            Ok(r) => parts.push(format!("## Memory results\n{}", r)),
+            Ok(r) => parts.push(format!(
+                "## Memory results\n{}",
+                filter_memory_rows(r, params.top_k)
+            )),
             Err(e) => parts.push(format!("## Memory results\nError: {e}")),
         }
     }

@@ -32,7 +32,9 @@ use crate::gh_ops::handle_tachi_gh;
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
-use crate::handoff_ops::{handle_handoff_check, handle_handoff_leave};
+use crate::handoff_ops::{
+    handle_handoff_check, handle_handoff_leave, handle_handoff_promote_issue,
+};
 use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
@@ -1208,8 +1210,26 @@ impl MemoryServer {
                 };
                 handle_handoff_check(self, check_params).await
             }
+            "promote_issue" => {
+                let memo_id = params
+                    .memo_id
+                    .clone()
+                    .ok_or_else(|| "memo_id is required when action='promote_issue'".to_string())?;
+                let repo = params
+                    .repo
+                    .clone()
+                    .ok_or_else(|| "repo is required when action='promote_issue'".to_string())?;
+                let promote_params = HandoffPromoteIssueParams {
+                    memo_id,
+                    repo,
+                    title: params.title.clone(),
+                    labels: params.labels.clone(),
+                    flow_id: params.flow_id.clone(),
+                };
+                handle_handoff_promote_issue(self, promote_params).await
+            }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'leave' or 'check'.",
+                "Invalid action '{}'. Use 'leave', 'check', or 'promote_issue'.",
                 params.action
             )),
         }

@@ -228,7 +228,7 @@ fn default_true() -> bool {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiHandoffParams {
-    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos
+    /// Action: "leave" to leave a handoff memo, "check" to check for pending memos, "promote_issue" to create a GitHub issue from a memo
     pub action: String,
 
     /// Summary of what was accomplished (required when action="leave")
@@ -254,6 +254,21 @@ pub(crate) struct TachiHandoffParams {
     /// Whether to acknowledge retrieved memos (used when action="check", default: true)
     #[serde(default = "default_true")]
     pub acknowledge: bool,
+
+    #[serde(default)]
+    pub memo_id: Option<String>,
+
+    #[serde(default)]
+    pub repo: Option<String>,
+
+    #[serde(default)]
+    pub title: Option<String>,
+
+    #[serde(default)]
+    pub labels: Vec<String>,
+
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 // ─── Facade: agent dispatch ───────────────────────────────────────────────────
