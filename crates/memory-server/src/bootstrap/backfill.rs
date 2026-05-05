@@ -54,7 +54,7 @@ pub(super) async fn run_backfill_vectors(
                 let t = text.trim();
                 let s = if t.len() < 10 { summary.as_str() } else { t };
                 if s.len() > 8000 {
-                    s[..8000].to_string()
+                    s.chars().take(8000).collect()
                 } else {
                     s.to_string()
                 }

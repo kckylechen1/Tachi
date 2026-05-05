@@ -1,5 +1,6 @@
 use crate::*;
 use serde::Serialize;
+use std::io::IsTerminal;
 
 mod backfill;
 mod cli_tool;
@@ -220,7 +221,7 @@ pub(super) fn collect_memory_db_files(
 }
 
 pub(super) fn atty_stdout() -> bool {
-    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    std::io::stdout().is_terminal()
 }
 
 pub(super) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
