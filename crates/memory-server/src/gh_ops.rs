@@ -15,6 +15,40 @@ use std::process::Command;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
+const GH_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_SSH_COMMAND",
+    "SSH_AUTH_SOCK",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "TMP",
+    "TEMP",
+    "LANG",
+    "LC_ALL",
+];
 
 /// Validate that a repo string contains exactly one "/"
 fn validate_repo(repo: &str) -> Result<(), String> {
@@ -75,25 +109,62 @@ fn sanitize_output(text: &str, token: &str) -> String {
     sanitized
 }
 
-/// Build a sanitized Command for `gh` with env_clear + vault token injection
-fn build_gh_command(server: &MemoryServer) -> Result<(Command, String), String> {
-    let gh_path = resolve_gh_path()?;
-    let token = read_unlocked_vault_secret(server, "GH_TOKEN", Some(GH_AGENT_ID), false)?;
+fn vault_secret_unavailable(err: &str) -> bool {
+    err.starts_with("Secret not found: ")
+        || err.starts_with("Vault is locked")
+        || err.starts_with("Vault auto-locked")
+        || err.starts_with("Vault not initialized")
+}
 
-    let mut cmd = Command::new(&gh_path);
-    cmd.env_clear();
+fn env_gh_token() -> Option<String> {
+    for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
 
-    // Inject minimal safe environment
-    for var in ["PATH", "HOME"] {
+fn resolve_gh_token(server: &MemoryServer) -> Result<Option<String>, String> {
+    match read_unlocked_vault_secret(server, "GH_TOKEN", Some(GH_AGENT_ID), false) {
+        Ok(token) => Ok(Some(token)),
+        Err(err) if vault_secret_unavailable(&err) => Ok(env_gh_token()),
+        Err(err) => Err(err),
+    }
+}
+
+fn preserve_gh_env(cmd: &mut Command) {
+    for var in GH_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
     }
-    cmd.env("GH_TOKEN", &token);
+    if std::env::var_os("GITHUB_TOKEN").is_some() && std::env::var_os("GH_TOKEN").is_none() {
+        if let Ok(val) = std::env::var("GITHUB_TOKEN") {
+            cmd.env("GITHUB_TOKEN", val);
+        }
+    }
+}
+
+/// Build a sanitized Command for `gh` with env_clear + vault token injection
+fn build_gh_command(server: &MemoryServer) -> Result<(Command, String), String> {
+    let gh_path = resolve_gh_path()?;
+    let token = resolve_gh_token(server)?;
+
+    let mut cmd = Command::new(&gh_path);
+    cmd.env_clear();
+
+    preserve_gh_env(&mut cmd);
+    if let Some(token) = token.as_deref() {
+        cmd.env("GH_TOKEN", token);
+    }
     cmd.env("GH_PROMPT_DISABLED", "1");
     cmd.env("NO_COLOR", "1");
 
-    Ok((cmd, token))
+    Ok((cmd, token.unwrap_or_default()))
 }
 
 /// Execute a gh command and return sanitized output, truncated to MAX_GH_OUTPUT_CHARS
@@ -809,6 +880,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
 mod safe_merge_tests {
     use super::*;
     use crate::gh_safe_merge::{CheckRun, MockGhClient};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn ready_pr() -> PrState {
         PrState {
@@ -1011,5 +1085,107 @@ mod safe_merge_tests {
             classify_gh_error("network blip"),
             GhError::Sanitized(_)
         ));
+    }
+
+    #[test]
+    fn vault_unavailable_errors_allow_fallback() {
+        assert!(vault_secret_unavailable("Secret not found: GH_TOKEN"));
+        assert!(vault_secret_unavailable("Vault is locked"));
+        assert!(vault_secret_unavailable(
+            "Vault auto-locked. Call vault_unlock first."
+        ));
+        assert!(vault_secret_unavailable("Vault not initialized"));
+        assert!(!vault_secret_unavailable("Vault decrypt failed"));
+    }
+
+    #[test]
+    fn env_gh_token_prefers_gh_token_and_falls_back() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_gh = std::env::var_os("GH_TOKEN");
+        let old_github = std::env::var_os("GITHUB_TOKEN");
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("GITHUB_TOKEN");
+
+        std::env::set_var("GITHUB_TOKEN", "github-token");
+        assert_eq!(env_gh_token().as_deref(), Some("github-token"));
+        std::env::set_var("GH_TOKEN", "gh-token");
+        assert_eq!(env_gh_token().as_deref(), Some("gh-token"));
+        std::env::set_var("GH_TOKEN", "   ");
+        assert_eq!(env_gh_token().as_deref(), Some("github-token"));
+
+        if let Some(v) = old_gh {
+            std::env::set_var("GH_TOKEN", v);
+        } else {
+            std::env::remove_var("GH_TOKEN");
+        }
+        if let Some(v) = old_github {
+            std::env::set_var("GITHUB_TOKEN", v);
+        } else {
+            std::env::remove_var("GITHUB_TOKEN");
+        }
+    }
+
+    #[test]
+    fn preserve_gh_env_keeps_auth_proxy_and_platform_env() {
+        use std::ffi::OsStr;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_https = std::env::var_os("HTTPS_PROXY");
+        let old_cert = std::env::var_os("SSL_CERT_FILE");
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_gh = std::env::var_os("GH_TOKEN");
+        let old_github = std::env::var_os("GITHUB_TOKEN");
+
+        std::env::set_var("HTTPS_PROXY", "http://proxy.local:8080");
+        std::env::set_var("SSL_CERT_FILE", "/tmp/test-ca.pem");
+        std::env::set_var("XDG_CONFIG_HOME", "/tmp/test-xdg");
+        std::env::remove_var("GH_TOKEN");
+        std::env::set_var("GITHUB_TOKEN", "github-env-token");
+
+        let mut cmd = Command::new("gh");
+        cmd.env_clear();
+        preserve_gh_env(&mut cmd);
+
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let get = |name: &str| {
+            envs.iter()
+                .find(|(k, _)| *k == OsStr::new(name))
+                .and_then(|(_, v)| *v)
+                .map(|v| v.to_string_lossy().to_string())
+        };
+
+        assert_eq!(
+            get("HTTPS_PROXY").as_deref(),
+            Some("http://proxy.local:8080")
+        );
+        assert_eq!(get("SSL_CERT_FILE").as_deref(), Some("/tmp/test-ca.pem"));
+        assert_eq!(get("XDG_CONFIG_HOME").as_deref(), Some("/tmp/test-xdg"));
+        assert_eq!(get("GITHUB_TOKEN").as_deref(), Some("github-env-token"));
+
+        if let Some(v) = old_https {
+            std::env::set_var("HTTPS_PROXY", v);
+        } else {
+            std::env::remove_var("HTTPS_PROXY");
+        }
+        if let Some(v) = old_cert {
+            std::env::set_var("SSL_CERT_FILE", v);
+        } else {
+            std::env::remove_var("SSL_CERT_FILE");
+        }
+        if let Some(v) = old_xdg {
+            std::env::set_var("XDG_CONFIG_HOME", v);
+        } else {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        if let Some(v) = old_gh {
+            std::env::set_var("GH_TOKEN", v);
+        } else {
+            std::env::remove_var("GH_TOKEN");
+        }
+        if let Some(v) = old_github {
+            std::env::set_var("GITHUB_TOKEN", v);
+        } else {
+            std::env::remove_var("GITHUB_TOKEN");
+        }
     }
 }
