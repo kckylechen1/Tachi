@@ -1,9 +1,15 @@
+use crate::gh_safe_merge::{
+    evaluate_merge_gate, ChecksState, GhClient, GhError, MergeDecision, MergeResult, MergeStrategy,
+    Mergeable, PrLifecycleState, PrState, ReviewDecision,
+};
+use crate::shell_ops::{append_github_event, merge_github_status, shell_runs_root};
 use crate::tool_params::{
     GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrListParams, GhPrReadParams,
     GhRepoViewParams, TachiGhParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
+use async_trait::async_trait;
 use serde_json::json;
 use std::process::Command;
 
@@ -349,9 +355,661 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await
         }
+        "safe_merge" => {
+            let number = params
+                .number
+                .ok_or("safe_merge requires 'number' parameter (PR number)")?;
+            let strategy = parse_merge_strategy(params.merge_strategy.as_deref())?;
+            let client = CliGhClient { server };
+            handle_github_safe_merge(
+                &client,
+                &params.repo,
+                number,
+                strategy,
+                params.dry_run,
+                params.flow_id.as_deref(),
+            )
+            .await
+        }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, safe_merge",
             other
         )),
+    }
+}
+
+// ─── safe_merge: CliGhClient + orchestrator ─────────────────────────────────
+
+fn parse_merge_strategy(raw: Option<&str>) -> Result<MergeStrategy, String> {
+    match raw.unwrap_or("squash").to_ascii_lowercase().as_str() {
+        "squash" => Ok(MergeStrategy::Squash),
+        "merge" => Ok(MergeStrategy::Merge),
+        "rebase" => Ok(MergeStrategy::Rebase),
+        other => Err(format!(
+            "invalid merge_strategy '{}' (allowed: squash, merge, rebase)",
+            other
+        )),
+    }
+}
+
+fn merge_strategy_flag(s: MergeStrategy) -> &'static str {
+    match s {
+        MergeStrategy::Squash => "--squash",
+        MergeStrategy::Merge => "--merge",
+        MergeStrategy::Rebase => "--rebase",
+    }
+}
+
+/// Map a `gh` CLI failure string into a typed `GhError`. The input is already
+/// sanitized by `run_gh`. We classify by substring so callers can distinguish
+/// "PR doesn't exist" (NotFound, terminal) from "API rate limit" (transient).
+fn classify_gh_error(raw: &str) -> GhError {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("could not resolve") || lower.contains("not found") || lower.contains("404") {
+        GhError::NotFound(raw.to_string())
+    } else if lower.contains("rate limit") || lower.contains("403") && lower.contains("rate") {
+        GhError::RateLimited(raw.to_string())
+    } else {
+        GhError::Sanitized(raw.to_string())
+    }
+}
+
+/// Production `GhClient` that wraps the sanitized `gh` subprocess pipeline
+/// already used by the rest of `tachi_gh`. Holds a borrowed `&MemoryServer`
+/// so the vault token is read fresh per call.
+pub(crate) struct CliGhClient<'a> {
+    pub(crate) server: &'a MemoryServer,
+}
+
+impl<'a> CliGhClient<'a> {
+    fn build(&self) -> Result<(Command, String), GhError> {
+        build_gh_command(self.server).map_err(|e| GhError::Sanitized(e))
+    }
+}
+
+#[async_trait]
+impl<'a> GhClient for CliGhClient<'a> {
+    async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
+        validate_repo(repo).map_err(GhError::Sanitized)?;
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["pr", "view", &number.to_string()])
+            .args(["--repo", repo])
+            .args([
+                "--json",
+                "number,state,mergeable,reviewDecision,isDraft,headRefOid",
+            ]);
+        let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
+        let v: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| GhError::Sanitized(format!("pr_view parse: {e}")))?;
+        let checks = self.checks_list(repo, number).await?;
+        Ok(parse_pr_view_json(&v, checks)
+            .map_err(|e| GhError::Sanitized(format!("pr_view shape: {e}")))?)
+    }
+
+    async fn pr_merge(
+        &self,
+        repo: &str,
+        number: u64,
+        strategy: MergeStrategy,
+    ) -> Result<MergeResult, GhError> {
+        validate_repo(repo).map_err(GhError::Sanitized)?;
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["pr", "merge", &number.to_string()])
+            .args(["--repo", repo])
+            .arg(merge_strategy_flag(strategy));
+        let _out = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
+        // gh pr merge prints a status line, not JSON. Re-fetch the merged SHA.
+        let (mut cmd2, token2) = self.build()?;
+        cmd2.args(["pr", "view", &number.to_string()])
+            .args(["--repo", repo])
+            .args(["--json", "mergeCommit"]);
+        let sha_raw = run_gh(cmd2, &token2).map_err(|e| classify_gh_error(&e))?;
+        let merge_sha = serde_json::from_str::<serde_json::Value>(&sha_raw)
+            .ok()
+            .and_then(|v| {
+                v.get("mergeCommit")
+                    .and_then(|mc| mc.get("oid"))
+                    .and_then(|o| o.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        Ok(MergeResult {
+            pr_number: number,
+            merge_sha,
+            strategy,
+        })
+    }
+
+    async fn issue_view(
+        &self,
+        repo: &str,
+        number: u64,
+    ) -> Result<crate::gh_safe_merge::IssueState, GhError> {
+        validate_repo(repo).map_err(GhError::Sanitized)?;
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["issue", "view", &number.to_string()])
+            .args(["--repo", repo])
+            .args(["--json", "number,title,state,url"]);
+        let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
+        let v: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| GhError::Sanitized(format!("issue_view parse: {e}")))?;
+        Ok(crate::gh_safe_merge::IssueState {
+            number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(number),
+            title: v
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            state: v
+                .get("state")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            url: v
+                .get("url")
+                .and_then(|u| u.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        })
+    }
+
+    async fn issue_create(
+        &self,
+        repo: &str,
+        title: &str,
+        body: Option<&str>,
+        labels: &[String],
+    ) -> Result<crate::gh_safe_merge::IssueState, GhError> {
+        validate_repo(repo).map_err(GhError::Sanitized)?;
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["issue", "create"])
+            .args(["--repo", repo])
+            .args(["--title", title]);
+        if let Some(b) = body {
+            cmd.args(["--body", b]);
+        }
+        for l in labels {
+            cmd.args(["--label", l]);
+        }
+        let url = run_gh(cmd, &token)
+            .map_err(|e| classify_gh_error(&e))?
+            .trim()
+            .to_string();
+        // `gh issue create` prints the issue URL; derive the number from the trailing path segment.
+        let number = url
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        Ok(crate::gh_safe_merge::IssueState {
+            number,
+            title: title.to_string(),
+            state: "OPEN".to_string(),
+            url,
+        })
+    }
+
+    async fn checks_list(
+        &self,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<crate::gh_safe_merge::CheckRun>, GhError> {
+        validate_repo(repo).map_err(GhError::Sanitized)?;
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["pr", "checks", &pr_number.to_string()])
+            .args(["--repo", repo])
+            .arg("--json")
+            .arg("name,state,bucket");
+        // `gh pr checks` may exit non-zero when checks have failed; we still
+        // want to parse the JSON. Run it directly and tolerate non-zero exit
+        // when stdout looks like a JSON array.
+        let (mut raw_cmd, _) = self.build()?;
+        raw_cmd
+            .args(["pr", "checks", &pr_number.to_string()])
+            .args(["--repo", repo])
+            .arg("--json")
+            .arg("name,state,bucket");
+        let output = raw_cmd
+            .output()
+            .map_err(|e| GhError::Sanitized(format!("gh exec: {e}")))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let sanitized = sanitize_output(&stdout, &token);
+        let trimmed = sanitized.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            return Ok(Vec::new());
+        }
+        if !trimmed.starts_with('[') {
+            // Not a JSON array — propagate original error path
+            let _ = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
+            return Ok(Vec::new());
+        }
+        let arr: Vec<serde_json::Value> = serde_json::from_str(trimmed)
+            .map_err(|e| GhError::Sanitized(format!("checks_list parse: {e}")))?;
+        Ok(arr
+            .into_iter()
+            .map(|v| {
+                let name = v
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                // `gh pr checks --json` exposes `bucket` ∈ pass/fail/pending/skipping/cancel
+                // and `state` for the raw check status. We map bucket → conclusion
+                // and synthesize a `completed`/`in_progress` status.
+                let bucket = v
+                    .get("bucket")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let (status, conclusion) = match bucket.as_str() {
+                    "pass" => ("completed".to_string(), Some("success".to_string())),
+                    "fail" => ("completed".to_string(), Some("failure".to_string())),
+                    "cancel" => ("completed".to_string(), Some("cancelled".to_string())),
+                    "skipping" => ("completed".to_string(), Some("skipped".to_string())),
+                    "pending" | "" => ("in_progress".to_string(), None),
+                    _ => ("completed".to_string(), Some(bucket.clone())),
+                };
+                crate::gh_safe_merge::CheckRun {
+                    name,
+                    conclusion,
+                    status,
+                }
+            })
+            .collect())
+    }
+}
+
+/// Parse the `gh pr view --json number,state,mergeable,reviewDecision,isDraft,headRefOid`
+/// payload into a `PrState`. Pulled out as a free function so unit tests can
+/// exercise the JSON shape without spawning `gh`.
+fn parse_pr_view_json(
+    v: &serde_json::Value,
+    checks: Vec<crate::gh_safe_merge::CheckRun>,
+) -> Result<PrState, String> {
+    let number = v
+        .get("number")
+        .and_then(|n| n.as_u64())
+        .ok_or("pr_view: missing number")?;
+    let state_raw = v
+        .get("state")
+        .and_then(|s| s.as_str())
+        .ok_or("pr_view: missing state")?;
+    let state = match state_raw {
+        "OPEN" => PrLifecycleState::Open,
+        "CLOSED" => PrLifecycleState::Closed,
+        "MERGED" => PrLifecycleState::Merged,
+        other => return Err(format!("pr_view: unknown state '{}'", other)),
+    };
+    let mergeable = match v.get("mergeable").and_then(|m| m.as_str()).unwrap_or("") {
+        "MERGEABLE" => Mergeable::Mergeable,
+        "CONFLICTING" => Mergeable::Conflicting,
+        _ => Mergeable::Unknown,
+    };
+    let review_decision = v
+        .get("reviewDecision")
+        .and_then(|r| r.as_str())
+        .and_then(|s| match s {
+            "APPROVED" => Some(ReviewDecision::Approved),
+            "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
+            "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
+            "" => None,
+            _ => None,
+        });
+    let is_draft = v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false);
+    let head_sha = v
+        .get("headRefOid")
+        .and_then(|h| h.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok(PrState {
+        number,
+        state,
+        mergeable,
+        review_decision,
+        checks: ChecksState::aggregate(&checks),
+        is_draft,
+        head_sha,
+    })
+}
+
+/// Orchestrate one `tachi_gh safe_merge` invocation:
+/// 1. Pull PR + checks via the `GhClient`.
+/// 2. Run the pure `evaluate_merge_gate`.
+/// 3. If `Ready` and `!dry_run`, call `pr_merge` (squash by default).
+/// 4. When `flow_id` is present, persist `merge_state` + reasons into
+///    `status.json::github` and append the matching event to `events.jsonl`.
+/// 5. Return a JSON envelope the agent can render directly.
+pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
+    client: &C,
+    repo: &str,
+    pr_number: u64,
+    strategy: MergeStrategy,
+    dry_run: bool,
+    flow_id: Option<&str>,
+) -> Result<String, String> {
+    let pr = client
+        .pr_view(repo, pr_number)
+        .await
+        .map_err(|e| format!("pr_view failed: {e}"))?;
+    let decision = evaluate_merge_gate(&pr);
+    let merge_state = decision.merge_state_label();
+
+    let (event_kind, event_payload, merged_sha) = match &decision {
+        MergeDecision::Ready => {
+            if dry_run {
+                (
+                    "github_review_gate_passed",
+                    json!({
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "head_sha": pr.head_sha,
+                        "dry_run": true,
+                    }),
+                    None,
+                )
+            } else {
+                let merge_res = client
+                    .pr_merge(repo, pr_number, strategy)
+                    .await
+                    .map_err(|e| format!("pr_merge failed: {e}"))?;
+                (
+                    "github_pr_merged",
+                    json!({
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "head_sha": pr.head_sha,
+                        "merge_sha": merge_res.merge_sha,
+                        "strategy": format!("{:?}", merge_res.strategy).to_lowercase(),
+                    }),
+                    Some(merge_res.merge_sha),
+                )
+            }
+        }
+        MergeDecision::Blocked { reasons } => (
+            "github_merge_blocked",
+            json!({
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": pr.head_sha,
+                "reasons": reasons,
+            }),
+            None,
+        ),
+        MergeDecision::Pending { waiting_on } => (
+            "github_checks_polled",
+            json!({
+                "repo": repo,
+                "pr_number": pr_number,
+                "head_sha": pr.head_sha,
+                "waiting_on": waiting_on,
+            }),
+            None,
+        ),
+    };
+
+    // Effective merge_state: if we actually merged, surface "merged" rather
+    // than "ready" so downstream consumers don't need to re-check.
+    let effective_state = if merged_sha.is_some() {
+        "merged"
+    } else {
+        merge_state
+    };
+
+    let status_patch = json!({
+        "repo": repo,
+        "pr_number": pr_number,
+        "merge_state": effective_state,
+        "checks": {
+            "state": match pr.checks {
+                ChecksState::None => "none",
+                ChecksState::Pending => "pending",
+                ChecksState::Success => "success",
+                ChecksState::Failure => "failure",
+            },
+        },
+        "review": {
+            "state": match pr.review_decision {
+                Some(ReviewDecision::Approved) => "approved",
+                Some(ReviewDecision::ChangesRequested) => "changes_requested",
+                Some(ReviewDecision::ReviewRequired) => "review_required",
+                None => "not_required",
+            },
+        },
+    });
+
+    let mut persisted = false;
+    if let Some(fid) = flow_id {
+        let run_dir = shell_runs_root().join(fid);
+        std::fs::create_dir_all(&run_dir).map_err(|e| format!("create run dir: {e}"))?;
+        merge_github_status(&run_dir, status_patch.clone())?;
+        append_github_event(&run_dir, fid, event_kind, event_payload.clone())?;
+        persisted = true;
+    }
+
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_safe_merge",
+        "repo": repo,
+        "pr_number": pr_number,
+        "decision": decision,
+        "merge_state": effective_state,
+        "merged_sha": merged_sha,
+        "dry_run": dry_run,
+        "flow_id": flow_id,
+        "persisted": persisted,
+        "status_patch": status_patch,
+        "event": {
+            "kind": event_kind,
+            "payload": event_payload,
+        },
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+#[cfg(test)]
+mod safe_merge_tests {
+    use super::*;
+    use crate::gh_safe_merge::{CheckRun, MockGhClient};
+
+    fn ready_pr() -> PrState {
+        PrState {
+            number: 42,
+            state: PrLifecycleState::Open,
+            mergeable: Mergeable::Mergeable,
+            review_decision: Some(ReviewDecision::Approved),
+            checks: ChecksState::Success,
+            is_draft: false,
+            head_sha: "deadbeef".to_string(),
+        }
+    }
+
+    fn blocked_draft_pr() -> PrState {
+        PrState {
+            is_draft: true,
+            ..ready_pr()
+        }
+    }
+
+    fn pending_pr() -> PrState {
+        PrState {
+            mergeable: Mergeable::Unknown,
+            ..ready_pr()
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_merge_dry_run_ready_does_not_call_pr_merge() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let out = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, true, None)
+            .await
+            .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "ready");
+        assert_eq!(v["dry_run"], true);
+        assert!(v["merged_sha"].is_null());
+        assert_eq!(v["event"]["kind"], "github_review_gate_passed");
+        assert!(client.merge_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn safe_merge_ready_executes_merge_when_not_dry_run() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let out = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, false, None)
+            .await
+            .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "merged");
+        assert!(v["merged_sha"].is_string());
+        assert_eq!(v["event"]["kind"], "github_pr_merged");
+        let calls = client.merge_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "o/r");
+        assert_eq!(calls[0].1, 42);
+    }
+
+    #[tokio::test]
+    async fn safe_merge_blocked_does_not_call_pr_merge_even_when_not_dry_run() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", blocked_draft_pr())
+            .with_checks("o/r", 42, vec![]);
+        let out = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, false, None)
+            .await
+            .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "blocked");
+        assert_eq!(v["event"]["kind"], "github_merge_blocked");
+        let reasons = v["event"]["payload"]["reasons"].as_array().unwrap();
+        assert!(reasons.iter().any(|r| r == "draft"));
+        assert!(client.merge_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn safe_merge_pending_emits_checks_polled() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", pending_pr())
+            .with_checks("o/r", 42, vec![]);
+        let out = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, false, None)
+            .await
+            .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(v["event"]["kind"], "github_checks_polled");
+        assert!(client.merge_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Force shell_runs_root() to the tempdir via env override.
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let flow = "test-flow-safe-merge";
+        let out =
+            handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, true, Some(flow))
+                .await
+                .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["persisted"], true);
+        let run_dir = tmp.path().join(flow);
+        let status: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+                .unwrap();
+        assert_eq!(status["github"]["merge_state"], "ready");
+        assert_eq!(status["github"]["pr_number"], 42);
+        let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+        assert!(events.contains("\"github_review_gate_passed\""));
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+
+    #[tokio::test]
+    async fn safe_merge_propagates_pr_view_not_found() {
+        let client = MockGhClient::new(); // no PRs registered
+        let err = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, true, None)
+            .await
+            .expect_err("should fail");
+        assert!(err.contains("pr_view failed"));
+        assert!(err.contains("not found") || err.contains("NotFound"));
+    }
+
+    #[test]
+    fn parse_pr_view_json_happy_path() {
+        let v = json!({
+            "number": 7,
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": "APPROVED",
+            "isDraft": false,
+            "headRefOid": "abc123",
+        });
+        let pr = parse_pr_view_json(&v, vec![]).unwrap();
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.state, PrLifecycleState::Open);
+        assert_eq!(pr.mergeable, Mergeable::Mergeable);
+        assert_eq!(pr.review_decision, Some(ReviewDecision::Approved));
+        assert_eq!(pr.checks, ChecksState::None);
+        assert!(!pr.is_draft);
+        assert_eq!(pr.head_sha, "abc123");
+    }
+
+    #[test]
+    fn parse_pr_view_json_aggregates_checks() {
+        let v = json!({
+            "number": 7,
+            "state": "OPEN",
+            "mergeable": "MERGEABLE",
+            "reviewDecision": null,
+            "isDraft": false,
+            "headRefOid": "abc",
+        });
+        let runs = vec![
+            CheckRun {
+                name: "ci".into(),
+                conclusion: Some("success".into()),
+                status: "completed".into(),
+            },
+            CheckRun {
+                name: "lint".into(),
+                conclusion: Some("failure".into()),
+                status: "completed".into(),
+            },
+        ];
+        let pr = parse_pr_view_json(&v, runs).unwrap();
+        assert_eq!(pr.checks, ChecksState::Failure);
+        assert_eq!(pr.review_decision, None);
+    }
+
+    #[test]
+    fn parse_merge_strategy_defaults_to_squash() {
+        assert_eq!(parse_merge_strategy(None).unwrap(), MergeStrategy::Squash);
+        assert_eq!(
+            parse_merge_strategy(Some("Squash")).unwrap(),
+            MergeStrategy::Squash
+        );
+        assert_eq!(
+            parse_merge_strategy(Some("rebase")).unwrap(),
+            MergeStrategy::Rebase
+        );
+        assert!(parse_merge_strategy(Some("foo")).is_err());
+    }
+
+    #[test]
+    fn classify_gh_error_buckets() {
+        assert!(matches!(
+            classify_gh_error("HTTP 404 not found"),
+            GhError::NotFound(_)
+        ));
+        assert!(matches!(
+            classify_gh_error("API rate limit exceeded"),
+            GhError::RateLimited(_)
+        ));
+        assert!(matches!(
+            classify_gh_error("network blip"),
+            GhError::Sanitized(_)
+        ));
     }
 }

@@ -1034,7 +1034,6 @@ fn stage_state_for(stage: &str) -> &'static str {
 // `dead_code` allow: production callers land in the follow-up commit that
 // wires `tachi_gh safe_merge` through this helper. Tests already exercise
 // every branch, and the helper is intentionally stable API surface.
-#[allow(dead_code)]
 pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
     "github_issue_created",
     "github_issue_linked",
@@ -1054,14 +1053,12 @@ pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
 /// - `blocked`  — at least one gate is red or a bot review requested changes
 /// - `ready`    — all gates green, safe to merge (no automated merge yet)
 /// - `merged`   — `gh pr merge` (any strategy) succeeded
-#[allow(dead_code)]
 pub(crate) const GITHUB_MERGE_STATES: &[&str] = &["pending", "blocked", "ready", "merged"];
 
 /// Recursively merge `patch` into `target` in-place. Object values are merged
 /// key-by-key (so a partial `{"checks": {"state": "success"}}` does not wipe
 /// `checks.updated_at`); non-object values are replaced wholesale; `null`
 /// values in `patch` clear the corresponding key in `target`.
-#[allow(dead_code)]
 fn deep_merge(target: &mut Value, patch: Value) {
     match (target, patch) {
         (Value::Object(t), Value::Object(p)) => {
@@ -1087,7 +1084,6 @@ fn deep_merge(target: &mut Value, patch: Value) {
 ///
 /// `patch` MUST be a JSON object; non-object input is rejected to avoid
 /// accidentally wiping the block with e.g. `Value::Null`.
-#[allow(dead_code)]
 pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value, String> {
     if !patch.is_object() {
         return Err(format!(
@@ -1128,7 +1124,6 @@ pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value,
 /// pollute the event stream. `payload` is merged into the event object after
 /// the standard `event`/`flow_id`/`timestamp` fields, but those three keys
 /// are reserved and cannot be overridden by the caller.
-#[allow(dead_code)]
 pub(crate) fn append_github_event(
     run_dir: &Path,
     flow_id: &str,
