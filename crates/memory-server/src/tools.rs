@@ -1225,6 +1225,7 @@ impl MemoryServer {
                     title: params.title.clone(),
                     labels: params.labels.clone(),
                     flow_id: params.flow_id.clone(),
+                    force: params.force,
                 };
                 handle_handoff_promote_issue(self, promote_params).await
             }

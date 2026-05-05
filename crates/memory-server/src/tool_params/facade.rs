@@ -255,20 +255,29 @@ pub(crate) struct TachiHandoffParams {
     #[serde(default = "default_true")]
     pub acknowledge: bool,
 
+    /// Handoff memo ID to promote (required for action="promote_issue", with or without "handoff:" prefix)
     #[serde(default)]
     pub memo_id: Option<String>,
 
+    /// GitHub repo in "owner/repo" format (required for action="promote_issue")
     #[serde(default)]
     pub repo: Option<String>,
 
+    /// Issue title override (used by action="promote_issue"; defaults to memo summary truncated to 120 chars)
     #[serde(default)]
     pub title: Option<String>,
 
+    /// Issue labels (used by action="promote_issue"; defaults to ["handoff"])
     #[serde(default)]
     pub labels: Vec<String>,
 
+    /// Shell flow ID for artifact linkage (optional for action="promote_issue"; writes status.json + events.jsonl)
     #[serde(default)]
     pub flow_id: Option<String>,
+
+    /// Force re-promote even if memo already has a GitHub issue link (used by action="promote_issue")
+    #[serde(default)]
+    pub force: bool,
 }
 
 // ─── Facade: agent dispatch ───────────────────────────────────────────────────

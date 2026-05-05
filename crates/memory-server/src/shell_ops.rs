@@ -1152,6 +1152,14 @@ pub(crate) fn append_github_event(
     append_event(run_dir, Value::Object(event))
 }
 
+/// Global test lock for `TACHI_RUN_ROOT` env var mutations.
+/// All test modules that set this env var must acquire this lock to avoid races.
+#[cfg(test)]
+pub(crate) fn tachi_run_root_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1159,8 +1167,7 @@ mod tests {
     use super::*;
 
     fn runs_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        tachi_run_root_env_lock()
     }
 
     struct RunsRootGuard {
