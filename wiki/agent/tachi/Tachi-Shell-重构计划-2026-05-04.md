@@ -44,7 +44,7 @@
 | `kanban` | 查看所有异步 flow/task 状态 | `tachi_task(action=board)` |
 | `status` | 查看单个 flow/task 详情 | `tachi_task`, run artifacts |
 | `review` | 代码审查 gate | `tachi_skill`, `tachi_task`, optional Codex |
-| `ship` | 测试、gitleaks、commit、PR、merge、distill | `tachi_task`, `tachi_gh`, `tachi_complete` |
+| `ship` | 测试、gitleaks、commit、push feature branch、PR、review gate、merge PR、distill | `tachi_task`, `tachi_gh`, `tachi_complete` |
 
 ## Skill gate 映射
 
@@ -338,19 +338,34 @@ Gastown 不作为新工具暴露，而是作为 `tachi_shell` 的协作协议：
 
 目标：实现 `ship` 的后台交付流程。
 
+发布顺序默认采用 PR-first，不直推主分支：
+
+```text
+1. feature branch 完成
+2. test
+3. push feature branch
+4. open PR
+5. PR gate：CI checks + review gate
+6. merge PR
+7. deploy/release
+```
+
+除非人类明确授权“直推 main / protected branch”，否则 `ship` 只能生成 PR、等待 review gate 和 merge gate。
+
 任务：
 1. preflight：`git status`, tests, fmt/clippy, `gitleaks`。
 2. diff summary：生成变更摘要和风险点。
 3. review gate：默认 Claude Code 自审；高风险可 Codex gate。
 4. commit：生成 commit message；默认可配置是否自动 commit。
-5. PR：生成 PR body；通过 `tachi_gh` 创建/更新 PR。
-6. merge：默认需要确认；可配置自动 merge。
-7. distill：完成后调用 `tachi_complete` / memory save。
+5. push feature branch：推送工作分支，不直接推主分支。
+6. PR：生成 PR body；通过 `tachi_gh` 创建/更新 PR。
+7. merge：PR gate 通过后合并；默认需要确认；可配置自动 merge。
+8. distill：完成后调用 `tachi_complete` / memory save。
 
 验收：
 - `ship` 能异步跑完整 preflight。
 - gitleaks 结果保存为 artifact。
-- PR body / ship summary 保存为 artifact 和 memory。
+- PR body / ship summary / CI 结果保存为 artifact 和 memory。
 
 ### Phase 5：Memory / GitHub lifecycle
 
