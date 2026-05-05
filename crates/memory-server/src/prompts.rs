@@ -23,16 +23,6 @@ pub const EXTRACTION_PROMPT: &str = r#"你是一个记忆提取代理。从对�
 /// L0 summary system prompt
 pub const SUMMARY_PROMPT: &str = "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text.";
 
-/// Daily truth-maintenance prompt for curation judgments.
-#[allow(dead_code)]
-pub const CURATION_PROMPT: &str = r#"You are Tachi's knowledge truth maintenance engine. Review the following memory entries and perform:
-1) Causal chain extraction: find cause->decision->result chains
-2) Contradiction detection: find conflicting entry pairs, mark which is newer/more reliable
-3) Correction/replacement detection: find "actually X" / "changed to Y" / "no longer Z" semantics
-
-For each judgment, output confidence (0.0-1.0). Only give high confidence when you are certain two memories describe different versions of the same fact.
-Output JSON: {"causal_edges":[{"source":"id1","target":"id2","relation":"causes","confidence":0.92,"reason":"..."}],"contradictions":[{"newer":"id3","older":"id4","relation":"supersedes","confidence":0.88,"reason":"..."}]}"#;
-
 /// Skill analysis prompt — scans a skill's prompt template for issues and generates an L0 summary
 pub const SKILL_ANALYSIS_PROMPT: &str = r#"You are a prompt engineering reviewer. Analyze the given Skill prompt template and output a JSON object:
 

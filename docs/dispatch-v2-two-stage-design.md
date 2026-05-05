@@ -186,4 +186,4 @@ async fn post_complete_hooks(server: &MemoryServer, eval: &EvalEntry) {
 - `docs/handoff_gh_and_brainstorming.md` — Hub-Driven Engineering 理念
 - `.tachi-plans/async-delegate-phase1.md` — 异步 Dispatch + Watchdog + Kanban 设计
 - [obra/superpowers](https://github.com/obra/superpowers) — Planning/Execution 方法论
-- `docs/code-review-superpowers.md` — Superpowers 实战审查案例
+- `docs/archive/code-review-superpowers.md` — Superpowers 实战审查案例

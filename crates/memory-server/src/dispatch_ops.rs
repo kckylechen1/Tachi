@@ -187,7 +187,11 @@ pub(crate) fn write_note_file(
             .take(6)
             .collect::<Vec<_>>()
             .join("-");
-        format!("{:.60}", s) // cap length
+        if s.is_empty() {
+            "note".to_string()
+        } else {
+            format!("{:.60}", s) // cap length
+        }
     };
 
     let abs_path = resolve_note_path(&root, user_path, &slug, &ts)?;
@@ -831,25 +835,6 @@ async fn run_agent_subprocess(
         exit_code,
         duration_ms,
     })
-}
-
-// ─── Parse Claude JSON output ────────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn parse_claude_output(raw: &str) -> serde_json::Value {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(result) = parsed.get("result") {
-            return json!({
-                "parsed": true,
-                "result": result,
-                "cost": parsed.get("cost_usd"),
-                "duration_ms": parsed.get("duration_ms"),
-                "num_turns": parsed.get("num_turns"),
-            });
-        }
-        return json!({"parsed": true, "raw_json": parsed});
-    }
-    json!({"parsed": false, "text": raw})
 }
 
 fn tail_chars(text: &str, max_chars: usize) -> String {

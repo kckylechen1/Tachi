@@ -1082,7 +1082,7 @@ async fn run_setup_command(
 }
 
 fn atty_stdout() -> bool {
-    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
+    std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 async fn run_tidy_command(
@@ -2484,10 +2484,20 @@ fn init_tracing(home: &std::path::Path) {
     struct SharedWriter(std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send + Sync>>>);
     impl std::io::Write for SharedWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().write(buf)
+            self.0
+                .lock()
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::Other, "log writer mutex poisoned")
+                })?
+                .write(buf)
         }
         fn flush(&mut self) -> std::io::Result<()> {
-            self.0.lock().unwrap().flush()
+            self.0
+                .lock()
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::Other, "log writer mutex poisoned")
+                })?
+                .flush()
         }
     }
 
