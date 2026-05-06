@@ -41,11 +41,6 @@ pub(crate) fn build_setup_report(
             home.join(".openclaw").join("plugins"),
             "tachi-projection.json",
         ),
-        (
-            "opencode",
-            home.join(".opencode").join("skills"),
-            "SKILL.md",
-        ),
     ];
     let mut discovered_skill_entries = 0usize;
     let skill_details = skill_roots
@@ -85,7 +80,6 @@ pub(crate) fn build_setup_report(
         ("gemini", home.join(".gemini").join("mcp.json")),
         ("codex", home.join(".codex")),
         ("openclaw", home.join(".openclaw").join("openclaw.json")),
-        ("opencode", home.join(".opencode")),
     ];
     let detected_agents = agent_configs
         .iter()

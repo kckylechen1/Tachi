@@ -89,7 +89,6 @@ fn normalize_host_label(raw: Option<&str>) -> Option<String> {
         "cursor" => "cursor",
         "codex" => "codex",
         "openclaw" => "openclaw",
-        "opencode" => "opencode",
         "gemini" => "gemini",
         "trae" => "trae",
         "antigravity" => "antigravity",

@@ -5,11 +5,10 @@ import { HubDashboard } from './components/HubDashboard';
 import { Inspector, type InspectableItem } from './components/Inspector';
 import { DEFAULT_TACHI_DAEMON_HOST, getApiErrorMessage, tachiApi, type MemoryEntry } from './services/api';
 
-type TabKey = 'kanban' | 'ghost' | 'memory' | 'hub' | 'settings';
+type TabKey = 'kanban' | 'memory' | 'hub' | 'settings';
 
 const TAB_TITLES: Record<TabKey, string> = {
   kanban: 'Kanban Flow',
-  ghost: 'Ghost Whispers',
   memory: 'Memory Explorer',
   hub: 'Hub Dashboard',
   settings: 'Settings',
@@ -144,8 +143,8 @@ function App() {
         </header>
 
         <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-          {(activeTab === 'kanban' || activeTab === 'ghost') && (
-            <AgentCanvas view={activeTab} onNodeClick={setSelectedNode} />
+          {activeTab === 'kanban' && (
+            <AgentCanvas onNodeClick={setSelectedNode} />
           )}
 
           {activeTab === 'memory' && (

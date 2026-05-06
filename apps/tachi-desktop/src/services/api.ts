@@ -92,19 +92,6 @@ export interface GcStats {
   [key: string]: unknown;
 }
 
-export interface GhostTopic {
-  topic: string;
-  message_count?: number;
-  count?: number;
-  last_message_at?: string;
-  [key: string]: unknown;
-}
-
-export interface GhostTopicSnapshot {
-  active_topics: number;
-  topics: GhostTopic[];
-}
-
 export class TachiOfflineError extends Error {
   readonly causeError?: unknown;
 
@@ -134,10 +121,6 @@ function parseJsonMaybe(value: string): unknown {
 
 function toStringOrNull(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
-}
-
-function toNumberOrNull(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
 function uniqueUrls(values: string[]): string[] {
@@ -363,38 +346,6 @@ class TachiApi {
       return {};
     }
     return payload as GcStats;
-  }
-
-  async fetchGhostTopics(): Promise<GhostTopicSnapshot> {
-    // `ghost_topics` was removed server-side when the standard profile
-    // shipped. Keep the method as a no-op so the Ghost Whispers view
-    // renders an empty state instead of throwing.
-    const payload = await this.callToolSoft(
-      'ghost_topics',
-      {},
-      { active_topics: 0, topics: [] } as GhostTopicSnapshot,
-    );
-    if (!isRecord(payload)) {
-      return { active_topics: 0, topics: [] };
-    }
-
-    const topics = ensureArray<unknown>(payload.topics).filter(isRecord).map((topic) => {
-      const topicName = toStringOrNull(topic.topic) ?? 'unknown-topic';
-      const messageCount = toNumberOrNull(topic.message_count);
-      const fallbackCount = toNumberOrNull(topic.count);
-      const lastMessageAt = toStringOrNull(topic.last_message_at);
-      return {
-        ...topic,
-        topic: topicName,
-        message_count: messageCount ?? fallbackCount ?? undefined,
-        last_message_at: lastMessageAt ?? undefined,
-      } as GhostTopic;
-    });
-
-    return {
-      active_topics: toNumberOrNull(payload.active_topics) ?? topics.length,
-      topics,
-    };
   }
 
   async fetchKanbanCards(limit = 100): Promise<MemoryEntry[]> {

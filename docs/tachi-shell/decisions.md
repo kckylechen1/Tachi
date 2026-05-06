@@ -40,7 +40,7 @@ Direct push to `main` or protected branches requires explicit human authorizatio
 
 ## Parallel convoy workflow
 
-For decomposable tasks, Tachi Shell should support an OpenCode-style parallel convoy:
+For decomposable tasks, Tachi Shell should support a parallel subagent convoy:
 
 - Create multiple worktrees from a common base branch or commit.
 - Assign one independent slice per worktree.

@@ -27,7 +27,7 @@ tachi setup
 1/5 🔑 API Keys     — Voyage / SiliconFlow / MiniMax / GLM-5.1，写入 config.env，验证可用性
 2/5 🔍 Skills        — 扫描 ~/.claude/skills、~/.codex/、~/.tachi/skills 等
                        策略选择：Hub-only / Hybrid / Keep-local
-3/5 🤖 Agents        — 检测 Amp/Claude/Cursor/Gemini/Codex/OpenCode
+3/5 🤖 Agents        — 检测 Amp/Claude/Cursor/Gemini/Codex
                        自动注入 MCP 配置
 4/5 ⚡ Pipeline      — 是否启用因果提取（ENABLE_PIPELINE）
 5/5 🔐 Vault         — 可选初始化 master password
@@ -99,18 +99,12 @@ recommend_skill("ship code, create PR") → skill:ship 排第一
 |---|---|---|---|
 | gstack | SKILL.md | 31 | ✅ 已移入 ~/.tachi/skills/ |
 | superpowers | SKILL.md (plugin) | 14 | 只读 scan → Hub index（不动文件） |
-| oh-my-codex agents | .toml | 20 | 新增 adapter：toml → Hub skill |
-| oh-my-codex prompts | .md | 20 | 新增 adapter：md → Hub skill |
-| oh-my-codex vendor | SKILL.md | 35 | scan → Hub index |
 | baoyu | SKILL.md | 17 | ✅ 已在 ~/.tachi/skills/ |
 | Amp builtin | 内置 | 4 | 不可控，跳过 |
 
 ### 2.2 `pack_project` 投射完善
 
-当前 `pack_project` 支持 10 种 agent 格式，但 oh-my-codex 的 `.toml` agent 格式没有 ingest adapter。需要：
-- Codex agent `.toml` → Hub skill 的解析器
-- Codex prompt `.md` → Hub skill 的解析器
-- 反向投射：Hub skill → `.toml` agent（让 Codex 也能用 Hub 管理的 skill）
+当前 `pack_project` 继续保留主流 agent 的技能投射能力；废弃生态不再作为目标。
 
 ---
 

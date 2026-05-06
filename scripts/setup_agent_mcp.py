@@ -34,10 +34,6 @@ AGENT_TARGETS = {
         "path": Path("~/.gemini/mcp.json"),
         "server_key": "tachi",
     },
-    "opencode": {
-        "path": Path("~/.config/opencode/config.json"),
-        "server_key": "tachi",
-    },
     "trae": {
         "path": Path("~/.trae/mcp.json"),
         "server_key": "tachi",
@@ -112,7 +108,7 @@ def build_entry(agent_name, command, args, env_overrides):
         entry["args"] = args
     
     env = {}
-    if agent_name in ("antigravity", "claude-code", "claude-desktop", "cursor", "gemini-cli", "opencode", "trae"):
+    if agent_name in ("antigravity", "claude-code", "claude-desktop", "cursor", "gemini-cli", "trae"):
         env["TACHI_PROFILE"] = "standard"
 
     if env_overrides:

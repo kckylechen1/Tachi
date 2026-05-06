@@ -2,7 +2,7 @@
 
 **创建时间**: 2026-05-03
 **状态**: 设计稿
-**交接目标**: Windsurf / OpenCode
+**交接目标**: Windsurf / worker agents
 
 ---
 

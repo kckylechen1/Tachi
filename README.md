@@ -118,7 +118,7 @@
 
 ## 🤖 三、 开宗明义：辅佐灵核 (MCP 协议)
 
-若君以 Claude Desktop, Cursor, OpenCode, Gemini CLI 亦或 AutoGen 为伴，均可唤 Tachi 依 MCP 之约降世。
+若君以 Claude Desktop, Cursor, Gemini CLI 亦或 AutoGen 为伴，均可唤 Tachi 依 MCP 之约降世。
 
 **【上策】 灵核自渡（将此真经赐予你的 AI 剑童）**
 
@@ -136,7 +136,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/s
 
 此符诏将自行：
 - 以丹鼎（Homebrew）炼成 `tachi` 法器
-- 巡视四方灵核府邸（Claude, Cursor, Gemini, OpenCode 等），将 Tachi 灵枢入口嵌入各家道籍
+- 巡视四方灵核府邸（Claude, Cursor, Gemini 等），将 Tachi 灵枢入口嵌入各家道籍
 
 **【下策】 手动铸器**
 

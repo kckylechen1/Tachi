@@ -1,4 +1,4 @@
-import { Activity, LayoutDashboard, Brain, HardDrive, Settings } from 'lucide-react';
+import { LayoutDashboard, Brain, HardDrive, Settings } from 'lucide-react';
 
 interface SidebarProps {
   activeTab: string;
@@ -9,7 +9,6 @@ interface SidebarProps {
 export function Sidebar({ activeTab, setActiveTab, daemonOnline }: SidebarProps) {
   const navItems = [
     { id: 'kanban', label: 'Kanban Flow', icon: LayoutDashboard },
-    { id: 'ghost', label: 'Ghost Whispers', icon: Activity },
     { id: 'memory', label: 'Memory Explorer', icon: Brain },
     { id: 'hub', label: 'Hub Capabilities', icon: HardDrive },
     { id: 'settings', label: 'Settings', icon: Settings },

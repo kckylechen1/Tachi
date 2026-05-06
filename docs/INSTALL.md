@@ -51,7 +51,6 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
 | Claude Code | `~/.claude/.mcp.json` |
 | Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
 | Cursor | `~/.cursor/mcp.json` |
-| OpenCode | `~/.config/opencode/config.json` (mcpServers section) |
 | Gemini CLI | `~/.gemini/mcp.json` |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json` |
 

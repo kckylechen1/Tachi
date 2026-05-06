@@ -70,7 +70,7 @@ Tachi 不仅是工具集线器，更是标准 Workflow 的“主板”。通过�
 
 ## 🤖 快速开始: Coding Agents (MCP 协议)
 
-适用于 Claude Desktop, Cursor, OpenCode, Gemini CLI 或 AutoGen 等环境。
+适用于 Claude Desktop, Cursor, Gemini CLI 或 AutoGen 等环境。
 
 ### 方式一：AI 自动安装（推荐 — 粘贴链接至你的 AI 助手）
 
@@ -88,7 +88,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/s
 
 安装脚本将自动：
 - 通过 Homebrew 安装 `tachi`（或下载预编译二进制）
-- 自动检测本地 AI Agent 配置文件（Claude, Cursor, Gemini, OpenCode 等）
+- 自动检测本地 AI Agent 配置文件（Claude, Cursor, Gemini 等）
 - 向每个检测到的配置中注入 Tachi MCP 服务入口
 
 ### 方式三：手动 Homebrew 安装

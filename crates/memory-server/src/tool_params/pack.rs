@@ -82,7 +82,7 @@ pub(crate) struct PackProjectParams {
     /// Pack identifier to project
     pub pack_id: String,
 
-    /// List of agent kinds to project to: "claude", "codex", "cursor", "gemini", "openclaw", "opencode", "antigravity", "trae", "kiro", "generic"
+    /// List of agent kinds to project to: "claude", "codex", "cursor", "gemini", "openclaw", "antigravity", "trae", "kiro", "generic"
     pub agents: Vec<String>,
 }
 

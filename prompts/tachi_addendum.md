@@ -7,7 +7,7 @@
 
 | 你 | 工具 |
 |---|---|
-| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / OpenCode / Amp / Antigravity） | `tachi-*` MCP 工具集 + `tachi-hub` CLI |
+| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi-*` MCP 工具集 + `tachi-hub` CLI |
 
 ## 三条铁律
 

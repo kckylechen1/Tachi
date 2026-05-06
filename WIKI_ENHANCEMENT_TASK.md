@@ -1,4 +1,4 @@
-# 🔧 Tachi Wiki Enhancement — Task Brief for OpenCode
+# 🔧 Tachi Wiki Enhancement — Task Brief
 
 > **Branch**: `feat/wiki-enhancement`
 > **Base**: `main`

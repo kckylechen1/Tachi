@@ -666,14 +666,7 @@ fn projection_allowed_roots() -> Vec<std::path::PathBuf> {
         roots.push(git_root);
     }
     if let Some(home) = dirs::home_dir() {
-        for suffix in [
-            ".openclaw",
-            ".claude",
-            ".codex",
-            ".cursor",
-            ".opencode",
-            ".agents",
-        ] {
+        for suffix in [".openclaw", ".claude", ".codex", ".cursor", ".agents"] {
             let root = home.join(suffix);
             if root.exists() {
                 roots.push(root);

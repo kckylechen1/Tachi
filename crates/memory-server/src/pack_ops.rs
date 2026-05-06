@@ -229,7 +229,7 @@ pub(crate) async fn handle_pack_project(
         .collect();
 
     if agents.is_empty() {
-        return Err("No valid agent kinds provided. Use: claude, codex, cursor, gemini, openclaw, opencode, antigravity, trae, kiro, generic".to_string());
+        return Err("No valid agent kinds provided. Use: claude, codex, cursor, gemini, openclaw, antigravity, trae, kiro, generic".to_string());
     }
 
     let mut results = Vec::new();
@@ -557,7 +557,6 @@ fn discover_agent_overlays(
             "openclaw",
             vec![".openclaw", "openclaw", "integrations/openclaw"],
         ),
-        ("opencode", vec![".opencode"]),
     ] {
         let slot = overlays.entry(agent.to_string()).or_default();
         for rel in paths {
@@ -590,7 +589,6 @@ fn overlay_lookup_keys(agent: AgentKind) -> &'static [&'static str] {
         AgentKind::Cursor => &["cursor"],
         AgentKind::Gemini => &["gemini"],
         AgentKind::OpenClaw => &["openclaw"],
-        AgentKind::OpenCode => &["opencode"],
         AgentKind::Antigravity | AgentKind::Kiro => &["claude"],
         AgentKind::Trae => &["trae"],
         AgentKind::Generic => &["generic"],

@@ -4,7 +4,6 @@ import {
   DEFAULT_TACHI_DAEMON_HOST,
   getApiErrorMessage,
   tachiApi,
-  type GhostTopicSnapshot,
   type MemoryEntry,
 } from '../services/api';
 import type { InspectableItem } from './Inspector';
@@ -25,7 +24,6 @@ interface GraphDataShape {
 }
 
 interface AgentCanvasProps {
-  view: 'kanban' | 'ghost';
   onNodeClick: (item: InspectableItem) => void;
 }
 
@@ -133,44 +131,7 @@ function buildKanbanGraph(cards: MemoryEntry[]): GraphDataShape {
   };
 }
 
-function buildGhostGraph(snapshot: GhostTopicSnapshot): GraphDataShape {
-  const nodes: GraphNode[] = [
-    {
-      id: 'tachi',
-      group: 1,
-      kind: 'core',
-      label: 'Tachi Hub',
-      details: {
-        activeTopics: snapshot.active_topics,
-      },
-    },
-  ];
-  const links: GraphLink[] = [];
-
-  for (const topic of snapshot.topics) {
-    const topicId = `topic:${topic.topic}`;
-    const count = typeof topic.message_count === 'number' ? topic.message_count : 1;
-    nodes.push({
-      id: topicId,
-      group: 3,
-      kind: 'topic',
-      label: topic.topic,
-      details: {
-        messages: count,
-        lastMessageAt: topic.last_message_at ?? 'n/a',
-      },
-    });
-    links.push({
-      source: 'tachi',
-      target: topicId,
-      value: Math.max(1, count),
-    });
-  }
-
-  return { nodes, links };
-}
-
-export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
+export function AgentCanvas({ onNodeClick }: AgentCanvasProps) {
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
   const containerRef = useRef<HTMLDivElement>(null);
   const [graphData, setGraphData] = useState<GraphDataShape>(BASE_GRAPH);
@@ -194,10 +155,7 @@ export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
 
     const poll = async () => {
       try {
-        const nextGraph =
-          view === 'kanban'
-            ? buildKanbanGraph(await tachiApi.fetchKanbanCards(120))
-            : buildGhostGraph(await tachiApi.fetchGhostTopics());
+        const nextGraph = buildKanbanGraph(await tachiApi.fetchKanbanCards(120));
 
         if (!cancelled) {
           setGraphData(nextGraph.nodes.length > 0 ? nextGraph : BASE_GRAPH);
@@ -224,7 +182,7 @@ export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [view]);
+  }, []);
 
   const isEmptyGraph = graphData.nodes.length <= 1 && graphData.links.length === 0;
 
@@ -267,7 +225,7 @@ export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
             <div className="text-muted" style={{ fontSize: '0.82rem' }}>
               {error
                 ? `Unable to fetch live MCP data from ${DEFAULT_TACHI_DAEMON_HOST}.`
-                : 'Waiting for Ghost Whispers or Kanban activity to appear.'}
+                : 'Waiting for Kanban activity to appear.'}
             </div>
           </div>
         </div>
