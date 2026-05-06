@@ -1331,6 +1331,8 @@ impl MemoryServer {
                     agent_role: None,
                     project: params.project.clone(),
                     domain: params.domain.clone(),
+                    file_context: None,
+                    error_context: None,
                     weights: None,
                 };
                 handle_tachi_wiki_search(self, wiki_params).await

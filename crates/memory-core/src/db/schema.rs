@@ -669,7 +669,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         conn.execute(
         "UPDATE memories SET category = 'other'
          WHERE category IS NULL OR category = ''
-            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')",
+            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')",
         [],
     )?;
 
@@ -706,7 +706,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         )?;
         conn.execute(
             "UPDATE memories SET retention_policy = 'permanent'
-         WHERE retention_policy IS NULL AND path LIKE '/wiki%'",
+         WHERE retention_policy IS NULL AND (path LIKE '/wiki%' OR path LIKE '/guide%')",
             [],
         )?;
         conn.execute(
@@ -743,7 +743,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             retention_policy TEXT,
             domain       TEXT,
             superseded_by TEXT,
-            CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
+            CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')),
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
             CHECK (

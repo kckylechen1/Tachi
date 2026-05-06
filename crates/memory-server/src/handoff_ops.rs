@@ -534,7 +534,7 @@ async fn promote_handoff_issue_with_client<C: GhClient>(
         .and_then(|v| v.as_str())
         .unwrap_or("pending")
         .to_string();
-    match server.with_global_store(|store| {
+    if let Some((latest, url)) = server.with_global_store(|store| {
         let latest = store
             .get(&entry_id)
             .map_err(|e| format!("Failed to read handoff memory: {e}"))?
@@ -561,25 +561,22 @@ async fn promote_handoff_issue_with_client<C: GhClient>(
         }
         Ok(None)
     })? {
-        Some((latest, url)) => {
-            let issue_number = latest
-                .metadata
-                .get("github")
-                .and_then(|gh| gh.get("issue_number"))
-                .cloned();
-            let repair = repair_handoff_flow_artifact(flow_artifact.as_ref(), &latest, &entry_id)?;
-            return serde_json::to_string(&json!({
-                "status": "already_promoted",
-                "memo_id": memo_id,
-                "entry_id": entry_id,
-                "issue_url": url,
-                "issue_number": issue_number,
-                "artifact_repair": repair,
-                "hint": "Pass force=true to create a new issue anyway.",
-            }))
-            .map_err(|e| format!("serialize: {e}"));
-        }
-        None => {}
+        let issue_number = latest
+            .metadata
+            .get("github")
+            .and_then(|gh| gh.get("issue_number"))
+            .cloned();
+        let repair = repair_handoff_flow_artifact(flow_artifact.as_ref(), &latest, &entry_id)?;
+        return serde_json::to_string(&json!({
+            "status": "already_promoted",
+            "memo_id": memo_id,
+            "entry_id": entry_id,
+            "issue_url": url,
+            "issue_number": issue_number,
+            "artifact_repair": repair,
+            "hint": "Pass force=true to create a new issue anyway.",
+        }))
+        .map_err(|e| format!("serialize: {e}"));
     }
 
     let memo = memo_from_entry(&entry);

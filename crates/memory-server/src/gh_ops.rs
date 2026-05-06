@@ -868,9 +868,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
 
     let mut persisted = false;
     if let (Some(fid), Some(run_dir)) = (flow_id, flow_run_dir.as_ref()) {
-        std::fs::create_dir_all(&run_dir).map_err(|e| format!("create run dir: {e}"))?;
-        merge_github_status(&run_dir, status_patch.clone())?;
-        append_github_event(&run_dir, fid, event_kind, event_payload.clone())?;
+        std::fs::create_dir_all(run_dir).map_err(|e| format!("create run dir: {e}"))?;
+        merge_github_status(run_dir, status_patch.clone())?;
+        append_github_event(run_dir, fid, event_kind, event_payload.clone())?;
         persisted = true;
     }
 

@@ -59,6 +59,8 @@ pub(crate) async fn handle_tachi_search(
             agent_role: None,
             project: params.project.clone(),
             domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
             weights: None,
         };
         let wiki_result = handle_tachi_wiki_search(server, wiki_params).await;
@@ -83,6 +85,8 @@ pub(crate) async fn handle_tachi_search(
             agent_role: None,
             project: params.project.clone(),
             domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
         };
         let mem_result = handle_search_memory(server, mem_params).await;

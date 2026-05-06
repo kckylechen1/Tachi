@@ -24,6 +24,8 @@ pub(crate) async fn handle_tachi_board(
             agent_role: None,
             project: params.project.clone(),
             domain: None,
+            file_context: None,
+            error_context: None,
             enable_rerank: false,
         },
     )

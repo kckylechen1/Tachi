@@ -73,7 +73,18 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     }
 
     let path = opts.path_prefix.as_deref().unwrap_or("");
-    if path.starts_with("/wiki") || path.starts_with("/behavior") || path.starts_with("/rules") {
+    if path.starts_with("/guide") {
+        HybridWeights {
+            decay: 0.02,
+            semantic: 0.25,
+            fts: 0.45,
+            symbolic: 0.28,
+            use_rrf: true,
+        }
+    } else if path.starts_with("/wiki")
+        || path.starts_with("/behavior")
+        || path.starts_with("/rules")
+    {
         HybridWeights {
             decay: 0.02,
             semantic: 0.48,
@@ -384,7 +395,7 @@ pub fn hybrid_search(
 mod tests {
     use super::*;
     use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
-    use crate::types::{HybridScore, MemoryEntry};
+    use crate::types::MemoryEntry;
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -427,16 +438,6 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
-        }
-    }
-
-    fn score(final_score: f64) -> HybridScore {
-        HybridScore {
-            vector: 0.0,
-            fts: 0.0,
-            symbolic: 0.0,
-            decay: 0.0,
-            final_score,
         }
     }
 
@@ -502,5 +503,18 @@ mod tests {
         let results = hybrid_search(&conn, "", &opts).unwrap();
         // FTS5 with empty query should produce no FTS results; vec channel also empty
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn guide_path_uses_operational_weights() {
+        let opts = SearchOptions {
+            path_prefix: Some("/guide/fix_pattern".to_string()),
+            ..Default::default()
+        };
+        let weights = resolve_weights(&opts);
+        assert_eq!(weights.fts, 0.45);
+        assert_eq!(weights.symbolic, 0.28);
+        assert_eq!(weights.decay, 0.02);
+        assert!(weights.use_rrf);
     }
 }
