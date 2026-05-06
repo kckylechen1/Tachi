@@ -36,6 +36,12 @@ pub(crate) struct TachiSearchParams {
     #[serde(default)]
     pub domain: Option<String>,
 
+    #[serde(default)]
+    pub file_context: Option<String>,
+
+    #[serde(default)]
+    pub error_context: Option<String>,
+
     /// Wiki category filter (only used when scope includes wiki)
     #[serde(default)]
     pub category: Option<String>,
@@ -177,6 +183,10 @@ pub(crate) struct TachiMemoryParams {
     pub top_k: usize,
     #[serde(default)]
     pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub file_context: Option<String>,
+    #[serde(default)]
+    pub error_context: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]

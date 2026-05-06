@@ -525,6 +525,8 @@ pub(crate) async fn handle_recall_context(
                 agent_role: params.agent_role.clone(),
                 project: params.project.clone(),
                 domain: None,
+                file_context: None,
+                error_context: None,
                 enable_rerank: false,
             },
         )
@@ -594,6 +596,8 @@ pub(crate) async fn handle_recall_context(
                 agent_role: None,
                 project: Some(params.wiki_project.clone()),
                 domain: None,
+                file_context: None,
+                error_context: None,
                 enable_rerank: false,
             },
         )

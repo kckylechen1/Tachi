@@ -367,6 +367,14 @@ pub(crate) struct SearchMemoryParams {
     #[serde(default)]
     pub domain: Option<String>,
 
+    /// Optional current file path for guide/context-aware retrieval.
+    #[serde(default)]
+    pub file_context: Option<String>,
+
+    /// Optional current error text for guide/context-aware retrieval.
+    #[serde(default)]
+    pub error_context: Option<String>,
+
     /// Enable adaptive Voyage reranking when top hybrid scores are close.
     #[serde(default)]
     pub enable_rerank: bool,
@@ -965,6 +973,14 @@ pub(crate) struct WikiSearchParams {
     /// Optional domain filter.
     #[serde(default)]
     pub domain: Option<String>,
+
+    /// Optional current file path for guide/context-aware retrieval.
+    #[serde(default)]
+    pub file_context: Option<String>,
+
+    /// Optional current error text for guide/context-aware retrieval.
+    #[serde(default)]
+    pub error_context: Option<String>,
 
     /// Optional scoring weights override
     #[serde(default)]

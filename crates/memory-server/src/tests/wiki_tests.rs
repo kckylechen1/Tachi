@@ -136,6 +136,8 @@ async fn wiki_search_includes_related_entries_for_top_results() {
             agent_role: None,
             project: Some("wiki".to_string()),
             domain: None,
+            file_context: None,
+            error_context: None,
             weights: None,
         }))
         .await
@@ -168,6 +170,8 @@ async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
             path_prefix: None,
             project: None,
             domain: None,
+            file_context: None,
+            error_context: None,
             category: None,
             include_archived: false,
             enable_rerank: false,

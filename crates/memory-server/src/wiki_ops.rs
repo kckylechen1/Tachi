@@ -1160,6 +1160,8 @@ pub(crate) async fn handle_wiki_search(
             agent_role: None,
             project: Some(project_name.clone()),
             domain: None,
+            file_context: params.file_context,
+            error_context: params.error_context,
             enable_rerank: false,
         },
     )

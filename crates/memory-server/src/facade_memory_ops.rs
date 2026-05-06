@@ -27,6 +27,8 @@ pub(crate) async fn handle_tachi_memory(
                 path_prefix: params.path_prefix.clone(),
                 project: params.project.clone(),
                 domain: params.domain.clone(),
+                file_context: params.file_context.clone(),
+                error_context: params.error_context.clone(),
                 category: params.category.clone(),
                 include_archived: params.include_archived,
                 enable_rerank: params.enable_rerank,

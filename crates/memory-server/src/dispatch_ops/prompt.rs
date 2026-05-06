@@ -62,6 +62,8 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
                 agent_role: None,
                 project: params.project.clone(),
                 domain: None,
+                file_context: None,
+                error_context: None,
                 enable_rerank: false,
             },
         )
@@ -111,6 +113,8 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
             agent_role: None,
             project: params.project.clone(),
             domain: None,
+            file_context: None,
+            error_context: None,
             enable_rerank: false,
         },
     )

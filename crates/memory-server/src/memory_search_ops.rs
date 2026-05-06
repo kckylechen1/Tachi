@@ -404,6 +404,12 @@ pub(super) async fn search_memory_rows(
         combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
     }
 
+    apply_guide_context_boosts(
+        &mut combined_results,
+        params.file_context.as_deref(),
+        params.error_context.as_deref(),
+    );
+
     combined_results.sort_by(|a, b| {
         b.0.score
             .final_score
@@ -507,6 +513,71 @@ fn search_score(row: &serde_json::Value) -> f64 {
         .and_then(serde_json::Value::as_f64)
         .or_else(|| row.get("relevance").and_then(serde_json::Value::as_f64))
         .unwrap_or(0.0)
+}
+
+fn apply_guide_context_boosts(
+    results: &mut [(memory_core::SearchResult, DbScope)],
+    file_context: Option<&str>,
+    error_context: Option<&str>,
+) {
+    if file_context.is_none() && error_context.is_none() {
+        return;
+    }
+    for (result, _) in results.iter_mut() {
+        let boost = guide_context_boost(&result.entry, file_context, error_context);
+        if boost > 0.0 {
+            result.score.final_score = (result.score.final_score + boost).min(1.0);
+        }
+    }
+}
+
+fn guide_context_boost(
+    entry: &MemoryEntry,
+    file_context: Option<&str>,
+    error_context: Option<&str>,
+) -> f64 {
+    if !entry.is_guide() {
+        return 0.0;
+    }
+    let mut boost = 0.0;
+    if let Some(context) = file_context {
+        if context_matches_patterns(context, &entry.file_patterns()) {
+            boost += 0.25;
+        }
+    }
+    if let Some(context) = error_context {
+        if context_matches_patterns(context, &entry.error_patterns()) {
+            boost += 0.35;
+        }
+    }
+    boost
+}
+
+fn context_matches_patterns(context: &str, patterns: &[String]) -> bool {
+    let context = context.trim().to_ascii_lowercase();
+    if context.is_empty() {
+        return false;
+    }
+    patterns
+        .iter()
+        .map(|pattern| pattern.trim().to_ascii_lowercase())
+        .filter(|pattern| !pattern.is_empty())
+        .any(|pattern| pattern_matches_context(&pattern, &context))
+}
+
+fn pattern_matches_context(pattern: &str, context: &str) -> bool {
+    if pattern.contains('*') {
+        let mut cursor = 0usize;
+        for segment in pattern.split('*').filter(|segment| !segment.is_empty()) {
+            let Some(pos) = context[cursor..].find(segment) else {
+                return false;
+            };
+            cursor += pos + segment.len();
+        }
+        true
+    } else {
+        context.contains(pattern) || pattern.contains(context)
+    }
 }
 
 pub(crate) async fn handle_search_memory(

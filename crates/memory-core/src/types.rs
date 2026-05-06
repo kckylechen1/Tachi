@@ -225,6 +225,7 @@ pub enum MemoryCategory {
     Handoff,
     Ghost,
     Wiki,
+    Guide,
 }
 
 impl MemoryCategory {
@@ -240,6 +241,7 @@ impl MemoryCategory {
             Self::Handoff => "handoff",
             Self::Ghost => "ghost",
             Self::Wiki => "wiki",
+            Self::Guide => "guide",
         }
     }
 
@@ -255,6 +257,7 @@ impl MemoryCategory {
             "handoff" => Self::Handoff,
             "ghost" => Self::Ghost,
             "wiki" => Self::Wiki,
+            "guide" => Self::Guide,
             _ => Self::Other,
         }
     }
@@ -327,7 +330,8 @@ impl std::fmt::Display for MemoryScope {
 pub fn default_retention_for(path: &str, source: &str) -> Option<&'static str> {
     if path.starts_with("/handoff") || path.starts_with("/kanban") {
         Some("pinned")
-    } else if path.starts_with("/wiki") || source == "foundry_distill" {
+    } else if path.starts_with("/wiki") || path.starts_with("/guide") || source == "foundry_distill"
+    {
         Some("permanent")
     } else {
         None
@@ -495,6 +499,33 @@ pub struct MemoryEntry {
     pub metadata: serde_json::Value,
 }
 
+impl MemoryEntry {
+    pub fn is_guide(&self) -> bool {
+        self.category.eq_ignore_ascii_case("guide")
+            || self.path == "/guide"
+            || self.path.starts_with("/guide/")
+            || self
+                .metadata
+                .get("guide")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+    }
+
+    pub fn guide_type(&self) -> Option<&str> {
+        self.metadata
+            .get("guide_type")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    pub fn file_patterns(&self) -> Vec<String> {
+        metadata_string_array(&self.metadata, "file_patterns")
+    }
+
+    pub fn error_patterns(&self) -> Vec<String> {
+        metadata_string_array(&self.metadata, "error_patterns")
+    }
+}
+
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 fn default_path() -> String {
@@ -517,6 +548,20 @@ fn default_revision() -> i64 {
 }
 fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
+}
+
+fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Vec<String> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ─── Scoring Types ───────────────────────────────────────────────────────────
@@ -730,6 +775,44 @@ mod tests {
         assert_eq!(MemoryCategory::normalize("Handoff"), "handoff");
         assert_eq!(MemoryCategory::normalize("GHOST"), "ghost");
         assert_eq!(MemoryCategory::normalize("wiki"), "wiki");
+        assert_eq!(MemoryCategory::normalize("Guide"), "guide");
+    }
+
+    #[test]
+    fn test_memory_entry_guide_helpers() {
+        let entry = MemoryEntry {
+            id: "g1".to_string(),
+            path: "/guide/fix_pattern/rust".to_string(),
+            summary: "".to_string(),
+            text: "fix rust build".to_string(),
+            importance: 0.7,
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            category: "guide".to_string(),
+            topic: "".to_string(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: "".to_string(),
+            source: "foundry_distill".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            metadata: serde_json::json!({
+                "guide": true,
+                "guide_type": "fix_pattern",
+                "file_patterns": ["crates/*/src/*.rs"],
+                "error_patterns": ["linker error"]
+            }),
+        };
+        assert!(entry.is_guide());
+        assert_eq!(entry.guide_type(), Some("fix_pattern"));
+        assert_eq!(entry.file_patterns(), vec!["crates/*/src/*.rs"]);
+        assert_eq!(entry.error_patterns(), vec!["linker error"]);
     }
 
     #[test]

@@ -216,6 +216,8 @@ async fn build_evidence(
                 agent_role: None,
                 project: query.project.clone(),
                 domain: None,
+                file_context: None,
+                error_context: None,
                 enable_rerank: false,
             },
         )
