@@ -248,8 +248,8 @@ func TestAppendToRC(t *testing.T) {
 	if !strings.Contains(content, "tachi_env()") {
 		t.Errorf("rc file doesn't contain helper function: %s", content)
 	}
-	if !strings.Contains(content, "--keychain") {
-		t.Errorf("rc file helper missing --keychain flag: %s", content)
+	if !strings.Contains(content, "--password-file") {
+		t.Errorf("rc file helper missing portable --password-file fallback: %s", content)
 	}
 
 	// Should be idempotent

@@ -106,8 +106,9 @@ pub(super) async fn run_vault_command(
         VaultAction::Unlock {
             stdin_password,
             keychain,
+            password_file,
         } => {
-            let password = read_vault_password(stdin_password, keychain)?;
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
 
             if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
                 let mut args = serde_json::Map::new();
@@ -141,6 +142,7 @@ pub(super) async fn run_vault_command(
             description,
             stdin_password,
             keychain,
+            password_file,
             value_stdin,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
@@ -152,7 +154,7 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(stdin_password, keychain)?;
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -207,6 +209,7 @@ pub(super) async fn run_vault_command(
             name,
             stdin_password,
             keychain,
+            password_file,
         } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let config = store
@@ -214,7 +217,7 @@ pub(super) async fn run_vault_command(
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
 
-            let password = read_vault_password(stdin_password, keychain)?;
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -241,6 +244,7 @@ pub(super) async fn run_vault_command(
         VaultAction::List {
             stdin_password,
             keychain,
+            password_file,
         } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let config = store
@@ -248,7 +252,7 @@ pub(super) async fn run_vault_command(
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
 
-            let password = read_vault_password(stdin_password, keychain)?;
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -279,11 +283,18 @@ pub(super) async fn run_vault_command(
     }
 }
 
-fn read_vault_password(
+pub(super) fn read_vault_password(
     stdin_password: bool,
     keychain: bool,
+    password_file: Option<&Path>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let password = if keychain {
+        if !cfg!(target_os = "macos") {
+            return Err(
+                "--keychain is only supported on macOS; use --password-file on Linux/Windows"
+                    .into(),
+            );
+        }
         let output = std::process::Command::new("security")
             .args([
                 "find-generic-password",
@@ -302,6 +313,8 @@ fn read_vault_password(
             .into());
         }
         String::from_utf8(output.stdout)?.trim().to_string()
+    } else if let Some(path) = password_file {
+        read_password_file(path)?
     } else if stdin_password {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
@@ -313,5 +326,28 @@ fn read_vault_password(
     if password.is_empty() {
         return Err("Password cannot be empty".into());
     }
+    Ok(password)
+}
+
+fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
+    let password = raw.lines().next().unwrap_or_default().trim().to_string();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "WARNING: password file {} is readable by group/other (mode {:o}); prefer 0600",
+                    path.display(),
+                    mode
+                );
+            }
+        }
+    }
+
     Ok(password)
 }

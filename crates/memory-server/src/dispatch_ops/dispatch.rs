@@ -20,7 +20,7 @@ pub(crate) struct DispatchResult {
 }
 
 pub(crate) fn apply_unlocked_vault_env(cmd: &mut Command, server: &MemoryServer) -> usize {
-    let Ok(secrets) = server.unlocked_api_key_secrets_for_child_env() else {
+    let Ok(secrets) = server.unlocked_env_secrets_for_child_env() else {
         return 0;
     };
 
