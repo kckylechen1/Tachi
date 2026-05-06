@@ -320,8 +320,20 @@ fn select_vault_entry(
     }
 }
 
-pub(super) fn load_unlocked_api_key_secrets(
+fn is_shell_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn load_unlocked_vault_secrets(
     server: &MemoryServer,
+    include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
     let key = get_vault_key(server)?;
     let entries = server
@@ -330,7 +342,7 @@ pub(super) fn load_unlocked_api_key_secrets(
 
     let mut secrets = Vec::new();
     for entry in entries {
-        if entry.secret_type != "api_key" || !entry.name.ends_with("_API_KEY") {
+        if !include_entry(&entry) {
             continue;
         }
         if entry
@@ -350,6 +362,20 @@ pub(super) fn load_unlocked_api_key_secrets(
     }
 
     Ok(secrets)
+}
+
+pub(super) fn load_unlocked_api_key_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    load_unlocked_vault_secrets(server, |entry| {
+        entry.secret_type == "api_key" && entry.name.ends_with("_API_KEY")
+    })
+}
+
+pub(super) fn load_unlocked_env_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    load_unlocked_vault_secrets(server, |entry| is_shell_env_name(&entry.name))
 }
 
 fn attach_provider_refresh_warning(server: &MemoryServer, body: String) -> Result<String, String> {

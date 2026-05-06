@@ -2,7 +2,7 @@ use crate::gh_safe_merge::{
     evaluate_merge_gate, ChecksState, GhClient, GhError, MergeDecision, MergeResult, MergeStrategy,
     Mergeable, PrLifecycleState, PrState, ReviewDecision,
 };
-use crate::shell_ops::{append_github_event, merge_github_status, shell_runs_root};
+use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
     GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrListParams, GhPrReadParams,
     GhRepoViewParams, TachiGhParams,
@@ -437,7 +437,7 @@ pub(crate) async fn handle_tachi_gh(
                 &params.repo,
                 number,
                 strategy,
-                params.dry_run,
+                effective_safe_merge_dry_run(params.confirm, params.dry_run),
                 params.flow_id.as_deref(),
             )
             .await
@@ -461,6 +461,10 @@ fn parse_merge_strategy(raw: Option<&str>) -> Result<MergeStrategy, String> {
             other
         )),
     }
+}
+
+fn effective_safe_merge_dry_run(confirm: bool, requested_dry_run: Option<bool>) -> bool {
+    !confirm || requested_dry_run.unwrap_or(false)
 }
 
 fn merge_strategy_flag(s: MergeStrategy) -> &'static str {
@@ -522,12 +526,16 @@ impl<'a> GhClient for CliGhClient<'a> {
         repo: &str,
         number: u64,
         strategy: MergeStrategy,
+        expected_head_sha: &str,
     ) -> Result<MergeResult, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
         let (mut cmd, token) = self.build()?;
         cmd.args(["pr", "merge", &number.to_string()])
             .args(["--repo", repo])
             .arg(merge_strategy_flag(strategy));
+        if !expected_head_sha.trim().is_empty() {
+            cmd.args(["--match-head-commit", expected_head_sha]);
+        }
         let _out = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
         // gh pr merge prints a status line, not JSON. Re-fetch the merged SHA.
         let (mut cmd2, token2) = self.build()?;
@@ -626,15 +634,10 @@ impl<'a> GhClient for CliGhClient<'a> {
         pr_number: u64,
     ) -> Result<Vec<crate::gh_safe_merge::CheckRun>, GhError> {
         validate_repo(repo).map_err(GhError::Sanitized)?;
-        let (mut cmd, token) = self.build()?;
-        cmd.args(["pr", "checks", &pr_number.to_string()])
-            .args(["--repo", repo])
-            .arg("--json")
-            .arg("name,state,bucket");
         // `gh pr checks` may exit non-zero when checks have failed; we still
         // want to parse the JSON. Run it directly and tolerate non-zero exit
         // when stdout looks like a JSON array.
-        let (mut raw_cmd, _) = self.build()?;
+        let (mut raw_cmd, token) = self.build()?;
         raw_cmd
             .args(["pr", "checks", &pr_number.to_string()])
             .args(["--repo", repo])
@@ -644,15 +647,25 @@ impl<'a> GhClient for CliGhClient<'a> {
             .output()
             .map_err(|e| GhError::Sanitized(format!("gh exec: {e}")))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let sanitized = sanitize_output(&stdout, &token);
+        let sanitized_stderr = sanitize_output(&stderr, &token);
         let trimmed = sanitized.trim();
         if trimmed.is_empty() || trimmed == "null" {
-            return Ok(Vec::new());
+            if output.status.success() {
+                return Ok(Vec::new());
+            }
+            return Err(classify_gh_error(&format!(
+                "gh pr checks failed: {}",
+                sanitized_stderr.trim()
+            )));
         }
         if !trimmed.starts_with('[') {
-            // Not a JSON array — propagate original error path
-            let _ = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
-            return Ok(Vec::new());
+            return Err(classify_gh_error(&format!(
+                "gh pr checks returned non-json output: {} {}",
+                trimmed,
+                sanitized_stderr.trim()
+            )));
         }
         let arr: Vec<serde_json::Value> = serde_json::from_str(trimmed)
             .map_err(|e| GhError::Sanitized(format!("checks_list parse: {e}")))?;
@@ -724,7 +737,7 @@ fn parse_pr_view_json(
             "CHANGES_REQUESTED" => Some(ReviewDecision::ChangesRequested),
             "REVIEW_REQUIRED" => Some(ReviewDecision::ReviewRequired),
             "" => None,
-            _ => None,
+            _ => Some(ReviewDecision::ReviewRequired),
         });
     let is_draft = v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false);
     let head_sha = v
@@ -758,6 +771,10 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     dry_run: bool,
     flow_id: Option<&str>,
 ) -> Result<String, String> {
+    let flow_run_dir = match flow_id {
+        Some(fid) => Some(run_dir_for_flow_id(fid)?),
+        None => None,
+    };
     let pr = client
         .pr_view(repo, pr_number)
         .await
@@ -780,7 +797,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                 )
             } else {
                 let merge_res = client
-                    .pr_merge(repo, pr_number, strategy)
+                    .pr_merge(repo, pr_number, strategy, &pr.head_sha)
                     .await
                     .map_err(|e| format!("pr_merge failed: {e}"))?;
                 (
@@ -830,6 +847,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         "repo": repo,
         "pr_number": pr_number,
         "merge_state": effective_state,
+        "head_sha": pr.head_sha,
         "checks": {
             "state": match pr.checks {
                 ChecksState::None => "none",
@@ -849,8 +867,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     });
 
     let mut persisted = false;
-    if let Some(fid) = flow_id {
-        let run_dir = shell_runs_root().join(fid);
+    if let (Some(fid), Some(run_dir)) = (flow_id, flow_run_dir.as_ref()) {
         std::fs::create_dir_all(&run_dir).map_err(|e| format!("create run dir: {e}"))?;
         merge_github_status(&run_dir, status_patch.clone())?;
         append_github_event(&run_dir, fid, event_kind, event_payload.clone())?;
@@ -942,6 +959,18 @@ mod safe_merge_tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "o/r");
         assert_eq!(calls[0].1, 42);
+        assert_eq!(calls[0].3, "deadbeef");
+    }
+
+    #[tokio::test]
+    async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
+        let client = MockGhClient::new().with_pr("o/r", ready_pr());
+        let out = handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, false, None)
+            .await
+            .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["event"]["payload"]["head_sha"], "deadbeef");
+        assert_eq!(client.merge_calls()[0].3, "deadbeef");
     }
 
     #[tokio::test]
@@ -986,7 +1015,7 @@ mod safe_merge_tests {
         let client = MockGhClient::new()
             .with_pr("o/r", ready_pr())
             .with_checks("o/r", 42, vec![]);
-        let flow = "test-flow-safe-merge";
+        let flow = "flow_test-safe-merge";
         let out =
             handle_github_safe_merge(&client, "o/r", 42, MergeStrategy::Squash, true, Some(flow))
                 .await
@@ -1006,6 +1035,24 @@ mod safe_merge_tests {
         } else {
             std::env::remove_var("TACHI_RUN_ROOT");
         }
+    }
+
+    #[tokio::test]
+    async fn safe_merge_rejects_invalid_flow_id() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let err = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            true,
+            Some("../escape"),
+        )
+        .await
+        .expect_err("invalid flow id should fail");
+        assert!(err.contains("Invalid flow_id"));
     }
 
     #[tokio::test]
@@ -1077,6 +1124,16 @@ mod safe_merge_tests {
             MergeStrategy::Rebase
         );
         assert!(parse_merge_strategy(Some("foo")).is_err());
+    }
+
+    #[test]
+    fn safe_merge_effective_dry_run_requires_confirm() {
+        assert!(effective_safe_merge_dry_run(false, None));
+        assert!(effective_safe_merge_dry_run(false, Some(false)));
+        assert!(effective_safe_merge_dry_run(false, Some(true)));
+        assert!(!effective_safe_merge_dry_run(true, None));
+        assert!(!effective_safe_merge_dry_run(true, Some(false)));
+        assert!(effective_safe_merge_dry_run(true, Some(true)));
     }
 
     #[test]

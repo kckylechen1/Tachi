@@ -369,7 +369,7 @@ pub(crate) enum Commands {
     },
     /// Output vault secrets as `export KEY=VALUE` lines for shell injection.
     /// Replaces project .env files — pipe into shell with: eval "$(tachi env --keychain)"
-    /// or add to .bashrc/.zshrc: eval "$(tachi env --keychain)".
+    /// or on non-macOS hosts: eval "$(tachi env --password-file ~/.config/tachi/vault-password)".
     Env {
         /// Optional glob-style filter on secret names (e.g. "OPENAI*" or "*API_KEY").
         /// Without this flag, all unrestricted secrets are emitted.
@@ -387,6 +387,10 @@ pub(crate) enum Commands {
         /// Uses service name "tachi-vault", account "default".
         #[arg(long)]
         keychain: bool,
+        /// Read master password from a local file (first line only).
+        /// Useful on Linux/Windows with OS/container secret mounts.
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
 }
 
@@ -622,6 +626,9 @@ pub(crate) enum VaultAction {
         /// Read password from macOS Keychain (service: tachi-vault, account: default).
         #[arg(long)]
         keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// Store a secret in the vault. Prompts for the value interactively
     /// unless --value-stdin is set.
@@ -640,6 +647,9 @@ pub(crate) enum VaultAction {
         /// Read vault password from macOS Keychain.
         #[arg(long)]
         keychain: bool,
+        /// Read vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
         /// Read the secret value from stdin (first line) instead of prompting.
         /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
         #[arg(long)]
@@ -655,6 +665,9 @@ pub(crate) enum VaultAction {
         /// Read password from macOS Keychain.
         #[arg(long)]
         keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// List all secret names in the vault (does not show values).
     List {
@@ -664,6 +677,9 @@ pub(crate) enum VaultAction {
         /// Read password from macOS Keychain.
         #[arg(long)]
         keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// Lock the vault (clear cached key).
     Lock,

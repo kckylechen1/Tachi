@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -159,9 +160,28 @@ func appendToRC(rcPath string) error {
 	}
 	defer f.Close()
 
-	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\ntachi_env() { eval \"$(tachi env --keychain)\"; }\n"
+	block := "\n# Tachi — run `tachi_env` to load vault secrets into shell\n" + tachiEnvHelperBlock() + "\n"
 	_, err = f.WriteString(block)
 	return err
+}
+
+func tachiEnvHelperBlock() string {
+	if runtime.GOOS == "darwin" {
+		return `tachi_env() {
+  if [ -n "${TACHI_VAULT_PASSWORD_FILE:-}" ]; then
+    eval "$(tachi env --password-file "$TACHI_VAULT_PASSWORD_FILE" --env-only)"
+  else
+    eval "$(tachi env --keychain --env-only)"
+  fi
+}`
+	}
+	return `tachi_env() {
+  if [ -n "${TACHI_VAULT_PASSWORD_FILE:-}" ]; then
+    eval "$(tachi env --password-file "$TACHI_VAULT_PASSWORD_FILE" --env-only)"
+  else
+    eval "$(tachi env --env-only)"
+  fi
+}`
 }
 
 // mcpServerDefs contains common MCP servers users might want to register.

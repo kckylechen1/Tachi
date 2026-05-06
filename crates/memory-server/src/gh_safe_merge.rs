@@ -300,6 +300,7 @@ pub trait GhClient: Send + Sync {
         repo: &str,
         number: u64,
         strategy: MergeStrategy,
+        expected_head_sha: &str,
     ) -> Result<MergeResult, GhError>;
     async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError>;
     async fn issue_create(
@@ -330,7 +331,7 @@ mod mock {
         prs: Mutex<HashMap<(String, u64), PrState>>,
         issues: Mutex<HashMap<(String, u64), IssueState>>,
         checks: Mutex<HashMap<(String, u64), Vec<CheckRun>>>,
-        merge_calls: Mutex<Vec<(String, u64, MergeStrategy)>>,
+        merge_calls: Mutex<Vec<(String, u64, MergeStrategy, String)>>,
         next_issue_number: Mutex<u64>,
     }
 
@@ -366,7 +367,7 @@ mod mock {
                 .insert((repo.to_string(), pr_number), runs);
             self
         }
-        pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy)> {
+        pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy, String)> {
             self.merge_calls.lock().unwrap().clone()
         }
     }
@@ -386,13 +387,16 @@ mod mock {
             repo: &str,
             number: u64,
             strategy: MergeStrategy,
+            expected_head_sha: &str,
         ) -> Result<MergeResult, GhError> {
             // Record call before any state lookup so tests can assert the
             // orchestrator did NOT short-circuit before reaching merge.
-            self.merge_calls
-                .lock()
-                .unwrap()
-                .push((repo.to_string(), number, strategy));
+            self.merge_calls.lock().unwrap().push((
+                repo.to_string(),
+                number,
+                strategy,
+                expected_head_sha.to_string(),
+            ));
             let pr = self
                 .prs
                 .lock()
@@ -400,6 +404,12 @@ mod mock {
                 .get(&(repo.to_string(), number))
                 .cloned()
                 .ok_or_else(|| GhError::NotFound(format!("pr {repo}#{number}")))?;
+            if !expected_head_sha.is_empty() && pr.head_sha != expected_head_sha {
+                return Err(GhError::Sanitized(format!(
+                    "head SHA changed: expected {expected_head_sha}, got {}",
+                    pr.head_sha
+                )));
+            }
             Ok(MergeResult {
                 pr_number: number,
                 merge_sha: format!("mock-sha-for-{}", pr.head_sha),
@@ -719,7 +729,7 @@ mod tests {
         let pr = open_pr();
         let mock = MockGhClient::new().with_pr("o/r", pr);
         let result = mock
-            .pr_merge("o/r", 1, MergeStrategy::Squash)
+            .pr_merge("o/r", 1, MergeStrategy::Squash, "abc123")
             .await
             .expect("merge");
         assert_eq!(result.pr_number, 1);
@@ -728,7 +738,15 @@ mod tests {
 
         let calls = mock.merge_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0], ("o/r".to_string(), 1, MergeStrategy::Squash));
+        assert_eq!(
+            calls[0],
+            (
+                "o/r".to_string(),
+                1,
+                MergeStrategy::Squash,
+                "abc123".to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -738,8 +756,21 @@ mod tests {
         // record the attempt regardless of whether it succeeds, so the
         // orchestrator test can `assert_eq!(merge_calls.len(), 0)`.
         let mock = MockGhClient::new();
-        let _ = mock.pr_merge("o/r", 42, MergeStrategy::Squash).await;
+        let _ = mock
+            .pr_merge("o/r", 42, MergeStrategy::Squash, "abc123")
+            .await;
         assert_eq!(mock.merge_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mock_pr_merge_rejects_head_sha_mismatch() {
+        let pr = open_pr();
+        let mock = MockGhClient::new().with_pr("o/r", pr);
+        let err = mock
+            .pr_merge("o/r", 1, MergeStrategy::Squash, "different")
+            .await
+            .expect_err("head mismatch should fail");
+        assert!(err.to_string().contains("head SHA changed"));
     }
 
     #[tokio::test]

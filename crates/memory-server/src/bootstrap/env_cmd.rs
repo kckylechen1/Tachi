@@ -1,5 +1,23 @@
 use super::*;
 
+fn is_shell_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_upper_snake_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+}
+
 // ─── `tachi env` handler ────────────────────────────────────────────────────
 
 pub(super) async fn run_env_command(
@@ -8,6 +26,7 @@ pub(super) async fn run_env_command(
     env_only: bool,
     stdin_password: bool,
     keychain: bool,
+    password_file: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_cli_store_read_only(global_db_path)?;
 
@@ -21,37 +40,8 @@ pub(super) async fn run_env_command(
                 .to_string()
         })?;
 
-    // 2. Prompt for password
-    let password = if keychain {
-        let output = std::process::Command::new("security")
-            .args([
-                "find-generic-password",
-                "-s",
-                "tachi-vault",
-                "-a",
-                "default",
-                "-w",
-            ])
-            .output()?;
-        if !output.status.success() {
-            return Err(format!(
-                "Failed to read from Keychain: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-            .into());
-        }
-        String::from_utf8(output.stdout)?.trim().to_string()
-    } else if stdin_password {
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf)?;
-        buf.trim().to_string()
-    } else {
-        rpassword::prompt_password("Vault password: ")?
-    };
-
-    if password.is_empty() {
-        return Err("Password cannot be empty".into());
-    }
+    // 2. Resolve password from the requested portable source.
+    let password = super::vault_cli::read_vault_password(stdin_password, keychain, password_file)?;
 
     // 3. Derive key and verify
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -83,13 +73,16 @@ pub(super) async fn run_env_command(
             continue;
         }
 
+        if !is_shell_env_name(&entry.name) {
+            eprintln!(
+                "WARNING: skipped secret '{}' because it is not a valid shell environment name",
+                entry.name
+            );
+            continue;
+        }
+
         // --env-only: skip names that don't look like env vars (UPPER_SNAKE_CASE)
-        if env_only
-            && !entry
-                .name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
-        {
+        if env_only && !is_upper_snake_env_name(&entry.name) {
             continue;
         }
 

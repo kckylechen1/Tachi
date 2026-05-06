@@ -1182,7 +1182,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Unified handoff: 'leave' a memo for the next session or 'check' for pending memos."
+        description = "Unified handoff: 'leave' a memo, 'check' pending memos, or 'promote_issue' to create/link a GitHub issue from a handoff memo."
     )]
     pub(crate) async fn tachi_handoff(
         &self,
@@ -1534,7 +1534,7 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read. Requires GH_TOKEN in Vault."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, safe_merge. safe_merge defaults to dry-run unless confirm=true. Requires GH_TOKEN in Vault or environment."
     )]
     pub(crate) async fn tachi_gh(
         &self,

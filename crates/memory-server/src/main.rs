@@ -119,7 +119,7 @@ use crate::utils::{
     lock_or_recover, parse_env_bool, parse_env_u64, read_or_recover, sanitize_safe_path_name,
     stable_hash, value_to_template_text, write_or_recover,
 };
-use crate::vault_ops::load_unlocked_api_key_secrets;
+use crate::vault_ops::{load_unlocked_api_key_secrets, load_unlocked_env_secrets};
 
 use chrono::Utc;
 use clap::Parser;
@@ -615,10 +615,10 @@ impl MemoryServer {
         Ok(self.llm.set_provider_secrets(secrets))
     }
 
-    pub(crate) fn unlocked_api_key_secrets_for_child_env(
+    pub(crate) fn unlocked_env_secrets_for_child_env(
         &self,
     ) -> Result<Vec<(String, String)>, String> {
-        load_unlocked_api_key_secrets(self)
+        load_unlocked_env_secrets(self)
     }
 
     /// Clone the foundry maintenance sender so external supervisors
