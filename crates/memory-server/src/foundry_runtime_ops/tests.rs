@@ -3,8 +3,9 @@ use super::handlers::{
     extract_bracket_self_evolution_notes,
 };
 use super::maintenance::{
-    coherence_bucket_key, coherent_distill_buckets, memory_claim_signature,
-    scheduled_distill_group_key, scheduled_distill_path_prefix,
+    build_distill_edges, classify_distill_guide_type, coherence_bucket_key,
+    coherent_distill_buckets, memory_claim_signature, scheduled_distill_group_key,
+    scheduled_distill_path_prefix,
 };
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
 use super::*;
@@ -402,4 +403,108 @@ fn coherent_distill_buckets_drop_generic_topics_without_shared_entity() {
     .collect::<Vec<_>>();
 
     assert!(coherent_distill_buckets(entries).is_empty());
+}
+
+fn distill_source_entry(id: &str, text: &str, category: &str) -> MemoryEntry {
+    MemoryEntry {
+        id: id.to_string(),
+        path: "/project/tachi/crates/memory-server/src/tools.rs".to_string(),
+        summary: text.chars().take(40).collect(),
+        text: text.to_string(),
+        importance: 0.7,
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        category: category.to_string(),
+        topic: "guide-layer".to_string(),
+        keywords: vec!["tachi".to_string()],
+        persons: vec![],
+        entities: vec!["Tachi".to_string()],
+        location: "crates/memory-server/src/tools.rs".to_string(),
+        source: "manual".to_string(),
+        scope: "project".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({
+            "file_path": "crates/memory-server/src/tools.rs"
+        }),
+        vector: None,
+        retention_policy: None,
+        domain: None,
+    }
+}
+
+#[test]
+fn distill_guide_classifier_emits_supported_guide_types() {
+    let source = vec![distill_source_entry("src", "context", "fact")];
+    assert_eq!(
+        classify_distill_guide_type("Must not add a normal guide write tool.", &source),
+        "constraint"
+    );
+    assert_eq!(
+        classify_distill_guide_type("Fix linker error by rebuilding sqlite vec.", &source),
+        "fix_pattern"
+    );
+    assert_eq!(
+        classify_distill_guide_type(
+            "Decision: choose metadata fields over schema changes.",
+            &source
+        ),
+        "decision"
+    );
+    assert_eq!(
+        classify_distill_guide_type("Runbook: 1. Inspect logs\n2. Re-run cargo test.", &source),
+        "runbook"
+    );
+}
+
+#[test]
+fn distill_edges_include_causal_guide_relations() {
+    let sources = vec![distill_source_entry(
+        "source-1",
+        "error: linker failed for sqlite vec",
+        "fact",
+    )];
+    let guide = MemoryEntry {
+        id: "guide-1".to_string(),
+        path: "/guide/fix_pattern/codex/20260101T000000".to_string(),
+        summary: "Fix linker errors".to_string(),
+        text: "Fix linker error by rebuilding sqlite vec; avoid deleting migrations.".to_string(),
+        importance: 0.75,
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        category: "guide".to_string(),
+        topic: "fix_pattern".to_string(),
+        keywords: vec!["guide".to_string(), "fix_pattern".to_string()],
+        persons: vec![],
+        entities: vec!["Tachi".to_string()],
+        location: "/project/tachi".to_string(),
+        source: FOUNDRY_DISTILL_SOURCE.to_string(),
+        scope: "project".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({
+            "guide": true,
+            "guide_type": "fix_pattern",
+        }),
+        vector: None,
+        retention_policy: None,
+        domain: None,
+    };
+
+    let relations = build_distill_edges(&guide, &sources, "fix_pattern", &guide.timestamp)
+        .into_iter()
+        .map(|edge| edge.relation)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(relations.contains("distilled_from"));
+    assert!(relations.contains("fixed_by"));
+    assert!(relations.contains("rejected_because"));
+
+    let constraint_relations =
+        build_distill_edges(&guide, &sources, "constraint", &guide.timestamp)
+            .into_iter()
+            .map(|edge| edge.relation)
+            .collect::<std::collections::HashSet<_>>();
+    assert!(constraint_relations.contains("causes"));
 }

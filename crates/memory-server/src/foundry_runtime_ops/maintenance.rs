@@ -25,6 +25,11 @@ pub(crate) const SKIP_NO_COHERENT_BUCKET: &str = "no_coherent_bucket";
 /// LLM returned an empty payload (post-trim).
 pub(crate) const SKIP_EMPTY_LLM_OUTPUT: &str = "empty_llm_output";
 
+const GUIDE_TYPE_CONSTRAINT: &str = "constraint";
+const GUIDE_TYPE_FIX_PATTERN: &str = "fix_pattern";
+const GUIDE_TYPE_DECISION: &str = "decision";
+const GUIDE_TYPE_RUNBOOK: &str = "runbook";
+
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
     read_or_recover(&server.agent_profile, "agent_profile")
         .as_ref()
@@ -561,6 +566,324 @@ pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
 
+fn guide_haystack(distill_text: &str, source_entries: &[MemoryEntry]) -> String {
+    let mut parts = vec![distill_text.to_string()];
+    for entry in source_entries {
+        parts.push(entry.summary.clone());
+        parts.push(entry.text.clone());
+        parts.push(entry.topic.clone());
+        parts.extend(entry.keywords.clone());
+    }
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn has_numbered_steps(text: &str) -> bool {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            let mut chars = trimmed.chars();
+            matches!(chars.next(), Some(ch) if ch.is_ascii_digit())
+                && matches!(chars.next(), Some('.' | ')'))
+        })
+        .take(2)
+        .count()
+        >= 2
+}
+
+pub(super) fn classify_distill_guide_type(
+    distill_text: &str,
+    source_entries: &[MemoryEntry],
+) -> &'static str {
+    let haystack = guide_haystack(distill_text, source_entries);
+    if contains_any(
+        &haystack,
+        &[
+            "fix",
+            "fixed",
+            "repair",
+            "bug",
+            "error",
+            "failure",
+            "failed",
+            "panic",
+            "exception",
+            "regression",
+            "linker",
+            "修复",
+            "报错",
+            "错误",
+            "失败",
+        ],
+    ) {
+        return GUIDE_TYPE_FIX_PATTERN;
+    }
+    if contains_any(
+        &haystack,
+        &[
+            "must",
+            "must not",
+            "never",
+            "required",
+            "constraint",
+            "invariant",
+            "policy",
+            "do not",
+            "don't",
+            "不得",
+            "必须",
+            "禁止",
+            "约束",
+        ],
+    ) {
+        return GUIDE_TYPE_CONSTRAINT;
+    }
+    if contains_any(
+        &haystack,
+        &[
+            "decided", "decision", "choose", "chosen", "accepted", "rejected", "tradeoff", "adr",
+            "决定", "取舍", "拒绝",
+        ],
+    ) || source_entries
+        .iter()
+        .any(|entry| entry.category.eq_ignore_ascii_case("decision"))
+    {
+        return GUIDE_TYPE_DECISION;
+    }
+    if contains_any(
+        &haystack,
+        &[
+            "runbook",
+            "checklist",
+            "procedure",
+            "step",
+            "steps",
+            "playbook",
+            "how to",
+            "操作",
+            "步骤",
+            "流程",
+        ],
+    ) || has_numbered_steps(distill_text)
+    {
+        return GUIDE_TYPE_RUNBOOK;
+    }
+    GUIDE_TYPE_RUNBOOK
+}
+
+fn build_guide_distill_path(agent_id: &str, guide_type: &str, timestamp_segment: &str) -> String {
+    format!(
+        "/guide/{}/{}/{}",
+        guide_type,
+        sanitize_safe_path_name(agent_id),
+        timestamp_segment
+    )
+}
+
+fn trim_context_token(raw: &str) -> String {
+    raw.trim_matches(|ch: char| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                '`' | '"' | '\'' | ',' | ';' | ':' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+    })
+    .trim_end_matches('.')
+    .to_string()
+}
+
+fn looks_like_file_pattern(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return false;
+    }
+    value.contains('/')
+        && (value.contains('*')
+            || value.ends_with(".rs")
+            || value.ends_with(".ts")
+            || value.ends_with(".tsx")
+            || value.ends_with(".js")
+            || value.ends_with(".jsx")
+            || value.ends_with(".py")
+            || value.ends_with(".go")
+            || value.ends_with(".java")
+            || value.ends_with(".md")
+            || value.ends_with(".toml")
+            || value.ends_with(".json")
+            || value.ends_with(".yaml")
+            || value.ends_with(".yml"))
+}
+
+fn wildcard_for_file_path(path: &str) -> Option<String> {
+    let slash = path.rfind('/')?;
+    let dot = path.rfind('.')?;
+    if dot <= slash {
+        return None;
+    }
+    Some(format!("{}/*{}", &path[..slash], &path[dot..]))
+}
+
+fn collect_metadata_file_patterns(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(raw) => {
+            let token = trim_context_token(raw);
+            if looks_like_file_pattern(&token) {
+                out.push(token.clone());
+                if let Some(wildcard) = wildcard_for_file_path(&token) {
+                    out.push(wildcard);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_metadata_file_patterns(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                let key = key.to_ascii_lowercase();
+                if key.contains("file") || key.contains("path") {
+                    collect_metadata_file_patterns(value, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn infer_file_patterns(source_entries: &[MemoryEntry]) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for entry in source_entries {
+        for candidate in [&entry.path, &entry.location] {
+            let token = trim_context_token(candidate);
+            if looks_like_file_pattern(&token) {
+                patterns.push(token.clone());
+                if let Some(wildcard) = wildcard_for_file_path(&token) {
+                    patterns.push(wildcard);
+                }
+            }
+        }
+        collect_metadata_file_patterns(&entry.metadata, &mut patterns);
+        for token in entry.text.split_whitespace() {
+            let token = trim_context_token(token);
+            if looks_like_file_pattern(&token) {
+                patterns.push(token.clone());
+                if let Some(wildcard) = wildcard_for_file_path(&token) {
+                    patterns.push(wildcard);
+                }
+            }
+        }
+    }
+    dedup_strings(patterns).into_iter().take(12).collect()
+}
+
+fn looks_like_error_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "error",
+            "failed",
+            "failure",
+            "panic",
+            "exception",
+            "could not",
+            "cannot",
+            "linker",
+            "报错",
+            "错误",
+            "失败",
+        ],
+    )
+}
+
+fn infer_error_patterns(distill_text: &str, source_entries: &[MemoryEntry]) -> Vec<String> {
+    let mut patterns = Vec::new();
+    for text in std::iter::once(distill_text.to_string()).chain(
+        source_entries
+            .iter()
+            .flat_map(|entry| [entry.summary.clone(), entry.text.clone()]),
+    ) {
+        for line in text.lines() {
+            if looks_like_error_line(line) {
+                patterns.push(line.trim().chars().take(120).collect::<String>());
+            }
+        }
+    }
+    dedup_strings(patterns).into_iter().take(8).collect()
+}
+
+fn mentions_rejection(text: &str) -> bool {
+    contains_any(
+        &text.to_ascii_lowercase(),
+        &[
+            "reject",
+            "rejected",
+            "avoid",
+            "do not",
+            "don't",
+            "never",
+            "instead of",
+            "rather than",
+            "拒绝",
+            "不要",
+            "避免",
+            "禁止",
+        ],
+    )
+}
+
+fn guide_edge_relations(guide_type: &str, distill_text: &str) -> Vec<&'static str> {
+    let mut relations = vec!["distilled_from"];
+    match guide_type {
+        GUIDE_TYPE_FIX_PATTERN => relations.push("fixed_by"),
+        _ => relations.push("causes"),
+    }
+    if mentions_rejection(distill_text) {
+        relations.push("rejected_because");
+    }
+    relations
+}
+
+pub(super) fn build_distill_edges(
+    distill_entry: &MemoryEntry,
+    source_entries: &[MemoryEntry],
+    guide_type: &str,
+    created_at: &str,
+) -> Vec<memory_core::MemoryEdge> {
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+    for source in source_entries {
+        for relation in guide_edge_relations(guide_type, &distill_entry.text) {
+            let (source_id, target_id, weight) = match relation {
+                "distilled_from" => (distill_entry.id.clone(), source.id.clone(), 1.0),
+                "fixed_by" => (source.id.clone(), distill_entry.id.clone(), 0.9),
+                "rejected_because" => (distill_entry.id.clone(), source.id.clone(), 0.75),
+                _ => (source.id.clone(), distill_entry.id.clone(), 0.7),
+            };
+            if seen.insert((source_id.clone(), target_id.clone(), relation.to_string())) {
+                edges.push(memory_core::MemoryEdge {
+                    source_id,
+                    target_id,
+                    relation: relation.to_string(),
+                    weight,
+                    metadata: json!({
+                        "source": "foundry_distill",
+                        "guide_type": guide_type,
+                    }),
+                    created_at: created_at.to_string(),
+                    valid_from: created_at.to_string(),
+                    valid_to: None,
+                });
+            }
+        }
+    }
+    edges
+}
+
 async fn process_memory_neighborhood_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
@@ -841,12 +1164,21 @@ async fn process_memory_distill_job(
         .target_agent_id
         .as_deref()
         .unwrap_or("unknown-agent");
-    let distill_root = build_foundry_distill_root(agent_id);
     let timestamp = Utc::now().to_rfc3339();
+    let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let memory_id = uuid::Uuid::new_v4().to_string();
+    let guide_type = classify_distill_guide_type(&distill_text, &source_entries);
+    let file_patterns = infer_file_patterns(&source_entries);
+    let error_patterns = infer_error_patterns(&distill_text, &source_entries);
+    let legacy_distill_root = build_foundry_distill_root(agent_id);
     let metadata = crate::provenance::inject_provenance(
         server,
         json!({
+            "guide": true,
+            "guide_type": guide_type,
+            "guide_layer": "guide",
+            "file_patterns": file_patterns,
+            "error_patterns": error_patterns,
             "source_memory_ids": source_entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>(),
             "source_path_prefix": item.path_prefix,
             "namespace_key": namespace_key,
@@ -854,6 +1186,7 @@ async fn process_memory_distill_job(
             "bucket_key": bucket_key,
             "quality_flags": quality_flags,
             "job_id": item.job.id,
+            "legacy_distill_root": legacy_distill_root,
         }),
         "foundry_worker",
         "memory_distill",
@@ -871,15 +1204,20 @@ async fn process_memory_distill_job(
 
     let distill_entry = MemoryEntry {
         id: memory_id.clone(),
-        path: format!("{distill_root}/{}", Utc::now().format("%Y%m%dT%H%M%S")),
+        path: build_guide_distill_path(agent_id, guide_type, &timestamp_segment),
         summary: distill_text.chars().take(100).collect(),
         text: distill_text,
         importance: 0.75,
         timestamp,
-        category: "other".to_string(),
-        topic: "foundry_distill".to_string(),
+        category: "guide".to_string(),
+        topic: guide_type.to_string(),
         keywords: dedup_strings({
-            let mut kws = vec!["foundry".to_string(), "distill".to_string()];
+            let mut kws = vec![
+                "foundry".to_string(),
+                "distill".to_string(),
+                "guide".to_string(),
+                guide_type.to_string(),
+            ];
             for entry in &source_entries {
                 kws.extend(entry.keywords.iter().cloned());
             }
@@ -913,6 +1251,20 @@ async fn process_memory_distill_job(
         store
             .upsert(&distill_entry)
             .map_err(|e| format!("Failed to save foundry distill memory: {e}"))
+    })?;
+    let edges = build_distill_edges(
+        &distill_entry,
+        &source_entries,
+        guide_type,
+        &distill_entry.timestamp,
+    );
+    with_foundry_store(server, item, |store| {
+        for edge in &edges {
+            store
+                .add_edge(edge)
+                .map_err(|e| format!("Failed to save foundry distill edge: {e}"))?;
+        }
+        Ok(())
     })?;
     queue_capture_enrichment(
         server,
