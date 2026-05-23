@@ -2,7 +2,9 @@ use super::capture::*;
 use super::helpers::*;
 use super::recall_cache::process_recall_rerank_cache_job;
 use super::*;
+use regex::Regex;
 use std::collections::{HashMap, HashSet};
+use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
 /// Outcome of a memory-distill job. Carries a structured skip reason so
@@ -590,19 +592,56 @@ pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
 
-fn guide_haystack(distill_text: &str, source_entries: &[MemoryEntry]) -> String {
-    let mut parts = vec![distill_text.to_string()];
-    for entry in source_entries {
-        parts.push(entry.summary.clone());
-        parts.push(entry.text.clone());
-        parts.push(entry.topic.clone());
-        parts.extend(entry.keywords.clone());
+/// Iterate over every text fragment that should be searched when classifying
+/// a distill guide. Returns borrowed slices so callers can scan without
+/// cloning or building a giant intermediate string (previously the
+/// `guide_haystack` function joined every field into one lowercase blob).
+fn guide_text_fragments<'a>(
+    distill_text: &'a str,
+    source_entries: &'a [MemoryEntry],
+) -> impl Iterator<Item = &'a str> {
+    std::iter::once(distill_text).chain(source_entries.iter().flat_map(|entry| {
+        std::iter::once(entry.summary.as_str())
+            .chain(std::iter::once(entry.text.as_str()))
+            .chain(std::iter::once(entry.topic.as_str()))
+            .chain(entry.keywords.iter().map(String::as_str))
+    }))
+}
+
+/// ASCII-case-insensitive `haystack.contains(needle)` without allocating.
+/// Non-ASCII bytes (e.g. CJK) compare byte-for-byte, which is what we want
+/// because all CJK needles in this module are already lower-case-free.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    if n.is_empty() {
+        return true;
     }
-    parts.join("\n").to_ascii_lowercase()
+    let h = haystack.as_bytes();
+    if h.len() < n.len() {
+        return false;
+    }
+    h.windows(n.len())
+        .any(|window| window.eq_ignore_ascii_case(n))
+}
+
+fn fragments_contain_any<'a, I>(fragments: I, needles: &[&str]) -> bool
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    for fragment in fragments {
+        for needle in needles {
+            if contains_ignore_ascii_case(fragment, needle) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
+    needles
+        .iter()
+        .any(|needle| contains_ignore_ascii_case(haystack, needle))
 }
 
 fn has_numbered_steps(text: &str) -> bool {
@@ -622,9 +661,13 @@ pub(super) fn classify_distill_guide_type(
     distill_text: &str,
     source_entries: &[MemoryEntry],
 ) -> &'static str {
-    let haystack = guide_haystack(distill_text, source_entries);
-    if contains_any(
-        &haystack,
+    // Scan field-by-field instead of building one giant lowercase string.
+    // Each call below re-iterates fragments cheaply (just borrows + iterator chain),
+    // so worst-case cost is O(needles * fragments * scan) without any allocation.
+    let fragments = || guide_text_fragments(distill_text, source_entries);
+
+    if fragments_contain_any(
+        fragments(),
         &[
             "fix",
             "fixed",
@@ -645,8 +688,8 @@ pub(super) fn classify_distill_guide_type(
     ) {
         return GUIDE_TYPE_FIX_PATTERN;
     }
-    if contains_any(
-        &haystack,
+    if fragments_contain_any(
+        fragments(),
         &[
             "must",
             "must not",
@@ -665,8 +708,8 @@ pub(super) fn classify_distill_guide_type(
     ) {
         return GUIDE_TYPE_CONSTRAINT;
     }
-    if contains_any(
-        &haystack,
+    if fragments_contain_any(
+        fragments(),
         &[
             "decided", "decision", "choose", "chosen", "accepted", "rejected", "tradeoff", "adr",
             "决定", "取舍", "拒绝",
@@ -677,8 +720,8 @@ pub(super) fn classify_distill_guide_type(
     {
         return GUIDE_TYPE_DECISION;
     }
-    if contains_any(
-        &haystack,
+    if fragments_contain_any(
+        fragments(),
         &[
             "runbook",
             "checklist",
@@ -721,24 +764,52 @@ fn trim_context_token(raw: &str) -> String {
 
 fn looks_like_file_pattern(value: &str) -> bool {
     let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
     if value.starts_with("http://") || value.starts_with("https://") {
         return false;
     }
-    value.contains('/')
-        && (value.contains('*')
-            || value.ends_with(".rs")
-            || value.ends_with(".ts")
-            || value.ends_with(".tsx")
-            || value.ends_with(".js")
-            || value.ends_with(".jsx")
-            || value.ends_with(".py")
-            || value.ends_with(".go")
-            || value.ends_with(".java")
-            || value.ends_with(".md")
-            || value.ends_with(".toml")
-            || value.ends_with(".json")
-            || value.ends_with(".yaml")
-            || value.ends_with(".yml"))
+    // Accept both nested paths ("crates/foo/bar.rs", "src/**/*.ts") and
+    // top-level files ("Cargo.toml", "README.md"). For top-level tokens we
+    // require a dotted file extension to avoid picking up bare words like
+    // "json" or "must" that happen to match an extension keyword.
+    let has_path_separator = value.contains('/');
+    let has_wildcard = value.contains('*');
+    if !has_path_separator && !has_wildcard {
+        // Top-level file: require an extension and a non-empty stem (so we
+        // skip values like ".md" or "foo." that aren't real file names).
+        match value.rfind('.') {
+            Some(dot) if dot > 0 && dot < value.len() - 1 => {}
+            _ => return false,
+        }
+    }
+    has_wildcard
+        || value.ends_with(".rs")
+        || value.ends_with(".ts")
+        || value.ends_with(".tsx")
+        || value.ends_with(".js")
+        || value.ends_with(".jsx")
+        || value.ends_with(".py")
+        || value.ends_with(".go")
+        || value.ends_with(".java")
+        || value.ends_with(".md")
+        || value.ends_with(".toml")
+        || value.ends_with(".json")
+        || value.ends_with(".yaml")
+        || value.ends_with(".yml")
+}
+
+/// Regex picking up tokens that could be a file path or wildcard pattern.
+/// Matches sequences of path-safe characters that either contain a `/` and
+/// a `.`, contain a `*`, or look like a top-level file (`Cargo.toml`).
+/// Used to avoid the previous per-whitespace-token `String` allocation when
+/// scanning entry bodies for file references.
+fn file_pattern_token_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"[A-Za-z0-9_./*\-]+").expect("file pattern regex compiles")
+    })
 }
 
 fn wildcard_for_file_path(path: &str) -> Option<String> {
@@ -748,6 +819,28 @@ fn wildcard_for_file_path(path: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}/*{}", &path[..slash], &path[dot..]))
+}
+
+fn collect_file_patterns_from_text(text: &str, out: &mut Vec<String>) {
+    for mat in file_pattern_token_regex().find_iter(text) {
+        let candidate = mat.as_str();
+        // Quick byte-level reject before allocating: must have either `*`,
+        // or a `.` somewhere (file extension), or contain a `/`. Lets us
+        // skip plain identifiers cheaply.
+        let bytes = candidate.as_bytes();
+        if !bytes.iter().any(|b| matches!(b, b'*' | b'.' | b'/')) {
+            continue;
+        }
+        let token = trim_context_token(candidate);
+        if looks_like_file_pattern(&token) {
+            if let Some(wildcard) = wildcard_for_file_path(&token) {
+                out.push(token);
+                out.push(wildcard);
+            } else {
+                out.push(token);
+            }
+        }
+    }
 }
 
 fn collect_metadata_file_patterns(value: &serde_json::Value, out: &mut Vec<String>) {
@@ -791,15 +884,10 @@ fn infer_file_patterns(source_entries: &[MemoryEntry]) -> Vec<String> {
             }
         }
         collect_metadata_file_patterns(&entry.metadata, &mut patterns);
-        for token in entry.text.split_whitespace() {
-            let token = trim_context_token(token);
-            if looks_like_file_pattern(&token) {
-                patterns.push(token.clone());
-                if let Some(wildcard) = wildcard_for_file_path(&token) {
-                    patterns.push(wildcard);
-                }
-            }
-        }
+        // Regex-driven token scan: avoids the previous per-whitespace-token
+        // `trim_context_token` allocation, which produced one `String` per
+        // word in every entry body (very wasteful on long distill sources).
+        collect_file_patterns_from_text(&entry.text, &mut patterns);
     }
     dedup_strings(patterns).into_iter().take(12).collect()
 }
@@ -1188,8 +1276,9 @@ async fn process_memory_distill_job(
         .target_agent_id
         .as_deref()
         .unwrap_or("unknown-agent");
-    let timestamp = Utc::now().to_rfc3339();
-    let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let now = Utc::now();
+    let timestamp = now.to_rfc3339();
+    let timestamp_segment = now.format("%Y%m%dT%H%M%S").to_string();
     let memory_id = uuid::Uuid::new_v4().to_string();
     let guide_type = classify_distill_guide_type(&distill_text, &source_entries);
     let file_patterns = infer_file_patterns(&source_entries);
