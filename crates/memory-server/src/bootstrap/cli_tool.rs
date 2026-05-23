@@ -46,7 +46,10 @@ pub(super) async fn run_cli_command(
         // carries `#[command(alias = "save")]`. The dispatcher therefore only
         // sees `Remember`, even when the user typed `tachi save TEXT`.
         Commands::Stats => {
-            let store = open_cli_store_read_only(db_path)?;
+            // Respect `--project-db` when supplied so `tachi --project-db X stats`
+            // actually reports on DB X instead of silently falling back to global.
+            let target_path = project_db_path.unwrap_or(db_path);
+            let store = open_cli_store_read_only(target_path)?;
             let stats = store.stats(false)?;
             print_pretty_json(&json!({
                 "total": stats.total,
@@ -55,7 +58,7 @@ pub(super) async fn run_cli_command(
                 "by_root_path": stats.by_root_path,
                 "warnings": ["stats opened database read-only; no maintenance writes attempted"],
                 "database": {
-                    "path": db_path.display().to_string(),
+                    "path": target_path.display().to_string(),
                     "vec_available": store.vec_available,
                 }
             }))
