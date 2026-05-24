@@ -28,7 +28,7 @@ use memory_core::{
 
 use crate::cli::{DaemonAction, FoundryAction};
 use crate::daemon_lock::{process_alive, read_pid_file};
-use crate::manifest::Manifest;
+use crate::manifest::{DbRole, Manifest};
 
 /// `in_progress` jobs older than this are flagged as stuck in `tachi status`.
 /// Matches the safety-net poll cadence in [`crate::foundry_scheduler`] with
@@ -345,7 +345,7 @@ fn collect_snapshot(
         } else {
             entry.scope_hint.clone()
         };
-        let orphan = is_orphan_path(&path, global_db_path, project_db_path);
+        let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
         if !path.exists() {
             dbs.push(DbStatus {
                 path: entry.path.clone(),
@@ -438,7 +438,12 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
 /// Mirrors the scheduler's current reduced-scope routing: own global DB,
 /// own project DB, and canonical `~/.tachi/projects/<name>/memory.db` are
 /// routable; everything else is an orphan until DbScope::Path exists.
-fn is_orphan_path(db_path: &Path, global_db_path: &Path, project_db_path: Option<&Path>) -> bool {
+fn is_orphan_entry(
+    entry: &crate::manifest::DbEntry,
+    db_path: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> bool {
     if paths_equal(db_path, global_db_path) {
         return false;
     }
@@ -447,7 +452,15 @@ fn is_orphan_path(db_path: &Path, global_db_path: &Path, project_db_path: Option
             return false;
         }
     }
-    named_project_from_path(db_path).is_none()
+    if named_project_from_path(db_path).is_some() {
+        return false;
+    }
+    !(entry.allow_write
+        && entry.schema_kind == "tachi"
+        && matches!(
+            entry.role,
+            DbRole::Agent | DbRole::Foundry | DbRole::Unknown
+        ))
 }
 
 fn named_project_from_path(db_path: &Path) -> Option<String> {
@@ -927,16 +940,51 @@ fn read_per_db_config(path: &Path) -> Result<PerDbConfig, Box<dyn std::error::Er
 mod tests {
     use super::*;
 
+    fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
+        crate::manifest::DbEntry {
+            path: "/tmp/status/memory.db".to_string(),
+            role,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".to_string(),
+            scope_hint: scope_hint.to_string(),
+            notes: String::new(),
+        }
+    }
+
     #[test]
     fn orphan_classification_matches_scheduler_routing() {
         let global = PathBuf::from("/tmp/status/global/memory.db");
         let project = PathBuf::from("/tmp/status/project/memory.db");
         let named = PathBuf::from("/home/u/.tachi/projects/sigil/memory.db");
         let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
-        assert!(!is_orphan_path(&global, &global, Some(&project)));
-        assert!(!is_orphan_path(&project, &global, Some(&project)));
-        assert!(!is_orphan_path(&named, &global, Some(&project)));
-        assert!(is_orphan_path(&agent, &global, Some(&project)));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Global, "global"),
+            &global,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Project, "project"),
+            &project,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Project, "project:sigil"),
+            &named,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Agent, "openclaw-agent:main"),
+            &agent,
+            &global,
+            Some(&project)
+        ));
     }
 
     #[test]

@@ -4,22 +4,17 @@ use super::recall_cache::process_recall_rerank_cache_job;
 use super::*;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 
 /// Outcome of a memory-distill job. Carries a structured skip reason so
 /// foundry_jobs.metadata.skip_reason answers "why didn't this run?" instead
 /// of the previous opaque "worker reported no-op".
 pub(crate) enum DistillOutcome {
-    /// Wrote a new distill memory with this id. The id is preserved on the
-    /// variant so future call sites (e.g. metrics, tracing, or a follow-up
-    /// rerank scheduler) can correlate the newly-written memory with the
-    /// originating job; today only the `Completed` status is surfaced.
     Wrote(#[allow(dead_code)] String),
     Skipped(String),
 }
 
-// ---- Foundry distill skip-reason codes (stable, surfaced in DB metadata) ----
 /// All source memories filtered out (archived or already a distill output).
 pub(crate) const SKIP_NO_SOURCE_ENTRIES: &str = "no_source_entries";
 /// No coherent topic/entity bucket among the source memories.
@@ -108,6 +103,7 @@ pub(super) fn enqueue_capture_maintenance_jobs(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<String>,
+    db_path: Option<std::path::PathBuf>,
     agent_id: &str,
     path_prefix: &str,
     memory_ids: &[String],
@@ -173,6 +169,7 @@ pub(super) fn enqueue_capture_maintenance_jobs(
             job: spec.clone(),
             target_db,
             named_project: named_project.clone(),
+            db_path: db_path.clone(),
             path_prefix: path_prefix.to_string(),
             memory_ids: memory_ids.to_vec(),
         })?;
@@ -185,6 +182,7 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<String>,
+    db_path: Option<std::path::PathBuf>,
     agent_id: &str,
     path_prefix: &str,
     memory_ids: &[String],
@@ -193,6 +191,7 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
         server,
         target_db,
         named_project,
+        db_path,
         agent_id,
         path_prefix,
         memory_ids,
@@ -448,6 +447,7 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
             job,
             target_db: DbScope::Project,
             named_project: None,
+            db_path: None,
             path_prefix: group.path_prefix,
             memory_ids: group.memory_ids,
         })?;
@@ -462,7 +462,9 @@ pub(super) fn with_foundry_store<T>(
     item: &FoundryMaintenanceItem,
     f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
-    if let Some(project_name) = item.named_project.as_deref() {
+    if let Some(ref db_path) = item.db_path {
+        server.with_path_store(db_path, f)
+    } else if let Some(project_name) = item.named_project.as_deref() {
         server.with_named_project_store(project_name, f)
     } else {
         server.with_store_for_scope(item.target_db, f)
@@ -474,7 +476,9 @@ pub(super) fn with_foundry_store_read<T>(
     item: &FoundryMaintenanceItem,
     f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
 ) -> Result<T, String> {
-    if let Some(project_name) = item.named_project.as_deref() {
+    if let Some(ref db_path) = item.db_path {
+        server.with_path_store_read(db_path, f)
+    } else if let Some(project_name) = item.named_project.as_deref() {
         server.with_named_project_store_read(project_name, f)
     } else {
         server.with_store_for_scope_read(item.target_db, f)
@@ -568,10 +572,6 @@ pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
 
-/// Iterate over every text fragment that should be searched when classifying
-/// a distill guide. Returns borrowed slices so callers can scan without
-/// cloning or building a giant intermediate string (previously the
-/// `guide_haystack` function joined every field into one lowercase blob).
 fn guide_text_fragments<'a>(
     distill_text: &'a str,
     source_entries: &'a [MemoryEntry],
@@ -584,9 +584,6 @@ fn guide_text_fragments<'a>(
     }))
 }
 
-/// ASCII-case-insensitive `haystack.contains(needle)` without allocating.
-/// Non-ASCII bytes (e.g. CJK) compare byte-for-byte, which is what we want
-/// because all CJK needles in this module are already lower-case-free.
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let n = needle.as_bytes();
     if n.is_empty() {
@@ -637,9 +634,6 @@ pub(super) fn classify_distill_guide_type(
     distill_text: &str,
     source_entries: &[MemoryEntry],
 ) -> &'static str {
-    // Scan field-by-field instead of building one giant lowercase string.
-    // Each call below re-iterates fragments cheaply (just borrows + iterator chain),
-    // so worst-case cost is O(needles * fragments * scan) without any allocation.
     let fragments = || guide_text_fragments(distill_text, source_entries);
 
     if fragments_contain_any(
@@ -746,15 +740,9 @@ fn looks_like_file_pattern(value: &str) -> bool {
     if value.starts_with("http://") || value.starts_with("https://") {
         return false;
     }
-    // Accept both nested paths ("crates/foo/bar.rs", "src/**/*.ts") and
-    // top-level files ("Cargo.toml", "README.md"). For top-level tokens we
-    // require a dotted file extension to avoid picking up bare words like
-    // "json" or "must" that happen to match an extension keyword.
     let has_path_separator = value.contains('/');
     let has_wildcard = value.contains('*');
     if !has_path_separator && !has_wildcard {
-        // Top-level file: require an extension and a non-empty stem (so we
-        // skip values like ".md" or "foo." that aren't real file names).
         match value.rfind('.') {
             Some(dot) if dot > 0 && dot < value.len() - 1 => {}
             _ => return false,
@@ -776,16 +764,9 @@ fn looks_like_file_pattern(value: &str) -> bool {
         || value.ends_with(".yml")
 }
 
-/// Regex picking up tokens that could be a file path or wildcard pattern.
-/// Matches sequences of path-safe characters that either contain a `/` and
-/// a `.`, contain a `*`, or look like a top-level file (`Cargo.toml`).
-/// Used to avoid the previous per-whitespace-token `String` allocation when
-/// scanning entry bodies for file references.
 fn file_pattern_token_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"[A-Za-z0-9_./*\-]+").expect("file pattern regex compiles")
-    })
+    REGEX.get_or_init(|| Regex::new(r"[A-Za-z0-9_./*\-]+").expect("file pattern regex compiles"))
 }
 
 fn wildcard_for_file_path(path: &str) -> Option<String> {
@@ -800,9 +781,6 @@ fn wildcard_for_file_path(path: &str) -> Option<String> {
 fn collect_file_patterns_from_text(text: &str, out: &mut Vec<String>) {
     for mat in file_pattern_token_regex().find_iter(text) {
         let candidate = mat.as_str();
-        // Quick byte-level reject before allocating: must have either `*`,
-        // or a `.` somewhere (file extension), or contain a `/`. Lets us
-        // skip plain identifiers cheaply.
         let bytes = candidate.as_bytes();
         if !bytes.iter().any(|b| matches!(b, b'*' | b'.' | b'/')) {
             continue;
@@ -860,9 +838,6 @@ fn infer_file_patterns(source_entries: &[MemoryEntry]) -> Vec<String> {
             }
         }
         collect_metadata_file_patterns(&entry.metadata, &mut patterns);
-        // Regex-driven token scan: avoids the previous per-whitespace-token
-        // `trim_context_token` allocation, which produced one `String` per
-        // word in every entry body (very wasteful on long distill sources).
         collect_file_patterns_from_text(&entry.text, &mut patterns);
     }
     dedup_strings(patterns).into_iter().take(12).collect()
@@ -890,10 +865,10 @@ fn looks_like_error_line(line: &str) -> bool {
 
 fn infer_error_patterns(distill_text: &str, source_entries: &[MemoryEntry]) -> Vec<String> {
     let mut patterns = Vec::new();
-    for text in std::iter::once(distill_text.to_string()).chain(
+    for text in std::iter::once(distill_text).chain(
         source_entries
             .iter()
-            .flat_map(|entry| [entry.summary.clone(), entry.text.clone()]),
+            .flat_map(|entry| [entry.summary.as_str(), entry.text.as_str()]),
     ) {
         for line in text.lines() {
             if looks_like_error_line(line) {
@@ -996,6 +971,7 @@ async fn process_memory_neighborhood_job(
             server,
             item.target_db,
             item.named_project.as_deref(),
+            item.db_path.as_ref(),
             &item.path_prefix,
             &vector,
             FOUNDRY_RELATED_LIMIT + 2,
@@ -1041,6 +1017,7 @@ async fn process_memory_neighborhood_job(
                     server,
                     item.target_db,
                     item.named_project.as_deref(),
+                    item.db_path.as_ref(),
                     &merged,
                 )?;
                 let changed = with_foundry_store(server, item, |store| {
@@ -1055,6 +1032,7 @@ async fn process_memory_neighborhood_job(
                     server,
                     item.target_db,
                     item.named_project.clone(),
+                    item.db_path.clone(),
                     &merged,
                     true,
                     item.job.target_agent_id.as_deref(),
@@ -1260,7 +1238,7 @@ async fn process_memory_distill_job(
     let file_patterns = infer_file_patterns(&source_entries);
     let error_patterns = infer_error_patterns(&distill_text, &source_entries);
     let legacy_distill_root = build_foundry_distill_root(agent_id);
-    let metadata = crate::provenance::inject_provenance(
+    let mut metadata = crate::provenance::inject_provenance(
         server,
         json!({
             "guide": true,
@@ -1290,6 +1268,13 @@ async fn process_memory_distill_job(
             "path_prefix": item.path_prefix,
         }),
     );
+    if let Some(db_path) = item.db_path.as_ref() {
+        metadata = crate::provenance::restamp_provenance_for_destination(
+            metadata,
+            db_path,
+            item.target_db,
+        );
+    }
 
     let distill_entry = MemoryEntry {
         id: memory_id.clone(),
@@ -1359,6 +1344,7 @@ async fn process_memory_distill_job(
         server,
         item.target_db,
         item.named_project.clone(),
+        item.db_path.clone(),
         &distill_entry,
         false,
         None,

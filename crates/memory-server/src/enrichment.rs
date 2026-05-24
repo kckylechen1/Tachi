@@ -13,6 +13,7 @@ pub(super) struct EnrichmentItem {
     pub(super) needs_summary: bool,
     pub(super) target_db: DbScope,
     pub(super) named_project: Option<String>,
+    pub(super) db_path: Option<PathBuf>,
     pub(super) foundry_agent_id: Option<String>,
     pub(super) foundry_path_prefix: Option<String>,
     pub(super) revision: i64,
@@ -170,6 +171,8 @@ impl MemoryServer {
 
                 let res = if let Some(ref project_name) = item.named_project {
                     self.with_named_project_store(project_name, update_action)
+                } else if let Some(ref db_path) = item.db_path {
+                    self.with_path_store(db_path, update_action)
                 } else {
                     self.with_store_for_scope(item.target_db, update_action)
                 };
@@ -218,6 +221,7 @@ impl MemoryServer {
                                 self,
                                 item.target_db,
                                 item.named_project.clone(),
+                                item.db_path.clone(),
                                 &agent_id_owned,
                                 &path_prefix_owned,
                                 &[item.id.clone()],

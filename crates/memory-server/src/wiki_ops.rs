@@ -670,6 +670,7 @@ pub(crate) async fn handle_wiki_ingest(
         needs_summary: false,
         target_db: DbScope::Project,
         named_project: Some("wiki".to_string()),
+        db_path: None,
         foundry_agent_id: None,
         foundry_path_prefix: None,
         revision: 1,

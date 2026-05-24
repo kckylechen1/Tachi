@@ -571,6 +571,7 @@ impl MemoryServer {
                             job: job.spec,
                             target_db,
                             named_project: job.named_project,
+                            db_path: None,
                             path_prefix: job.path_prefix,
                             memory_ids: job.memory_ids,
                         };

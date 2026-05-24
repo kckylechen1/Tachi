@@ -166,6 +166,7 @@ pub(crate) async fn handle_save_memory(
             needs_summary,
             target_db,
             named_project: params.project.clone(),
+            db_path: None,
             foundry_agent_id: None,
             foundry_path_prefix: None,
             revision: 1,
