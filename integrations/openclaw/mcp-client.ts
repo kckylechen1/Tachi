@@ -272,10 +272,23 @@ export class MemoryMcpClient {
   }
 
   private resolveServerCommand(): string {
-    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > Homebrew install > local build > PATH (tachi, then memory-server)
+    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > user install > local build > Homebrew > PATH.
+    // Homebrew can lag behind the active development binary, so prefer ~/bin/tachi
+    // when present. Operators can still pin a different binary with TACHI_BIN.
     const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
     if (fromEnv) {
       return fromEnv;
+    }
+
+    const userBinary = path.join(os.homedir(), "bin", "tachi");
+    if (fs.existsSync(userBinary)) {
+      return userBinary;
+    }
+
+    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    const localBinary = path.resolve(moduleDir, "../../target/release/memory-server");
+    if (fs.existsSync(localBinary)) {
+      return localBinary;
     }
 
     const packagedCandidates = process.platform === "darwin"
@@ -287,11 +300,6 @@ export class MemoryMcpClient {
       }
     }
 
-    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-    const localBinary = path.resolve(moduleDir, "../../target/release/memory-server");
-    if (fs.existsSync(localBinary)) {
-      return localBinary;
-    }
     // Prefer "tachi" (brew install name) over "memory-server" (dev name)
     return "tachi";
   }

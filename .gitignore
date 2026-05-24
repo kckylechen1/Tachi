@@ -10,6 +10,7 @@
 
 # oh-my-codex (omx) plugin artifacts
 .omx/
+.omo/
 
 # Node.js
 node_modules/

@@ -206,6 +206,7 @@ pub(super) fn search_similar_capture_entries(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
     path_prefix: &str,
     query_vec: &[f32],
     top_k: usize,
@@ -231,6 +232,8 @@ pub(super) fn search_similar_capture_entries(
 
     if let Some(project_name) = named_project {
         server.with_named_project_store_read(project_name, search_action)
+    } else if let Some(db_path) = db_path {
+        server.with_path_store_read(db_path, search_action)
     } else {
         server.with_store_for_scope_read(target_db, search_action)
     }
@@ -240,6 +243,7 @@ pub(super) fn persist_capture_entry(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
+    db_path: Option<&std::path::PathBuf>,
     entry: &MemoryEntry,
 ) -> Result<(), String> {
     if let Some(project_name) = named_project {
@@ -254,6 +258,21 @@ pub(super) fn persist_capture_entry(
             store
                 .upsert(&entry)
                 .map_err(|e| format!("Failed to save session capture to '{project_name}': {e}"))
+        })
+    } else if let Some(db_path) = db_path {
+        let mut entry = entry.clone();
+        entry.metadata = crate::provenance::restamp_provenance_for_destination(
+            entry.metadata,
+            db_path,
+            target_db,
+        );
+        server.with_path_store(db_path, |store| {
+            store.upsert(&entry).map_err(|e| {
+                format!(
+                    "Failed to save captured memory to {}: {e}",
+                    db_path.display()
+                )
+            })
         })
     } else {
         let dest_path = match target_db {
@@ -280,6 +299,7 @@ pub(super) fn queue_capture_enrichment(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<String>,
+    db_path: Option<PathBuf>,
     entry: &MemoryEntry,
     needs_summary: bool,
     agent_id: Option<&str>,
@@ -294,7 +314,7 @@ pub(super) fn queue_capture_enrichment(
         needs_summary,
         target_db,
         named_project,
-        db_path: None,
+        db_path,
         foundry_agent_id: agent_id.map(ToString::to_string),
         foundry_path_prefix: path_prefix.map(ToString::to_string),
         revision: entry.revision,

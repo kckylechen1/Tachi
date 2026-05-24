@@ -531,7 +531,10 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         )
         .ok();
     if let Some(sql) = existing_sql.as_deref() {
-        if sql.contains("CHECK (source") || sql.contains("CHECK(source") {
+        let has_source_check = sql.contains("CHECK (source") || sql.contains("CHECK(source");
+        let has_latest_category_values = sql.contains("'guide'");
+        let has_latest_source_values = sql.contains("'foundry_recall_rerank_cache'");
+        if has_source_check && has_latest_category_values && has_latest_source_values {
             // Already migrated; nothing to do.
             return Ok(());
         }
@@ -971,7 +974,7 @@ mod migration_tests {
             );
             CREATE VIRTUAL TABLE memories_fts USING fts5(
                 id UNINDEXED, path, summary, text, keywords, entities,
-                tokenize = 'simple'
+                tokenize = 'unicode61'
             );
             "#,
         )
@@ -1078,6 +1081,85 @@ mod migration_tests {
                 || err.to_string().to_ascii_lowercase().contains("constraint"),
             "expected CHECK violation, got: {err}"
         );
+    }
+
+    #[test]
+    fn migration_updates_stale_enum_checks() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id           TEXT PRIMARY KEY,
+                path         TEXT NOT NULL DEFAULT '/',
+                summary      TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                importance   REAL NOT NULL DEFAULT 0.7,
+                timestamp    TEXT NOT NULL,
+                category     TEXT NOT NULL DEFAULT 'fact',
+                topic        TEXT NOT NULL DEFAULT '',
+                keywords     TEXT NOT NULL DEFAULT '[]',
+                persons      TEXT NOT NULL DEFAULT '[]',
+                entities     TEXT NOT NULL DEFAULT '[]',
+                location     TEXT NOT NULL DEFAULT '',
+                source       TEXT NOT NULL DEFAULT 'manual',
+                scope        TEXT NOT NULL DEFAULT 'general',
+                archived     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access  TEXT,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                metadata     TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain       TEXT,
+                CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
+                CHECK (scope IN ('user','project','general')),
+                CHECK (
+                    source IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')
+                    OR source LIKE 'external:%'
+                )
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, persons, entities, location, source, scope, archived,
+                 created_at, updated_at, access_count, last_access, revision,
+                 metadata, retention_policy, domain)
+               VALUES ('row1', '/notes/x', '', 'hello', 0.5, '2026-04-30T00:00:00Z',
+                       'fact', '', '[]','[]','[]','', 'manual', 'general', 0,
+                       '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
+                       '{}', NULL, NULL);
+            "#,
+        )
+        .unwrap();
+
+        libsimple::enable_auto_extension().unwrap();
+        init_schema(&conn).unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("'guide'"));
+        assert!(sql.contains("'foundry_recall_rerank_cache'"));
+        conn.execute(
+            r#"INSERT INTO memories
+                   (id, path, summary, text, importance, timestamp, category, topic,
+                    keywords, persons, entities, location, source, scope, archived,
+                    created_at, updated_at, access_count, last_access, revision,
+                    metadata, retention_policy, domain)
+                   VALUES ('row2', '/guide/fix/main/x', '', '', 0.5, '2026-04-30T00:00:00Z',
+                           'guide', '', '[]','[]','[]','', 'foundry_recall_rerank_cache', 'project', 0,
+                           '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
+                           '{}', NULL, NULL)"#,
+            [],
+        )
+        .unwrap();
     }
 
     #[test]

@@ -135,6 +135,138 @@ function messageToText(message: any): string {
   return "";
 }
 
+function normalizeCaptureMessage(role: string, content: string): { role: string; content: string } | null {
+  const normalizedRole = role === "assistant" ? "assistant" : "user";
+  const text = String(content || "").trim();
+  if (!text || text === "[OpenClaw heartbeat poll]" || text === "HEARTBEAT_OK") {
+    return null;
+  }
+  return { role: normalizedRole, content: text };
+}
+
+async function readJsonlRows(filePath: string): Promise<any[]> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const rows: any[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      continue;
+    }
+  }
+  return rows;
+}
+
+type SessionIndexEntry = {
+  sessionId?: string;
+  sessionFile?: string;
+};
+
+function addSessionCandidate(files: string[], candidate: string | null | undefined): void {
+  if (!candidate) return;
+  const resolved = path.isAbsolute(candidate) ? candidate : path.resolve(candidate);
+  if (!files.includes(resolved)) {
+    files.push(resolved);
+  }
+}
+
+function addSessionIdCandidates(files: string[], sessionDir: string, sessionId: string | null | undefined): void {
+  if (!sessionId) return;
+  addSessionCandidate(files, path.join(sessionDir, `${sessionId}.jsonl`));
+  addSessionCandidate(files, path.join(sessionDir, `${sessionId}.trajectory.jsonl`));
+}
+
+function addSessionFileCandidates(files: string[], sessionFile: string | null | undefined): void {
+  if (!sessionFile) return;
+  addSessionCandidate(files, sessionFile);
+  if (sessionFile.endsWith(".jsonl") && !sessionFile.endsWith(".trajectory.jsonl")) {
+    addSessionCandidate(files, sessionFile.replace(/\.jsonl$/, ".trajectory.jsonl"));
+  }
+}
+
+async function resolveSessionFiles(agentId: string, sessionId: string | null | undefined, sessionKey: string | null | undefined): Promise<string[]> {
+  const sessionDir = path.join(os.homedir(), ".openclaw", "agents", agentId, "sessions");
+  const files: string[] = [];
+  const refs = [sessionId, sessionKey].filter((value): value is string => Boolean(value));
+  for (const ref of refs) {
+    addSessionIdCandidates(files, sessionDir, ref);
+  }
+
+  const sessionIndex = await readJsonFile<Record<string, SessionIndexEntry>>(
+    path.join(sessionDir, "sessions.json"),
+    {},
+  );
+  for (const ref of refs) {
+    const indexed = sessionIndex[ref];
+    if (indexed) {
+      addSessionFileCandidates(files, indexed.sessionFile);
+      addSessionIdCandidates(files, sessionDir, indexed.sessionId);
+    }
+    for (const entry of Object.values(sessionIndex)) {
+      if (entry?.sessionId !== ref && entry?.sessionFile !== ref) continue;
+      addSessionFileCandidates(files, entry.sessionFile);
+      addSessionIdCandidates(files, sessionDir, entry.sessionId);
+    }
+  }
+  return files;
+}
+
+function captureMessagesFromRows(rows: any[]): Array<{ role: string; content: string }> {
+  const messages: Array<{ role: string; content: string }> = [];
+  for (const row of rows) {
+    if (row?.type === "message" && row.message) {
+      const role = typeof row.message.role === "string" ? row.message.role : "unknown";
+      if (role !== "user" && role !== "assistant") continue;
+      const message = normalizeCaptureMessage(role, messageToText(row.message));
+      if (message) messages.push(message);
+      continue;
+    }
+
+    if (row?.type === "prompt.submitted" && typeof row?.data?.prompt === "string") {
+      const message = normalizeCaptureMessage("user", row.data.prompt);
+      if (message) messages.push(message);
+      continue;
+    }
+
+    if (row?.type === "model.completed") {
+      if (Array.isArray(row?.data?.messagesSnapshot)) {
+        messages.push(
+          ...captureMessagesFromRows(row.data.messagesSnapshot.map((message: any) => ({ type: "message", message }))),
+        );
+        continue;
+      }
+      const texts = Array.isArray(row?.data?.assistantTexts) ? row.data.assistantTexts : [];
+      for (const text of texts) {
+        if (typeof text !== "string") continue;
+        const message = normalizeCaptureMessage("assistant", text);
+        if (message) messages.push(message);
+      }
+    }
+  }
+  return messages;
+}
+
+async function readSessionMessages(
+  agentId: string,
+  sessionId: string | null | undefined,
+  sessionKey: string | null | undefined,
+): Promise<Array<{ role: string; content: string }>> {
+  const sessionFiles = await resolveSessionFiles(agentId, sessionId, sessionKey);
+  for (const sessionFile of sessionFiles) {
+    const messages = captureMessagesFromRows(await readJsonlRows(sessionFile));
+    if (messages.length > 0) {
+      return messages.slice(-8);
+    }
+  }
+  return [];
+}
+
 type SelfEvolutionInsight = {
   note: string;
   messageIndex: number;
@@ -1150,9 +1282,35 @@ export const memoryHybridBridgePlugin = {
       const memoryAgentId = resolveMemoryAgentId(agentId);
       const scope = resolveScope(context, event);
 
-      if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) {
+      if (!event?.success) {
         await finalizeAgentRun(scope, agentId, context, Boolean(event?.success), null);
         return;
+      }
+
+      const sessionId = event?.sessionId || context?.sessionId || event?.conversationId || event?.runId || null;
+      const sessionKey = context?.sessionKey || event?.sessionKey || null;
+      const eventMessages = Array.isArray(event?.messages) ? event.messages : [];
+      const fallbackMessages = eventMessages.length > 0 ? [] : await readSessionMessages(agentId, sessionId, sessionKey);
+      const captureMessages = eventMessages.length > 0 ? eventMessages : fallbackMessages;
+      if (captureMessages.length === 0) {
+        await finalizeAgentRun(scope, agentId, context, Boolean(event?.success), {
+          status: "skipped",
+          reason: eventMessages.length === 0 ? "event_messages_missing_and_session_fallback_empty" : "empty_messages",
+          captured: 0,
+          source: eventMessages.length === 0 ? "session_fallback" : "event_messages",
+          sessionId,
+          sessionKey,
+        });
+        return;
+      }
+      if (eventMessages.length === 0) {
+        await appendRunAudit(scope, {
+          type: "capture_fallback_used",
+          agentId,
+          sessionKey,
+          sessionId,
+          messages: captureMessages.length,
+        });
       }
 
       const conversationId =
@@ -1161,7 +1319,7 @@ export const memoryHybridBridgePlugin = {
 
       const selfEvolutionAgents = new Set(config.selfEvolutionAgents.map((value) => value.toLowerCase()));
       if (selfEvolutionAgents.has(agentId.toLowerCase())) {
-        const insights = extractSelfEvolutionInsights(event.messages);
+        const insights = extractSelfEvolutionInsights(captureMessages);
         if (insights.length > 0) {
           let saved = 0;
           for (const [insightIndex, insight] of insights.entries()) {
@@ -1198,7 +1356,7 @@ export const memoryHybridBridgePlugin = {
         }
       }
 
-      const recentMessages = event.messages
+      const recentMessages = captureMessages
         .slice(-8)
         .map((message: any) => ({
           role: typeof message?.role === "string" ? message.role : "unknown",
