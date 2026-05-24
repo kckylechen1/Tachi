@@ -169,6 +169,57 @@ pub(crate) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
+pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String, String> {
+    let tool_profile = server
+        .active_tool_profile()
+        .map(|profile| profile.as_str())
+        .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str());
+    let requested_profile = std::env::var("TACHI_PROFILE").ok();
+    let derivative_identity = std::env::var("TACHI_DERIVATIVE_IDENTITY")
+        .ok()
+        .or_else(|| std::env::var("TACHI_PRODUCT").ok())
+        .unwrap_or_else(|| "tachi".to_string());
+    let binary = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+
+    let project = server.project_db_path.as_ref().map(|path| {
+        json!({
+            "path": path.display().to_string(),
+            "vec_available": server.project_vec_available,
+        })
+    });
+
+    serde_json::to_string(&json!({
+        "runtime": {
+            "name": "tachi",
+            "version": env!("CARGO_PKG_VERSION"),
+            "binary": binary,
+            "pid": std::process::id(),
+            "tool_profile": tool_profile,
+            "requested_profile": requested_profile,
+            "derivative_identity": derivative_identity,
+        },
+        "databases": {
+            "global": {
+                "path": server.global_db_path.display().to_string(),
+                "vec_available": server.global_vec_available,
+            },
+            "project": project,
+            "single_db_mode": !server.has_project_db(),
+        },
+        "env": {
+            "TACHI_HOME": std::env::var("TACHI_HOME").ok(),
+            "SIGIL_HOME": std::env::var("SIGIL_HOME").ok(),
+            "MEMORY_DB_PATH": std::env::var("MEMORY_DB_PATH").ok(),
+            "TACHI_PROFILE": std::env::var("TACHI_PROFILE").ok(),
+            "TACHI_DERIVATIVE_IDENTITY": std::env::var("TACHI_DERIVATIVE_IDENTITY").ok(),
+            "TACHI_PRODUCT": std::env::var("TACHI_PRODUCT").ok(),
+        },
+    }))
+    .map_err(|e| format!("Failed to serialize runtime_info: {e}"))
+}
+
 pub(crate) async fn handle_delete_memory(
     server: &MemoryServer,
     params: DeleteMemoryParams,

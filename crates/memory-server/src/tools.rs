@@ -49,7 +49,7 @@ use crate::kanban::{
 use crate::memory_ops::{
     handle_archive_memory, handle_delete_domain, handle_delete_memory, handle_get_domain,
     handle_get_memory, handle_list_domains, handle_list_memories, handle_memory_gc,
-    handle_memory_stats, handle_register_domain,
+    handle_memory_stats, handle_register_domain, handle_runtime_info,
 };
 use crate::memory_search_ops::{
     handle_find_similar_memory, handle_remember, handle_save_memory, handle_search_memory,
@@ -163,6 +163,13 @@ impl MemoryServer {
     #[tool(description = "Get aggregate statistics about the memory store.")]
     pub(crate) async fn memory_stats(&self) -> Result<String, String> {
         handle_memory_stats(self).await
+    }
+
+    #[tool(
+        description = "Return Tachi runtime identity and DB routing metadata. Clients should verify this before writing through embedded or derivative Tachi deployments."
+    )]
+    pub(crate) async fn runtime_info(&self) -> Result<String, String> {
+        handle_runtime_info(self).await
     }
 
     #[tool(

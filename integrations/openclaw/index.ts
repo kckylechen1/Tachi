@@ -829,6 +829,25 @@ export const memoryHybridBridgePlugin = {
     });
 
     api.registerTool({
+      name: "memory_runtime_info",
+      label: "Memory Runtime Info",
+      description:
+        "Return the verified Tachi runtime identity and DB routing for this OpenClaw agent bridge.",
+      parameters: Type.Object({}),
+      async execute(_toolCallId, _params, _signal, context) {
+        const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
+        const result = await runWithClient(
+          "runtime_info",
+          async (client) => await client.runtimeInfoPayload(),
+          agentId,
+        );
+        return result.ok
+          ? formatJsonTextResult(result.value)
+          : textResult("Tachi MCP client unavailable.");
+      },
+    });
+
+    api.registerTool({
       name: "memory_save",
       label: "Memory Save",
       description: "Save a durable memory into Tachi for future recall.",

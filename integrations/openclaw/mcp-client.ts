@@ -26,6 +26,28 @@ type LoggerLike = {
   warn?: (message: string) => void;
 };
 
+type RuntimeInfoPayload = {
+  runtime?: {
+    name?: string;
+    version?: string;
+    binary?: string | null;
+    tool_profile?: string;
+    requested_profile?: string | null;
+    derivative_identity?: string;
+  };
+  databases?: {
+    global?: {
+      path?: string;
+      vec_available?: boolean;
+    };
+    project?: {
+      path?: string;
+      vec_available?: boolean;
+    } | null;
+    single_db_mode?: boolean;
+  };
+};
+
 type SearchOptions = {
   top_k?: number;
   candidates?: number;
@@ -77,6 +99,7 @@ type RawToolResult = CallToolResult & {
 };
 
 const REQUIRED_TOOLS = [
+  "runtime_info",
   "recall_context",
   "capture_session",
   "save_memory",
@@ -86,6 +109,22 @@ const REQUIRED_TOOLS = [
   "memory_stats",
   "list_memories",
 ] as const;
+
+function normalizePathForCompare(value: string): string {
+  return path.resolve(value.replace(/^~/, os.homedir()));
+}
+
+function pathsEqualForRouting(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false;
+  return normalizePathForCompare(left) === normalizePathForCompare(right);
+}
+
+function runtimeInfoSummary(info: RuntimeInfoPayload): string {
+  return JSON.stringify({
+    runtime: info.runtime,
+    databases: info.databases,
+  });
+}
 
 function asFiniteNumber(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -255,6 +294,7 @@ export class MemoryMcpClient {
   private transport: StdioClientTransport | null = null;
   private connecting: Promise<Client> | null = null;
   private availableTools = new Set<string>();
+  private runtimeInfo: RuntimeInfoPayload | null = null;
 
   private static readonly CLIENT_VERSION = "0.16.4";
 
@@ -310,6 +350,7 @@ export class MemoryMcpClient {
       ...process.env,
       MEMORY_DB_PATH: this.dbPath,
       TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
+      TACHI_DERIVATIVE_IDENTITY: process.env.TACHI_DERIVATIVE_IDENTITY || "openclaw-tachi",
     } as Record<string, string>;
     const candidates: LaunchConfig[] = [
       // First candidate: explicit global-db, no project db (clean isolation)
@@ -369,6 +410,7 @@ export class MemoryMcpClient {
       this.client = client;
       this.transport = transport;
       this.availableTools = names;
+      this.runtimeInfo = await this.verifyRuntimeRouting(client, launch);
       return client;
     } catch (error) {
       await client.close().catch(() => {});
@@ -418,6 +460,7 @@ export class MemoryMcpClient {
     const transport = this.transport;
     this.client = null;
     this.transport = null;
+    this.runtimeInfo = null;
     this.availableTools.clear();
     await client?.close().catch(() => {});
     await transport?.close().catch(() => {});
@@ -441,6 +484,49 @@ export class MemoryMcpClient {
       throw new Error(extractErrorMessage(result, name));
     }
     return extractJsonPayload<T>(result, name);
+  }
+
+  private async verifyRuntimeRouting(client: Client, launch: LaunchConfig): Promise<RuntimeInfoPayload> {
+    let result: RawToolResult;
+    try {
+      result = (await client.callTool({ name: "runtime_info", arguments: {} })) as RawToolResult;
+    } catch (error) {
+      throw new Error(`runtime_info self-check failed for ${launch.command}: ${String(error)}`);
+    }
+    if (result.isError) {
+      throw new Error(`runtime_info self-check rejected for ${launch.command}: ${extractErrorMessage(result, "runtime_info")}`);
+    }
+    const info = extractJsonPayload<RuntimeInfoPayload>(result, "runtime_info");
+    const globalPath = info.databases?.global?.path;
+    const projectPath = info.databases?.project?.path;
+    const profile = info.runtime?.tool_profile;
+    const requestedProfile = info.runtime?.requested_profile;
+    const identity = info.runtime?.derivative_identity;
+    const errors: string[] = [];
+    if (!pathsEqualForRouting(globalPath, this.dbPath)) {
+      errors.push(`global DB mismatch: expected ${this.dbPath}, got ${globalPath || "<missing>"}`);
+    }
+    if (projectPath) {
+      errors.push(`project DB must be disabled for OpenClaw per-agent stores, got ${projectPath}`);
+    }
+    if (requestedProfile !== "openclaw") {
+      errors.push(`requested profile mismatch: expected openclaw, got ${requestedProfile || "<missing>"}`);
+    }
+    if (identity !== "openclaw-tachi") {
+      errors.push(`derivative identity mismatch: expected openclaw-tachi, got ${identity || "<missing>"}`);
+    }
+    if (errors.length > 0) {
+      throw new Error(`Tachi runtime routing self-check failed: ${errors.join("; ")}; info=${runtimeInfoSummary(info)}`);
+    }
+    this.logInfo(
+      `runtime verified profile=${profile || "<missing>"} requested=${requestedProfile} identity=${identity} db=${normalizePathForCompare(this.dbPath)}`,
+    );
+    return info;
+  }
+
+  async getRuntimeInfo(): Promise<RuntimeInfoPayload> {
+    await this.getClient();
+    return this.runtimeInfo ?? {};
   }
 
   async saveMemory(entry: MemoryEntry): Promise<void> {
@@ -652,6 +738,10 @@ export class MemoryMcpClient {
 
   async memoryStats(): Promise<unknown> {
     return await this.callJson<unknown>("memory_stats", {});
+  }
+
+  async runtimeInfoPayload(): Promise<RuntimeInfoPayload> {
+    return await this.callJson<RuntimeInfoPayload>("runtime_info", {});
   }
 
   async callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
