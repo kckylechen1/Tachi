@@ -442,12 +442,13 @@ pub(crate) async fn handle_compact_session_memory(
 
     let mut saved_ids = Vec::new();
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
+                None,
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -469,6 +470,7 @@ pub(crate) async fn handle_compact_session_memory(
             server,
             target_db,
             named_project.clone(),
+            None,
             &params.agent_id,
             &base_path,
             &saved_ids,
@@ -1119,12 +1121,13 @@ pub(crate) async fn handle_capture_session(
     let mut saved_ids = Vec::new();
 
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
+                None,
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -1139,6 +1142,7 @@ pub(crate) async fn handle_capture_session(
         server,
         target_db,
         named_project.clone(),
+        None,
         &params.agent_id,
         &base_path,
         &saved_ids,

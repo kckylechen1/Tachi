@@ -233,6 +233,7 @@ impl MemoryServer {
                                 self,
                                 item.target_db,
                                 item.named_project.clone(),
+                                item.db_path.clone(),
                                 &agent_id_owned,
                                 &path_prefix_owned,
                                 &[item.id.clone()],

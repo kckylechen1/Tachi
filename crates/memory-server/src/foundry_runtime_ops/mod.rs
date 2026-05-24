@@ -40,6 +40,7 @@ pub(crate) struct FoundryMaintenanceItem {
     pub job: memory_core::FoundryJobSpec,
     pub target_db: DbScope,
     pub named_project: Option<String>,
+    pub db_path: Option<std::path::PathBuf>,
     pub path_prefix: String,
     pub memory_ids: Vec<String>,
 }
