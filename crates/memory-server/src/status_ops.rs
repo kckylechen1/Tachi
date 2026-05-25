@@ -28,7 +28,7 @@ use memory_core::{
 
 use crate::cli::{DaemonAction, FoundryAction};
 use crate::daemon_lock::{process_alive, read_pid_file};
-use crate::manifest::Manifest;
+use crate::manifest::{DbRole, Manifest};
 
 /// `in_progress` jobs older than this are flagged as stuck in `tachi status`.
 /// Matches the safety-net poll cadence in [`crate::foundry_scheduler`] with
@@ -175,6 +175,19 @@ fn render_one(
             orphan = orphan_marker,
             stuck = stuck_marker,
         );
+        if db.memory_total > 0 {
+            let pct = db.vector_coverage * 100.0;
+            let marker = if db.vector_missing > 0 { "[!]" } else { "[OK]" };
+            let failures = if db.enrichment_failed_recent > 0 {
+                format!(" enrichment_failed={}", db.enrichment_failed_recent)
+            } else {
+                String::new()
+            };
+            println!(
+                "       {marker} vectors={}/{} missing={} coverage={pct:.1}%{}",
+                db.vector_count, db.memory_total, db.vector_missing, failures
+            );
+        }
         if let Some(err) = &db.error {
             println!("       [X] {err}");
         }
@@ -259,6 +272,86 @@ fn render_one(
     Ok(())
 }
 
+/// MCP tool handler: returns a concise JSON health summary for agents.
+pub(crate) async fn handle_tachi_status(server: &crate::MemoryServer) -> Result<String, String> {
+    let app_home: PathBuf = std::env::var("TACHI_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".tachi")
+        });
+    let global_db_path = server.global_db_path_buf();
+    let project_db_path = server.project_db_path_buf();
+
+    let snapshot = collect_snapshot(&app_home, &global_db_path, project_db_path.as_deref());
+
+    let daemon_state = match &snapshot.daemon {
+        DaemonStatus::Running { pid, .. } => json!({
+            "running": true,
+            "pid": pid,
+        }),
+        DaemonStatus::StalePid { pid, .. } => json!({
+            "running": false,
+            "stale": true,
+            "pid": pid,
+        }),
+        DaemonStatus::None => json!({
+            "running": false,
+        }),
+    };
+
+    let total_dbs = snapshot.dbs.len();
+    let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
+    let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
+    let low_coverage: Vec<serde_json::Value> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.vector_coverage < 0.9)
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "coverage": format!("{:.1}%", d.vector_coverage * 100.0),
+                "missing": d.vector_missing,
+            })
+        })
+        .collect();
+
+    let mut warnings: Vec<String> = Vec::new();
+    if !daemon_state["running"].as_bool().unwrap_or(false) {
+        warnings.push(
+            "daemon not running — background tasks (enrichment, distill, GC) are paused"
+                .to_string(),
+        );
+    }
+    if !low_coverage.is_empty() {
+        warnings.push(format!(
+            "{} db(s) have vector coverage below 90%",
+            low_coverage.len()
+        ));
+    }
+    if total_failed > 0 {
+        warnings.push(format!(
+            "{total_failed} foundry job(s) failed across {total_dbs} dbs"
+        ));
+    }
+
+    serde_json::to_string(&json!({
+        "daemon": daemon_state,
+        "version": env!("CARGO_PKG_VERSION"),
+        "databases": {
+            "total": total_dbs,
+            "pending_jobs": total_pending,
+            "failed_jobs": total_failed,
+            "low_vector_coverage": low_coverage,
+        },
+        "warnings": warnings,
+        "daily_pipeline": snapshot.last_daily_report,
+    }))
+    .map_err(|e| e.to_string())
+}
+
 #[derive(Debug, serde::Serialize)]
 struct StatusSnapshot {
     daemon: DaemonStatus,
@@ -303,6 +396,11 @@ struct DbStatus {
     /// True if the manifest entry is not under any scope the running
     /// daemon's scheduler can route to (i.e. agents/, hub/, vault/, etc.).
     orphan: bool,
+    memory_total: usize,
+    vector_count: usize,
+    vector_missing: usize,
+    vector_coverage: f64,
+    enrichment_failed_recent: usize,
     pending: usize,
     running: usize,
     completed: usize,
@@ -345,12 +443,17 @@ fn collect_snapshot(
         } else {
             entry.scope_hint.clone()
         };
-        let orphan = is_orphan_path(&path, global_db_path, project_db_path);
+        let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
         if !path.exists() {
             dbs.push(DbStatus {
                 path: entry.path.clone(),
                 label,
                 orphan,
+                memory_total: 0,
+                vector_count: 0,
+                vector_missing: 0,
+                vector_coverage: 0.0,
+                enrichment_failed_recent: 0,
                 pending: 0,
                 running: 0,
                 completed: 0,
@@ -362,10 +465,15 @@ fn collect_snapshot(
             continue;
         }
         match probe_db(&path) {
-            Ok((hist, stuck)) => dbs.push(DbStatus {
+            Ok((hist, stuck, vector)) => dbs.push(DbStatus {
                 path: entry.path.clone(),
                 label,
                 orphan,
+                memory_total: vector.total,
+                vector_count: vector.with_vec,
+                vector_missing: vector.missing,
+                vector_coverage: vector.coverage,
+                enrichment_failed_recent: vector.enrichment_failed_recent,
                 pending: hist.queued + hist.planned,
                 running: hist.running,
                 completed: hist.completed,
@@ -378,6 +486,11 @@ fn collect_snapshot(
                 path: entry.path.clone(),
                 label,
                 orphan,
+                memory_total: 0,
+                vector_count: 0,
+                vector_missing: 0,
+                vector_coverage: 0.0,
+                enrichment_failed_recent: 0,
                 pending: 0,
                 running: 0,
                 completed: 0,
@@ -403,7 +516,16 @@ fn collect_snapshot(
     }
 }
 
-fn probe_db(path: &Path) -> Result<(JobStatusHistogram, usize), String> {
+#[derive(Debug, Default)]
+struct VectorHealth {
+    total: usize,
+    with_vec: usize,
+    missing: usize,
+    coverage: f64,
+    enrichment_failed_recent: usize,
+}
+
+fn probe_db(path: &Path) -> Result<(JobStatusHistogram, usize, VectorHealth), String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
@@ -414,7 +536,44 @@ fn probe_db(path: &Path) -> Result<(JobStatusHistogram, usize), String> {
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
-    Ok((hist, stuck))
+    let vector = vector_health(conn).unwrap_or_default();
+    Ok((hist, stuck, vector))
+}
+
+fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
+    let total: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| {
+        row.get::<_, i64>(0).map(|n| n as usize)
+    })?;
+    let with_vec: usize = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories_vec v
+             JOIN memories m ON m.id = v.id",
+            [],
+            |row| row.get::<_, i64>(0).map(|n| n as usize),
+        )
+        .unwrap_or(0);
+    let enrichment_failed_recent: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories
+             WHERE json_extract(metadata, '$.enrichment.status') = 'failed'",
+            [],
+            |row| row.get::<_, i64>(0).map(|n| n as usize),
+        )
+        .unwrap_or(0);
+    let missing = total.saturating_sub(with_vec);
+    let coverage = if total == 0 {
+        1.0
+    } else {
+        with_vec as f64 / total as f64
+    };
+    Ok(VectorHealth {
+        total,
+        with_vec,
+        missing,
+        coverage,
+        enrichment_failed_recent,
+    })
 }
 
 fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
@@ -438,7 +597,12 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
 /// Mirrors the scheduler's current reduced-scope routing: own global DB,
 /// own project DB, and canonical `~/.tachi/projects/<name>/memory.db` are
 /// routable; everything else is an orphan until DbScope::Path exists.
-fn is_orphan_path(db_path: &Path, global_db_path: &Path, project_db_path: Option<&Path>) -> bool {
+fn is_orphan_entry(
+    entry: &crate::manifest::DbEntry,
+    db_path: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> bool {
     if paths_equal(db_path, global_db_path) {
         return false;
     }
@@ -447,7 +611,15 @@ fn is_orphan_path(db_path: &Path, global_db_path: &Path, project_db_path: Option
             return false;
         }
     }
-    named_project_from_path(db_path).is_none()
+    if named_project_from_path(db_path).is_some() {
+        return false;
+    }
+    !(entry.allow_write
+        && entry.schema_kind == "tachi"
+        && matches!(
+            entry.role,
+            DbRole::Agent | DbRole::Foundry | DbRole::Unknown
+        ))
 }
 
 fn named_project_from_path(db_path: &Path) -> Option<String> {
@@ -927,16 +1099,51 @@ fn read_per_db_config(path: &Path) -> Result<PerDbConfig, Box<dyn std::error::Er
 mod tests {
     use super::*;
 
+    fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
+        crate::manifest::DbEntry {
+            path: "/tmp/status/memory.db".to_string(),
+            role,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".to_string(),
+            scope_hint: scope_hint.to_string(),
+            notes: String::new(),
+        }
+    }
+
     #[test]
     fn orphan_classification_matches_scheduler_routing() {
         let global = PathBuf::from("/tmp/status/global/memory.db");
         let project = PathBuf::from("/tmp/status/project/memory.db");
         let named = PathBuf::from("/home/u/.tachi/projects/sigil/memory.db");
         let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
-        assert!(!is_orphan_path(&global, &global, Some(&project)));
-        assert!(!is_orphan_path(&project, &global, Some(&project)));
-        assert!(!is_orphan_path(&named, &global, Some(&project)));
-        assert!(is_orphan_path(&agent, &global, Some(&project)));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Global, "global"),
+            &global,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Project, "project"),
+            &project,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Project, "project:sigil"),
+            &named,
+            &global,
+            Some(&project)
+        ));
+        assert!(!is_orphan_entry(
+            &entry(DbRole::Agent, "openclaw-agent:main"),
+            &agent,
+            &global,
+            Some(&project)
+        ));
     }
 
     #[test]
