@@ -105,9 +105,21 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
-        /// Execute the conservative apply path for clearly safe actions
+        /// Execute the conservative apply path for clearly safe actions (legacy alias)
         #[arg(long)]
         apply: bool,
+        /// Show the migration plan without making any writes (default behavior)
+        #[arg(long)]
+        dry_run: bool,
+        /// Execute fragment-DB consolidation: migrate rows, archive sources, update manifest
+        #[arg(long)]
+        execute: bool,
+        /// Skip per-DB interactive confirmation prompts (requires --execute)
+        #[arg(long)]
+        yes: bool,
+        /// Override the migration target DB (defaults to ~/.tachi/global/memory.db)
+        #[arg(long, value_name = "PATH")]
+        target_db: Option<PathBuf>,
     },
     /// Doctor v2 — extension-aware DB classification + safe auto-fix
     Doctor {
