@@ -94,11 +94,17 @@ pub(crate) enum Commands {
     // are optional.
     /// Show database statistics
     Stats,
-    /// Inspect onboarding readiness and current local Tachi setup
+    /// Inspect onboarding readiness or run the interactive 5-step setup wizard
     Setup {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
+        /// Force the interactive 5-step onboarding wizard (overrides TTY detection)
+        #[arg(long, conflicts_with_all = ["json", "non_interactive"])]
+        interactive: bool,
+        /// Force report-only mode (no prompts) even when stdout is a TTY
+        #[arg(long)]
+        non_interactive: bool,
     },
     /// Scan for fragmented memory databases and report consolidation candidates
     Tidy {
