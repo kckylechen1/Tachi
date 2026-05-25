@@ -9,6 +9,7 @@ mod manifest_cli;
 mod rescue_cli;
 mod serve;
 mod setup;
+mod setup_wizard;
 mod tidy;
 mod vault_cli;
 

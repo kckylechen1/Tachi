@@ -279,8 +279,17 @@ pub(super) fn render_setup_report(report: &SetupReport) -> String {
     lines.join("\n")
 }
 
+/// Top-level dispatcher for `tachi setup`.
+///
+/// Routing:
+///   * `--json`               → emit machine-readable report (never interactive)
+///   * `--non-interactive`    → render the human report and exit
+///   * `--interactive`        → always run the 5-step wizard, even without a TTY
+///   * default                → wizard when stdout is a TTY, otherwise report
 pub(super) async fn run_setup_command(
     json_output: bool,
+    interactive: bool,
+    non_interactive: bool,
     home: &std::path::Path,
     app_home: &std::path::Path,
     global_db_path: &PathBuf,
@@ -301,167 +310,40 @@ pub(super) async fn run_setup_command(
         return print_pretty_json(&serde_json::to_value(&report)?);
     }
 
-    println!("{}", render_setup_report(&report));
+    let want_interactive = interactive || (!non_interactive && atty_stdout());
 
-    // Interactive wizard — only when stdout is a TTY and not JSON mode
-    if !atty_stdout() {
+    if !want_interactive {
+        println!("{}", render_setup_report(&report));
         return Ok(());
     }
 
-    let needs_attention: Vec<&SetupItem> = report
-        .items
-        .iter()
-        .filter(|item| item.status != "ready" && item.status != "configured")
-        .collect();
-
-    if needs_attention.is_empty() {
-        println!("\nAll checks passed. Nothing to configure.");
-        return Ok(());
-    }
-
-    let proceed = dialoguer::Confirm::new()
-        .with_prompt("Run interactive setup wizard?")
-        .default(true)
-        .interact()?;
-
-    if !proceed {
-        return Ok(());
-    }
+    // Print the report first so the user sees the current state before
+    // making decisions inside the wizard.
+    println!("{}\n", render_setup_report(&report));
 
     let config_env_path = app_home.join("config.env");
-    let mut new_entries: Vec<(String, String)> = Vec::new();
+    let outcome = super::setup_wizard::run_interactive_wizard(
+        home,
+        app_home,
+        &config_env_path,
+        &report,
+        &env_vars,
+        global_db_path,
+    )
+    .await?;
 
-    // 1. API Keys
-    let missing_keys: Vec<(&str, &str)> = SETUP_API_KEYS
-        .iter()
-        .filter(|(key, _)| {
-            !env_vars
-                .get(*key)
-                .map(|v| !v.trim().is_empty())
-                .unwrap_or(false)
-        })
-        .copied()
-        .collect();
-
-    if !missing_keys.is_empty() {
-        println!("\n--- API Keys ---");
-        for (key, label) in &missing_keys {
-            let value: String = dialoguer::Input::new()
-                .with_prompt(format!("{key} ({label})"))
-                .allow_empty(true)
-                .interact_text()?;
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                new_entries.push((key.to_string(), value));
-            }
-        }
-    }
-
-    // 2. Pipeline
-    let pipeline_enabled = env_vars
-        .get("ENABLE_PIPELINE")
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false);
-
-    if !pipeline_enabled {
-        println!("\n--- Pipeline ---");
-        let enable = dialoguer::Confirm::new()
-            .with_prompt("Enable the extraction pipeline? (ENABLE_PIPELINE=true)")
-            .default(false)
-            .interact()?;
-        if enable {
-            new_entries.push(("ENABLE_PIPELINE".to_string(), "true".to_string()));
-        }
-    }
-
-    // 3. Daemon settings
-    let daemon_port = env_vars.get("TACHI_DAEMON_PORT");
-    if daemon_port.is_none() {
-        println!("\n--- Daemon ---");
-        let port: String = dialoguer::Input::new()
-            .with_prompt("Daemon port (TACHI_DAEMON_PORT)")
-            .default("6919".to_string())
-            .interact_text()?;
-        let port = port.trim().to_string();
-        if !port.is_empty() && port != "6919" {
-            new_entries.push(("TACHI_DAEMON_PORT".to_string(), port));
-        }
-    }
-
-    // Write to config.env
-    if new_entries.is_empty() {
+    if outcome.aborted {
+        println!("\nSetup wizard aborted; no changes written.");
+    } else if outcome.wrote_changes {
+        println!(
+            "\nWrote {} entries to {}.",
+            outcome.changed_keys.len(),
+            config_env_path.display()
+        );
+        println!("Restart the daemon for changes to take effect.");
+    } else {
         println!("\nNo new values to write.");
-        return Ok(());
     }
 
-    println!("\nWill append to {}:", config_env_path.display());
-    for (key, value) in &new_entries {
-        let masked = if key.contains("KEY") || key.contains("SECRET") || key.contains("TOKEN") {
-            let v = value.as_str();
-            if v.len() > 8 {
-                format!("{}...{}", &v[..4], &v[v.len() - 4..])
-            } else {
-                "****".to_string()
-            }
-        } else {
-            value.clone()
-        };
-        println!("  {key}={masked}");
-    }
-
-    let confirm = dialoguer::Confirm::new()
-        .with_prompt("Write these values?")
-        .default(true)
-        .interact()?;
-
-    if !confirm {
-        println!("Aborted.");
-        return Ok(());
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = config_env_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Read existing content and build updated lines
-    let existing = std::fs::read_to_string(&config_env_path).unwrap_or_default();
-    let mut existing_lines: Vec<String> = existing.lines().map(String::from).collect();
-
-    for (key, value) in &new_entries {
-        let prefix = format!("{key}=");
-        let commented_prefix = format!("# {key}=");
-        let mut replaced = false;
-        for line in existing_lines.iter_mut() {
-            let trimmed = line.trim();
-            if trimmed.starts_with(&prefix) || trimmed.starts_with(&commented_prefix) {
-                *line = format!("{key}={value}");
-                replaced = true;
-                break;
-            }
-        }
-        if !replaced {
-            existing_lines.push(format!("{key}={value}"));
-        }
-    }
-
-    // Ensure trailing newline
-    let mut output = existing_lines.join("\n");
-    if !output.ends_with('\n') {
-        output.push('\n');
-    }
-
-    std::fs::write(&config_env_path, output)?;
-    println!(
-        "\nWrote {} entries to {}",
-        new_entries.len(),
-        config_env_path.display()
-    );
-    println!("Restart the daemon for changes to take effect.");
     Ok(())
 }

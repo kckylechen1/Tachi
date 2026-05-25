@@ -432,9 +432,16 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
-    if let Commands::Setup { json } = &command {
+    if let Commands::Setup {
+        json,
+        interactive,
+        non_interactive,
+    } = &command
+    {
         return super::setup::run_setup_command(
             *json,
+            *interactive,
+            *non_interactive,
             &home,
             &app_home,
             &global_db_path,
