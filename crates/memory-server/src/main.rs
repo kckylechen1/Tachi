@@ -139,12 +139,14 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, Commands, HubAction, ManifestAction, RescueAction};
 use crate::enrichment::EnrichmentItem;
@@ -376,6 +378,8 @@ struct MemoryServer {
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::Sender<EnrichmentItem>,
+    inline_enrichment: Arc<AtomicBool>,
+    inline_enrichment_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
     foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
     foundry_stats: Arc<FoundryWorkerStats>,
@@ -406,6 +410,45 @@ struct MemoryServer {
 // MCP client pool types are in mcp_pool.rs
 
 impl MemoryServer {
+    fn set_inline_enrichment(&self, enabled: bool) {
+        self.inline_enrichment.store(enabled, Ordering::SeqCst);
+    }
+
+    fn inline_enrichment_enabled(&self) -> bool {
+        self.inline_enrichment.load(Ordering::SeqCst)
+    }
+
+    fn enqueue_enrichment(&self, item: EnrichmentItem) {
+        if self.inline_enrichment.load(Ordering::SeqCst) {
+            let server = self.clone();
+            let handle = tokio::spawn(async move {
+                let mut batch = vec![item];
+                server.flush_enrichment_batch(&mut batch).await;
+            });
+            lock_or_recover(&self.inline_enrichment_tasks, "inline_enrichment_tasks").push(handle);
+        } else if let Err(err) = self.enrich_tx.try_send(item) {
+            eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
+        }
+    }
+
+    async fn drain_inline_enrichment(&self) {
+        loop {
+            let handles = {
+                let mut guard =
+                    lock_or_recover(&self.inline_enrichment_tasks, "inline_enrichment_tasks");
+                std::mem::take(&mut *guard)
+            };
+            if handles.is_empty() {
+                break;
+            }
+            for handle in handles {
+                if let Err(err) = handle.await {
+                    eprintln!("[enrichment-batcher] inline enrichment task failed: {err}");
+                }
+            }
+        }
+    }
+
     fn new(
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
@@ -523,6 +566,8 @@ impl MemoryServer {
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
+            inline_enrichment: Arc::new(AtomicBool::new(false)),
+            inline_enrichment_tasks: Arc::new(StdMutex::new(Vec::new())),
             foundry_tx,
             foundry_stats,
             vault_key: Arc::new(StdRwLock::new(None)),

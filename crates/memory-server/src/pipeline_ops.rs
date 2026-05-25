@@ -613,7 +613,7 @@ async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+        server.enqueue_enrichment(super::EnrichmentItem {
             id: entry_id.clone(),
             text: entry.text.clone(),
             summary: entry.summary.clone(),
@@ -1118,7 +1118,7 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+            server.enqueue_enrichment(super::EnrichmentItem {
                 id: entry.id.clone(),
                 text: entry.text.clone(),
                 summary: entry.summary.clone(),

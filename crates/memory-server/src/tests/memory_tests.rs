@@ -261,6 +261,62 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
 }
 
 #[tokio::test]
+async fn search_memory_filters_logs_and_coordination_noise() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut memory = make_entry("trendlock-memory-row");
+            memory.path = "/facts/trendlock".to_string();
+            memory.text =
+                "TrendLock rule protects active agent trends in normal recall.".to_string();
+            memory.summary = "TrendLock memory".to_string();
+            store.upsert(&memory).map_err(|e| e.to_string())?;
+
+            let mut log = make_entry("wiki-log-row");
+            log.path = "/wiki/_log".to_string();
+            log.topic = "wiki_log".to_string();
+            log.text =
+                "TrendLock write operation log should stay out of search recall.".to_string();
+            log.metadata = json!({"wiki_log": true});
+            store.upsert(&log).map_err(|e| e.to_string())?;
+
+            let mut kanban = make_entry("kanban-noise-row");
+            kanban.path = "/kanban/tasks/abc".to_string();
+            kanban.category = "kanban".to_string();
+            kanban.text =
+                "TrendLock kanban status card should stay out of general recall.".to_string();
+            store.upsert(&kanban).map_err(|e| e.to_string())
+        })
+        .expect("seed noisy entries");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "TrendLock recall".to_string(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: None,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+        }))
+        .await
+        .expect("search memory");
+
+    assert!(response.contains("trendlock-memory-row"));
+    assert!(!response.contains("wiki-log-row"));
+    assert!(!response.contains("kanban-noise-row"));
+}
+
+#[tokio::test]
 async fn search_memory_boosts_guide_rows_by_context() {
     let server = make_server();
     server

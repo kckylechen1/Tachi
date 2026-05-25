@@ -174,6 +174,7 @@ Operational notes:
   - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
   - **Lexical**: Native CJK-optimized full-text search utilizing `libsimple` and `FTS5`.
   - **Decay**: Temporal relevance degradation inspired by the ACT-R cognitive architecture.
+- **🧼 Memory Search Hygiene**: Default search hides superseded rows, wiki operation logs, Foundry rerank caches, and unscoped kanban/handoff coordination noise. Wiki/guide rows get only bounded relevance boosts, Foundry distill fragments are demoted, and same-subject wiki/guide/distill results are collapsed to a canonical result.
 - **🔒 Hard State Engine**: Introduced a deterministic Key-Value store independent of vector memory. Useful for tracking trading watchlists or rigid state.
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution Deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
@@ -205,7 +206,8 @@ Operational notes:
 - **🏭 Foundry Job Lifecycle Hardening**: Atomic terminal-reason metadata updates, GC retention extended to 30 days, and `job_status_histogram` for cross-DB overview.
 - **🔌 OpenClaw Manifest Bridge**: OpenClaw now routes through `~/.tachi/manifest.json`, raises default capture floor to 200 chars, and tolerates noisy MCP JSON (BOM, whitespace, bracket recovery).
 - **🎭 Tool Surface v2 (Facade & Delegation)**: Provides compact, task-focused unified tools (`tachi_search`, `tachi_web_search`, `tachi_save`, etc.) along with advanced delegation and evaluation capabilities (`tachi_dispatch`, `approve_merge`, `tachi_complete`) for cross-agent orchestration.
-- **📚 Wiki System**: Built-in, durable knowledge base system (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`) optimized for multi-agent knowledge sharing.
+- **📚 Wiki System**: Built-in, durable knowledge base system (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`) optimized for multi-agent knowledge sharing. Writes update an existing active path/topic in place, supersede duplicate wiki rows, and keep `_log` rows out of user-facing browse/export results.
+- **📈 Enrichment Health**: Enrichment success/failure is tracked in memory metadata, `tachi status` reports vector coverage and recent failures, and `backfill-vectors` can load provider API keys from Tachi Vault before falling back to environment variables.
 
 ---
 

@@ -51,6 +51,13 @@
 - **划疆而治（Domain Management）**：新增疆域之治（`register_domain`、`list_domains` 等），各域互不侵扰，更可定独立之生灭轮回（GC 阈值）。
 - **洗尽铅华（架构归宗）**：OpenClaw 旁支法脉（JS Bridge）尽数斩断归元，今后天上地下皆以 MCP 纯血大阵为宗。百余法器尽数收归 `tools.rs` 统一调拨。
 
+### 近次修补（v1.1.2）
+
+- **搜魂去尘**：默认检索不再唤回 `superseded_by` 旧卷、`/wiki/_log` 操作札记、`foundry_recall_rerank_cache`、未指名的 `/kanban` 与 `/handoff` 协调噪声；需审计旧史时可设 `TACHI_SEARCH_INCLUDE_SUPERSEDED=1`。
+- **经阁覆写归一**：`tachi_wiki_write` 遇同一路径或主题之旧卷，今原地续写并将重复旧卷标为 superseded，不再 append 出一串版本残影。回执会明示 `wiki_write_mode`、`wiki_duplicates_superseded` 与旧 revision。
+- **精卷居上**：Wiki 与 guide 只在原本相关时微升权，Foundry 蒸馏片段降权；同主题 wiki/guide/distill 候选会折叠为一条 canonical 结果，免碎片同权挤占上下文。
+- **炼丹可诊**：enrichment 成败写入 metadata，`tachi status` 展示向量覆盖率、缺失数与失败数；`backfill-vectors` 可从 Tachi Vault 读取未限 agent 的 API key 后再回退环境变量。
+
 ### 近次修补（v0.16.4）
 
 - **FTS 旧索补脉**：新增 `tachi backfill-fts [--db PATH] [--dry-run] [--full]`。可先验 `memories_fts` 缺口，亦可增量补齐，若旧索走火入魔，亦可一令重筑全表。

@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "memory-core"
-version = "1.1.0"
+version = "1.1.2"
 dependencies = [
  "chrono",
  "lazy_static",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "memory-node"
-version = "1.1.0"
+version = "1.1.2"
 dependencies = [
  "memory-core",
  "napi",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "memory-python"
-version = "1.1.0"
+version = "1.1.2"
 dependencies = [
  "memory-core",
  "pyo3",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server"
-version = "1.1.0"
+version = "1.1.2"
 dependencies = [
  "aes-gcm",
  "argon2",

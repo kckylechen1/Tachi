@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-05-25
+
+Memory and wiki hygiene release focused on keeping durable knowledge separate from logs, stale revisions, coordination state, and low-signal Foundry fragments.
+
+### Added
+
+- **Superseded memory filtering.** Hybrid search, vector search, and FTS now hide rows with `superseded_by` by default. Audit/history callers can opt back in through `SearchOptions.include_superseded` or `TACHI_SEARCH_INCLUDE_SUPERSEDED=1`.
+- **Wiki overwrite/dedup semantics.** `tachi_wiki_write` now updates an active row with the same wiki path/topic instead of appending another version, marks duplicate wiki rows as superseded, and emits `wiki_write_mode`, `wiki_duplicates_superseded`, and `wiki_previous_revision` in the response.
+- **Enrichment observability.** Successful enrichment writes `metadata.enrichment.status`; failures record stage/error metadata. Status output now reports vector coverage, missing vector counts, and recent enrichment failures per DB.
+- **Vault-aware vector backfill.** `tachi backfill-vectors` can load unscoped provider API keys from Tachi Vault on macOS before falling back to environment/config values.
+
+### Changed
+
+- **Cleaner default search results.** Default memory search filters wiki operation logs, `foundry_recall_rerank_cache`, and unscoped `/kanban` or `/handoff` coordination rows. Explicit path-scoped searches still allow those operational buckets.
+- **Search ranking is less metadata-driven.** Wiki and guide rows receive a modest boost only when already close to the top score, `foundry_distill` rows are demoted, and same-subject wiki/guide/distill candidates are deduplicated with canonical rows preferred.
+- **Wiki search defaults are knowledge-first.** Wiki search now defaults to a semantic/FTS/symbolic weight mix tuned for durable entries and hides `_log` rows from browse/export/related-entry surfaces.
+- **Inline CLI enrichment.** In-process CLI calls can attempt enrichment inline and drain spawned enrichment tasks before returning, avoiding silent best-effort queue drops for one-shot local commands.
+
+### Fixed
+
+- **Default wiki project fallback.** `tachi_wiki_write` now uses the named `wiki` project only when that project belongs to the server's active Tachi home; temporary/global-only servers fall back to the global DB instead of failing with `Project 'wiki' not found`.
+- **Top-k normalization.** Search now normalizes zero/empty `top_k` requests to at least one result before combining and deduplicating channels.
+
+### Tests
+
+- `cargo test -p memory-core`
+- `cargo test -p memory-server`
+- `cargo check -p memory-server`
+
 ## [1.1.0] - 2026-05-04
 
 Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v2 branch are fixed. No public CLI/tool surface changes, but several defaults are now safer.

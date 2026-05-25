@@ -184,6 +184,7 @@ pub(super) fn capture_search_options(
         path_prefix,
         query_vec: Some(query_vec),
         include_archived: false,
+        include_superseded: false,
         candidates_per_channel: 8,
         mmr_threshold: None,
         graph_expand_hops: 0,
@@ -304,7 +305,7 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
-    let _ = server.enrich_tx.try_send(EnrichmentItem {
+    server.enqueue_enrichment(EnrichmentItem {
         id: entry.id.clone(),
         text: entry.text.clone(),
         summary: entry.summary.clone(),

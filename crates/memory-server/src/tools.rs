@@ -173,6 +173,13 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Health check: daemon status, vector coverage, foundry queue depth, and active warnings. Call this at session start to detect issues like a dead daemon or missing embeddings."
+    )]
+    pub(crate) async fn tachi_status(&self) -> Result<String, String> {
+        crate::status_ops::handle_tachi_status(self).await
+    }
+
+    #[tool(
         description = "Doctor v2 — scan known memory.db roots, classify each (healthy / vec_extension_missing / wal_orphan / corrupt / legacy_schema / placeholder / backup), return JSON report. Read-only; no mutations."
     )]
     pub(crate) async fn tachi_doctor_scan(&self) -> Result<String, String> {

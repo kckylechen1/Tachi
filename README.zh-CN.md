@@ -177,6 +177,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
   - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
   - **词法级（Lexical）**：基于 `libsimple` 和 `FTS5` 构建优化的 CJK（中日韩文）全文索引库。
   - **遗忘曲线（Decay）**：借鉴 ACT-R 经典认知模型的时间惩罚衰减机制。
+- **🧼 检索卫生**：默认检索会隐藏 superseded 旧行、wiki 操作日志、Foundry rerank cache，以及未显式按路径查询的 kanban/handoff 协调噪声。Wiki/guide 仅在已相关时有限升权，Foundry distill 片段降权，同主题 wiki/guide/distill 会折叠为 canonical 结果。
 - **🔒 强状态隔离**：引入了确定性并独立于向量的强状态 `hard_state` KV 引擎，适合存放监视清单、明确仓位等避免幻觉影响的事务。
 - **🧠 三级自适应上下文分层**：数据接入时将自动被提纯为三个深度：`L0`（摘要提要）, `L1`（段落概览）, 与 `L2`（完整内容）。
 - **🔄 两阶演化（记忆去重）**：首创基于数学相似度阈值的 `HARD_SKIP` 与 `EVOLVE` 两阶段查重去重算法。
@@ -208,7 +209,8 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🏭 Foundry 任务生命周期加固**：任务终了原因以原子方式写入 metadata，GC Retention 延长至 30 天，新增 `job_status_histogram` 总览。
 - **🔌 OpenClaw 总录桥接**：OpenClaw 现在通过 `~/.tachi/manifest.json` 路由自身数据库，默认捕获门坎升至 200 字，MCP JSON 解析增强容错（BOM/空格/括号失衡）。
 - **🎭 工具门面 v2 (Facade & Delegation)**：提供紧凑、聚焦任务的统一工具入口 (`tachi_search`, `tachi_web_search`, `tachi_save`) 以及高阶的智能体调度与评估能力 (`tachi_dispatch`, `approve_merge`, `tachi_complete`)，专为跨 Agent 编排设计。
-- **📚 Wiki 知识库系统**：内置的持久化知识管理系统 (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`)，针对多智能体间的长效知识共享与沉淀进行了优化。
+- **📚 Wiki 知识库系统**：内置的持久化知识管理系统 (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`)，针对多智能体间的长效知识共享与沉淀进行了优化。同路径/主题写入会原地更新，重复 wiki 行会标记为 superseded，`_log` 操作记录不会出现在用户可见 browse/export 结果中。
+- **📈 Enrichment 健康观测**：摘要/向量 enrichment 的成功与失败会写入 metadata，`tachi status` 展示向量覆盖率、缺失数和近期失败数，`backfill-vectors` 可优先从 Tachi Vault 读取 provider API key。
 
 ---
 

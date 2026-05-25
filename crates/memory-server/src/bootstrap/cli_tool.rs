@@ -541,8 +541,10 @@ where
         }
     }
     let server = crate::cli_client::build_in_process_server(global_db, project_db)?;
-    let body = in_process(server, args)
+    server.set_inline_enrichment(true);
+    let body = in_process(server.clone(), args)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    server.drain_inline_enrichment().await;
     Ok(body)
 }
