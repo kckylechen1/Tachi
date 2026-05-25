@@ -19,6 +19,32 @@ async fn standard_profile_direct_add_edge_call_is_rejected() {
     );
 }
 
+#[tokio::test]
+async fn runtime_info_reports_identity_and_db_routing() {
+    let server = make_server();
+    server.set_tool_profile(Some(
+        crate::profiles::parse_tool_profile("openclaw").expect("openclaw profile should parse"),
+    ));
+
+    let info = server
+        .runtime_info()
+        .await
+        .expect("runtime_info should serialize");
+    let value: serde_json::Value = serde_json::from_str(&info).expect("runtime_info JSON");
+    assert_eq!(value["runtime"]["name"], json!("tachi"));
+    assert_eq!(
+        value["runtime"]["version"],
+        json!(env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(
+        value["runtime"]["tool_profile"],
+        json!("observe,remember,operate")
+    );
+    assert!(value["databases"]["global"]["path"].as_str().is_some());
+    assert_eq!(value["databases"]["project"], serde_json::Value::Null);
+    assert_eq!(value["databases"]["single_db_mode"], json!(true));
+}
+
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
