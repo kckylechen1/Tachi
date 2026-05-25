@@ -139,7 +139,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
@@ -379,7 +379,7 @@ struct MemoryServer {
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::Sender<EnrichmentItem>,
     inline_enrichment: Arc<AtomicBool>,
-    inline_enrichment_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
+    enrichment_pending: Arc<AtomicUsize>,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
     foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
     foundry_stats: Arc<FoundryWorkerStats>,
@@ -420,33 +420,25 @@ impl MemoryServer {
 
     fn enqueue_enrichment(&self, item: EnrichmentItem) {
         if self.inline_enrichment.load(Ordering::SeqCst) {
-            let server = self.clone();
-            let handle = tokio::spawn(async move {
-                let mut batch = vec![item];
-                server.flush_enrichment_batch(&mut batch).await;
-            });
-            lock_or_recover(&self.inline_enrichment_tasks, "inline_enrichment_tasks").push(handle);
+            self.enrichment_pending.fetch_add(1, Ordering::SeqCst);
+            if let Err(err) = self.enrich_tx.blocking_send(item) {
+                self.enrichment_pending.fetch_sub(1, Ordering::SeqCst);
+                eprintln!("[enrichment-batcher] failed to queue inline enrichment item: {err}");
+            }
         } else if let Err(err) = self.enrich_tx.try_send(item) {
             eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
         }
     }
 
     async fn drain_inline_enrichment(&self) {
-        loop {
-            let handles = {
-                let mut guard =
-                    lock_or_recover(&self.inline_enrichment_tasks, "inline_enrichment_tasks");
-                std::mem::take(&mut *guard)
-            };
-            if handles.is_empty() {
-                break;
-            }
-            for handle in handles {
-                if let Err(err) = handle.await {
-                    eprintln!("[enrichment-batcher] inline enrichment task failed: {err}");
-                }
-            }
+        while self.enrichment_pending.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        // Allow the batcher one flush interval to drain the last partial batch.
+        tokio::time::sleep(Duration::from_millis(
+            crate::enrichment::ENRICH_FLUSH_INTERVAL_MS + 50,
+        ))
+        .await;
     }
 
     fn new(
@@ -567,7 +559,7 @@ impl MemoryServer {
             mcp_tool_exposure_mode,
             enrich_tx,
             inline_enrichment: Arc::new(AtomicBool::new(false)),
-            inline_enrichment_tasks: Arc::new(StdMutex::new(Vec::new())),
+            enrichment_pending: Arc::new(AtomicUsize::new(0)),
             foundry_tx,
             foundry_stats,
             vault_key: Arc::new(StdRwLock::new(None)),

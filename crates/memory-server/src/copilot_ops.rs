@@ -58,19 +58,21 @@ fn wiki_subject_token(input: &str) -> Option<String> {
     }
 }
 
-fn wiki_text_jaccard(a: &str, b: &str) -> f64 {
-    let a = wiki_text_tokens(a);
-    let b = wiki_text_tokens(b);
+fn wiki_text_jaccard_sets(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let intersection = a.intersection(&b).count() as f64;
-    let union = a.union(&b).count() as f64;
+    let intersection = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
     if union == 0.0 {
         0.0
     } else {
         intersection / union
     }
+}
+
+fn wiki_text_jaccard(a: &str, b: &str) -> f64 {
+    wiki_text_jaccard_sets(&wiki_text_tokens(a), &wiki_text_tokens(b))
 }
 
 fn find_wiki_entry_by_path_or_topic(
@@ -120,16 +122,20 @@ fn supersede_wiki_duplicates(
         .list_by_path("/wiki", 5000, false)
         .map_err(|e| format!("wiki duplicate scan: {e}"))?;
     let mut changed = 0usize;
+    let target_subject = wiki_subject_token(topic);
+    let target_text_tokens = wiki_text_tokens(text);
     for candidate in candidates {
         if candidate.id == canonical_id {
             continue;
         }
         let same_subject = candidate.path == path
-            || wiki_subject_token(topic).is_some_and(|token| {
-                wiki_subject_token(&candidate.topic)
-                    .is_some_and(|candidate_token| token == candidate_token)
+            || target_subject.as_ref().is_some_and(|token| {
+                wiki_subject_token(&candidate.topic).as_ref() == Some(token)
             })
-            || wiki_text_jaccard(&candidate.text, text) >= WIKI_DUP_JACCARD_THRESHOLD;
+            || wiki_text_jaccard_sets(
+                &target_text_tokens,
+                &wiki_text_tokens(&candidate.text),
+            ) >= WIKI_DUP_JACCARD_THRESHOLD;
         if !same_subject {
             continue;
         }

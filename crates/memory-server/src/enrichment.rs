@@ -252,6 +252,10 @@ impl MemoryServer {
         }
 
         eprintln!("[enrichment-batcher] batch of {batch_size} complete");
+        if self.inline_enrichment_enabled() {
+            self.enrichment_pending
+                .fetch_sub(batch_size, Ordering::SeqCst);
+        }
     }
 }
 
