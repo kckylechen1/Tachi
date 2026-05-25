@@ -37,6 +37,8 @@ pub struct SearchOptions {
     pub record_access: bool,
     /// Whether to include archived entries in query results.
     pub include_archived: bool,
+    /// Whether to include entries superseded by a newer memory.
+    pub include_superseded: bool,
     /// MMR diversity threshold: cosine similarity > threshold → defer to end.
     /// Set to None to disable MMR. Default: Some(0.85).
     pub mmr_threshold: Option<f64>,
@@ -46,6 +48,13 @@ pub struct SearchOptions {
     /// Optional filter for graph edges: "causes", "follows", "related_to", etc.
     /// None = traverse all relation types.
     pub graph_relation_filter: Option<String>,
+}
+
+fn env_truthy(key: &str) -> bool {
+    matches!(
+        std::env::var(key).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
+    )
 }
 
 impl Default for SearchOptions {
@@ -60,6 +69,7 @@ impl Default for SearchOptions {
             vec_available: false,
             record_access: true,
             include_archived: false,
+            include_superseded: false,
             mmr_threshold: Some(0.85),
             graph_expand_hops: 0,
             graph_relation_filter: None,
@@ -184,6 +194,55 @@ fn newest_by_shared_entity(entries: &HashMap<String, &MemoryEntry>) -> HashSet<S
         .collect()
 }
 
+fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
+    entry
+        .metadata
+        .get(key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
+    let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
+    let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
+    let wiki_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/wiki"));
+    (!wiki_scoped
+        && (entry.path == "/wiki/_log"
+            || metadata_bool(entry, "wiki_log")
+            || entry.topic.eq_ignore_ascii_case("wiki_log")))
+        || entry
+            .source
+            .eq_ignore_ascii_case("foundry_recall_rerank_cache")
+        || (!kanban_scoped
+            && (entry.path.starts_with("/kanban/")
+                || entry.category.eq_ignore_ascii_case("kanban")))
+        || (!handoff_scoped
+            && (entry.path.starts_with("/handoff/")
+                || entry.category.eq_ignore_ascii_case("handoff")))
+}
+
+fn quality_multiplier(entry: &MemoryEntry) -> f64 {
+    if entry.source.eq_ignore_ascii_case("foundry_distill") {
+        return 0.75;
+    }
+    if metadata_bool(entry, "wiki")
+        || entry.domain.as_deref() == Some("wiki")
+        || entry.category.eq_ignore_ascii_case("wiki")
+    {
+        return 1.15;
+    }
+    if entry.is_guide() {
+        return 1.12;
+    }
+    if matches!(entry.category.as_str(), "kanban" | "handoff")
+        || entry.path.starts_with("/kanban/")
+        || entry.path.starts_with("/handoff/")
+    {
+        return 0.65;
+    }
+    1.0
+}
+
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
 ///
 /// Execution plan:
@@ -198,6 +257,8 @@ pub fn hybrid_search(
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
     let n = opts.candidates_per_channel;
+    let include_superseded =
+        opts.include_superseded || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED");
 
     // ── Channel 1: Vector ─────────────────────────────────────────────────────
     let vec_scores: HashMap<String, f64> = if opts.vec_available {
@@ -207,6 +268,7 @@ pub fn hybrid_search(
                 qv,
                 n,
                 opts.include_archived,
+                include_superseded,
                 opts.path_prefix.as_deref(),
             )?
         } else {
@@ -222,6 +284,7 @@ pub fn hybrid_search(
         query,
         n,
         opts.include_archived,
+        include_superseded,
         opts.path_prefix.as_deref(),
     )?;
 
@@ -250,10 +313,19 @@ pub fn hybrid_search(
         })
         .collect();
 
+    let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
+    let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec).unwrap_or_default();
+
     // ── Optional path-prefix filter ───────────────────────────────────────────
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
-        .filter(|(_, e)| {
+        .filter(|(id, e)| {
+            if !include_superseded && superseded_ids.contains(*id) {
+                return false;
+            }
+            if is_search_noise_entry(e, opts.path_prefix.as_deref()) {
+                return false;
+            }
             // Path prefix filter
             if let Some(prefix) = &opts.path_prefix {
                 if !e.path.starts_with(prefix.as_str()) {
@@ -291,10 +363,29 @@ pub fn hybrid_search(
         &access_times,
     );
 
-    let superseded_ids = get_superseded_ids(conn, &candidate_ids_vec).unwrap_or_default();
-    for id in &superseded_ids {
-        if let Some(score) = scores.get_mut(id) {
-            score.final_score *= 0.3;
+    if include_superseded {
+        for id in &superseded_ids {
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= 0.3;
+            }
+        }
+    }
+
+    let top_pre_quality_score = scores
+        .values()
+        .map(|score| score.final_score)
+        .filter(|score| score.is_finite())
+        .fold(0.0_f64, f64::max);
+    let quality_boost_floor = top_pre_quality_score * 0.85;
+    for (id, entry) in &entries_ref {
+        let multiplier = quality_multiplier(entry);
+        if (multiplier - 1.0).abs() > f64::EPSILON {
+            if let Some(score) = scores.get_mut(id) {
+                if multiplier > 1.0 && score.final_score < quality_boost_floor {
+                    continue;
+                }
+                score.final_score *= multiplier;
+            }
         }
     }
 
@@ -357,6 +448,15 @@ pub fn hybrid_search(
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
+                .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
+                .filter(|entry| {
+                    if include_superseded {
+                        return true;
+                    }
+                    !get_superseded_ids(conn, std::slice::from_ref(&entry.id))
+                        .map(|ids| ids.contains(&entry.id))
+                        .unwrap_or(false)
+                })
                 .map(|entry| {
                     let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
                     let pr = pr_scores.get(&entry.id).copied().unwrap_or(0.0);
@@ -516,5 +616,67 @@ mod tests {
         assert_eq!(weights.symbolic, 0.28);
         assert_eq!(weights.decay, 0.02);
         assert!(weights.use_rrf);
+    }
+
+    #[test]
+    fn hybrid_hides_superseded_by_default() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "old",
+            "TrendLock protects trends using the stale rule",
+            &["trendlock"],
+        );
+        insert(
+            &mut conn,
+            "new",
+            "TrendLock protects trends using the canonical rule",
+            &["trendlock"],
+        );
+        crate::db::supersede_memory(&conn, "old", "new").unwrap();
+
+        let opts = SearchOptions {
+            top_k: 5,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+        let ids = results
+            .into_iter()
+            .map(|result| result.entry.id)
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"new".to_string()));
+        assert!(!ids.contains(&"old".to_string()));
+    }
+
+    #[test]
+    fn hybrid_hides_operation_logs() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "knowledge",
+            "TrendLock durable decision rule for agents",
+            &["trendlock"],
+        );
+        let mut log = memory_entry(
+            "wiki-operation-log",
+            "TrendLock write operation log should not be recalled",
+            &["trendlock", "log"],
+        );
+        log.path = "/wiki/_log".to_string();
+        log.topic = "wiki_log".to_string();
+        log.metadata = json!({"wiki_log": true});
+        upsert(&mut conn, &log, false).unwrap();
+
+        let opts = SearchOptions {
+            top_k: 5,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "knowledge"));
+        assert!(!results
+            .iter()
+            .any(|result| result.entry.id == "wiki-operation-log"));
     }
 }

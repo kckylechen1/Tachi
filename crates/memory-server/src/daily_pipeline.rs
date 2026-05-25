@@ -302,6 +302,7 @@ async fn run_truth_maintenance_for_target(
             needs_summary: false,
             target_db,
             named_project: named_project.clone(),
+            db_path: None,
             foundry_agent_id: None,
             foundry_path_prefix: None,
             revision: entry.revision,

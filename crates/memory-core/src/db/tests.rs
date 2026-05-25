@@ -47,7 +47,7 @@ fn upsert_and_fts() {
     let e = make_entry("abc", "Rust is a systems programming language");
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "systems programming", 5, false, None).unwrap();
+    let results = search_fts(&conn, "systems programming", 5, false, false, None).unwrap();
     assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
 }
 
@@ -59,7 +59,7 @@ fn upsert_idempotent() {
     e.text = "updated text".into();
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "updated", 5, false, None).unwrap();
+    let results = search_fts(&conn, "updated", 5, false, false, None).unwrap();
     assert!(results.contains_key("dup"));
 }
 
@@ -125,7 +125,7 @@ fn search_vec_knn_with_k_constraint() {
     upsert(&mut conn, &e, true).unwrap();
 
     let query = vec![0.1_f32; 1024];
-    let results = search_vec(&conn, &query, 3, false, None).unwrap();
+    let results = search_vec(&conn, &query, 3, false, false, None).unwrap();
     assert!(results.contains_key("vec-1"));
 }
 
@@ -149,7 +149,7 @@ fn delete_existing() {
     assert_eq!(count, 0);
 
     // Verify it's gone from FTS
-    let fts_results = search_fts(&conn, "deleted", 5, false, None).unwrap();
+    let fts_results = search_fts(&conn, "deleted", 5, false, false, None).unwrap();
     assert!(!fts_results.contains_key("del-1"));
 }
 
@@ -164,9 +164,34 @@ fn search_fts_respects_path_prefix() {
     docs_entry.path = "/docs/rust".into();
     upsert(&mut conn, &docs_entry, false).unwrap();
 
-    let results = search_fts(&conn, "systems programming", 5, false, Some("/project")).unwrap();
+    let results = search_fts(
+        &conn,
+        "systems programming",
+        5,
+        false,
+        false,
+        Some("/project"),
+    )
+    .unwrap();
     assert!(results.contains_key("proj-1"));
     assert!(!results.contains_key("docs-1"));
+}
+
+#[test]
+fn raw_search_channels_exclude_superseded_by_default() {
+    let mut conn = make_conn();
+    let old = make_entry("old", "TrendLock old rule");
+    let new = make_entry("new", "TrendLock new rule");
+    upsert(&mut conn, &old, false).unwrap();
+    upsert(&mut conn, &new, false).unwrap();
+    supersede_memory(&conn, "old", "new").unwrap();
+
+    let results = search_fts(&conn, "TrendLock", 5, false, false, None).unwrap();
+    assert!(results.contains_key("new"));
+    assert!(!results.contains_key("old"));
+
+    let with_superseded = search_fts(&conn, "TrendLock", 5, false, true, None).unwrap();
+    assert!(with_superseded.contains_key("old"));
 }
 
 #[test]

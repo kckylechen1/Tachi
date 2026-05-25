@@ -13,6 +13,7 @@ pub(super) struct EnrichmentItem {
     pub(super) needs_summary: bool,
     pub(super) target_db: DbScope,
     pub(super) named_project: Option<String>,
+    pub(super) db_path: Option<PathBuf>,
     pub(super) foundry_agent_id: Option<String>,
     pub(super) foundry_path_prefix: Option<String>,
     pub(super) revision: i64,
@@ -41,6 +42,12 @@ pub(super) const ENRICH_BATCH_MAX: usize = 32;
 pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
 impl MemoryServer {
+    pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
+        if let Err(err) = self.enrich_tx.try_send(item) {
+            eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
+        }
+    }
+
     /// Background worker that batches enrichment requests (embedding + summary).
     /// Flushes every ENRICH_FLUSH_INTERVAL_MS or when ENRICH_BATCH_MAX items accumulate.
     pub(super) async fn run_enrichment_batcher(
@@ -115,10 +122,13 @@ impl MemoryServer {
         for (idx, result) in summary_results {
             match result {
                 Ok(s) => summaries[idx] = Some(s),
-                Err(e) => eprintln!(
-                    "[enrichment-batcher] summary failed for {}: {e}",
-                    items[idx].id
-                ),
+                Err(e) => {
+                    eprintln!(
+                        "[enrichment-batcher] summary failed for {}: {e}",
+                        items[idx].id
+                    );
+                    record_enrichment_failure(self, &items[idx], "summary", &e);
+                }
             }
         }
 
@@ -152,6 +162,9 @@ impl MemoryServer {
                 }
                 Err(e) => {
                     eprintln!("[enrichment-batcher] batch embedding failed: {e}");
+                    for &item_idx in &embed_indices {
+                        record_enrichment_failure(self, &items[item_idx], "embedding", &e);
+                    }
                 }
             }
         }
@@ -170,6 +183,8 @@ impl MemoryServer {
 
                 let res = if let Some(ref project_name) = item.named_project {
                     self.with_named_project_store(project_name, update_action)
+                } else if let Some(ref db_path) = item.db_path {
+                    self.with_path_store(db_path, update_action)
                 } else {
                     self.with_store_for_scope(item.target_db, update_action)
                 };
@@ -234,13 +249,40 @@ impl MemoryServer {
                         item.id
                     ),
                     Err(e) => {
-                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id)
+                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id);
+                        record_enrichment_failure(self, item, "db_update", &e);
                     }
                 }
             }
         }
 
         eprintln!("[enrichment-batcher] batch of {batch_size} complete");
+    }
+}
+
+fn record_enrichment_failure(
+    server: &MemoryServer,
+    item: &EnrichmentItem,
+    stage: &str,
+    error: &str,
+) {
+    let action = |store: &mut MemoryStore| {
+        store
+            .record_enrichment_failure(&item.id, stage, error)
+            .map_err(|e| format!("record enrichment failure: {e}"))
+    };
+    let res = if let Some(ref project_name) = item.named_project {
+        server.with_named_project_store(project_name, action)
+    } else if let Some(ref db_path) = item.db_path {
+        server.with_path_store(db_path, action)
+    } else {
+        server.with_store_for_scope(item.target_db, action)
+    };
+    if let Err(err) = res {
+        eprintln!(
+            "[enrichment-batcher] failed to record enrichment failure for {}: {err}",
+            item.id
+        );
     }
 }
 
