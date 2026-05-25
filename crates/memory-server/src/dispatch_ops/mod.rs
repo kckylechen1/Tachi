@@ -11,12 +11,12 @@ use tokio::process::Command;
 
 mod board;
 mod dispatch;
+mod dispatch_v2;
 mod kanban_helpers;
 mod mcp_config;
 mod merge;
 mod prompt;
 mod subprocess;
-mod v2;
 
 // Re-exports preserving the legacy public surface so external callers
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep

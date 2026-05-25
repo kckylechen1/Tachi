@@ -288,7 +288,7 @@ async fn v2_two_stage_smoke() {
     assert!(status["duration_ms_plan"].as_u64().is_some());
     assert_eq!(
         status["plan_review_status"],
-        serde_json::json!("auto_approved")
+        serde_json::json!("approved")
     );
 
     // Cleanup.
