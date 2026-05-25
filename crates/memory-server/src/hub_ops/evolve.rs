@@ -122,8 +122,7 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
 
     // ── 4. Call LLM for evolution ────────────────────────────────────────────
     // Phase 2: route through Claude CLI pool first; on Err, fall back to the
-    // existing reasoning lane (raw_api) so behaviour stays unchanged in
-    // environments without the Claude CLI installed.
+    // raw extract lane (SiliconFlow/Qwen) without spawning an unbounded CLI.
     const EVOLVE_SYSTEM: &str = "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.";
     let llm_for_fallback = server.llm.clone();
     let evolution_prompt_for_fallback = evolution_prompt.clone();
@@ -134,7 +133,7 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
         "skill-evolve",
         move || async move {
             llm_for_fallback
-                .call_reasoning_llm(
+                .call_extract_llm(
                     EVOLVE_SYSTEM,
                     &evolution_prompt_for_fallback,
                     None,
