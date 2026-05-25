@@ -23,15 +23,46 @@ pub(crate) use tidy::{
     update_manifest_after_migration, MigrationConfig,
 };
 
-pub(super) const SETUP_API_KEYS: [(&str, &str); 5] = [
-    ("VOYAGE_API_KEY", "Voyage embeddings (voyage-4)"),
-    (
-        "VOYAGE_RERANK_API_KEY",
-        "Voyage reranking (rerank-2.5) — optional",
-    ),
-    ("SILICONFLOW_API_KEY", "SiliconFlow extraction"),
-    ("MINIMAX_API_KEY", "MiniMax distill/summary"),
-    ("REASONING_API_KEY", "GLM-5.1 reasoning lane"),
+// Phase 2 (LLM 3-layer consolidation): only `SILICONFLOW_API_KEY` +
+// `VOYAGE_API_KEY` are required going forward. Background skill/foundry
+// lanes now go through the Claude CLI pool with SiliconFlow/Qwen as the
+// raw-API fallback, so `MINIMAX_*`, `DISTILL_*` and `REASONING_*` env vars
+// are deprecated. We keep them recognised here (with a `deprecated` flag)
+// so `tachi setup` surfaces a soft warning instead of silently ignoring
+// existing user configs.
+pub(super) struct SetupApiKey {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub deprecated: bool,
+}
+
+pub(super) const SETUP_API_KEYS: [SetupApiKey; 5] = [
+    SetupApiKey {
+        key: "VOYAGE_API_KEY",
+        label: "Voyage embeddings (voyage-4)",
+        deprecated: false,
+    },
+    SetupApiKey {
+        key: "VOYAGE_RERANK_API_KEY",
+        label: "Voyage reranking (rerank-2.5) — optional",
+        deprecated: false,
+    },
+    SetupApiKey {
+        key: "SILICONFLOW_API_KEY",
+        label: "SiliconFlow extraction (raw_api fallback for all background lanes)",
+        deprecated: false,
+    },
+    SetupApiKey {
+        key: "MINIMAX_API_KEY",
+        label:
+            "MiniMax distill/summary — DEPRECATED (Phase 2: routed via Claude pool + SiliconFlow)",
+        deprecated: true,
+    },
+    SetupApiKey {
+        key: "REASONING_API_KEY",
+        label: "GLM-5.1 reasoning lane — DEPRECATED (Phase 2: skill-evolve uses Claude pool)",
+        deprecated: true,
+    },
 ];
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =

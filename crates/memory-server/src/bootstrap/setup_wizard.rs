@@ -46,9 +46,11 @@ pub(super) async fn run_interactive_wizard(
     // ─── [1/5] API Keys ────────────────────────────────────────────────────
     println!("\n[1/5] API Keys");
     println!("  Tachi uses Voyage (embeddings) and SiliconFlow (extraction).");
-    for (key, label) in SETUP_API_KEYS.iter() {
+    for entry in SETUP_API_KEYS.iter().filter(|entry| !entry.deprecated) {
+        let key = entry.key;
+        let label = entry.label;
         let existing = env_vars
-            .get(*key)
+            .get(key)
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
 
@@ -66,7 +68,7 @@ pub(super) async fn run_interactive_wizard(
                 .interact()?
         } else {
             // Required keys are the first two; others are optional.
-            let required = matches!(*key, "VOYAGE_API_KEY" | "SILICONFLOW_API_KEY");
+            let required = matches!(key, "VOYAGE_API_KEY" | "SILICONFLOW_API_KEY");
             Confirm::with_theme(&theme)
                 .with_prompt(if required {
                     format!("    set {key} now? (recommended)")

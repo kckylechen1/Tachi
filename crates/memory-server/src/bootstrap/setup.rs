@@ -12,17 +12,19 @@ pub(crate) fn build_setup_report(
 
     let api_key_details = SETUP_API_KEYS
         .iter()
-        .map(|(key, label)| {
+        .map(|entry| {
             let status = if env_vars
-                .get(*key)
+                .get(entry.key)
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
             {
                 "configured"
+            } else if entry.deprecated {
+                "deprecated-unset"
             } else {
                 "missing"
             };
-            format!("{key}: {status} ({label})")
+            format!("{}: {} ({})", entry.key, status, entry.label)
         })
         .collect::<Vec<_>>();
     let configured_api_keys = api_key_details
