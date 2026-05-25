@@ -211,6 +211,65 @@ impl ClaudePool {
     }
 }
 
+/// Combine a `system` preamble and `user` payload into a single prompt the
+/// Claude CLI can consume on stdin. Mirrors the OpenAI-compatible chat
+/// shape used by the raw-API lanes so behaviour stays comparable.
+pub fn format_pool_prompt(system: &str, user: &str) -> String {
+    let sys = system.trim();
+    let usr = user.trim();
+    if sys.is_empty() {
+        usr.to_string()
+    } else {
+        format!("{sys}\n\n---\n\n{usr}")
+    }
+}
+
+/// Source label returned by [`pool_call_with_fallback`] indicating which
+/// backend actually produced the response. Useful for audit/log output so
+/// operators can see when the Claude pool degraded to the raw-API lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolCallSource {
+    ClaudeCli,
+    RawApiFallback,
+}
+
+impl PoolCallSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PoolCallSource::ClaudeCli => "claude_cli",
+            PoolCallSource::RawApiFallback => "raw_api_fallback",
+        }
+    }
+}
+
+/// Try `pool.call(system+user, label)` first; on Err, invoke `fallback`
+/// (the existing raw-API LLM helper closure). Returns the produced text
+/// together with which backend supplied it so callers can log/audit.
+///
+/// The pool failure is logged to stderr so operators notice when the
+/// Claude CLI lane keeps degrading.
+pub async fn pool_call_with_fallback<F, Fut>(
+    pool: &ClaudePool,
+    system: &str,
+    user: &str,
+    label: &str,
+    fallback: F,
+) -> Result<(String, PoolCallSource), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    let combined = format_pool_prompt(system, user);
+    match pool.call(label, &combined).await {
+        Ok(outcome) => Ok((outcome.text, PoolCallSource::ClaudeCli)),
+        Err(pool_err) => {
+            eprintln!("[claude_pool:{label}] degraded to raw_api fallback: {pool_err}");
+            let text = fallback().await?;
+            Ok((text, PoolCallSource::RawApiFallback))
+        }
+    }
+}
+
 fn sanitize_label(label: &str) -> String {
     let cleaned: String = label
         .chars()
@@ -398,5 +457,68 @@ mod tests {
         assert_eq!(removed, 1, "only the success dir should be over its 7d cap");
         assert!(!fresh2.exists());
         assert!(failed2.exists());
+    }
+
+    #[test]
+    fn format_pool_prompt_combines_system_and_user() {
+        let out = format_pool_prompt("be precise", "the question");
+        assert!(out.contains("be precise"));
+        assert!(out.contains("the question"));
+        assert!(out.contains("---"));
+    }
+
+    #[test]
+    fn format_pool_prompt_skips_separator_when_system_empty() {
+        let out = format_pool_prompt("   ", "just user");
+        assert_eq!(out, "just user");
+    }
+
+    #[tokio::test]
+    async fn pool_call_with_fallback_invokes_fallback_when_pool_errors() {
+        // CLAUDE_BIN points at a binary that cannot exist → pool errors → fallback fires.
+        let prev = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var("CLAUDE_BIN", "/nonexistent/__tachi_test_no_such_claude__");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = ClaudePool {
+            sem: Arc::new(Semaphore::new(1)),
+            runs_dir: tmp.path().to_path_buf(),
+            timeout: Duration::from_secs(5),
+            binary: "/nonexistent/__tachi_test_no_such_claude__".to_string(),
+        };
+
+        let (text, source) = pool_call_with_fallback(&pool, "sys", "usr", "unit-test", || async {
+            Ok::<_, String>("fallback-text".to_string())
+        })
+        .await
+        .expect("fallback path should succeed");
+
+        assert_eq!(text, "fallback-text");
+        assert_eq!(source, PoolCallSource::RawApiFallback);
+        assert_eq!(source.as_str(), "raw_api_fallback");
+
+        // Restore env
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_call_with_fallback_propagates_fallback_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = ClaudePool {
+            sem: Arc::new(Semaphore::new(1)),
+            runs_dir: tmp.path().to_path_buf(),
+            timeout: Duration::from_secs(5),
+            binary: "/nonexistent/__tachi_test_no_such_claude_2__".to_string(),
+        };
+
+        let err = pool_call_with_fallback(&pool, "sys", "usr", "unit-test-err", || async {
+            Err::<String, _>("raw api also down".to_string())
+        })
+        .await
+        .expect_err("fallback error should surface");
+        assert!(err.contains("raw api also down"));
     }
 }

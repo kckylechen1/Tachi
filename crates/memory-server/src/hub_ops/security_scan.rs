@@ -326,22 +326,61 @@ pub(super) async fn scan_skill_definition_with_llm(
         return None;
     }
 
+    // Phase 2: SKILL_SECURITY_SCAN_BACKEND chooses how the LLM portion is
+    // executed. `claude_cli` is the default — call the pool first and fall
+    // back to the raw_api lane on Err. `raw_api` bypasses the pool entirely.
+    // `disabled` skips the LLM portion (callers still receive the static
+    // heuristic scan via merge_skill_scans).
+    let backend = resolve_security_scan_backend();
+    if backend == SecurityScanBackend::Disabled {
+        return None;
+    }
+
     let model = std::env::var("SKILL_SECURITY_SCAN_MODEL")
         .unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
     let payload = serde_json::to_string(def).ok()?;
 
-    match server
-        .llm
-        .call_extract_llm(
-            crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
-            &payload,
-            Some(&model),
-            0.1,
-            800,
-        )
-        .await
-    {
-        Ok(raw) => {
+    let llm_call_result: Result<(String, &'static str), String> = match backend {
+        SecurityScanBackend::ClaudeCli => {
+            let llm_for_fallback = server.llm.clone();
+            let payload_for_fallback = payload.clone();
+            let model_for_fallback = model.clone();
+            crate::claude_pool::pool_call_with_fallback(
+                &server.claude_pool,
+                crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+                &payload,
+                "security-scan",
+                move || async move {
+                    llm_for_fallback
+                        .call_extract_llm(
+                            crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+                            &payload_for_fallback,
+                            Some(&model_for_fallback),
+                            0.1,
+                            800,
+                        )
+                        .await
+                },
+            )
+            .await
+            .map(|(text, src)| (text, src.as_str()))
+        }
+        SecurityScanBackend::RawApi => server
+            .llm
+            .call_extract_llm(
+                crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+                &payload,
+                Some(&model),
+                0.1,
+                800,
+            )
+            .await
+            .map(|text| (text, "raw_api")),
+        SecurityScanBackend::Disabled => unreachable!("handled above"),
+    };
+
+    match llm_call_result {
+        Ok((raw, source)) => {
             let parsed: serde_json::Value =
                 serde_json::from_str(llm::LlmClient::strip_code_fence(&raw)).unwrap_or_else(|_| {
                     serde_json::json!({
@@ -354,14 +393,48 @@ pub(super) async fn scan_skill_definition_with_llm(
             Some(serde_json::json!({
                 "status": "ok",
                 "model": model,
+                "backend": source,
                 "result": parsed,
             }))
         }
         Err(e) => Some(serde_json::json!({
             "status": "error",
             "model": model,
+            "backend": backend.as_str(),
             "error": e,
         })),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SecurityScanBackend {
+    ClaudeCli,
+    RawApi,
+    Disabled,
+}
+
+impl SecurityScanBackend {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            SecurityScanBackend::ClaudeCli => "claude_cli",
+            SecurityScanBackend::RawApi => "raw_api",
+            SecurityScanBackend::Disabled => "disabled",
+        }
+    }
+}
+
+/// Resolve `SKILL_SECURITY_SCAN_BACKEND` env var into a backend choice.
+/// Unknown / missing values default to `claude_cli`.
+pub(super) fn resolve_security_scan_backend() -> SecurityScanBackend {
+    match std::env::var("SKILL_SECURITY_SCAN_BACKEND")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "raw_api" | "raw-api" | "rawapi" => SecurityScanBackend::RawApi,
+        "disabled" | "off" | "false" | "0" => SecurityScanBackend::Disabled,
+        _ => SecurityScanBackend::ClaudeCli,
     }
 }
 
@@ -434,4 +507,90 @@ pub(super) fn merge_skill_scans(
         "llm": llm_meta,
         "llm_status": llm_status
     })
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::{resolve_security_scan_backend, SecurityScanBackend};
+    use std::sync::Mutex;
+
+    // Serialize env mutation across tests in this module.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_backend_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("SKILL_SECURITY_SCAN_BACKEND").ok();
+        match value {
+            Some(v) => std::env::set_var("SKILL_SECURITY_SCAN_BACKEND", v),
+            None => std::env::remove_var("SKILL_SECURITY_SCAN_BACKEND"),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var("SKILL_SECURITY_SCAN_BACKEND", v),
+            None => std::env::remove_var("SKILL_SECURITY_SCAN_BACKEND"),
+        }
+    }
+
+    #[test]
+    fn backend_defaults_to_claude_cli_when_unset() {
+        with_backend_env(None, || {
+            assert_eq!(
+                resolve_security_scan_backend(),
+                SecurityScanBackend::ClaudeCli
+            );
+        });
+    }
+
+    #[test]
+    fn backend_defaults_to_claude_cli_when_unknown() {
+        with_backend_env(Some("bogus"), || {
+            assert_eq!(
+                resolve_security_scan_backend(),
+                SecurityScanBackend::ClaudeCli
+            );
+        });
+    }
+
+    #[test]
+    fn backend_recognises_raw_api() {
+        with_backend_env(Some("raw_api"), || {
+            assert_eq!(resolve_security_scan_backend(), SecurityScanBackend::RawApi);
+        });
+        with_backend_env(Some("RAW-API"), || {
+            assert_eq!(resolve_security_scan_backend(), SecurityScanBackend::RawApi);
+        });
+    }
+
+    #[test]
+    fn backend_recognises_disabled() {
+        with_backend_env(Some("disabled"), || {
+            assert_eq!(
+                resolve_security_scan_backend(),
+                SecurityScanBackend::Disabled
+            );
+        });
+        with_backend_env(Some("0"), || {
+            assert_eq!(
+                resolve_security_scan_backend(),
+                SecurityScanBackend::Disabled
+            );
+        });
+    }
+
+    #[test]
+    fn backend_recognises_explicit_claude_cli() {
+        with_backend_env(Some("claude_cli"), || {
+            assert_eq!(
+                resolve_security_scan_backend(),
+                SecurityScanBackend::ClaudeCli
+            );
+        });
+    }
+
+    #[test]
+    fn backend_as_str_matches_env_values() {
+        assert_eq!(SecurityScanBackend::ClaudeCli.as_str(), "claude_cli");
+        assert_eq!(SecurityScanBackend::RawApi.as_str(), "raw_api");
+        assert_eq!(SecurityScanBackend::Disabled.as_str(), "disabled");
+    }
 }

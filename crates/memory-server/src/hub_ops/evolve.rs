@@ -121,17 +121,36 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
     );
 
     // ── 4. Call LLM for evolution ────────────────────────────────────────────
-    let llm_response = server
-        .llm
-        .call_reasoning_llm(
-            "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.",
-            &evolution_prompt,
-            None,
-            0.4,
-            4000,
-        )
-        .await
-        .map_err(|e| format!("LLM evolution call failed: {e}"))?;
+    // Phase 2: route through Claude CLI pool first; on Err, fall back to the
+    // existing reasoning lane (raw_api) so behaviour stays unchanged in
+    // environments without the Claude CLI installed.
+    const EVOLVE_SYSTEM: &str = "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.";
+    let llm_for_fallback = server.llm.clone();
+    let evolution_prompt_for_fallback = evolution_prompt.clone();
+    let (llm_response, source) = crate::claude_pool::pool_call_with_fallback(
+        &server.claude_pool,
+        EVOLVE_SYSTEM,
+        &evolution_prompt,
+        "skill-evolve",
+        move || async move {
+            llm_for_fallback
+                .call_reasoning_llm(
+                    EVOLVE_SYSTEM,
+                    &evolution_prompt_for_fallback,
+                    None,
+                    0.4,
+                    4000,
+                )
+                .await
+        },
+    )
+    .await
+    .map_err(|e| format!("LLM evolution call failed: {e}"))?;
+    eprintln!(
+        "[skill-evolve] {}: backend={}",
+        params.skill_id,
+        source.as_str()
+    );
 
     // Parse LLM response as JSON
     let evolved: serde_json::Value = serde_json::from_str(llm_response.trim())

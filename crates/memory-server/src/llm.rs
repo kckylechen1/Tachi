@@ -21,6 +21,8 @@ struct ChatLaneConfig {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // Phase 2: Distill lane retained for back-compat; call_distill_llm
+                    // no longer invoked but kept for env-var probing & rollback.
 enum ChatLane {
     Extract,
     Distill,
@@ -431,6 +433,11 @@ impl LlmClient {
         .await
     }
 
+    /// DEPRECATED (Phase 2): Foundry recall compaction now uses
+    /// `call_extract_llm` (SiliconFlow/Qwen) and daily distill goes
+    /// through the Claude CLI pool. Retained for back-compat and
+    /// potential rollback only.
+    #[allow(dead_code)]
     pub async fn call_distill_llm(
         &self,
         system: &str,

@@ -12,17 +12,19 @@ pub(crate) fn build_setup_report(
 
     let api_key_details = SETUP_API_KEYS
         .iter()
-        .map(|(key, label)| {
+        .map(|entry| {
             let status = if env_vars
-                .get(*key)
+                .get(entry.key)
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
             {
                 "configured"
+            } else if entry.deprecated {
+                "deprecated-unset"
             } else {
                 "missing"
             };
-            format!("{key}: {status} ({label})")
+            format!("{}: {} ({})", entry.key, status, entry.label)
         })
         .collect::<Vec<_>>();
     let configured_api_keys = api_key_details
@@ -331,16 +333,20 @@ pub(super) async fn run_setup_command(
     let config_env_path = app_home.join("config.env");
     let mut new_entries: Vec<(String, String)> = Vec::new();
 
-    // 1. API Keys
+    // 1. API Keys — only required (non-deprecated) keys are surfaced in the
+    // interactive wizard. Deprecated lanes (MINIMAX_*/REASONING_*) are
+    // still recognised if already set, but the wizard no longer prompts
+    // for them (Phase 2: 3-layer consolidation).
     let missing_keys: Vec<(&str, &str)> = SETUP_API_KEYS
         .iter()
-        .filter(|(key, _)| {
+        .filter(|entry| !entry.deprecated)
+        .filter(|entry| {
             !env_vars
-                .get(*key)
+                .get(entry.key)
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false)
         })
-        .copied()
+        .map(|entry| (entry.key, entry.label))
         .collect();
 
     if !missing_keys.is_empty() {

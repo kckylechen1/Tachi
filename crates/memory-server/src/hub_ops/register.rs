@@ -196,6 +196,7 @@ pub(crate) async fn handle_hub_register(
         };
         if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
             let llm = server.llm.clone();
+            let claude_pool = server.claude_pool.clone();
             let cap_clone = cap.clone();
             let desc_empty = params.description.is_empty();
             let db_path = match target_db {
@@ -210,17 +211,32 @@ pub(crate) async fn handle_hub_register(
             let cap_id = cap_clone.id.clone();
 
             tokio::spawn(async move {
-                match llm
-                    .call_extract_llm(
-                        crate::prompts::SKILL_ANALYSIS_PROMPT,
-                        &prompt_text,
-                        None,
-                        0.3,
-                        500,
-                    )
-                    .await
-                {
-                    Ok(analysis_raw) => {
+                // Phase 2: try Claude CLI pool first; on Err, fall back to the
+                // existing SiliconFlow/Qwen extract lane. Backend used is
+                // reported in the audit log.
+                let prompt_for_fallback = prompt_text.clone();
+                let llm_for_fallback = llm.clone();
+                let pool_result = crate::claude_pool::pool_call_with_fallback(
+                    &claude_pool,
+                    crate::prompts::SKILL_ANALYSIS_PROMPT,
+                    &prompt_text,
+                    "skill-analysis",
+                    move || async move {
+                        llm_for_fallback
+                            .call_extract_llm(
+                                crate::prompts::SKILL_ANALYSIS_PROMPT,
+                                &prompt_for_fallback,
+                                None,
+                                0.3,
+                                500,
+                            )
+                            .await
+                    },
+                )
+                .await;
+
+                match pool_result {
+                    Ok((analysis_raw, source)) => {
                         let analysis_json: serde_json::Value = match serde_json::from_str(
                             llm::LlmClient::strip_code_fence(&analysis_raw),
                         ) {
@@ -263,7 +279,12 @@ pub(crate) async fn handle_hub_register(
                                 }).await;
                             }
                         }
-                        eprintln!("[skill-analysis] {}: {:?}", cap_id, analysis_json);
+                        eprintln!(
+                            "[skill-analysis] {} (via {}): {:?}",
+                            cap_id,
+                            source.as_str(),
+                            analysis_json
+                        );
                     }
                     Err(e) => {
                         eprintln!("[skill-analysis] failed for {}: {}", cap_id, e);

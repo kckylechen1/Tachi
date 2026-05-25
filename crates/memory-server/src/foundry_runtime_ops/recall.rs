@@ -211,7 +211,7 @@ pub(super) async fn run_compaction_model(
         .map_err(|e| format!("Failed to serialize compaction payload: {e}"))?;
     let raw = server
         .llm
-        .call_distill_llm(
+        .call_extract_llm(
             prompt,
             &request,
             None,
