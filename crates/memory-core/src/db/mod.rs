@@ -19,7 +19,7 @@ mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
-pub use common::normalize_utc_iso_or_now;
+pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,

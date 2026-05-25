@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -111,9 +111,9 @@ impl ClaudePool {
         }
 
         let started_at = Utc::now().to_rfc3339();
-        let started = SystemTime::now();
+        let started = Instant::now();
         let result = self.run_claude_cli(prompt).await.map_err(|e| e.to_string());
-        let elapsed_ms = started.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         let finished_at = Utc::now().to_rfc3339();
 
         // Drop permit before fs writes — file I/O shouldn't hold a CLI slot.
@@ -268,6 +268,10 @@ pub fn parse_claude_json_envelope(stdout: &str) -> Result<String, String> {
 }
 
 fn cleanup_runs_dir(root: &Path, now: SystemTime) -> (usize, usize) {
+    cleanup_runs_dir_recursive(root, now, 0)
+}
+
+fn cleanup_runs_dir_recursive(root: &Path, now: SystemTime, depth: usize) -> (usize, usize) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return (0, 0);
     };
@@ -282,10 +286,32 @@ fn cleanup_runs_dir(root: &Path, now: SystemTime) -> (usize, usize) {
         if !path.is_dir() {
             continue;
         }
-        scanned += 1;
 
         let status_path = path.join("status.json");
-        let (failed, modified) = if let Ok(raw) = std::fs::read_to_string(&status_path) {
+        let manifest_path = path.join("source_manifest.json");
+        if !status_path.exists() && !manifest_path.exists() {
+            let child_has_dirs = std::fs::read_dir(&path)
+                .ok()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| e.path().is_dir());
+            if child_has_dirs && depth < 8 {
+                let (r, s) = cleanup_runs_dir_recursive(&path, now, depth + 1);
+                removed += r;
+                scanned += s;
+                continue;
+            }
+        }
+
+        scanned += 1;
+
+        let (failed, modified) = if manifest_path.exists() {
+            let mtime = std::fs::metadata(&manifest_path)
+                .and_then(|m| m.modified())
+                .ok();
+            (false, mtime)
+        } else if let Ok(raw) = std::fs::read_to_string(&status_path) {
             let failed = serde_json::from_str::<Value>(&raw)
                 .ok()
                 .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
@@ -296,8 +322,6 @@ fn cleanup_runs_dir(root: &Path, now: SystemTime) -> (usize, usize) {
                 .ok();
             (failed, mtime)
         } else {
-            // No status.json — treat as failed/abandoned for retention purposes,
-            // and use the dir's own mtime if available.
             let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             (true, mtime)
         };

@@ -39,7 +39,7 @@ pub fn normalize_utc_iso_or_now(ts: &str) -> String {
     normalize_utc_iso(ts).unwrap_or_else(|_| now_utc_iso())
 }
 
-pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
+pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
     let metadata_str: String = row.get("metadata")?;
     let metadata: serde_json::Value =
         serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));

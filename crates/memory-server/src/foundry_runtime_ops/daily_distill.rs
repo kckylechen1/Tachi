@@ -341,28 +341,24 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
 
         let mut stmt = conn
             .prepare(
-                "SELECT id FROM memories
+                "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+                  FROM memories
                   WHERE archived = 0 AND source != ?1
                   ORDER BY timestamp ASC",
             )
-            .map_err(|e| format!("prepare candidate id query: {e}"))?;
-        let ids = stmt
-            .query_map([FOUNDRY_DISTILL_SOURCE], |row| row.get::<_, String>(0))
-            .map_err(|e| format!("query candidate ids: {e}"))?;
+            .map_err(|e| format!("prepare candidate query: {e}"))?;
+        let rows = stmt
+            .query_map([FOUNDRY_DISTILL_SOURCE], memory_core::row_to_entry)
+            .map_err(|e| format!("query candidate rows: {e}"))?;
 
         let mut entries: Vec<MemoryEntry> = Vec::new();
-        for id_row in ids {
-            let id = id_row.map_err(|e| format!("read candidate id row: {e}"))?;
-            if processed_ids.contains(&id) {
+        for row in rows {
+            let entry = row.map_err(|e| format!("read candidate row: {e}"))?;
+            if processed_ids.contains(&entry.id) {
                 continue;
             }
-            if let Some(entry) = store
-                .get(&id)
-                .map_err(|e| format!("load candidate entry {id}: {e}"))?
-            {
-                if !entry.archived && entry.source != FOUNDRY_DISTILL_SOURCE {
-                    entries.push(entry);
-                }
+            if !entry.archived && entry.source != FOUNDRY_DISTILL_SOURCE {
+                entries.push(entry);
             }
         }
         Ok((processed_ids, entries))
@@ -396,7 +392,7 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
                 (path_prefix, coherence_key)
             });
         let group_id = format!(
-            "{}_{}",
+            "{}|{}",
             sanitize_id_segment(&path_prefix),
             sanitize_id_segment(&coherence_key)
         );
