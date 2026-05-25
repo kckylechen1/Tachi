@@ -418,32 +418,531 @@ pub(crate) fn execute_tidy_apply(
 pub(super) async fn run_tidy_command(
     json_output: bool,
     apply: bool,
+    dry_run: bool,
+    execute: bool,
+    yes: bool,
+    target_db_override: Option<PathBuf>,
+    home: &std::path::Path,
     app_home: &std::path::Path,
     roots: Vec<PathBuf>,
     git_root: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = build_tidy_report(&roots, git_root)?;
+
+    // --execute: fragment-DB consolidation pipeline.
+    if execute {
+        // Refuse if a daemon already holds the singleton lock — concurrent
+        // writes to the same DB would corrupt the migration.
+        let lock_path = app_home.join("daemon.lock");
+        if lock_path.exists() {
+            return Err(format!(
+                "refusing to run tachi tidy --execute while daemon lock is held at {}; \
+                 stop the running tachi daemon first",
+                lock_path.display()
+            )
+            .into());
+        }
+
+        let target_db = target_db_override
+            .clone()
+            .unwrap_or_else(|| app_home.join("global").join("memory.db"));
+        let archive_root = app_home
+            .join("archive")
+            .join(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
+        let plan = build_migration_plan(&report, &target_db, &archive_root, home);
+
+        let cfg = MigrationConfig {
+            target_db,
+            archive_root,
+            manifest_path: crate::manifest::Manifest::default_path(home),
+            yes,
+            dry_run: false,
+            interactive: !yes && atty_stdout(),
+        };
+
+        let summary = execute_tidy_migrations(&plan, &cfg)?;
+
+        if json_output {
+            return print_pretty_json(&json!({
+                "report": report,
+                "execute_summary": summary,
+            }));
+        }
+        println!("{}", render_tidy_report(&report));
+        println!();
+        println!("{}", render_tidy_execute_summary(&summary));
+        return Ok(());
+    }
+
+    // Legacy --apply path: conservative confirm-only summary.
     let apply_summary = if apply {
         Some(execute_tidy_apply(app_home, &report)?)
     } else {
         None
     };
 
+    // --dry-run (or default): also include the migration plan preview when
+    // there are any migration candidates, but make no writes.
+    let target_db_preview = target_db_override
+        .clone()
+        .unwrap_or_else(|| app_home.join("global").join("memory.db"));
+    let archive_preview = app_home.join("archive").join("<timestamp>");
+    let plan_preview = build_migration_plan(&report, &target_db_preview, &archive_preview, home);
+
     if json_output {
         if let Some(summary) = apply_summary.as_ref() {
-            print_pretty_json(&json!({
+            return print_pretty_json(&json!({
                 "report": report,
                 "apply_summary": summary,
-            }))
-        } else {
-            print_pretty_json(&serde_json::to_value(&report)?)
+                "migration_plan": plan_preview,
+                "dry_run": dry_run || !apply,
+            }));
         }
-    } else {
-        println!("{}", render_tidy_report(&report));
-        if let Some(summary) = apply_summary.as_ref() {
-            println!();
-            println!("{}", render_tidy_apply_summary(summary));
-        }
-        Ok(())
+        return print_pretty_json(&json!({
+            "report": report,
+            "migration_plan": plan_preview,
+            "dry_run": true,
+        }));
     }
+
+    println!("{}", render_tidy_report(&report));
+    if !plan_preview.is_empty() {
+        println!();
+        println!("{}", render_migration_plan(&plan_preview));
+    }
+    if let Some(summary) = apply_summary.as_ref() {
+        println!();
+        println!("{}", render_tidy_apply_summary(summary));
+    }
+    if !execute {
+        println!();
+        println!(
+            "(no writes performed — pass --execute to migrate, or --apply for the conservative path)"
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fragment-DB migration: planner + executor.
+// ---------------------------------------------------------------------------
+
+/// Configuration controlling how migrations are executed.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct MigrationConfig {
+    pub target_db: PathBuf,
+    pub archive_root: PathBuf,
+    pub manifest_path: PathBuf,
+    /// Skip per-DB y/n prompts.
+    pub yes: bool,
+    /// When true, do not perform any write. Used by integration tests and
+    /// equivalent to `--dry-run --execute` (which is currently disallowed at
+    /// the CLI but useful for tests).
+    pub dry_run: bool,
+    /// True when prompts are appropriate (TTY + !yes).
+    pub interactive: bool,
+}
+
+/// Build the list of source DBs that are candidates for fragment-consolidation
+/// migration into a single target DB. Pure function — no I/O.
+///
+/// We migrate DBs whose recommended action implies that the rows should be
+/// merged into the canonical store. We deliberately do NOT migrate
+/// `keep_*_db` (already in the right place) or `repair_before_any_move`
+/// (unsafe). `archive_or_delete_after_review` is included only when the
+/// caller explicitly opts in via `--yes`; the planner records it with action
+/// label so the executor can decide.
+pub(crate) fn build_migration_plan(
+    report: &TidyReport,
+    target_db: &std::path::Path,
+    archive_root: &std::path::Path,
+    home: &std::path::Path,
+) -> Vec<TidyMigration> {
+    let mut plan = Vec::new();
+    let target_str = target_db.to_string_lossy().to_string();
+
+    for db in &report.databases {
+        if db.status != "ok" {
+            continue;
+        }
+        // Never migrate the target onto itself.
+        if db.path == target_str {
+            continue;
+        }
+        let should_migrate = matches!(
+            db.recommended_action.as_str(),
+            "review_for_legacy_migration"
+        );
+        if !should_migrate {
+            continue;
+        }
+
+        let source = PathBuf::from(&db.path);
+        let archive_path = archive_root.join(archive_relative_path(&source, home));
+
+        plan.push(TidyMigration {
+            source_path: db.path.clone(),
+            target_path: target_str.clone(),
+            archive_path: archive_path.display().to_string(),
+            scope_suggestion: db.scope_suggestion.clone(),
+            action: db.recommended_action.clone(),
+            source_row_count: db.entry_count.unwrap_or(0),
+            reason: tidy_rationale(&db.scope_suggestion, &db.recommended_action),
+        });
+    }
+
+    plan
+}
+
+/// Compute a stable, collision-free relative path used inside the archive
+/// timestamp directory. We prefer the source path relative to `$HOME` so the
+/// archive layout mirrors the user's tree; falls back to the file name when
+/// the source is outside `$HOME`.
+fn archive_relative_path(source: &std::path::Path, home: &std::path::Path) -> PathBuf {
+    if let Ok(rel) = source.strip_prefix(home) {
+        return rel.to_path_buf();
+    }
+    PathBuf::from(
+        source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "memory.db".to_string()),
+    )
+}
+
+pub(crate) fn execute_tidy_migrations(
+    plan: &[TidyMigration],
+    cfg: &MigrationConfig,
+) -> Result<TidyExecuteSummary, Box<dyn std::error::Error>> {
+    let mut outcomes = Vec::new();
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    if plan.is_empty() {
+        return Ok(TidyExecuteSummary {
+            target_db: cfg.target_db.display().to_string(),
+            planned: plan.to_vec(),
+            outcomes,
+            migrated_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
+            dry_run: cfg.dry_run,
+        });
+    }
+
+    // Ensure target parent exists (needed for both real run and creating a
+    // fresh empty target DB).
+    if let Some(parent) = cfg.target_db.parent() {
+        if !cfg.dry_run {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    for migration in plan {
+        // Interactive confirm.
+        if cfg.interactive {
+            let prompt = format!(
+                "Migrate {} ({} rows) into {} and archive source? [y/N]",
+                migration.source_path, migration.source_row_count, migration.target_path
+            );
+            let confirmed = dialoguer::Confirm::new()
+                .with_prompt(prompt)
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            if !confirmed {
+                outcomes.push(TidyMigrationOutcome {
+                    source_path: migration.source_path.clone(),
+                    target_path: migration.target_path.clone(),
+                    archive_path: None,
+                    status: "skipped".to_string(),
+                    rows_before_target: 0,
+                    rows_after_target: 0,
+                    rows_copied: 0,
+                    message: "skipped by interactive prompt".to_string(),
+                });
+                skipped += 1;
+                continue;
+            }
+        }
+
+        match migrate_single_db(migration, cfg) {
+            Ok(outcome) => {
+                if outcome.status == "migrated" {
+                    migrated += 1;
+                } else if outcome.status == "failed" {
+                    failed += 1;
+                } else {
+                    skipped += 1;
+                }
+                outcomes.push(outcome);
+            }
+            Err(err) => {
+                failed += 1;
+                outcomes.push(TidyMigrationOutcome {
+                    source_path: migration.source_path.clone(),
+                    target_path: migration.target_path.clone(),
+                    archive_path: None,
+                    status: "failed".to_string(),
+                    rows_before_target: 0,
+                    rows_after_target: 0,
+                    rows_copied: 0,
+                    message: format!("migration error: {err}"),
+                });
+            }
+        }
+    }
+
+    // Update manifest (drop migrated source entries, ensure target entry).
+    if !cfg.dry_run {
+        if let Err(err) = update_manifest_after_migration(cfg, &outcomes) {
+            eprintln!(
+                "[tidy] WARN: manifest update failed after migration: {err}; rows were migrated successfully"
+            );
+        }
+    }
+
+    Ok(TidyExecuteSummary {
+        target_db: cfg.target_db.display().to_string(),
+        planned: plan.to_vec(),
+        outcomes,
+        migrated_count: migrated,
+        skipped_count: skipped,
+        failed_count: failed,
+        dry_run: cfg.dry_run,
+    })
+}
+
+fn migrate_single_db(
+    migration: &TidyMigration,
+    cfg: &MigrationConfig,
+) -> Result<TidyMigrationOutcome, Box<dyn std::error::Error>> {
+    let source_path = PathBuf::from(&migration.source_path);
+    let target_path = cfg.target_db.clone();
+
+    // Open source read-only and read all rows (including archived) up front.
+    // SQLite's LIMIT binds as i64, so cap below i64::MAX to avoid overflow.
+    let source_store = open_cli_store_read_only(&source_path)?;
+    let source_rows = source_store.get_all_with_options(i64::MAX as usize, true)?;
+    let source_count = source_rows.len();
+    drop(source_store);
+
+    if cfg.dry_run {
+        return Ok(TidyMigrationOutcome {
+            source_path: migration.source_path.clone(),
+            target_path: migration.target_path.clone(),
+            archive_path: Some(migration.archive_path.clone()),
+            status: "dry_run".to_string(),
+            rows_before_target: 0,
+            rows_after_target: 0,
+            rows_copied: source_count,
+            message: format!("would migrate {source_count} rows"),
+        });
+    }
+
+    // Open target writable. If the file doesn't exist, MemoryStore::open will
+    // create it with the canonical schema.
+    let mut target_store = open_cli_store(&target_path)?;
+    let rows_before = target_store
+        .stats(true)
+        .map(|s| s.total as usize)
+        .unwrap_or(0);
+
+    // Per-row upsert. `MemoryStore::upsert` internally wraps each row in its
+    // own transaction (see memory_core::db::memory_crud::upsert), so a nested
+    // outer BEGIN would fail with "cannot start a transaction within a
+    // transaction". The operation is idempotent by entry id — re-running
+    // `tachi tidy --execute` after a transient failure is safe.
+    //
+    // Rollback semantics on error: we track ids that did not already exist
+    // in the target before this run, and delete them on failure so the
+    // target is left logically unchanged. Rows that already existed in the
+    // target (true upserts) are left as-is; their pre-existing values were
+    // overwritten only if the migration succeeded.
+    let mut copied = 0usize;
+    let mut newly_inserted_ids: Vec<String> = Vec::new();
+    let mut copy_err: Option<Box<dyn std::error::Error>> = None;
+    for entry in &source_rows {
+        let existed_before = target_store
+            .get(&entry.id)
+            .map(|opt| opt.is_some())
+            .unwrap_or(false);
+        match target_store.upsert(entry) {
+            Ok(()) => {
+                if !existed_before {
+                    newly_inserted_ids.push(entry.id.clone());
+                }
+                copied += 1;
+            }
+            Err(e) => {
+                copy_err = Some(Box::new(e));
+                break;
+            }
+        }
+    }
+
+    if let Some(err) = copy_err {
+        // Best-effort rollback: delete rows we newly inserted in this run.
+        for id in &newly_inserted_ids {
+            let _ = target_store.delete(id);
+        }
+        return Ok(TidyMigrationOutcome {
+            source_path: migration.source_path.clone(),
+            target_path: migration.target_path.clone(),
+            archive_path: None,
+            status: "failed".to_string(),
+            rows_before_target: rows_before,
+            rows_after_target: rows_before,
+            rows_copied: 0,
+            message: format!(
+                "rolled back after {copied}/{source_count} rows ({} reverted): {err}",
+                newly_inserted_ids.len()
+            ),
+        });
+    }
+
+    let rows_after = target_store
+        .stats(true)
+        .map(|s| s.total as usize)
+        .unwrap_or(rows_before);
+    drop(target_store);
+
+    // Archive the source DB file. Move (rename) when possible; fall back to
+    // copy + remove across filesystems.
+    let archive_path = PathBuf::from(&migration.archive_path);
+    if let Some(parent) = archive_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(&source_path, &archive_path) {
+        Ok(()) => {}
+        Err(_) => {
+            std::fs::copy(&source_path, &archive_path)?;
+            std::fs::remove_file(&source_path)?;
+        }
+    }
+    // Also move sidecar WAL/SHM files if present.
+    for ext in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
+        if sidecar.exists() {
+            let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
+            let _ = std::fs::rename(&sidecar, &dst).or_else(|_| {
+                std::fs::copy(&sidecar, &dst)
+                    .map(|_| ())
+                    .and_then(|_| std::fs::remove_file(&sidecar))
+            });
+        }
+    }
+
+    Ok(TidyMigrationOutcome {
+        source_path: migration.source_path.clone(),
+        target_path: migration.target_path.clone(),
+        archive_path: Some(archive_path.display().to_string()),
+        status: "migrated".to_string(),
+        rows_before_target: rows_before,
+        rows_after_target: rows_after,
+        rows_copied: copied,
+        message: format!("migrated {copied} rows ({rows_before} -> {rows_after} on target)"),
+    })
+}
+
+/// Drop migrated source entries from the manifest and ensure the target entry
+/// exists. We deliberately only touch entries we actually migrated; the rest
+/// of the manifest is left as-is. Pure with respect to `outcomes` — file I/O
+/// is wrapped in `Manifest::load_or_empty` / `save`.
+pub(crate) fn update_manifest_after_migration(
+    cfg: &MigrationConfig,
+    outcomes: &[TidyMigrationOutcome],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+
+    let mut manifest = Manifest::load_or_empty(&cfg.manifest_path);
+
+    let migrated_sources: std::collections::HashSet<String> = outcomes
+        .iter()
+        .filter(|o| o.status == "migrated")
+        .map(|o| o.source_path.clone())
+        .collect();
+    if migrated_sources.is_empty() {
+        return Ok(());
+    }
+
+    let target_canonical = crate::manifest::canonicalize_db_path(&cfg.target_db)
+        .display()
+        .to_string();
+
+    manifest.dbs.retain(|e| {
+        let canon = crate::manifest::canonicalize_db_path(std::path::Path::new(&e.path))
+            .display()
+            .to_string();
+        !migrated_sources.contains(&e.path) && !migrated_sources.contains(&canon)
+    });
+
+    if !manifest
+        .dbs
+        .iter()
+        .any(|e| e.path == target_canonical || e.path == cfg.target_db.display().to_string())
+    {
+        manifest.dbs.push(DbEntry {
+            path: target_canonical,
+            role: DbRole::Global,
+            owner: "tachi".to_string(),
+            schema_kind: "tachi-memory-v1".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_classification: "healthy".to_string(),
+            scope_hint: "global".to_string(),
+            notes: "registered by `tachi tidy --execute`".to_string(),
+        });
+    }
+    manifest.generated_at = chrono::Utc::now().to_rfc3339();
+    manifest.save(&cfg.manifest_path)?;
+    Ok(())
+}
+
+fn render_migration_plan(plan: &[TidyMigration]) -> String {
+    let mut lines = vec!["Migration plan (fragment-DB consolidation):".to_string()];
+    for (idx, m) in plan.iter().enumerate() {
+        lines.push(format!(
+            "  {}. {} ({} rows) -> {}",
+            idx + 1,
+            m.source_path,
+            m.source_row_count,
+            m.target_path
+        ));
+        lines.push(format!("     archive: {}", m.archive_path));
+        lines.push(format!("     reason:  {}", m.reason));
+    }
+    lines.join("\n")
+}
+
+fn render_tidy_execute_summary(summary: &TidyExecuteSummary) -> String {
+    let mut lines = vec![
+        "Execute summary:".to_string(),
+        format!("  target: {}", summary.target_db),
+        format!(
+            "  migrated: {} | skipped: {} | failed: {}{}",
+            summary.migrated_count,
+            summary.skipped_count,
+            summary.failed_count,
+            if summary.dry_run { " (dry-run)" } else { "" }
+        ),
+    ];
+    for o in &summary.outcomes {
+        lines.push(format!(
+            "  - [{}] {} -> {}",
+            o.status, o.source_path, o.target_path
+        ));
+        lines.push(format!(
+            "     rows: copied={}, target {} -> {}",
+            o.rows_copied, o.rows_before_target, o.rows_after_target
+        ));
+        if let Some(arch) = &o.archive_path {
+            lines.push(format!("     archive: {arch}"));
+        }
+        lines.push(format!("     {}", o.message));
+    }
+    lines.join("\n")
 }

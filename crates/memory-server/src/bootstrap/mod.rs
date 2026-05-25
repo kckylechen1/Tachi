@@ -17,7 +17,10 @@ mod vault_cli;
 #[cfg(test)]
 pub(crate) use setup::build_setup_report;
 #[cfg(test)]
-pub(crate) use tidy::{build_tidy_report, execute_tidy_apply};
+pub(crate) use tidy::{
+    build_migration_plan, build_tidy_report, execute_tidy_apply, execute_tidy_migrations,
+    update_manifest_after_migration, MigrationConfig,
+};
 
 pub(super) const SETUP_API_KEYS: [(&str, &str); 5] = [
     ("VOYAGE_API_KEY", "Voyage embeddings (voyage-4)"),
@@ -94,6 +97,43 @@ pub(crate) struct TidyApplySummary {
     pub applied_steps: Vec<TidyAppliedStep>,
     pub applied_count: usize,
     pub skipped_count: usize,
+}
+
+/// One source DB scheduled for fragment-consolidation migration.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyMigration {
+    pub source_path: String,
+    pub target_path: String,
+    pub archive_path: String,
+    pub scope_suggestion: String,
+    pub action: String,
+    pub source_row_count: usize,
+    pub reason: String,
+}
+
+/// Result of a single migration execution.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyMigrationOutcome {
+    pub source_path: String,
+    pub target_path: String,
+    pub archive_path: Option<String>,
+    pub status: String, // "migrated" | "skipped" | "failed" | "dry_run"
+    pub rows_before_target: usize,
+    pub rows_after_target: usize,
+    pub rows_copied: usize,
+    pub message: String,
+}
+
+/// Aggregate result of the `--execute` path.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyExecuteSummary {
+    pub target_db: String,
+    pub planned: Vec<TidyMigration>,
+    pub outcomes: Vec<TidyMigrationOutcome>,
+    pub migrated_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -444,7 +444,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .await;
     }
 
-    if let Commands::Tidy { json, apply } = &command {
+    if let Commands::Tidy {
+        json,
+        apply,
+        dry_run,
+        execute,
+        yes,
+        target_db,
+    } = &command
+    {
         let mut roots = vec![
             app_home.clone(),
             home.join(".sigil"),
@@ -454,8 +462,19 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         if let Some(root) = git_root.as_ref() {
             roots.push(root.clone());
         }
-        return super::tidy::run_tidy_command(*json, *apply, &app_home, roots, git_root.as_ref())
-            .await;
+        return super::tidy::run_tidy_command(
+            *json,
+            *apply,
+            *dry_run,
+            *execute,
+            *yes,
+            target_db.clone(),
+            &home,
+            &app_home,
+            roots,
+            git_root.as_ref(),
+        )
+        .await;
     }
 
     if let Commands::Doctor {
