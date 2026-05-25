@@ -209,10 +209,8 @@ pub(super) async fn run_interactive_wizard(
             .default(false)
             .interact()?;
         if want_vault {
-            match init_vault_inline(global_db_path) {
-                Ok(()) => println!("  Vault initialized."),
-                Err(e) => println!("  Vault init skipped: {e}"),
-            }
+            init_vault_inline(global_db_path, &theme)?;
+            println!("  Vault initialized.");
         }
     }
 
@@ -265,7 +263,10 @@ pub(super) async fn run_interactive_wizard(
 /// Inline vault initializer used by step 5. Mirrors `vault_cli::VaultAction::Init`
 /// but keeps the wizard self-contained; on any error we surface it to the caller
 /// so the wizard can continue gracefully.
-fn init_vault_inline(global_db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn init_vault_inline(
+    global_db_path: &PathBuf,
+    theme: &ColorfulTheme,
+) -> Result<(), Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     let store = open_cli_store_read_only(global_db_path)?;
@@ -278,13 +279,12 @@ fn init_vault_inline(global_db_path: &PathBuf) -> Result<(), Box<dyn std::error:
     }
     drop(store);
 
-    let password = rpassword::prompt_password("    New vault password: ")?;
+    let password = Password::with_theme(theme)
+        .with_prompt("    New vault password")
+        .with_confirmation("    Confirm password", "    Passwords do not match")
+        .interact()?;
     if password.is_empty() {
         return Err("password cannot be empty".into());
-    }
-    let confirm = rpassword::prompt_password("    Confirm password: ")?;
-    if password != confirm {
-        return Err("passwords do not match".into());
     }
 
     let salt = crate::vault_crypto::generate_salt();
@@ -320,11 +320,15 @@ pub(super) fn merge_config_env(existing: &str, updates: &[(String, String)]) -> 
 
     for (key, value) in updates {
         let prefix = format!("{key}=");
-        let commented_prefix = format!("# {key}=");
         let mut replaced = false;
         for line in lines.iter_mut() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with(&prefix) || trimmed.starts_with(&commented_prefix) {
+            let is_match = trimmed.starts_with(&prefix)
+                || trimmed
+                    .strip_prefix('#')
+                    .map(|s| s.trim_start().starts_with(&prefix))
+                    .unwrap_or(false);
+            if is_match {
                 *line = format!("{key}={value}");
                 replaced = true;
                 break;
