@@ -158,6 +158,7 @@ pub async fn run_repair(
     apply: bool,
     no_backup: bool,
     json_out: bool,
+    purge_failed: Option<u64>,
     app_home: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Register the FTS5 `simple` tokenizer + sqlite-vec auto-extensions once,
@@ -233,7 +234,10 @@ pub async fn run_repair(
                 "R1" => Box::new(fts::FtsRebuild),
                 "R2" => Box::new(retention::RetentionBackfill),
                 "R3" => Box::new(quarantine::QuarantineSweep),
-                "R4" => Box::new(jobs::JobsPurge::default()),
+                "R4" => Box::new(jobs::JobsPurge {
+                    failed_days: purge_failed,
+                    ..Default::default()
+                }),
                 "R5" => Box::new(integrity::IntegrityCheck),
                 "R7" => Box::new(edges::OrphanRefs),
                 "R8" => Box::new(junk::JunkCleanup),

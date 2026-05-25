@@ -111,7 +111,46 @@ pub(super) fn enqueue_capture_maintenance_jobs(
         return Ok(Vec::new());
     }
 
-    let specs = vec![
+    let specs = capture_maintenance_specs(
+        server,
+        agent_id,
+        path_prefix,
+        memory_ids,
+        merged_count,
+        duplicate_count,
+    );
+
+    for spec in &specs {
+        server.enqueue_foundry_job(FoundryMaintenanceItem {
+            job: spec.clone(),
+            target_db,
+            named_project: named_project.clone(),
+            path_prefix: path_prefix.to_string(),
+            memory_ids: memory_ids.to_vec(),
+        })?;
+    }
+
+    Ok(specs)
+}
+
+/// Build the (Phase 1) per-capture maintenance specs. Pulled out of
+/// [`enqueue_capture_maintenance_jobs`] so the kind-set can be asserted in
+/// unit tests without spinning up a MemoryServer.
+///
+/// Phase 1 invariant: this list MUST NOT include
+/// [`memory_core::FoundryJobKind::MemoryDistill`]. Distill is now handled
+/// exclusively by the daily batch scheduler
+/// (`run_daily_batch_distill`); per-capture distill jobs would defeat the
+/// batching that keeps Claude CLI invocations cheap.
+pub(super) fn capture_maintenance_specs(
+    server: &MemoryServer,
+    agent_id: &str,
+    path_prefix: &str,
+    memory_ids: &[String],
+    merged_count: usize,
+    duplicate_count: usize,
+) -> Vec<memory_core::FoundryJobSpec> {
+    vec![
         build_foundry_maintenance_job(
             server,
             memory_core::FoundryJobKind::MemoryNeighborhood,
@@ -137,17 +176,11 @@ pub(super) fn enqueue_capture_maintenance_jobs(
                 "candidate_multiplier": FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
             }),
         ),
-        build_foundry_maintenance_job(
-            server,
-            memory_core::FoundryJobKind::MemoryDistill,
-            agent_id,
-            path_prefix,
-            memory_ids,
-            json!({
-                "kind": "memory_distill",
-                "window": FOUNDRY_DISTILL_WINDOW,
-            }),
-        ),
+        // NOTE: Phase 1 — MemoryDistill is no longer enqueued from capture.
+        // The daily batch distill (`run_daily_batch_distill`, invoked from
+        // the bootstrap scheduler) replaces the per-capture distill job.
+        // We still enqueue ForgetSweep so per-capture sweeps continue to
+        // garbage-collect stale distill memories.
         build_foundry_maintenance_job(
             server,
             memory_core::FoundryJobKind::ForgetSweep,
@@ -159,19 +192,7 @@ pub(super) fn enqueue_capture_maintenance_jobs(
                 "keep_latest": FOUNDRY_DISTILL_KEEP,
             }),
         ),
-    ];
-
-    for spec in &specs {
-        server.enqueue_foundry_job(FoundryMaintenanceItem {
-            job: spec.clone(),
-            target_db,
-            named_project: named_project.clone(),
-            path_prefix: path_prefix.to_string(),
-            memory_ids: memory_ids.to_vec(),
-        })?;
-    }
-
-    Ok(specs)
+    ]
 }
 
 pub(crate) fn enqueue_foundry_capture_maintenance(
@@ -243,10 +264,12 @@ pub(super) fn coherence_bucket_key(topic: &str, entities: &[String]) -> Option<S
         .map(|entity| format!("entity:{entity}"))
 }
 
+#[allow(dead_code)] // Phase 1: legacy scheduler helper.
 pub(super) fn scheduled_distill_group_key(path: &str, coherence_key: &str) -> String {
     format!("{}#{coherence_key}", scheduled_distill_path_prefix(path))
 }
 
+#[allow(dead_code)] // Phase 1: legacy scheduler helper.
 fn distill_metadata_is_trusted(metadata: &serde_json::Value) -> bool {
     let has_coherence_key = metadata
         .get("coherence_key")
@@ -292,6 +315,7 @@ fn distill_quality_flags(entries: &[MemoryEntry]) -> Vec<String> {
 
 /// Scan for project memories that have not yet been included in a distill output
 /// and enqueue distill jobs for sufficiently large coherent groups.
+#[allow(dead_code)] // Phase 1: kept as manual fallback; see foundry_runtime_ops/mod.rs re-export.
 pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Result<usize, String> {
     struct ScheduledDistillGroup {
         path_prefix: String,
@@ -1116,4 +1140,33 @@ fn build_distill_input(entries: &[MemoryEntry]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+#[cfg(test)]
+mod phase1_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// Phase 1 regression: per-capture maintenance must not enqueue
+    /// `MemoryDistill`. Distill now runs only via the daily batch
+    /// scheduler (`run_daily_batch_distill`).
+    #[tokio::test]
+    async fn capture_specs_exclude_memory_distill() {
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("global.db");
+        let server = crate::MemoryServer::new(db_path, None).expect("server");
+
+        let memory_ids = vec!["m1".to_string(), "m2".to_string()];
+        let specs = capture_maintenance_specs(&server, "agent", "/a/b", &memory_ids, 0, 0);
+
+        let kinds: Vec<memory_core::FoundryJobKind> =
+            specs.iter().map(|s| s.kind.clone()).collect();
+        assert!(
+            !kinds.contains(&memory_core::FoundryJobKind::MemoryDistill),
+            "Phase 1: capture must not enqueue MemoryDistill (got {kinds:?})"
+        );
+        assert!(kinds.contains(&memory_core::FoundryJobKind::ForgetSweep));
+        assert!(kinds.contains(&memory_core::FoundryJobKind::MemoryNeighborhood));
+        assert!(kinds.contains(&memory_core::FoundryJobKind::RecallRerankCache));
+    }
 }
