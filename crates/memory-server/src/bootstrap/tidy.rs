@@ -431,16 +431,21 @@ pub(super) async fn run_tidy_command(
 
     // --execute: fragment-DB consolidation pipeline.
     if execute {
-        // Refuse if a daemon already holds the singleton lock — concurrent
-        // writes to the same DB would corrupt the migration.
+        // Refuse if a live daemon holds the singleton lock — concurrent writes
+        // to the same DB would corrupt the migration. A stale lock file from a
+        // crashed process is ignored because DaemonLock probes the PID.
         let lock_path = app_home.join("daemon.lock");
-        if lock_path.exists() {
-            return Err(format!(
-                "refusing to run tachi tidy --execute while daemon lock is held at {}; \
-                 stop the running tachi daemon first",
-                lock_path.display()
-            )
-            .into());
+        match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
+            Err(crate::daemon_lock::DaemonLockError::AlreadyRunning { pid }) => {
+                return Err(format!(
+                    "refusing to run tachi tidy --execute while tachi daemon is running (pid {pid}); stop it first"
+                )
+                .into());
+            }
+            Err(e) => {
+                return Err(format!("daemon lock probe failed: {e}").into());
+            }
+            Ok(lock) => drop(lock),
         }
 
         let target_db = target_db_override
@@ -719,15 +724,15 @@ fn migrate_single_db(
     migration: &TidyMigration,
     cfg: &MigrationConfig,
 ) -> Result<TidyMigrationOutcome, Box<dyn std::error::Error>> {
+    use std::collections::HashSet;
+
     let source_path = PathBuf::from(&migration.source_path);
     let target_path = cfg.target_db.clone();
 
-    // Open source read-only and read all rows (including archived) up front.
-    // SQLite's LIMIT binds as i64, so cap below i64::MAX to avoid overflow.
     let source_store = open_cli_store_read_only(&source_path)?;
-    let source_rows = source_store.get_all_with_options(i64::MAX as usize, true)?;
-    let source_count = source_rows.len();
-    drop(source_store);
+    let source_count: usize = source_store
+        .connection()
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
 
     if cfg.dry_run {
         return Ok(TidyMigrationOutcome {
@@ -742,43 +747,44 @@ fn migrate_single_db(
         });
     }
 
-    // Open target writable. If the file doesn't exist, MemoryStore::open will
-    // create it with the canonical schema.
     let mut target_store = open_cli_store(&target_path)?;
     let rows_before = target_store
         .stats(true)
         .map(|s| s.total as usize)
         .unwrap_or(0);
 
-    // Per-row upsert. `MemoryStore::upsert` internally wraps each row in its
-    // own transaction (see memory_core::db::memory_crud::upsert), so a nested
-    // outer BEGIN would fail with "cannot start a transaction within a
-    // transaction". The operation is idempotent by entry id — re-running
-    // `tachi tidy --execute` after a transient failure is safe.
-    //
-    // Rollback semantics on error: we track ids that did not already exist
-    // in the target before this run, and delete them on failure so the
-    // target is left logically unchanged. Rows that already existed in the
-    // target (true upserts) are left as-is; their pre-existing values were
-    // overwritten only if the migration succeeded.
+    let existing_target_ids: HashSet<String> = {
+        let conn = target_store.connection();
+        let mut stmt = conn.prepare("SELECT id FROM memories")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.filter_map(Result::ok).collect()
+    };
+
     let mut copied = 0usize;
     let mut newly_inserted_ids: Vec<String> = Vec::new();
     let mut copy_err: Option<Box<dyn std::error::Error>> = None;
-    for entry in &source_rows {
-        let existed_before = target_store
-            .get(&entry.id)
-            .map(|opt| opt.is_some())
-            .unwrap_or(false);
-        match target_store.upsert(entry) {
-            Ok(()) => {
-                if !existed_before {
-                    newly_inserted_ids.push(entry.id.clone());
+
+    {
+        let conn = source_store.connection();
+        let mut stmt = conn.prepare(
+            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+             FROM memories",
+        )?;
+        let mut rows = stmt.query_map([], memory_core::row_to_entry)?;
+        while let Some(row) = rows.next() {
+            let entry = row?;
+            let existed_before = existing_target_ids.contains(&entry.id);
+            match target_store.upsert(&entry) {
+                Ok(()) => {
+                    if !existed_before {
+                        newly_inserted_ids.push(entry.id.clone());
+                    }
+                    copied += 1;
                 }
-                copied += 1;
-            }
-            Err(e) => {
-                copy_err = Some(Box::new(e));
-                break;
+                Err(e) => {
+                    copy_err = Some(Box::new(e));
+                    break;
+                }
             }
         }
     }
@@ -859,12 +865,16 @@ pub(crate) fn update_manifest_after_migration(
 
     let mut manifest = Manifest::load_or_empty(&cfg.manifest_path);
 
-    let migrated_sources: std::collections::HashSet<String> = outcomes
+    let migrated_canons: std::collections::HashSet<String> = outcomes
         .iter()
         .filter(|o| o.status == "migrated")
-        .map(|o| o.source_path.clone())
+        .map(|o| {
+            crate::manifest::canonicalize_db_path(std::path::Path::new(&o.source_path))
+                .display()
+                .to_string()
+        })
         .collect();
-    if migrated_sources.is_empty() {
+    if migrated_canons.is_empty() {
         return Ok(());
     }
 
@@ -872,12 +882,7 @@ pub(crate) fn update_manifest_after_migration(
         .display()
         .to_string();
 
-    manifest.dbs.retain(|e| {
-        let canon = crate::manifest::canonicalize_db_path(std::path::Path::new(&e.path))
-            .display()
-            .to_string();
-        !migrated_sources.contains(&e.path) && !migrated_sources.contains(&canon)
-    });
+    manifest.dbs.retain(|e| !migrated_canons.contains(&e.path));
 
     if !manifest
         .dbs
