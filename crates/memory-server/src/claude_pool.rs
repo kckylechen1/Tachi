@@ -220,7 +220,7 @@ pub fn format_pool_prompt(system: &str, user: &str) -> String {
     if sys.is_empty() {
         usr.to_string()
     } else {
-        format!("{sys}\n\n---\n\n{usr}")
+        format!("<system>\n{sys}\n</system>\n\n{usr}")
     }
 }
 
@@ -464,7 +464,8 @@ mod tests {
         let out = format_pool_prompt("be precise", "the question");
         assert!(out.contains("be precise"));
         assert!(out.contains("the question"));
-        assert!(out.contains("---"));
+        assert!(out.contains("<system>"));
+        assert!(out.contains("</system>"));
     }
 
     #[test]
