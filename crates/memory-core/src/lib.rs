@@ -257,6 +257,16 @@ impl MemoryStore {
         )
     }
 
+    /// Record an asynchronous enrichment failure on the memory metadata.
+    pub fn record_enrichment_failure(
+        &self,
+        id: &str,
+        stage: &str,
+        error: &str,
+    ) -> Result<(), MemoryError> {
+        db::record_enrichment_failure(&self.conn, id, stage, error)
+    }
+
     /// List entries that are missing vector embeddings.
     /// Returns (id, text, summary, revision) tuples.
     pub fn entries_missing_vectors(
@@ -361,11 +371,13 @@ impl MemoryStore {
         let total: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let with_vec: i64 =
-            self.conn
-                .query_row("SELECT COUNT(DISTINCT id) FROM memories_vec", [], |r| {
-                    r.get(0)
-                })?;
+        let with_vec: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT v.id)
+                     FROM memories_vec v
+                     JOIN memories m ON m.id = v.id",
+            [],
+            |r| r.get(0),
+        )?;
         Ok((total, with_vec))
     }
 
@@ -529,6 +541,11 @@ impl MemoryStore {
     /// Archive a memory entry (set archived=1, used after merge).
     pub fn archive_memory(&self, id: &str) -> Result<bool, MemoryError> {
         db::archive_memory(&self.conn, id)
+    }
+
+    /// Mark a memory as superseded by a newer/canonical memory.
+    pub fn supersede_memory(&self, id: &str, superseded_by: &str) -> Result<bool, MemoryError> {
+        db::supersede_memory(&self.conn, id, superseded_by)
     }
 
     /// Run retention-based garbage collection on growing tables.

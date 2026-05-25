@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::hash_map::Entry;
 
 fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
     entry.importance >= 0.5 || entry.vector.is_some()
@@ -74,8 +75,9 @@ pub(crate) async fn handle_save_memory(
         Some(gate_decision.violations.clone())
     };
 
-    let id = params
-        .id
+    let requested_id = params.id.clone();
+    let id = requested_id
+        .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let timestamp = params
         .timestamp
@@ -89,6 +91,22 @@ pub(crate) async fn handle_save_memory(
     } else {
         server.resolve_write_scope(&requested_scope)
     };
+    let existing_revision = if requested_id.is_some() {
+        let lookup = |store: &mut MemoryStore| {
+            store
+                .get(&id)
+                .map(|entry| entry.map(|entry| entry.revision))
+                .map_err(|e| format_save_error(server, target_db, named_project.as_deref(), &e))
+        };
+        if let Some(ref project_name) = named_project {
+            server.with_named_project_store_read(project_name, lookup)?
+        } else {
+            server.with_store_for_scope_read(target_db, lookup)?
+        }
+    } else {
+        None
+    };
+    let enrichment_revision = existing_revision.unwrap_or(0) + 1;
 
     let summary = params.summary;
     let needs_summary = summary.is_empty();
@@ -157,7 +175,7 @@ pub(crate) async fn handle_save_memory(
     // the Voyage API in batch (up to 128 per request), dramatically
     // reducing API calls when the agent saves multiple memories in sequence.
     if (needs_embedding || needs_summary) && should_enqueue_enrichment(&entry) {
-        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+        server.enqueue_enrichment(super::EnrichmentItem {
             id: id.clone(),
             text: entry.text.clone(),
             summary: entry.summary.clone(),
@@ -166,9 +184,10 @@ pub(crate) async fn handle_save_memory(
             needs_summary,
             target_db,
             named_project: params.project.clone(),
+            db_path: None,
             foundry_agent_id: None,
             foundry_path_prefix: None,
-            revision: 1,
+            revision: enrichment_revision,
         });
     }
 
@@ -176,7 +195,12 @@ pub(crate) async fn handle_save_memory(
     response.insert("id".into(), json!(id));
     response.insert("timestamp".into(), json!(timestamp));
     response.insert("db".into(), json!(target_db.as_str()));
-    response.insert("status".into(), json!("saved (enrichment pending)"));
+    let status = if (needs_embedding || needs_summary) && should_enqueue_enrichment(&entry) {
+        "saved (enrichment pending)"
+    } else {
+        "saved (enrichment skipped by policy)"
+    };
+    response.insert("status".into(), json!(status));
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
     }
@@ -344,6 +368,8 @@ pub(super) async fn search_memory_rows(
     if memory_core::should_skip_query(&params.query) {
         return Ok(vec![]);
     }
+    let top_k = params.top_k.max(1);
+    params.top_k = top_k;
 
     let named_project_vec_available = if let Some(ref project_name) = params.project {
         server
@@ -417,13 +443,15 @@ pub(super) async fn search_memory_rows(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    combined_results = dedup_search_results(combined_results, top_k);
+
     let mut seen_ids = HashSet::new();
     let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
     for (result, db_scope) in combined_results {
         if seen_ids.insert(result.entry.id.clone()) {
             deduped_results.push((result, db_scope));
         }
-        if deduped_results.len() >= params.top_k {
+        if deduped_results.len() >= top_k {
             break;
         }
     }
@@ -505,6 +533,98 @@ pub(super) async fn search_memory_rows(
     }
 
     Ok(output)
+}
+
+fn dedup_search_results(
+    results: Vec<(memory_core::SearchResult, DbScope)>,
+    top_k: usize,
+) -> Vec<(memory_core::SearchResult, DbScope)> {
+    let mut by_subject: HashMap<String, (memory_core::SearchResult, DbScope)> = HashMap::new();
+    let mut passthrough = Vec::new();
+
+    for (result, db_scope) in results {
+        let Some(key) = dedup_subject_key(&result.entry) else {
+            passthrough.push((result, db_scope));
+            continue;
+        };
+        match by_subject.entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert((result, db_scope));
+            }
+            Entry::Occupied(mut slot) => {
+                if should_replace_dedup_result(&result, &slot.get().0) {
+                    slot.insert((result, db_scope));
+                }
+            }
+        }
+    }
+
+    let mut out = by_subject
+        .into_values()
+        .chain(passthrough)
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        b.0.score
+            .final_score
+            .partial_cmp(&a.0.score.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    out.truncate(top_k.saturating_mul(3).max(top_k).max(1));
+    out
+}
+
+fn should_replace_dedup_result(
+    candidate: &memory_core::SearchResult,
+    current: &memory_core::SearchResult,
+) -> bool {
+    canonical_rank(&candidate.entry)
+        .cmp(&canonical_rank(&current.entry))
+        .then_with(|| candidate.entry.timestamp.cmp(&current.entry.timestamp))
+        .then_with(|| {
+            candidate
+                .score
+                .final_score
+                .partial_cmp(&current.score.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .is_gt()
+}
+
+fn canonical_rank(entry: &MemoryEntry) -> u8 {
+    if entry.source.eq_ignore_ascii_case("foundry_distill") {
+        return 2;
+    }
+    if entry
+        .metadata
+        .get("wiki")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || entry.domain.as_deref() == Some("wiki")
+        || entry.category.eq_ignore_ascii_case("wiki")
+    {
+        4
+    } else if entry.is_guide() {
+        3
+    } else {
+        1
+    }
+}
+
+fn dedup_subject_key(entry: &MemoryEntry) -> Option<String> {
+    let path = entry.path.trim();
+    if path == "/wiki/_log" {
+        return Some("wiki-log".to_string());
+    }
+    if path.starts_with("/wiki/") {
+        return Some(format!("wiki:path:{}", path));
+    }
+    let topic = entry.topic.trim().to_ascii_lowercase();
+    if !topic.is_empty()
+        && (entry.source.eq_ignore_ascii_case("foundry_distill") || entry.is_guide())
+    {
+        return Some(format!("distill:{topic}:{}", entry.entities.join("|")));
+    }
+    None
 }
 
 fn search_score(row: &serde_json::Value) -> f64 {
@@ -637,6 +757,7 @@ pub(crate) async fn handle_find_similar_memory(
         vec_available: server.global_vec_available,
         record_access: false,
         include_archived: params.include_archived,
+        include_superseded: false,
         mmr_threshold: None,
         graph_expand_hops: 0,
         graph_relation_filter: None,
@@ -660,6 +781,7 @@ pub(crate) async fn handle_find_similar_memory(
             vec_available: server.project_vec_available,
             record_access: false,
             include_archived: params.include_archived,
+            include_superseded: false,
             mmr_threshold: None,
             graph_expand_hops: 0,
             graph_relation_filter: None,

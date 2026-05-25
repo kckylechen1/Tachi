@@ -349,8 +349,50 @@ pub fn update_enrichment_fields(
         )?;
     }
 
+    let status = if new_vec.is_some() && new_summary.is_some() {
+        "embedded+summarized"
+    } else if new_vec.is_some() {
+        "embedded"
+    } else {
+        "summarized"
+    };
+    tx.execute(
+        r#"UPDATE memories
+           SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.status', ?1,
+                 '$.enrichment.last_success_at', ?2,
+                 '$.enrichment.last_error', NULL
+               )
+           WHERE id = ?3"#,
+        params![status, &now, id],
+    )?;
+
     tx.commit()?;
     Ok(true)
+}
+
+pub fn record_enrichment_failure(
+    conn: &Connection,
+    id: &str,
+    stage: &str,
+    error: &str,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        r#"UPDATE memories
+           SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.status', 'failed',
+                 '$.enrichment.failed_stage', ?1,
+                 '$.enrichment.last_error', ?2,
+                 '$.enrichment.last_failure_at', ?3
+               ),
+               updated_at = ?3
+           WHERE id = ?4"#,
+        params![stage, error, &now, id],
+    )?;
+    Ok(())
 }
 
 // ─── VECTOR SEARCH ────────────────────────────────────────────────────────────
@@ -364,6 +406,7 @@ pub fn search_vec(
     query_vec: &[f32],
     top_k: usize,
     include_archived: bool,
+    include_superseded: bool,
     path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
@@ -373,14 +416,21 @@ pub fn search_vec(
            FROM memories_vec v
            JOIN memories m ON m.id = v.id
            WHERE v.embedding MATCH ?1
-             AND k = ?3
-             AND (?2 = 1 OR m.archived = 0)
-             AND (?4 IS NULL OR m.path LIKE ?4)
-           ORDER BY v.distance"#,
+              AND k = ?3
+              AND (?2 = 1 OR m.archived = 0)
+              AND (?4 = 1 OR m.superseded_by IS NULL)
+              AND (?5 IS NULL OR m.path LIKE ?5)
+            ORDER BY v.distance"#,
     )?;
 
     let rows = stmt.query_map(
-        params![blob, include_archived as i64, top_k as i64, path_like],
+        params![
+            blob,
+            include_archived as i64,
+            top_k as i64,
+            include_superseded as i64,
+            path_like
+        ],
         |row| {
             let id: String = row.get(0)?;
             let dist: f64 = row.get(1)?;
@@ -408,6 +458,7 @@ pub fn search_fts(
     query: &str,
     limit: usize,
     include_archived: bool,
+    include_superseded: bool,
     path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     // Sanitise query: remove potentially dangerous characters
@@ -430,13 +481,20 @@ pub fn search_fts(
            JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH simple_query(?1)
              AND (?2 = 1 OR m.archived = 0)
-             AND (?4 IS NULL OR m.path LIKE ?4)
-           ORDER BY bm25(memories_fts)
-           LIMIT ?3"#,
+             AND (?4 = 1 OR m.superseded_by IS NULL)
+             AND (?5 IS NULL OR m.path LIKE ?5)
+            ORDER BY bm25(memories_fts)
+            LIMIT ?3"#,
     )?;
 
     let rows = stmt.query_map(
-        params![safe_query, include_archived as i64, limit as i64, path_like],
+        params![
+            safe_query,
+            include_archived as i64,
+            limit as i64,
+            include_superseded as i64,
+            path_like
+        ],
         |row| {
             let id: String = row.get(0)?;
             let score: f64 = row.get(1)?;
@@ -606,6 +664,28 @@ pub fn list_by_path(
     Ok(out)
 }
 
+/// Find the canonical active wiki row for a path/topic pair.
+pub fn find_active_wiki_entry_by_path_or_topic(
+    conn: &Connection,
+    path: &str,
+    topic: &str,
+) -> Result<Option<MemoryEntry>, MemoryError> {
+    let mut stmt = conn.prepare(
+        r#"SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+           FROM memories
+           WHERE archived = 0
+             AND superseded_by IS NULL
+             AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
+           ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
+           LIMIT 1"#,
+    )?;
+    let mut rows = stmt.query_map(params![path, topic], row_to_entry)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
 /// Bump access_count and last_access for a list of IDs (called after every search).
 /// Also records access timestamps for ACT-R base-level activation.
 pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
@@ -736,6 +816,26 @@ pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> 
     conn.execute(
         "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
         params![now, id],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
+/// Mark a memory as superseded by a newer/canonical memory. Superseded rows are
+/// hidden from default search but remain available for audit/history.
+pub fn supersede_memory(
+    conn: &Connection,
+    id: &str,
+    superseded_by: &str,
+) -> Result<bool, MemoryError> {
+    if id == superseded_by {
+        return Ok(false);
+    }
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE memories
+         SET superseded_by = ?1, updated_at = ?2, revision = revision + 1
+         WHERE id = ?3 AND (superseded_by IS NULL OR superseded_by != ?1)",
+        params![superseded_by, now, id],
     )?;
     Ok(conn.changes() > 0)
 }

@@ -78,7 +78,9 @@ fn make_server() -> MemoryServer {
 fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
     ensure_test_env();
     let temp_home = TempHomeGuard::new();
-    let global_db = temp_home.temp_home.join("global.sqlite");
+    let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
+    std::fs::create_dir_all(global_db.parent().expect("global db parent"))
+        .expect("create global db dir");
     let server = MemoryServer::new(global_db, None).expect("failed to create test server");
     (server, temp_home)
 }

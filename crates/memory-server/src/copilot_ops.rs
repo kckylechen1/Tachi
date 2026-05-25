@@ -8,6 +8,8 @@ const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
     "If stderr/log visibility is weak, add a durable test or inspect the data structure at the API boundary.",
 ];
 
+const WIKI_DUP_JACCARD_THRESHOLD: f64 = 0.85;
+
 fn compact_rows(rows: Vec<Value>, limit: usize) -> Vec<Value> {
     rows.into_iter()
         .take(limit)
@@ -37,6 +39,129 @@ fn normalize_wiki_path(path: Option<String>, topic: &str) -> String {
     } else {
         format!("/wiki{}", with_slash)
     }
+}
+
+fn wiki_text_tokens(input: &str) -> HashSet<String> {
+    input
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| token.chars().count() >= 3)
+        .collect()
+}
+
+fn wiki_subject_token(input: &str) -> Option<String> {
+    let tokens = wiki_text_tokens(input);
+    if tokens.len() == 1 {
+        tokens.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn wiki_text_jaccard_sets(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.intersection(b).count() as f64;
+    let union = a.union(b).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+fn wiki_text_jaccard(a: &str, b: &str) -> f64 {
+    wiki_text_jaccard_sets(&wiki_text_tokens(a), &wiki_text_tokens(b))
+}
+
+fn find_wiki_entry_by_path_or_topic(
+    store: &mut MemoryStore,
+    path: &str,
+    topic: &str,
+) -> Result<Option<MemoryEntry>, String> {
+    memory_core::db::find_active_wiki_entry_by_path_or_topic(store.connection(), path, topic)
+        .map_err(|e| format!("wiki existing lookup: {e}"))
+}
+
+fn with_existing_wiki_store<T>(
+    server: &MemoryServer,
+    project_name: &str,
+    use_named_project: bool,
+    f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+) -> Result<T, String> {
+    if use_named_project {
+        server.with_named_project_store(project_name, f)
+    } else {
+        server.with_global_store(f)
+    }
+}
+
+fn default_named_project_available(server: &MemoryServer, project_name: &str) -> bool {
+    let Ok(db_path) = MemoryServer::resolve_named_project_db_path(project_name) else {
+        return false;
+    };
+    let Some(app_home) = db_path
+        .parent()
+        .and_then(|project_dir| project_dir.parent())
+        .and_then(|projects_dir| projects_dir.parent())
+    else {
+        return false;
+    };
+    server.global_db_path.starts_with(app_home)
+}
+
+fn supersede_wiki_duplicates(
+    store: &mut MemoryStore,
+    canonical_id: &str,
+    path: &str,
+    topic: &str,
+    text: &str,
+) -> Result<usize, String> {
+    let candidates = store
+        .list_by_path("/wiki", 5000, false)
+        .map_err(|e| format!("wiki duplicate scan: {e}"))?;
+    let mut changed = 0usize;
+    let target_subject = wiki_subject_token(topic);
+    let target_text_tokens = wiki_text_tokens(text);
+    for candidate in candidates {
+        if candidate.id == canonical_id {
+            continue;
+        }
+        let same_subject = candidate.path == path
+            || target_subject.as_ref().is_some_and(|token| {
+                wiki_subject_token(&candidate.topic).as_ref() == Some(token)
+            })
+            || wiki_text_jaccard_sets(
+                &target_text_tokens,
+                &wiki_text_tokens(&candidate.text),
+            ) >= WIKI_DUP_JACCARD_THRESHOLD;
+        if !same_subject {
+            continue;
+        }
+        if store
+            .supersede_memory(&candidate.id, canonical_id)
+            .map_err(|e| format!("wiki duplicate supersede: {e}"))?
+        {
+            let edge = memory_core::MemoryEdge {
+                source_id: canonical_id.to_string(),
+                target_id: candidate.id.clone(),
+                relation: "supersedes".to_string(),
+                weight: 0.9,
+                metadata: json!({
+                    "source": "wiki_write_dedup",
+                    "path": path,
+                    "topic": topic,
+                }),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            let _ = store.add_edge(&edge);
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 fn tokenize_task(input: &str) -> Vec<String> {
@@ -222,12 +347,30 @@ pub(crate) async fn handle_tachi_wiki_write(
     server: &MemoryServer,
     params: WikiWriteParams,
 ) -> Result<String, String> {
+    if !params.force && memory_core::is_noise_text(&params.text) {
+        return serde_json::to_string(&json!({
+            "saved": false,
+            "noise": true,
+            "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
+            "hint": "Retry with force=true if this is intentional wiki content.",
+        }))
+        .map_err(|e| format!("serialize wiki_write noise response: {e}"));
+    }
+
+    let entry_text = params.text.clone();
     let topic = params
         .topic
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| wiki_slug(&params.title));
     let path = normalize_wiki_path(params.path.clone(), &topic);
+    let requested_project = params.project.clone();
+    let project_name = requested_project
+        .clone()
+        .unwrap_or_else(|| "wiki".to_string());
+    let use_named_project =
+        requested_project.is_some() || default_named_project_available(server, &project_name);
+    let target_project = use_named_project.then(|| project_name.clone());
     let summary = params
         .summary
         .clone()
@@ -253,10 +396,25 @@ pub(crate) async fn handle_tachi_wiki_write(
     });
     let _ = wiki_metadata.as_object_mut();
 
+    let existing = with_existing_wiki_store(server, &project_name, use_named_project, |store| {
+        find_wiki_entry_by_path_or_topic(store, &path, &topic)
+    })?;
+    if let Some(existing) = &existing {
+        if let Some(obj) = wiki_metadata.as_object_mut() {
+            obj.insert("wiki_update_of".to_string(), json!(existing.id));
+            obj.insert(
+                "wiki_previous_revision".to_string(),
+                json!(existing.revision),
+            );
+        }
+    }
+    let update_id = existing.as_ref().map(|entry| entry.id.clone());
+    let existing_revision = existing.as_ref().map(|entry| entry.revision).unwrap_or(1);
+
     let save_result = handle_save_memory(
         server,
         SaveMemoryParams {
-            text: params.text,
+            text: entry_text.clone(),
             summary,
             path: path.clone(),
             importance: params.importance.clamp(0.0, 1.0),
@@ -268,10 +426,10 @@ pub(crate) async fn handle_tachi_wiki_write(
             location: String::new(),
             scope: params.scope,
             vector: None,
-            id: None,
+            id: update_id.clone(),
             force: true,
             auto_link: true,
-            project: params.project,
+            project: target_project.clone(),
             retention_policy: Some(params.retention_policy),
             domain: params.domain.or_else(|| Some("wiki".to_string())),
             timestamp: None,
@@ -285,17 +443,49 @@ pub(crate) async fn handle_tachi_wiki_write(
     if let Some(obj) = response.as_object_mut() {
         obj.insert("wiki_path".to_string(), json!(path));
         obj.insert("wiki_topic".to_string(), json!(topic));
+        obj.insert(
+            "wiki_write_mode".to_string(),
+            json!(if update_id.is_some() {
+                "updated"
+            } else {
+                "created"
+            }),
+        );
+    }
+    let canonical_id = response
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "wiki write response missing id".to_string())?
+        .to_string();
+    let duplicate_action = |store: &mut MemoryStore| {
+        supersede_wiki_duplicates(store, &canonical_id, &path, &topic, &entry_text)
+    };
+    let duplicates_superseded =
+        with_existing_wiki_store(server, &project_name, use_named_project, duplicate_action)
+            .unwrap_or(0);
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert(
+            "wiki_duplicates_superseded".to_string(),
+            json!(duplicates_superseded),
+        );
+        if update_id.is_some() {
+            obj.insert(
+                "wiki_previous_revision".to_string(),
+                json!(existing_revision),
+            );
+        }
     }
     crate::wiki_ops::append_wiki_log(
         server,
         "write",
         &format!(
-            "{} | {}",
+            "{} | {} | {} duplicate(s) superseded",
             path,
             response
                 .get("id")
                 .and_then(Value::as_str)
-                .unwrap_or("unknown")
+                .unwrap_or("unknown"),
+            duplicates_superseded
         ),
     );
     serde_json::to_string(&response).map_err(|e| format!("serialize wiki_write: {e}"))
@@ -346,7 +536,15 @@ pub(crate) async fn handle_tachi_wiki_search(
             mmr_threshold: None,
             graph_expand_hops: 1,
             graph_relation_filter: None,
-            weights: None,
+            weights: params.weights.or_else(|| {
+                Some(HybridWeightsParam {
+                    semantic: 0.48,
+                    fts: 0.30,
+                    symbolic: 0.20,
+                    decay: 0.02,
+                    use_rrf: true,
+                })
+            }),
             agent_role: params.agent_role,
             project: Some(project_name.clone()),
             domain: params.domain,

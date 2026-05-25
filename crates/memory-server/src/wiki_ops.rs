@@ -237,6 +237,7 @@ fn find_related_by_entities(
 
     let mut related = entries
         .into_iter()
+        .filter(is_user_facing_wiki_entry)
         .filter(|entry| entry.id != exclude_id)
         .filter(|entry| {
             entry
@@ -273,13 +274,35 @@ fn list_related_candidates(
                 .list_by_path("/wiki", limit, false)
                 .map_err(|e| format!("wiki list: {e}"))
         })
-        .or_else(|_| {
-            server.with_global_store_read(|store| {
-                store
-                    .list_by_path("/wiki", limit, false)
-                    .map_err(|e| format!("wiki fallback list: {e}"))
-            })
+        .map(|entries| {
+            entries
+                .into_iter()
+                .filter(is_user_facing_wiki_entry)
+                .collect()
         })
+        .or_else(|_| {
+            server
+                .with_global_store_read(|store| {
+                    store
+                        .list_by_path("/wiki", limit, false)
+                        .map_err(|e| format!("wiki fallback list: {e}"))
+                })
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .filter(is_user_facing_wiki_entry)
+                        .collect()
+                })
+        })
+}
+
+fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
+    entry.path != "/wiki/_log"
+        && !entry
+            .metadata
+            .get("wiki_log")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
 }
 
 fn list_wiki_entries(
@@ -292,14 +315,28 @@ fn list_wiki_entries(
             .list_by_path("/wiki", limit, false)
             .map_err(|e| format!("wiki list: {e}"))
     }) {
-        Ok(entries) => Ok((entries, "named")),
+        Ok(entries) => Ok((
+            entries
+                .into_iter()
+                .filter(is_user_facing_wiki_entry)
+                .collect(),
+            "named",
+        )),
         Err(named_err) => server
             .with_global_store_read(|store| {
                 store
                     .list_by_path("/wiki", limit, false)
                     .map_err(|e| format!("wiki fallback list: {e}"))
             })
-            .map(|entries| (entries, "global"))
+            .map(|entries| {
+                (
+                    entries
+                        .into_iter()
+                        .filter(is_user_facing_wiki_entry)
+                        .collect(),
+                    "global",
+                )
+            })
             .map_err(|fallback_err| format!("{named_err}; {fallback_err}")),
     }
 }
@@ -661,7 +698,7 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
-    let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+    server.enqueue_enrichment(super::EnrichmentItem {
         id: id.clone(),
         text: entry.text.clone(),
         summary: entry.summary.clone(),
@@ -670,6 +707,7 @@ pub(crate) async fn handle_wiki_ingest(
         needs_summary: false,
         target_db: DbScope::Project,
         named_project: Some("wiki".to_string()),
+        db_path: None,
         foundry_agent_id: None,
         foundry_path_prefix: None,
         revision: 1,
@@ -705,6 +743,9 @@ pub(crate) fn export_wiki_obsidian(
     let mut exported = 0usize;
     for entry in entries {
         if entry.path == "/wiki/_log" {
+            continue;
+        }
+        if !is_user_facing_wiki_entry(&entry) {
             continue;
         }
         let relative_dir = entry
@@ -1156,7 +1197,15 @@ pub(crate) async fn handle_wiki_search(
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
-            weights: params.weights,
+            weights: params.weights.or_else(|| {
+                Some(HybridWeightsParam {
+                    semantic: 0.48,
+                    fts: 0.30,
+                    symbolic: 0.20,
+                    decay: 0.02,
+                    use_rrf: true,
+                })
+            }),
             agent_role: None,
             project: Some(project_name.clone()),
             domain: None,
