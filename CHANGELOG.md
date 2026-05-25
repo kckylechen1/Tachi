@@ -32,6 +32,7 @@ Forty-eight commits since v1.1.1. Major themes: shell orchestration, dispatch v2
 ### Changed
 
 - **`tachi_memory` facade** unifies search/save; GH merge worktree safety hardened.
+- **Release alignment**: Rust crates, `@chaoxlabs/tachi-node`, OpenClaw plugin, and install docs unified on `1.2.0`.
 
 ## [1.1.0] - 2026-05-04
 

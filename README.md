@@ -51,6 +51,11 @@
 - **划疆而治（Domain Management）**：新增疆域之治（`register_domain`、`list_domains` 等），各域互不侵扰，更可定独立之生灭轮回（GC 阈值）。
 - **洗尽铅华（架构归宗）**：OpenClaw 旁支法脉（JS Bridge）尽数斩断归元，今后天上地下皆以 MCP 纯血大阵为宗。百余法器尽数收归 `tools.rs` 统一调拨。
 
+### 近次修补（v1.2.0）
+
+- **版牒归一**：Rust crates、`@chaoxlabs/tachi-node`、OpenClaw 插件与安装脚本统一至 `1.2.0`。
+- 详见 [CHANGELOG](CHANGELOG.md#120---2026-05-25) 与 [GitHub Release v1.2.0](https://github.com/kckylechen1/tachi/releases/tag/v1.2.0)。
+
 ### 近次修补（v0.16.4）
 
 - **FTS 旧索补脉**：新增 `tachi backfill-fts [--db PATH] [--dry-run] [--full]`。可先验 `memories_fts` 缺口，亦可增量补齐，若旧索走火入魔，亦可一令重筑全表。
