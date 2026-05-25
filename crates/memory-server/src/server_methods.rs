@@ -254,35 +254,6 @@ impl MemoryServer {
         }
     }
 
-    pub(super) fn with_path_store<T>(
-        &self,
-        db_path: &PathBuf,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let db_str = db_path
-            .to_str()
-            .ok_or_else(|| format!("DB path contains invalid UTF-8: {}", db_path.display()))?;
-        let label = db_path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|os| os.to_str())
-            .unwrap_or("path");
-        let _gate = write_or_recover(&self.global_rw_gate, "path_db_rw_gate");
-        let mut store = MemoryStore::open_with_label(db_str, label)
-            .map_err(|e| format!("open path store {}: {e}", db_path.display()))?;
-        f(&mut store)
-    }
-
-    pub(super) fn with_path_store_read<T>(
-        &self,
-        db_path: &PathBuf,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let _gate = read_or_recover(&self.global_rw_gate, "path_db_rw_gate");
-        let mut store = Self::open_read_store(db_path, "path")?;
-        f(&mut store)
-    }
-
     /// Resolve a named project's DB path: `~/.tachi/projects/{name}/memory.db`
     pub(super) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
