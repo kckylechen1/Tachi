@@ -35,6 +35,7 @@ mod bootstrap;
 mod builtins;
 mod capability_ops;
 mod capture_gate;
+mod claude_pool;
 mod clawdoctor;
 mod cli;
 mod cli_client;
@@ -359,6 +360,10 @@ struct MemoryServer {
     /// a project database on a running daemon without restart.
     hot_project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
     llm: Arc<llm::LlmClient>,
+    /// Bounded Claude CLI pool used by the daily batch distill (Phase 1).
+    /// Falls back to LlmClient on call errors — see
+    /// `foundry_runtime_ops::maintenance::run_daily_batch_distill`.
+    pub(crate) claude_pool: Arc<claude_pool::ClaudePool>,
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
     proxy_tools: Arc<StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>>,
@@ -452,6 +457,11 @@ impl MemoryServer {
             };
 
         let llm = Arc::new(llm::LlmClient::new()?);
+        let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(claude_pool::DEFAULT_MAX_CONCURRENT);
+        let claude_pool = Arc::new(claude_pool::ClaudePool::new(claude_pool_max));
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
@@ -510,6 +520,7 @@ impl MemoryServer {
             project_vec_available,
             hot_project_db,
             llm: llm.clone(),
+            claude_pool,
             pipeline_enabled,
             proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
             skill_tools: Arc::new(StdMutex::new(HashMap::new())),

@@ -361,6 +361,11 @@ pub(crate) enum Commands {
         /// Emit a machine-readable JSON report instead of the human summary.
         #[arg(long, global = true)]
         json: bool,
+        /// Also purge `failed` foundry_jobs older than N days during R4
+        /// (default cadence excludes them). Useful for clearing legacy
+        /// per-capture MemoryDistill failures after the Phase 1 migration.
+        #[arg(long, value_name = "DAYS", num_args = 0..=1, default_missing_value = "14", global = true)]
+        purge_failed: Option<u64>,
     },
     /// Vault secret management (init, unlock, set, get, list, lock, status).
     Vault {

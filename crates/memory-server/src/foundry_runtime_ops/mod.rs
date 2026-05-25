@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 
 mod capture;
+mod daily_distill;
 mod handlers;
 mod helpers;
 mod maintenance;
@@ -19,6 +20,7 @@ const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
 const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const FOUNDRY_RECALL_RERANK_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 const FOUNDRY_RELATED_LIMIT: usize = 4;
+#[allow(dead_code)] // Phase 1: only used by legacy schedule_pending_distill_jobs fallback.
 const FOUNDRY_DISTILL_WINDOW: usize = 8;
 const FOUNDRY_DISTILL_KEEP: usize = 6;
 const FOUNDRY_RECALL_RERANK_TOP_K: usize = 6;
@@ -107,11 +109,17 @@ fn default_capture_importance() -> f64 {
 }
 
 // Re-export items so sibling modules (main.rs etc.) can use them
+pub(crate) use daily_distill::run_daily_batch_distill;
+#[allow(unused_imports)]
+pub(crate) use daily_distill::DistillBatchReport;
 pub(crate) use handlers::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
-pub(crate) use maintenance::{
-    enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker,
-    schedule_pending_distill_jobs,
-};
+pub(crate) use maintenance::{enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker};
+// Phase 1: legacy 30-minute per-capture distill scheduler kept as a
+// manual fallback. The bootstrap loop now drives
+// `run_daily_batch_distill` instead, but operators can still call this
+// directly during incident recovery.
+#[allow(unused_imports)]
+pub(crate) use maintenance::schedule_pending_distill_jobs;

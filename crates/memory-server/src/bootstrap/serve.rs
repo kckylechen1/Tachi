@@ -523,6 +523,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         apply,
         no_backup,
         json,
+        purge_failed,
     } = &command
     {
         return crate::repair::run_repair(
@@ -532,6 +533,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             *apply,
             *no_backup,
             *json,
+            *purge_failed,
             &app_home,
         )
         .await;
@@ -902,31 +904,71 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
 
+        // Phase 1 daily batch distill. Default cadence is 24h; the legacy
+        // 30-minute per-capture scheduler is retained as a fallback (see
+        // `schedule_pending_distill_jobs`) but is no longer the primary path.
         let distill_interval_secs: u64 = std::env::var("DISTILL_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
-            .unwrap_or(1800);
+            .unwrap_or(86_400);
 
         let distill_server = server.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            let mut interval = tokio::time::interval(Duration::from_secs(distill_interval_secs));
             eprintln!(
-                "Distill scheduler: ENABLED (interval={}s)",
+                "Distill scheduler: ENABLED (daily batch, interval={}s)",
                 distill_interval_secs
             );
+
+            let marker_path = dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".tachi")
+                .join("foundry-runs")
+                .join(".last_distill_run");
+
+            let run_once = |server: &crate::MemoryServer, marker: &std::path::Path| {
+                let server = server.clone();
+                let marker = marker.to_path_buf();
+                async move {
+                    match crate::foundry_runtime_ops::run_daily_batch_distill(&server).await {
+                        Ok(report) => {
+                            eprintln!(
+                                "[distill] daily batch: dispatched={} distilled={} skipped={} fallback={} errors={}",
+                                report.batches_dispatched,
+                                report.groups_distilled,
+                                report.groups_skipped,
+                                report.fallback_used,
+                                report.errors.len()
+                            );
+                            if let Some(parent) = marker.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(&marker, chrono::Utc::now().to_rfc3339());
+                        }
+                        Err(err) => eprintln!("[distill] daily batch error: {err}"),
+                    }
+                }
+            };
+
+            // Catch-up: if the marker is missing or older than the cadence,
+            // run immediately after the 60s warmup.
+            let should_run_now = match std::fs::metadata(&marker_path).and_then(|m| m.modified()) {
+                Ok(modified) => modified
+                    .elapsed()
+                    .map(|d| d.as_secs() >= distill_interval_secs)
+                    .unwrap_or(true),
+                Err(_) => true,
+            };
+            if should_run_now {
+                run_once(&distill_server, &marker_path).await;
+            }
+
+            let mut interval = tokio::time::interval(Duration::from_secs(distill_interval_secs));
+            // First tick fires immediately; consume it so we wait a full cadence.
+            interval.tick().await;
             loop {
                 interval.tick().await;
-                match crate::foundry_runtime_ops::schedule_pending_distill_jobs(&distill_server)
-                    .await
-                {
-                    Ok(count) => {
-                        if count > 0 {
-                            eprintln!("[distill] Scheduled {count} distill jobs");
-                        }
-                    }
-                    Err(err) => eprintln!("[distill] Scheduler error: {err}"),
-                }
+                run_once(&distill_server, &marker_path).await;
             }
         });
     } else {

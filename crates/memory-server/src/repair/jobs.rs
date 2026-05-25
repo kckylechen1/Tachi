@@ -11,6 +11,12 @@ pub struct JobsPurge {
     pub dead_letter_days: Option<u64>,
     /// Custom completed retention in days. Defaults to 90 if None.
     pub completed_days: Option<u64>,
+    /// When Some(N), also purge `failed` foundry_jobs older than N days.
+    /// Disabled by default — failed rows are usually retained for triage,
+    /// but the Phase 1 distill migration leaves behind legacy
+    /// MemoryDistill failures that operators may want to sweep with
+    /// `tachi repair --purge-failed`.
+    pub failed_days: Option<u64>,
 }
 
 fn has_table(ctx: &DbContext, name: &str) -> bool {
@@ -68,6 +74,21 @@ impl RepairRule for JobsPurge {
                     .with_detail(json!({"older_than_days": cp_days})),
             );
         }
+        if let Some(fd_days) = self.failed_days {
+            let fd_iso = (Utc::now() - Duration::days(fd_days as i64)).to_rfc3339();
+            let n_fd: i64 = ctx.conn.query_row(
+                "SELECT COUNT(*) FROM foundry_jobs
+                     WHERE status = 'failed' AND updated_at < ?1",
+                [&fd_iso],
+                |row| row.get(0),
+            )?;
+            if n_fd > 0 {
+                r.findings.push(
+                    Finding::new("failed_jobs", n_fd as usize)
+                        .with_detail(json!({"older_than_days": fd_days})),
+                );
+            }
+        }
         Ok(r)
     }
 
@@ -89,6 +110,15 @@ impl RepairRule for JobsPurge {
             "DELETE FROM foundry_jobs WHERE status = 'completed' AND updated_at < ?1",
             [&cp_iso],
         )?;
+        let n_fd = if let Some(fd_days) = self.failed_days {
+            let fd_iso = (Utc::now() - Duration::days(fd_days as i64)).to_rfc3339();
+            tx.execute(
+                "DELETE FROM foundry_jobs WHERE status = 'failed' AND updated_at < ?1",
+                [&fd_iso],
+            )?
+        } else {
+            0
+        };
         tx.commit()?;
         if n_dl > 0 {
             r.findings.push(Finding::new("dead_letter_jobs", n_dl));
@@ -96,7 +126,10 @@ impl RepairRule for JobsPurge {
         if n_cp > 0 {
             r.findings.push(Finding::new("completed_jobs_stale", n_cp));
         }
-        r.applied = n_dl + n_cp;
+        if n_fd > 0 {
+            r.findings.push(Finding::new("failed_jobs", n_fd));
+        }
+        r.applied = n_dl + n_cp + n_fd;
         Ok(r)
     }
 }
