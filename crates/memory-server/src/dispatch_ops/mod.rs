@@ -11,6 +11,7 @@ use tokio::process::Command;
 
 mod board;
 mod dispatch;
+mod dispatch_v2;
 mod kanban_helpers;
 mod mcp_config;
 mod merge;
