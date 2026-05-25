@@ -296,7 +296,7 @@ export class MemoryMcpClient {
   private availableTools = new Set<string>();
   private runtimeInfo: RuntimeInfoPayload | null = null;
 
-  private static readonly CLIENT_VERSION = "0.16.4";
+  private static readonly CLIENT_VERSION = "1.2.0";
 
   constructor(
     private readonly dbPath: string,

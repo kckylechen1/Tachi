@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-25
+
+Forty-eight commits since v1.1.1. Major themes: shell orchestration, dispatch v2, daily distill, health/observability, search/wiki hygiene, guide layer, and OpenClaw per-agent routing.
+
+### Added
+
+- **`tachi_shell`**: skill-gated flow orchestration facade with convoy dispatch slices and lifecycle tests.
+- **`tachi_status` / `runtime_info` MCP tools**: daemon health, vector coverage, foundry queue warnings, and runtime DB routing self-check.
+- **Guide layer write side**: foundry distill artifacts under `/guide/<type>/<agent>/<ts>` with causal edges (`distilled_from`, `causes`, `fixed_by`, `rejected_because`).
+- **Dispatch v2**: two-stage plan-execute with full trajectory capture.
+- **Setup wizard TUI** (`tachi setup --interactive`) and **`tachi tidy`** for fragmented DB cleanup.
+- **Daily batch distill** (Claude pool) as primary scheduler; legacy 30-minute fallback retained.
+- **Wiki in-place update + Jaccard dedup**; search hygiene filters (wiki logs, rerank cache, kanban/handoff noise).
+- **OpenClaw `Route::Path`**: per-agent foundry jobs route to isolated agent DBs; MCP client verifies `runtime_info` on connect.
+- **Vault-aware `backfill-vectors`**; stdio MCP auto-spawns daemon when none detected.
+
+### Fixed
+
+- **`tachi stats --project-db`** now reads the specified project DB instead of silently using global.
+- LLM 3-layer consolidation (`extract` / `reasoning` / `embed` lanes); `evolve.rs` fallback uses extract lane.
+- Touch/access-stat semantics in `record_access`, auto-link, and vault touch.
+
+### Changed
+
+- **`tachi_memory` facade** unifies search/save; GH merge worktree safety hardened.
+
 ## [1.1.0] - 2026-05-04
 
 Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v2 branch are fixed. No public CLI/tool surface changes, but several defaults are now safer.
