@@ -41,6 +41,37 @@ use super::recall::{rerank_rows, value_id, value_path, value_relevance, value_to
 use super::*;
 use serde_json::json;
 
+async fn search_rows_for_recall_cache(
+    server: &MemoryServer,
+    item: &FoundryMaintenanceItem,
+    mut params: SearchMemoryParams,
+) -> Result<Vec<serde_json::Value>, String> {
+    if let Some(db_path) = item.db_path.as_ref() {
+        if params.query_vec.is_none() {
+            match server.llm.embed_voyage(&params.query, "query").await {
+                Ok(query_vec) => params.query_vec = Some(query_vec),
+                Err(e) => {
+                    eprintln!(
+                        "[recall-rerank-cache] path-db query embedding failed, falling back to lexical-only search: {e}"
+                    );
+                }
+            }
+        }
+        return server.with_path_store_read(db_path, |store| {
+            let opts = params.to_search_options(store.vec_available);
+            let rows = store
+                .search(&params.query, Some(opts))
+                .map_err(|e| format!("Search failed in path DB {}: {e}", db_path.display()))?;
+            Ok(rows
+                .into_iter()
+                .map(|row| slim_search_result(&row, item.target_db))
+                .collect())
+        });
+    }
+
+    search_memory_rows(server, params).await
+}
+
 /// LLM prompt parameters for the query-generation step. Kept here (not
 /// in `mod.rs`) because nothing else needs them and tuning is local.
 const RECALL_QUERY_LLM_TEMPERATURE: f32 = 0.2;
@@ -91,8 +122,9 @@ pub(super) async fn process_recall_rerank_cache_job(
 
     let mut updated = 0usize;
     for query in queries {
-        let mut rows = search_memory_rows(
+        let mut rows = search_rows_for_recall_cache(
             server,
+            item,
             SearchMemoryParams {
                 query: query.clone(),
                 query_vec: None,
@@ -222,6 +254,7 @@ pub(super) async fn process_recall_rerank_cache_job(
             server,
             item.target_db,
             item.named_project.as_deref(),
+            item.db_path.as_ref(),
             &cache_entry,
         )?;
         // PR #2 / Q4: intentionally NOT calling queue_capture_enrichment.

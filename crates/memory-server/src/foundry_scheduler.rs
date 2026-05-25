@@ -42,7 +42,7 @@ use tokio::time::{interval, Instant, MissedTickBehavior};
 use memory_core::{load_pending_foundry_jobs, MemoryStore, PersistedFoundryJob};
 
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
-use crate::manifest::Manifest;
+use crate::manifest::{DbRole, Manifest};
 use crate::DbScope;
 
 /// How often each per-DB worker scans `foundry_jobs` for pending work the
@@ -79,6 +79,11 @@ enum Route {
     /// Named project under `~/.tachi/projects/<name>/memory.db` — re-inject
     /// with `named_project = Some(name)`.
     NamedProject(String),
+    /// A manifest DB that must be opened by absolute path (OpenClaw agent DBs,
+    /// legacy extension DBs, and any future non-project stores). The worker
+    /// already knows the concrete path from the manifest, so it can preserve
+    /// isolation while still using the shared maintenance pipeline.
+    Path,
     /// Any other manifest DB (agents/, hub/, vault/, dark DBs). Existing
     /// `with_foundry_store` cannot route to it; jobs are counted as
     /// orphans so `tachi status` warns the operator. Full execution for
@@ -223,6 +228,7 @@ impl FoundryScheduler {
                 Route::Global => "global".to_string(),
                 Route::Project => "project".to_string(),
                 Route::NamedProject(n) => format!("named:{n}"),
+                Route::Path => "path".to_string(),
                 Route::Orphan(reason) => format!("orphan:{reason}"),
             };
             if matches!(handle.route, Route::Orphan(_)) {
@@ -321,7 +327,7 @@ fn reconcile_workers(
             continue;
         }
         let label = manifest_label_for(&path, &entry.scope_hint);
-        let route = classify_route(&path, own_global, own_project, &entry.scope_hint);
+        let route = classify_route(entry, &path, own_global, own_project);
         desired.insert(path.clone());
         by_path.insert(path, (label, route));
     }
@@ -469,23 +475,30 @@ async fn run_one_poll(
     }
 
     match route {
-        Route::Global | Route::Project | Route::NamedProject(_) => {
+        Route::Global | Route::Project | Route::NamedProject(_) | Route::Path => {
             let mut sent = 0u64;
             for job in pending {
                 let target_db = match route {
                     Route::Global => DbScope::Global,
                     Route::Project => DbScope::Project,
                     Route::NamedProject(_) => DbScope::Project, // existing routing path uses named_project for the actual store open
+                    Route::Path => DbScope::Global,
                     Route::Orphan(_) => unreachable!(),
                 };
                 let named_project = match route {
                     Route::NamedProject(n) => Some(n.clone()),
+                    Route::Path => None,
                     _ => job.named_project.clone(),
                 };
                 let item = FoundryMaintenanceItem {
                     job: job.spec,
                     target_db,
                     named_project,
+                    db_path: if matches!(route, Route::Path) {
+                        Some(db_path.to_path_buf())
+                    } else {
+                        None
+                    },
                     path_prefix: job.path_prefix,
                     memory_ids: job.memory_ids,
                 };
@@ -521,10 +534,10 @@ async fn run_one_poll(
 /// under `~/.tachi/projects/<name>/memory.db` routes as a named project;
 /// everything else is currently treated as orphan.
 fn classify_route(
+    entry: &crate::manifest::DbEntry,
     db_path: &Path,
     own_global: &Path,
     own_project: Option<&Path>,
-    scope_hint: &str,
 ) -> Route {
     if paths_equal(db_path, own_global) {
         return Route::Global;
@@ -537,8 +550,17 @@ fn classify_route(
     if let Some(name) = named_project_from_path(db_path) {
         return Route::NamedProject(name);
     }
+    if entry.allow_write
+        && entry.schema_kind == "tachi"
+        && matches!(
+            entry.role,
+            DbRole::Agent | DbRole::Foundry | DbRole::Unknown
+        )
+    {
+        return Route::Path;
+    }
     // Use scope_hint to give the operator a more readable orphan reason.
-    let reason: &'static str = match scope_hint {
+    let reason: &'static str = match entry.scope_hint.as_str() {
         "agent" => "agent_db",
         "foundry" => "foundry_db",
         "vault" => "vault_db",
@@ -605,10 +627,25 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
+        crate::manifest::DbEntry {
+            path: "/tmp/sched-test/memory.db".to_string(),
+            role,
+            owner: "test".to_string(),
+            schema_kind: "tachi".to_string(),
+            vec_enabled: true,
+            allow_write: true,
+            last_doctor_at: String::new(),
+            last_classification: "healthy".to_string(),
+            scope_hint: scope_hint.to_string(),
+            notes: String::new(),
+        }
+    }
+
     #[test]
     fn classify_route_routes_own_global() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
-        let r = classify_route(&global, &global, None, "global");
+        let r = classify_route(&entry(DbRole::Global, "global"), &global, &global, None);
         assert!(matches!(r, Route::Global));
     }
 
@@ -616,7 +653,12 @@ mod tests {
     fn classify_route_routes_own_project() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let project = PathBuf::from("/tmp/sched-test/proj.db");
-        let r = classify_route(&project, &global, Some(&project), "project");
+        let r = classify_route(
+            &entry(DbRole::Project, "project"),
+            &project,
+            &global,
+            Some(&project),
+        );
         assert!(matches!(r, Route::Project));
     }
 
@@ -624,7 +666,7 @@ mod tests {
     fn classify_route_recognizes_named_project() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let np = PathBuf::from("/home/u/.tachi/projects/sigil/memory.db");
-        let r = classify_route(&np, &global, None, "");
+        let r = classify_route(&entry(DbRole::Project, ""), &np, &global, None);
         match r {
             Route::NamedProject(n) => assert_eq!(n, "sigil"),
             other => panic!("expected NamedProject(sigil), got {other:?}"),
@@ -632,21 +674,20 @@ mod tests {
     }
 
     #[test]
-    fn classify_route_orphan_for_agent_db() {
+    fn classify_route_path_for_agent_db() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let agent = PathBuf::from("/home/u/.tachi/agents/main/memory.db");
-        let r = classify_route(&agent, &global, None, "agent");
-        match r {
-            Route::Orphan(reason) => assert_eq!(reason, "agent_db"),
-            other => panic!("expected Orphan(agent_db), got {other:?}"),
-        }
+        let r = classify_route(&entry(DbRole::Agent, "agent"), &agent, &global, None);
+        assert!(matches!(r, Route::Path));
     }
 
     #[test]
     fn classify_route_orphan_default_reason_when_no_hint() {
         let global = PathBuf::from("/tmp/sched-test/global.db");
         let weird = PathBuf::from("/somewhere/else/x.db");
-        let r = classify_route(&weird, &global, None, "");
+        let mut e = entry(DbRole::Unknown, "");
+        e.allow_write = false;
+        let r = classify_route(&e, &weird, &global, None);
         match r {
             Route::Orphan(reason) => assert_eq!(reason, "unscoped"),
             other => panic!("expected Orphan(unscoped), got {other:?}"),

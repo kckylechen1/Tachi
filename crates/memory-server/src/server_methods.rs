@@ -25,7 +25,12 @@ impl MemoryServer {
             path_prefix: item.path_prefix.clone(),
             memory_ids: item.memory_ids.clone(),
         };
-        let persist_result = if let Some(ref project_name) = item.named_project {
+        let persist_result = if let Some(ref db_path) = item.db_path {
+            self.with_path_store(db_path, |store| {
+                memory_core::insert_foundry_job(store.connection(), &persisted)
+                    .map_err(|e| format!("persist foundry job: {e}"))
+            })
+        } else if let Some(ref project_name) = item.named_project {
             self.with_named_project_store(project_name, |store| {
                 memory_core::insert_foundry_job(store.connection(), &persisted)
                     .map_err(|e| format!("persist foundry job: {e}"))

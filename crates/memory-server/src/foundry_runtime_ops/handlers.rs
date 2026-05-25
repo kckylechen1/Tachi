@@ -145,6 +145,119 @@ pub(crate) async fn handle_compact_rollup(
     .map_err(|e| format!("Failed to serialize compact_rollup response: {e}"))
 }
 
+fn compact_artifact_kind(entry: &MemoryEntry) -> Option<&str> {
+    entry
+        .metadata
+        .get("artifact_kind")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn import_signal_relations(signal_text: &str) -> Vec<&'static str> {
+    let lower = signal_text.to_ascii_lowercase();
+    let mut relations = vec!["distilled_from", "causes"];
+    if [
+        "fix",
+        "fixed",
+        "repair",
+        "error",
+        "failed",
+        "failure",
+        "bug",
+        "panic",
+        "exception",
+        "修复",
+        "错误",
+        "失败",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        relations.push("fixed_by");
+    }
+    if [
+        "reject", "rejected", "avoid", "do not", "don't", "never", "拒绝", "避免", "不要", "禁止",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        relations.push("rejected_because");
+    }
+    relations
+}
+
+fn build_compact_session_import_edges(
+    entries: &[MemoryEntry],
+    created_at: &str,
+) -> Vec<memory_core::MemoryEdge> {
+    let rollups = entries
+        .iter()
+        .filter(|entry| compact_artifact_kind(entry) == Some("compact_rollup"))
+        .collect::<Vec<_>>();
+    let signals = entries
+        .iter()
+        .filter(|entry| compact_artifact_kind(entry) == Some("durable_signal"))
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    let mut seen = HashSet::new();
+
+    for signal in signals {
+        for rollup in &rollups {
+            for relation in import_signal_relations(&signal.text) {
+                let (source_id, target_id, weight) = match relation {
+                    "distilled_from" | "rejected_because" => {
+                        (signal.id.clone(), rollup.id.clone(), 0.8)
+                    }
+                    "fixed_by" => (rollup.id.clone(), signal.id.clone(), 0.85),
+                    _ => (rollup.id.clone(), signal.id.clone(), 0.7),
+                };
+                if seen.insert((source_id.clone(), target_id.clone(), relation.to_string())) {
+                    edges.push(memory_core::MemoryEdge {
+                        source_id,
+                        target_id,
+                        relation: relation.to_string(),
+                        weight,
+                        metadata: json!({
+                            "source": "compact_session_memory",
+                            "artifact_kind": "durable_signal",
+                        }),
+                        created_at: created_at.to_string(),
+                        valid_from: created_at.to_string(),
+                        valid_to: None,
+                    });
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+fn persist_compact_session_import_edges(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    entries: &[MemoryEntry],
+) -> Result<usize, String> {
+    let created_at = Utc::now().to_rfc3339();
+    let edges = build_compact_session_import_edges(entries, &created_at);
+    if edges.is_empty() {
+        return Ok(0);
+    }
+    let save_edges = |store: &mut MemoryStore| {
+        for edge in &edges {
+            store
+                .add_edge(edge)
+                .map_err(|e| format!("Failed to save compact_session_memory edge: {e}"))?;
+        }
+        Ok(edges.len())
+    };
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, save_edges)
+    } else {
+        server.with_store_for_scope(target_db, save_edges)
+    }
+}
+
 pub(crate) async fn handle_compact_session_memory(
     server: &MemoryServer,
     params: CompactSessionMemoryParams,
@@ -329,12 +442,13 @@ pub(crate) async fn handle_compact_session_memory(
 
     let mut saved_ids = Vec::new();
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
+                None,
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -344,12 +458,19 @@ pub(crate) async fn handle_compact_session_memory(
         saved_ids.push(entry.id.clone());
     }
 
+    let import_edges = persist_compact_session_import_edges(
+        server,
+        target_db,
+        named_project.as_deref(),
+        &entries,
+    )?;
     let saved_ids = dedup_strings(saved_ids);
     let maintenance_jobs = if params.queue_maintenance {
         enqueue_capture_maintenance_jobs(
             server,
             target_db,
             named_project.clone(),
+            None,
             &params.agent_id,
             &base_path,
             &saved_ids,
@@ -382,6 +503,7 @@ pub(crate) async fn handle_compact_session_memory(
     response.insert("path_prefix".into(), json!(base_path));
     response.insert("salient_topics".into(), json!(salient_topics));
     response.insert("durable_signals".into(), json!(durable_signals));
+    response.insert("import_edges".into(), json!(import_edges));
     response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
     response.insert("section".into(), json!(section));
     if let Some(warning) = warning {
@@ -999,12 +1121,13 @@ pub(crate) async fn handle_capture_session(
     let mut saved_ids = Vec::new();
 
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
+                None,
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -1019,6 +1142,7 @@ pub(crate) async fn handle_capture_session(
         server,
         target_db,
         named_project.clone(),
+        None,
         &params.agent_id,
         &base_path,
         &saved_ids,
