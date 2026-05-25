@@ -69,7 +69,8 @@ pub(crate) async fn handle_tachi_dispatch(
         };
         base.join("runs").join(&dispatch_id)
     };
-    std::fs::create_dir_all(&workspace_dir)
+    tokio::fs::create_dir_all(&workspace_dir)
+        .await
         .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
 
     // 2. Generate MCP config if requested
