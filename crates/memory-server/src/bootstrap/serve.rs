@@ -337,7 +337,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         } else {
             global_db_path.clone()
         };
-        return super::backfill::run_backfill_vectors(&target_path, *batch_size, *dry_run).await;
+        return super::backfill::run_backfill_vectors(
+            &target_path,
+            &global_db_path,
+            *batch_size,
+            *dry_run,
+        )
+        .await;
     }
 
     if let Commands::BackfillSummaries { db, dry_run } = &command {
@@ -1166,7 +1172,40 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // Best-effort cleanup of daemon discovery file
         let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
     } else {
-        // stdio mode (default)
+        // stdio mode (default) — auto-spawn daemon if not running
+        {
+            let daemon_running = crate::cli_client::detect_daemon(&app_home).await.is_some();
+            if !daemon_running {
+                match std::env::current_exe() {
+                    Ok(exe) => {
+                        let port_str = cli.port.to_string();
+                        match std::process::Command::new(&exe)
+                            .args(["--daemon", "--port", &port_str])
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                        {
+                            Ok(child) => {
+                                eprintln!(
+                                    "[auto-daemon] spawned tachi daemon (pid={})",
+                                    child.id()
+                                );
+                                // Give daemon time to acquire lock and bind port
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            Err(e) => {
+                                eprintln!("[auto-daemon] failed to spawn daemon: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[auto-daemon] cannot determine binary path: {e}");
+                    }
+                }
+            }
+        }
+
         let transport = (stdin(), stdout());
         let running = rmcp::service::serve_server(server, transport).await?;
 

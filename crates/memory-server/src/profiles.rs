@@ -188,6 +188,8 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "memory_graph",
     "list_memories",
     "memory_stats",
+    "runtime_info",
+    "tachi_status",
     "get_edges",
     "wiki_search",
     "wiki_browse",
@@ -272,6 +274,10 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
 /// Standard profile allow-list. Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Runtime identity / DB routing self-check for embedded clients
+    "runtime_info",
+    // Health check: daemon status, vector coverage, foundry queue
+    "tachi_status",
     // Tachi Shell — skill-gated flow orchestration (primary user entry)
     "tachi_shell",
     // Task facade (plan / dispatch / board / merge)
@@ -293,6 +299,7 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
 /// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
 const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    "runtime_info",
     // Unified memory facade (search + save)
     "tachi_memory",
     "tachi_web_search",
