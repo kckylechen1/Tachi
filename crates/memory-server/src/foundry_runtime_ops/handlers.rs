@@ -4,6 +4,7 @@ use super::maintenance::enqueue_capture_maintenance_jobs;
 use super::recall::*;
 use super::*;
 use regex::Regex;
+use crate::utils::stable_hash;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -692,7 +693,15 @@ pub(crate) async fn handle_recall_context(
         .filter(|row| value_relevance(row) >= min_score)
         .collect::<Vec<_>>();
 
-    let reranked = rerank_rows(server, &params.query, filtered, params.top_k.max(1)).await;
+    let (reranked, rerank_outcome) =
+        rerank_rows_with_outcome(server, &params.query, filtered, params.top_k.max(1)).await;
+    if rerank_outcome == super::RerankOutcome::Fallback {
+        eprintln!(
+            "[recall_context] rerank fail-open: query_hash={} top_k={}",
+            stable_hash(&params.query),
+            params.top_k.max(1)
+        );
+    }
     let final_rows = reranked
         .into_iter()
         .filter(|row| value_relevance(row) >= min_score)

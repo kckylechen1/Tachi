@@ -239,14 +239,17 @@ pub(super) fn parse_session_capture_response(
         .collect())
 }
 
-pub(crate) async fn rerank_rows(
+pub(crate) async fn rerank_rows_with_outcome(
     server: &MemoryServer,
     query: &str,
     rows: Vec<Value>,
     top_k: usize,
-) -> Vec<Value> {
+) -> (Vec<Value>, super::RerankOutcome) {
     if rows.len() <= 1 {
-        return rows.into_iter().take(top_k).collect();
+        return (
+            rows.into_iter().take(top_k).collect(),
+            super::RerankOutcome::NotNeeded,
+        );
     }
 
     let docs = rows.iter().map(build_rerank_document).collect::<Vec<_>>();
@@ -266,15 +269,24 @@ pub(crate) async fn rerank_rows(
                 }
                 out.push(row);
             }
-            if out.is_empty() {
+            let outcome = if out.is_empty() {
+                super::RerankOutcome::Fallback
+            } else {
+                super::RerankOutcome::Applied
+            };
+            let rows = if out.is_empty() {
                 rows.into_iter().take(top_k).collect()
             } else {
                 out
-            }
+            };
+            (rows, outcome)
         }
         Err(err) => {
             eprintln!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
-            rows.into_iter().take(top_k).collect()
+            (
+                rows.into_iter().take(top_k).collect(),
+                super::RerankOutcome::Fallback,
+            )
         }
     }
 }

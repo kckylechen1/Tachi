@@ -71,10 +71,6 @@ fn wiki_text_jaccard_sets(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     }
 }
 
-fn wiki_text_jaccard(a: &str, b: &str) -> f64 {
-    wiki_text_jaccard_sets(&wiki_text_tokens(a), &wiki_text_tokens(b))
-}
-
 fn find_wiki_entry_by_path_or_topic(
     store: &mut MemoryStore,
     path: &str,
@@ -129,13 +125,11 @@ fn supersede_wiki_duplicates(
             continue;
         }
         let same_subject = candidate.path == path
-            || target_subject.as_ref().is_some_and(|token| {
-                wiki_subject_token(&candidate.topic).as_ref() == Some(token)
-            })
-            || wiki_text_jaccard_sets(
-                &target_text_tokens,
-                &wiki_text_tokens(&candidate.text),
-            ) >= WIKI_DUP_JACCARD_THRESHOLD;
+            || target_subject
+                .as_ref()
+                .is_some_and(|token| wiki_subject_token(&candidate.topic).as_ref() == Some(token))
+            || wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+                >= WIKI_DUP_JACCARD_THRESHOLD;
         if !same_subject {
             continue;
         }
@@ -524,7 +518,7 @@ pub(crate) async fn handle_tachi_wiki_search(
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
     let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
-    let mut rows = search_memory_rows(
+    let rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -554,10 +548,6 @@ pub(crate) async fn handle_tachi_wiki_search(
         },
     )
     .await?;
-
-    for row in rows.iter_mut().take(3) {
-        crate::wiki_ops::add_related_entries_to_row(row, server, &project_name, 5);
-    }
 
     crate::wiki_ops::append_wiki_log(
         server,
@@ -714,6 +704,11 @@ pub(crate) async fn handle_tachi_progress_check(
             .join("\n"),
         params.latest_error.clone().unwrap_or_else(|| "(none provided)".to_string())
     );
+    let progress_log = if let Some(flow_id) = params.flow_id.as_deref() {
+        record_progress_check_event(flow_id, &params, stuck)?
+    } else {
+        None
+    };
 
     serde_json::to_string(&json!({
         "status": "ok",
@@ -733,6 +728,7 @@ pub(crate) async fn handle_tachi_progress_check(
         "debug_checklist": debug_checklist,
         "should_ask_codex": stuck,
         "ask_codex_prompt": ask_codex_prompt,
+        "progress_log": progress_log,
         "next_actions": if stuck {
             json!(["search wiki hits", "write a failing boundary test", "ask another agent with ask_codex_prompt", "only then edit code"])
         } else {
@@ -740,6 +736,47 @@ pub(crate) async fn handle_tachi_progress_check(
         },
     }))
     .map_err(|e| format!("serialize progress_check: {e}"))
+}
+
+fn record_progress_check_event(
+    flow_id: &str,
+    params: &ProgressCheckParams,
+    stuck: bool,
+) -> Result<Option<String>, String> {
+    use std::io::Write;
+
+    if flow_id.is_empty()
+        || flow_id.contains('/')
+        || flow_id.contains('\\')
+        || flow_id.contains("..")
+        || !flow_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!("Invalid flow_id: '{flow_id}'"));
+    }
+    let run_dir = crate::shell_ops::shell_runs_root().join(flow_id);
+    std::fs::create_dir_all(&run_dir).map_err(|e| format!("create progress run dir: {e}"))?;
+    let path = run_dir.join("progress.jsonl");
+    let line = serde_json::to_string(&json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "flow_id": flow_id,
+        "event": "progress_check",
+        "task": params.task,
+        "attempt_count": params.attempts.len(),
+        "latest_error": params.latest_error,
+        "stuck": stuck,
+        "project": params.project,
+        "domain": params.domain,
+    }))
+    .map_err(|e| format!("serialize progress check: {e}"))?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    writeln!(file, "{line}").map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
 }
 
 async fn build_route_recommendation(

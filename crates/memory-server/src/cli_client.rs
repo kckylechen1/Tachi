@@ -36,6 +36,7 @@ pub(crate) struct DaemonInfo {
     pub pid: u32,
     #[allow(dead_code)]
     pub port: u16,
+    pub global_db: Option<String>,
 }
 
 /// Look up `~/.tachi/daemon.pid` and verify the daemon is actually listening.
@@ -59,7 +60,15 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
         tokio::time::timeout(DAEMON_PROBE_TIMEOUT, tokio::net::TcpStream::connect(&addr)).await;
 
     match probe {
-        Ok(Ok(_)) => Some(DaemonInfo { url, pid, port }),
+        Ok(Ok(_)) => Some(DaemonInfo {
+            url,
+            pid,
+            port,
+            global_db: parsed
+                .get("global_db")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        }),
         _ => None,
     }
 }
@@ -71,15 +80,16 @@ pub(crate) async fn call_daemon_tool(
     tool_name: &str,
     arguments: serde_json::Map<String, Value>,
 ) -> Result<String, String> {
+    let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let client = ServiceExt::serve((), transport)
         .await
         .map_err(|e| format!("daemon handshake failed at {}: {e}", info.url))?;
 
-    let mut params = CallToolRequestParams::new(tool_name.to_string());
-    if !arguments.is_empty() {
-        params = params.with_arguments(arguments);
+    let mut params = CallToolRequestParams::new(daemon_tool.clone());
+    if !daemon_args.is_empty() {
+        params = params.with_arguments(daemon_args);
     }
 
     let peer = client.peer().clone();
@@ -87,11 +97,11 @@ pub(crate) async fn call_daemon_tool(
         .await
         .map_err(|_| {
             format!(
-                "daemon call '{tool_name}' timed out after {:?}",
+                "daemon call '{daemon_tool}' timed out after {:?}",
                 DAEMON_CALL_TIMEOUT
             )
         })?
-        .map_err(|e| format!("daemon call '{tool_name}' failed: {e}"))?;
+        .map_err(|e| format!("daemon call '{daemon_tool}' failed: {e}"))?;
 
     // Best-effort cancel of the client session; ignore errors.
     let _ = client.cancel().await;
@@ -100,7 +110,7 @@ pub(crate) async fn call_daemon_tool(
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
         return Err(format!(
-            "daemon tool '{tool_name}' returned error: {err_text}"
+            "daemon tool '{daemon_tool}' returned error: {err_text}"
         ));
     }
 
@@ -112,6 +122,110 @@ fn first_text_block(blocks: &[rmcp::model::Annotated<RawContent>]) -> Option<Str
         RawContent::Text(t) => Some(t.text.clone()),
         _ => None,
     })
+}
+
+/// True when this process is the long-lived HTTP daemon (not stdio MCP / CLI).
+pub(crate) fn is_daemon_process() -> bool {
+    std::env::var("TACHI_DAEMON")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+/// Resolve `~/.tachi` (or `TACHI_HOME`) from the canonical global DB path.
+pub(crate) fn app_home_from_global_db(global_db_path: &Path) -> PathBuf {
+    if let Ok(home) = std::env::var("TACHI_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if let Some(global_dir) = global_db_path.parent() {
+        if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
+            if let Some(app_home) = global_dir.parent() {
+                return app_home.to_path_buf();
+            }
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".tachi")
+}
+
+fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
+    let Some(daemon_global) = info.global_db.as_deref() else {
+        return true;
+    };
+    if daemon_global.is_empty() {
+        return true;
+    }
+    if global_db_path.as_os_str() == daemon_global {
+        return true;
+    }
+    std::fs::canonicalize(global_db_path)
+        .ok()
+        .zip(std::fs::canonicalize(daemon_global).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
+}
+
+fn remap_daemon_tool(
+    tool_name: &str,
+    mut args: serde_json::Map<String, serde_json::Value>,
+) -> (String, serde_json::Map<String, serde_json::Value>) {
+    match tool_name {
+        "extract_facts" => {
+            args.insert("action".into(), serde_json::json!("extract_facts"));
+            ("tachi_memory".into(), args)
+        }
+        "save_memory" | "remember" => {
+            args.insert("action".into(), serde_json::json!("save"));
+            ("tachi_memory".into(), args)
+        }
+        "search_memory" => {
+            args.insert("action".into(), serde_json::json!("search"));
+            ("tachi_memory".into(), args)
+        }
+        "tachi_wiki_search" | "wiki_search" => {
+            args.insert("action".into(), serde_json::json!("search"));
+            ("tachi_wiki".into(), args)
+        }
+        "tachi_wiki_write" | "wiki_write" => {
+            args.insert("action".into(), serde_json::json!("write"));
+            ("tachi_wiki".into(), args)
+        }
+        other => (other.to_string(), args),
+    }
+}
+
+/// Forward a write tool to the running daemon when available.
+/// Returns `Some(body)` on success. Returns `None` when already in daemon
+/// mode, no daemon is listening, or forward failed (caller continues in-process).
+pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
+    global_db_path: &Path,
+    tool_name: &str,
+    params: &T,
+) -> Option<String> {
+    if is_daemon_process() {
+        return None;
+    }
+    let args = serde_json::to_value(params)
+        .ok()
+        .and_then(|value| value.as_object().cloned())?;
+    let app_home = app_home_from_global_db(global_db_path);
+    let info = detect_daemon(&app_home).await?;
+    if !daemon_global_db_matches(&info, global_db_path) {
+        return None;
+    }
+    match call_daemon_tool(&info, tool_name, args).await {
+        Ok(body) => Some(body),
+        Err(error) => {
+            eprintln!("[mcp] daemon forward '{tool_name}' failed ({error}); executing in-process");
+            None
+        }
+    }
 }
 
 /// Build a transient in-process `MemoryServer` for one-shot CLI use.

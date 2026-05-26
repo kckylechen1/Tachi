@@ -206,7 +206,6 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_toolchain",
     "prepare_capability_bundle",
     "tachi_task_brief",
-    "tachi_progress_check",
     "tachi_wiki_search",
     "search_memory",
     "cyberbrain_search",
@@ -230,10 +229,8 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "wiki_browse",
     // Facade tools (read-only)
     "tachi_search",
-    "tachi_memory",
     "tachi_web_search",
     "tachi_plan",
-    "tachi_unstick",
     "tachi_browse",
 ];
 
@@ -280,6 +277,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "register_domain",
     "delete_domain",
     "distill_trajectory",
+    "tachi_progress_check",
+    "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
     "tachi_wiki_ingest",

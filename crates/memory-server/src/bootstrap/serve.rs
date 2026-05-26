@@ -519,6 +519,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         scan_only,
         roots,
         jobs,
+        probe_keys,
     } = &command
     {
         return super::manifest_cli::run_doctor_command(
@@ -526,6 +527,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             *scan_only,
             roots.clone(),
             *jobs,
+            *probe_keys,
             &home,
             &app_home,
             git_root.as_ref(),
@@ -551,12 +553,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         watch,
         json,
         hide_orphans,
+        probe_keys,
     } = &command
     {
         return crate::status_ops::run_status(
             *watch,
             *json,
             *hide_orphans,
+            *probe_keys,
             &app_home,
             &global_db_path,
             project_db_path.as_deref(),
@@ -566,6 +570,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     if let Commands::Daemon { action } = &command {
         return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+    }
+
+    if let Commands::Watcher { action } = &command {
+        return crate::status_ops::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
     }
 
     if let Commands::Foundry { action } = &command {
@@ -1059,6 +1067,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     );
 
     if cli.daemon {
+        // Mark this process so MCP write handlers execute locally instead of
+        // re-forwarding to ourselves over HTTP.
+        std::env::set_var("TACHI_DAEMON", "1");
+
         // HTTP daemon mode
         // In daemon mode, project DB auto-detection is disabled above to avoid
         // mixed project context. Users can still opt into single-project mode

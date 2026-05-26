@@ -341,34 +341,6 @@ fn list_wiki_entries(
     }
 }
 
-pub(crate) fn add_related_entries_to_row(
-    row: &mut Value,
-    server: &MemoryServer,
-    project: &str,
-    limit: usize,
-) {
-    let Some(obj) = row.as_object_mut() else {
-        return;
-    };
-    let id = obj
-        .get("id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    let entities = obj
-        .get("entities")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let related = find_related_by_entities(server, project, &entities, &id, limit);
-    obj.insert("related_entries".to_string(), json!(related));
-}
-
 fn obsidian_file_stem(entry: &MemoryEntry) -> String {
     let topic = entry.topic.trim();
     if !topic.is_empty() {
@@ -1185,7 +1157,7 @@ pub(crate) async fn handle_wiki_search(
         .or_else(|| Some("/wiki".to_string()));
     let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
 
-    let mut rows = search_memory_rows(
+    let rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -1215,10 +1187,6 @@ pub(crate) async fn handle_wiki_search(
         },
     )
     .await?;
-
-    for row in rows.iter_mut().take(3) {
-        add_related_entries_to_row(row, server, &project_name, 5);
-    }
 
     append_wiki_log(
         server,

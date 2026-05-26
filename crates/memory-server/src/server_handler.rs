@@ -14,7 +14,7 @@ fn tool_not_found_error() -> rmcp::ErrorData {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task_brief to recall wiki lessons, prior memories, and useful skills. When repeated attempts fail or you suspect you are stuck, call tachi_progress_check before patching the same layer again. Store durable debugging lessons with tachi_wiki_write and search them with tachi_wiki_search.")
+            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') to recall wiki lessons, prior memories, and useful skills. When stuck after repeated attempts, search wiki with tachi_wiki(action='search') and inspect tachi_status. Store durable debugging lessons with tachi_wiki(action='write').")
     }
 
     fn list_tools(

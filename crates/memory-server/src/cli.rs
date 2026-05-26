@@ -141,6 +141,9 @@ pub(crate) enum Commands {
         /// Branch #5: also report a foundry job-status histogram per manifest DB
         #[arg(long)]
         jobs: bool,
+        /// Probe configured provider keys with live embedding/chat smoke calls
+        #[arg(long)]
+        probe_keys: bool,
     },
     /// Manifest v1 — show/init/refresh ~/.tachi/manifest.json
     Manifest {
@@ -350,11 +353,19 @@ pub(crate) enum Commands {
         /// unaffected so machine consumers always see the orphan flag.
         #[arg(long)]
         hide_orphans: bool,
+        /// Also run live provider smoke probes. This can make network calls and should not be used in cheap polling loops.
+        #[arg(long)]
+        probe_keys: bool,
     },
     /// Inspect or terminate the running tachi daemon.
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
+    },
+    /// Inspect or capture passive agent transcript sources such as Claude JSONL.
+    Watcher {
+        #[command(subcommand)]
+        action: WatcherAction,
     },
     /// Per-DB foundry runtime configuration.
     Foundry {
@@ -505,6 +516,20 @@ pub(crate) enum DaemonAction {
         /// and the PID inside is not actually a tachi process.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum WatcherAction {
+    /// Report known passive transcript sources without writing memory.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Capture a concise checkpoint from the latest Claude JSONL transcript.
+    CaptureLatest {
+        #[arg(long)]
+        json: bool,
     },
 }
 

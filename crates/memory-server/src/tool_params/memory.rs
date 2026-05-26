@@ -145,7 +145,7 @@ fn default_contradiction_threshold() -> f64 {
 // ─── Save / Update ──────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct SaveMemoryParams {
     /// Full text content of the memory
     pub text: String,
@@ -237,7 +237,7 @@ pub(crate) struct SaveMemoryParams {
 /// to `handle_save_memory`, so the capture gate, noise filter, provenance, and
 /// enrichment pipeline all run identically to a `save_memory` call.
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct RememberParams {
     /// Full text content to remember.
     pub text: String,
@@ -554,7 +554,7 @@ pub(crate) struct GetStateParams {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct ExtractFactsParams {
     /// Text to extract facts from
     pub text: String,
@@ -870,7 +870,7 @@ pub(crate) struct WikiLintParams {
     pub contradiction_threshold: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct WikiWriteParams {
     /// Short title for the wiki entry.
     pub title: String,

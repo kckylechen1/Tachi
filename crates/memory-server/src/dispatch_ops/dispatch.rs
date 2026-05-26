@@ -154,6 +154,9 @@ pub(crate) async fn handle_tachi_dispatch(
             .map_err(|e| format!("Failed to serialize started event: {e}"))?;
         std::fs::write(&trajectory_path, format!("{}\n", line))
             .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
+        let progress_path = workspace_dir.join("progress.jsonl");
+        std::fs::write(&progress_path, format!("{}\n", line))
+            .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
     }
 
     // Seed status.json so external pollers see something immediately.
@@ -407,6 +410,14 @@ pub(crate) async fn handle_tachi_dispatch(
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .append(true)
                     .open(&traj_path_for_spawn)
+                {
+                    let _ = writeln!(f, "{}", line);
+                }
+                let progress_path = workspace_dir.join("progress.jsonl");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(progress_path)
                 {
                     let _ = writeln!(f, "{}", line);
                 }

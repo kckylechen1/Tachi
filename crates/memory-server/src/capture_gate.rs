@@ -37,6 +37,7 @@ pub const ALLOWED_BUCKETS: &[&str] = &[
     "code-review",
     "trading",
     "agent",
+    "checkpoints",
     "foundry",
     "ghost",
     "openclaw",

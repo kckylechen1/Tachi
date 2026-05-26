@@ -5,6 +5,7 @@ pub(super) async fn run_doctor_command(
     scan_only: bool,
     roots_override: Vec<PathBuf>,
     jobs_report: bool,
+    probe_keys: bool,
     home: &std::path::Path,
     app_home: &std::path::Path,
     git_root: Option<&PathBuf>,
@@ -38,6 +39,8 @@ pub(super) async fn run_doctor_command(
     } else {
         None
     };
+    let provider_section =
+        collect_provider_key_report(&app_home.join("global").join("memory.db"), probe_keys).await;
 
     if json_output {
         let mut full = serde_json::to_value(&report)?;
@@ -45,6 +48,16 @@ pub(super) async fn run_doctor_command(
             if let Some(obj) = full.as_object_mut() {
                 obj.insert("foundry_jobs".into(), serde_json::to_value(jobs)?);
             }
+        }
+        if let Some(obj) = full.as_object_mut() {
+            obj.insert(
+                "provider_keys".into(),
+                serde_json::to_value(&provider_section)?,
+            );
+            obj.insert(
+                "models".into(),
+                serde_json::to_value(crate::status_ops::model_lanes_json())?,
+            );
         }
         print_pretty_json(&full)
     } else {
@@ -71,8 +84,102 @@ pub(super) async fn run_doctor_command(
                 }
             }
         }
+        println!("\n=== provider keys ===");
+        for key in &provider_section.keys {
+            println!(
+                "  {} status={} source={} required={} deprecated={}",
+                key.name, key.status, key.source, key.required, key.deprecated
+            );
+        }
+        if probe_keys {
+            for probe in &provider_section.probes {
+                println!(
+                    "  probe {}: {}{}",
+                    probe.name,
+                    probe.status,
+                    probe
+                        .message
+                        .as_ref()
+                        .map(|msg| format!(" ({msg})"))
+                        .unwrap_or_default()
+                );
+            }
+        } else {
+            println!("  live probes skipped (pass --probe-keys to test providers)");
+        }
+        println!("\n=== model lanes ===");
+        println!("  embedding: voyage-4 (1024d), key=VOYAGE_API_KEY");
+        println!("  rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY");
+        println!("  extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat");
+        println!("  distill/reasoning: Claude CLI first, chat fallback lanes");
         Ok(())
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderKeyReport {
+    keys: Vec<ProviderKeyStatus>,
+    probes: Vec<crate::status_ops::ProviderProbeResult>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ProviderKeyStatus {
+    name: String,
+    label: String,
+    required: bool,
+    deprecated: bool,
+    status: String,
+    source: String,
+}
+
+// Use the canonical key definitions from status_ops to avoid divergence.
+use crate::status_ops::API_KEY_DEFS;
+
+async fn collect_provider_key_report(
+    global_db_path: &std::path::Path,
+    probe_keys: bool,
+) -> ProviderKeyReport {
+    let keys = collect_provider_key_status(global_db_path);
+    let probes = if probe_keys {
+        crate::status_ops::run_provider_probes(global_db_path).await
+    } else {
+        Vec::new()
+    };
+    ProviderKeyReport { keys, probes }
+}
+
+fn collect_provider_key_status(global_db_path: &std::path::Path) -> Vec<ProviderKeyStatus> {
+    let statuses = crate::status_ops::provider_key_status_json(global_db_path);
+    statuses
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| {
+            let def = API_KEY_DEFS.iter().find(|def| {
+                value
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|name| name == def.key)
+            })?;
+            Some(ProviderKeyStatus {
+                name: def.key.to_string(),
+                label: def.label.to_string(),
+                required: def.required,
+                deprecated: def.deprecated,
+                status: value
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                source: value
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, serde::Serialize)]

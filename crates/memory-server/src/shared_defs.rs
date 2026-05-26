@@ -123,36 +123,56 @@ pub(super) fn slim_entry_with_enrichment(
     serde_json::Value::Object(obj)
 }
 
+fn round_score(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+/// Token-efficient search hit: id/path/topic/summary plus scores only.
+/// Full text and metadata remain available via `get_memory`.
 pub(super) fn slim_search_result(
     result: &memory_core::SearchResult,
     db: DbScope,
 ) -> serde_json::Value {
-    let mut obj = match slim_entry(&result.entry, db) {
-        serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
-    };
+    let entry = &result.entry;
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), json!(entry.id));
+    obj.insert("db".into(), json!(db.as_str()));
+    obj.insert("path".into(), json!(entry.path));
+    if !entry.topic.is_empty() {
+        obj.insert("topic".into(), json!(entry.topic));
+    }
+    if !entry.summary.is_empty() {
+        obj.insert("summary".into(), json!(entry.summary));
+    }
     obj.insert(
         "relevance".into(),
-        json!((result.score.final_score * 1000.0).round() / 1000.0),
+        json!(round_score(result.score.final_score)),
     );
     obj.insert(
         "score".into(),
         json!({
-            "vector": (result.score.vector * 1000.0).round() / 1000.0,
-            "fts": (result.score.fts * 1000.0).round() / 1000.0,
-            "symbolic": (result.score.symbolic * 1000.0).round() / 1000.0,
-            "decay": (result.score.decay * 1000.0).round() / 1000.0,
-            "final": (result.score.final_score * 1000.0).round() / 1000.0,
+            "vector": round_score(result.score.vector),
+            "fts": round_score(result.score.fts),
+            "symbolic": round_score(result.score.symbolic),
+            "decay": round_score(result.score.decay),
+            "final": round_score(result.score.final_score),
         }),
     );
     serde_json::Value::Object(obj)
 }
 
 pub(super) fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {
-    let mut obj = match slim_entry(rule, db) {
-        serde_json::Value::Object(m) => m,
-        _ => serde_json::Map::new(),
+    let summary = if !rule.summary.is_empty() {
+        rule.summary.clone()
+    } else {
+        rule.text.chars().take(200).collect()
     };
-    obj.insert("l0_rule".into(), json!(true));
-    serde_json::Value::Object(obj)
+    json!({
+        "id": rule.id,
+        "db": db.as_str(),
+        "path": rule.path,
+        "topic": if rule.topic.is_empty() { serde_json::Value::Null } else { json!(rule.topic) },
+        "summary": summary,
+        "l0_rule": true,
+    })
 }
