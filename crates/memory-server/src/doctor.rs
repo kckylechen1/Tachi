@@ -256,8 +256,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
         .unwrap_or("")
         .to_string();
 
-    // 1. Backup filename → short-circuit (don't try to open).
-    if is_backup_filename(&basename) {
+    // 1. Backup/archival path or filename → short-circuit (don't try to open).
+    if crate::manifest::is_archival_db_path(path) || is_backup_filename(&basename) {
         return DoctorFinding {
             path: path_str,
             classification: DbClassification::Backup,
@@ -1017,6 +1017,18 @@ mod tests {
     fn classify_broken_filename() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("memory.db.broken.20260201");
+        make_healthy_db(&p);
+        let f = classify_one(&p);
+        assert_eq!(f.classification, DbClassification::Backup);
+    }
+
+    #[test]
+    fn classify_backup_by_archival_path() {
+        let dir = tempdir().unwrap();
+        let p = dir
+            .path()
+            .join(".tachi/.agent/claude-code-runs/run-1/backups/global_memory.db");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
         make_healthy_db(&p);
         let f = classify_one(&p);
         assert_eq!(f.classification, DbClassification::Backup);

@@ -82,6 +82,9 @@ pub(super) async fn run_cli_command(
         Commands::BackfillFts { .. } => {
             unreachable!("BackfillFts is handled before generic CLI dispatch")
         }
+        Commands::Distill { .. } => {
+            unreachable!("Distill is handled in async context before generic CLI dispatch")
+        }
         Commands::Vault { .. } => {
             unreachable!("Vault is handled in async context before generic CLI dispatch")
         }

@@ -242,8 +242,11 @@ impl LlmClient {
     }
 
     fn should_disable_thinking(base_url: &str, model: &str) -> bool {
-        base_url.to_ascii_lowercase().contains("siliconflow")
-            && model.to_ascii_lowercase().contains("qwen")
+        if !base_url.to_ascii_lowercase().contains("siliconflow") {
+            return false;
+        }
+        let model = model.to_ascii_lowercase();
+        model.contains("qwen") || model.contains("deepseek")
     }
 
     /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
@@ -433,11 +436,8 @@ impl LlmClient {
         .await
     }
 
-    /// DEPRECATED (Phase 2): Foundry recall compaction now uses
-    /// `call_extract_llm` (SiliconFlow/Qwen) and daily distill goes
-    /// through the Claude CLI pool. Retained for back-compat and
-    /// potential rollback only.
-    #[allow(dead_code)]
+    /// Foundry batch distill and single-group fallback when
+    /// `FOUNDRY_DISTILL_BACKEND=raw_api`.
     pub async fn call_distill_llm(
         &self,
         system: &str,

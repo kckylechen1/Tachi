@@ -187,6 +187,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run batch memory distill (raw API by default; Claude CLI when configured).
+    Distill {
+        #[command(subcommand)]
+        action: DistillAction,
+    },
     /// Branch #6 — Rescue: split a multi-project memory.db into per-project Tachi DBs.
     /// Plan-only by default; pass --apply to actually write into target DBs.
     Rescue {
@@ -538,6 +543,16 @@ pub(crate) enum FoundryAction {
     ConfigList {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum DistillAction {
+    /// Run one daily batch distill pass against the project DB.
+    Run {
+        /// Project DB path (defaults to `--project-db` when set).
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
     },
 }
 
