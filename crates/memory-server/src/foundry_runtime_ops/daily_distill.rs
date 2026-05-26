@@ -166,7 +166,6 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
     let batch_size = resolve_batch_size();
 
     for (chunk_idx, chunk) in candidates.chunks(batch_size).enumerate() {
-        report.batches_dispatched += 1;
         match backend {
             DistillBackend::ClaudeCli => {
                 process_claude_batch(
@@ -223,6 +222,7 @@ async fn process_claude_batch(
     report: &mut DistillBatchReport,
     manifest: &mut Vec<SourceManifestEntry>,
 ) {
+    report.batches_dispatched += 1;
     let label = format!("distill-{}-b{}", project_label, chunk_idx);
     let prompt = build_batch_prompt(chunk);
     match server.claude_pool.call(&label, &prompt).await {
@@ -273,6 +273,7 @@ async fn process_api_batch(
         if batch.is_empty() {
             continue;
         }
+        report.batches_dispatched += 1;
         match call_api_batch_distill(&server.llm, batch).await {
             Ok(raw) => match parse_distill_response(&raw) {
                 Ok(per_group) => {
