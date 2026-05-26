@@ -85,7 +85,28 @@ pub fn canonicalize_db_path(p: &Path) -> PathBuf {
 ///   * filename matches `*.test.db` or `*.fixture.db`
 ///   * filename is `feature-daemon-global.db` AND path contains `vitejs` or
 ///     `zread` (belt-and-suspenders for the vite zread fixture pattern)
+/// Path-based archival/backup heuristics. Complements filename rules in
+/// [`crate::doctor::is_backup_filename`]: run snapshots, tidy archives, and
+/// explicit backup directories should never enter the manifest.
+pub fn is_archival_db_path(p: &Path) -> bool {
+    let path_str = p.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let markers = [
+        "/backups/",
+        "/.openclaw/backups/",
+        "/claude-code-runs/",
+        "/tidy/manual-cleanup-",
+        "/data/backup/",
+        "weixin-backup/",
+        ".pre-timestamp-fix",
+        ".checkpointed.db",
+    ];
+    markers.iter().any(|m| path_str.contains(m))
+}
+
 pub fn should_skip_path(p: &Path) -> Option<&'static str> {
+    if is_archival_db_path(p) {
+        return Some("archival/backup path");
+    }
     let path_str = p.to_string_lossy().replace('\\', "/");
     let file_name = p
         .file_name()
@@ -1144,6 +1165,14 @@ mod tests {
 
     #[test]
     fn should_skip_path_matches_fixture_patterns() {
+        assert!(should_skip_path(Path::new(
+            "/Users/me/.tachi/.agent/claude-code-runs/run/backups/global_memory.db"
+        ))
+        .is_some());
+        assert!(should_skip_path(Path::new(
+            "/Users/me/.tachi/tidy/manual-cleanup-20260503101336/global__memory.db"
+        ))
+        .is_some());
         // node_modules + tmp
         assert!(should_skip_path(Path::new(
             "/repo/node_modules/vitejs/vite/tmp/feature-daemon-global.db"

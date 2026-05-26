@@ -8,14 +8,14 @@
 //!    `metadata.source_memory_ids` array).
 //! 2. Groups them by (path_prefix, coherence_key) using the same
 //!    `coherent_distill_buckets` logic as the legacy scheduler.
-//! 3. Builds one mega-prompt per batch (≤ [`MAX_GROUPS_PER_BATCH`] groups)
-//!    and dispatches it through [`ClaudePool`].
+//! 3. Builds one mega-prompt per batch (≤ [`resolve_batch_size`] groups)
+//!    and dispatches it through the configured backend ([`DistillBackend`]).
 //! 4. Parses the JSON array response, persists one distill `MemoryEntry`
 //!    per group (with full provenance metadata), and writes a
 //!    `source_manifest.json` audit file under
 //!    `~/.tachi/foundry-runs/distill/<project>/<batch_run_id>/`.
-//! 5. On Claude error or unparseable response, falls back per-group to
-//!    [`LlmClient::call_extract_llm`] and stamps `fallback_used=true`.
+//! 5. On error or unparseable response, splits the batch (API path) or
+//!    falls back per-group to single-group [`LlmClient::call_distill_llm`].
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -31,9 +31,50 @@ use super::maintenance::{
 use super::*;
 use crate::llm::LlmClient;
 
-/// Maximum coherent groups bundled into a single Claude CLI call. Keeps
-/// the mega-prompt under ~50k tokens for the typical 8 memories/group.
-pub const MAX_GROUPS_PER_BATCH: usize = 20;
+/// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
+pub const DEFAULT_GROUPS_PER_BATCH: usize = 6;
+
+/// Legacy alias kept for external references.
+#[allow(dead_code)]
+pub const MAX_GROUPS_PER_BATCH: usize = DEFAULT_GROUPS_PER_BATCH;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistillBackend {
+    ClaudeCli,
+    RawApi,
+}
+
+impl DistillBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DistillBackend::ClaudeCli => "claude_cli",
+            DistillBackend::RawApi => "raw_api",
+        }
+    }
+}
+
+/// Resolve distill backend from `FOUNDRY_DISTILL_BACKEND`.
+/// Defaults to `raw_api` so daemon runs do not require Claude Code CLI.
+pub fn resolve_distill_backend() -> DistillBackend {
+    match std::env::var("FOUNDRY_DISTILL_BACKEND")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("claude_cli" | "claude-cli" | "cli") => DistillBackend::ClaudeCli,
+        Some("raw_api" | "raw-api" | "rawapi" | "api") => DistillBackend::RawApi,
+        None | Some(_) => DistillBackend::RawApi,
+    }
+}
+
+/// Batch size for one LLM call. Override with `FOUNDRY_DISTILL_BATCH_SIZE`.
+pub fn resolve_batch_size() -> usize {
+    std::env::var("FOUNDRY_DISTILL_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| (1..=20).contains(&n))
+        .unwrap_or(DEFAULT_GROUPS_PER_BATCH)
+}
 
 /// Minimum bucket size before we ask the LLM to distill — matches the
 /// scheduler's threshold so we don't stitch tiny noisy groups.
@@ -121,117 +162,33 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
     let _ = std::fs::create_dir_all(&runs_root);
 
     let mut manifest: Vec<SourceManifestEntry> = Vec::new();
+    let backend = resolve_distill_backend();
+    let batch_size = resolve_batch_size();
 
-    for (chunk_idx, chunk) in candidates.chunks(MAX_GROUPS_PER_BATCH).enumerate() {
-        report.batches_dispatched += 1;
-        let label = format!("distill-{}-b{}", project_label, chunk_idx);
-
-        let prompt = build_batch_prompt(chunk);
-        let claude_result = server.claude_pool.call(&label, &prompt).await;
-
-        match claude_result {
-            Ok(outcome) => {
-                let parsed = parse_distill_response(&outcome.text);
-                match parsed {
-                    Ok(per_group) => {
-                        for group in chunk {
-                            let item = per_group.get(&group.group_id);
-                            match item {
-                                Some(payload) if !payload.text.trim().is_empty() => {
-                                    match persist_distill_memory(
-                                        server,
-                                        group,
-                                        payload,
-                                        &batch_run_id,
-                                        "claude_cli",
-                                        false,
-                                    ) {
-                                        Ok(id) => {
-                                            report.groups_distilled += 1;
-                                            manifest.push(SourceManifestEntry {
-                                                group_id: group.group_id.clone(),
-                                                path_prefix: group.path_prefix.clone(),
-                                                coherence_key: group.coherence_key.clone(),
-                                                source_memory_ids: group
-                                                    .entries
-                                                    .iter()
-                                                    .map(|e| e.id.clone())
-                                                    .collect(),
-                                                written_memory_id: Some(id),
-                                                backend: "claude_cli",
-                                                fallback_used: false,
-                                                skip_reason: None,
-                                            });
-                                        }
-                                        Err(err) => {
-                                            report
-                                                .errors
-                                                .push(format!("persist {}: {err}", group.group_id));
-                                        }
-                                    }
-                                }
-                                Some(payload) => {
-                                    report.groups_skipped += 1;
-                                    manifest.push(SourceManifestEntry {
-                                        group_id: group.group_id.clone(),
-                                        path_prefix: group.path_prefix.clone(),
-                                        coherence_key: group.coherence_key.clone(),
-                                        source_memory_ids: group
-                                            .entries
-                                            .iter()
-                                            .map(|e| e.id.clone())
-                                            .collect(),
-                                        written_memory_id: None,
-                                        backend: "claude_cli",
-                                        fallback_used: false,
-                                        skip_reason: Some(
-                                            payload
-                                                .skip_reason
-                                                .clone()
-                                                .unwrap_or_else(|| "empty_text".to_string()),
-                                        ),
-                                    });
-                                }
-                                None => {
-                                    // Claude omitted this group → fall back per group.
-                                    fallback_one_group(
-                                        server,
-                                        group,
-                                        &batch_run_id,
-                                        &mut report,
-                                        &mut manifest,
-                                    )
-                                    .await;
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        report
-                            .errors
-                            .push(format!("parse batch {chunk_idx}: {err}"));
-                        // Whole batch unparseable → fallback for each group.
-                        for group in chunk {
-                            fallback_one_group(
-                                server,
-                                group,
-                                &batch_run_id,
-                                &mut report,
-                                &mut manifest,
-                            )
-                            .await;
-                        }
-                    }
-                }
+    for (chunk_idx, chunk) in candidates.chunks(batch_size).enumerate() {
+        match backend {
+            DistillBackend::ClaudeCli => {
+                process_claude_batch(
+                    server,
+                    chunk,
+                    chunk_idx,
+                    &project_label,
+                    &batch_run_id,
+                    &mut report,
+                    &mut manifest,
+                )
+                .await;
             }
-            Err(err) => {
-                report
-                    .errors
-                    .push(format!("claude batch {chunk_idx}: {err}"));
-                for group in chunk {
-                    fallback_one_group(server, group, &batch_run_id, &mut report, &mut manifest)
-                        .await;
-                }
+            DistillBackend::RawApi => {
+                process_api_batch(
+                    server,
+                    chunk,
+                    chunk_idx,
+                    &mut report,
+                    &mut manifest,
+                    &batch_run_id,
+                )
+                .await;
             }
         }
     }
@@ -241,6 +198,8 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
     if let Ok(body) = serde_json::to_string_pretty(&json!({
         "batch_run_id": batch_run_id,
         "project": project_label,
+        "backend": backend.as_str(),
+        "batch_size": batch_size,
         "generated_at": Utc::now().to_rfc3339(),
         "report": &report,
         "groups": manifest,
@@ -252,6 +211,213 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
     let _ = server.claude_pool.cleanup_expired();
 
     Ok(report)
+}
+
+async fn process_claude_batch(
+    server: &MemoryServer,
+    chunk: &[CandidateGroup],
+    chunk_idx: usize,
+    project_label: &str,
+    batch_run_id: &str,
+    report: &mut DistillBatchReport,
+    manifest: &mut Vec<SourceManifestEntry>,
+) {
+    report.batches_dispatched += 1;
+    let label = format!("distill-{}-b{}", project_label, chunk_idx);
+    let prompt = build_batch_prompt(chunk);
+    match server.claude_pool.call(&label, &prompt).await {
+        Ok(outcome) => match parse_distill_response(&outcome.text) {
+            Ok(per_group) => {
+                apply_parsed_groups(
+                    server,
+                    chunk,
+                    &per_group,
+                    batch_run_id,
+                    DistillBackend::ClaudeCli,
+                    false,
+                    report,
+                    manifest,
+                )
+                .await;
+            }
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("parse claude batch {chunk_idx}: {err}"));
+                for group in chunk {
+                    fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                }
+            }
+        },
+        Err(err) => {
+            report
+                .errors
+                .push(format!("claude batch {chunk_idx}: {err}"));
+            for group in chunk {
+                fallback_one_group(server, group, batch_run_id, report, manifest).await;
+            }
+        }
+    }
+}
+
+async fn process_api_batch(
+    server: &MemoryServer,
+    chunk: &[CandidateGroup],
+    chunk_idx: usize,
+    report: &mut DistillBatchReport,
+    manifest: &mut Vec<SourceManifestEntry>,
+    batch_run_id: &str,
+) {
+    let mut pending: Vec<&[CandidateGroup]> = vec![chunk];
+    while let Some(batch) = pending.pop() {
+        if batch.is_empty() {
+            continue;
+        }
+        report.batches_dispatched += 1;
+        match call_api_batch_distill(&server.llm, batch).await {
+            Ok(raw) => match parse_distill_response(&raw) {
+                Ok(per_group) => {
+                    apply_parsed_groups(
+                        server,
+                        batch,
+                        &per_group,
+                        batch_run_id,
+                        DistillBackend::RawApi,
+                        false,
+                        report,
+                        manifest,
+                    )
+                    .await;
+                }
+                Err(err) if batch.len() > 1 => {
+                    report.errors.push(format!(
+                        "parse api batch {chunk_idx} ({} groups): {err}; splitting",
+                        batch.len()
+                    ));
+                    let mid = batch.len() / 2;
+                    pending.push(&batch[mid..]);
+                    pending.push(&batch[..mid]);
+                }
+                Err(err) => {
+                    report
+                        .errors
+                        .push(format!("parse api batch {chunk_idx}: {err}"));
+                    for group in batch {
+                        fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                    }
+                }
+            },
+            Err(err) if batch.len() > 1 => {
+                report.errors.push(format!(
+                    "api batch {chunk_idx} ({} groups): {err}; splitting",
+                    batch.len()
+                ));
+                let mid = batch.len() / 2;
+                pending.push(&batch[mid..]);
+                pending.push(&batch[..mid]);
+            }
+            Err(err) => {
+                report
+                    .errors
+                    .push(format!("api batch {chunk_idx}: {err}"));
+                for group in batch {
+                    fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                }
+            }
+        }
+    }
+}
+
+async fn apply_parsed_groups(
+    server: &MemoryServer,
+    chunk: &[CandidateGroup],
+    per_group: &HashMap<String, GroupPayload>,
+    batch_run_id: &str,
+    backend: DistillBackend,
+    fallback_used: bool,
+    report: &mut DistillBatchReport,
+    manifest: &mut Vec<SourceManifestEntry>,
+) {
+    let backend_label = backend.as_str();
+    for group in chunk {
+        let item = per_group.get(&group.group_id);
+        match item {
+            Some(payload) if !payload.text.trim().is_empty() => {
+                match persist_distill_memory(
+                    server,
+                    group,
+                    payload,
+                    batch_run_id,
+                    backend_label,
+                    fallback_used,
+                ) {
+                    Ok(id) => {
+                        report.groups_distilled += 1;
+                        if fallback_used {
+                            report.fallback_used += 1;
+                        }
+                        manifest.push(SourceManifestEntry {
+                            group_id: group.group_id.clone(),
+                            path_prefix: group.path_prefix.clone(),
+                            coherence_key: group.coherence_key.clone(),
+                            source_memory_ids: group.entries.iter().map(|e| e.id.clone()).collect(),
+                            written_memory_id: Some(id),
+                            backend: backend_label,
+                            fallback_used,
+                            skip_reason: None,
+                        });
+                    }
+                    Err(err) => {
+                        report
+                            .errors
+                            .push(format!("persist {}: {err}", group.group_id));
+                    }
+                }
+            }
+            Some(payload) => {
+                report.groups_skipped += 1;
+                manifest.push(SourceManifestEntry {
+                    group_id: group.group_id.clone(),
+                    path_prefix: group.path_prefix.clone(),
+                    coherence_key: group.coherence_key.clone(),
+                    source_memory_ids: group.entries.iter().map(|e| e.id.clone()).collect(),
+                    written_memory_id: None,
+                    backend: backend_label,
+                    fallback_used,
+                    skip_reason: Some(
+                        payload
+                            .skip_reason
+                            .clone()
+                            .unwrap_or_else(|| "empty_text".to_string()),
+                    ),
+                });
+            }
+            None => {
+                fallback_one_group(server, group, batch_run_id, report, manifest).await;
+            }
+        }
+    }
+}
+
+async fn call_api_batch_distill(
+    llm: &LlmClient,
+    groups: &[CandidateGroup],
+) -> Result<String, String> {
+    let user = build_batch_user_payload(groups);
+    let max_tokens = batch_max_tokens(groups.len());
+    llm.call_distill_llm(
+        DISTILL_DAILY_SYSTEM_PROMPT,
+        &user,
+        None,
+        0.3,
+        max_tokens,
+    )
+    .await
+}
+
+fn batch_max_tokens(group_count: usize) -> u32 {
+    let estimated = group_count.saturating_mul(700).saturating_add(512);
+    estimated.min(8192) as u32
 }
 
 async fn fallback_one_group(
@@ -424,6 +590,14 @@ fn sanitize_id_segment(s: &str) -> String {
 }
 
 fn build_batch_prompt(groups: &[CandidateGroup]) -> String {
+    format!(
+        "<system>\n{}\n</system>\n\n{}",
+        DISTILL_DAILY_SYSTEM_PROMPT,
+        build_batch_user_payload(groups)
+    )
+}
+
+fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
     let mut payload = Vec::with_capacity(groups.len());
     for group in groups {
         let entries: Vec<Value> = group
@@ -451,8 +625,7 @@ fn build_batch_prompt(groups: &[CandidateGroup]) -> String {
     }
     let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
     format!(
-        "<system>\n{}\n</system>\n\nHere are {} groups to distill:\n\n{}",
-        DISTILL_DAILY_SYSTEM_PROMPT,
+        "Here are {} groups to distill:\n\n{}",
         groups.len(),
         groups_json
     )
@@ -529,7 +702,7 @@ fn snippet(s: &str) -> String {
 async fn fallback_distill(llm: &LlmClient, group: &CandidateGroup) -> Result<GroupPayload, String> {
     let user = build_fallback_user_payload(group);
     let text = llm
-        .call_extract_llm(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 600)
+        .call_distill_llm(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 600)
         .await?;
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() {
@@ -705,5 +878,60 @@ mod tests {
     fn sanitize_id_segment_keeps_safe_chars() {
         assert_eq!(sanitize_id_segment("topic:foo bar"), "topic_foo_bar");
         assert_eq!(sanitize_id_segment("/project/x"), "project_x");
+    }
+
+    #[test]
+    fn resolve_distill_backend_defaults_to_raw_api() {
+        with_backend_env(None, || {
+            assert_eq!(resolve_distill_backend(), DistillBackend::RawApi);
+        });
+    }
+
+    #[test]
+    fn resolve_distill_backend_recognises_claude_cli() {
+        with_backend_env(Some("claude_cli"), || {
+            assert_eq!(resolve_distill_backend(), DistillBackend::ClaudeCli);
+        });
+    }
+
+    #[test]
+    fn resolve_batch_size_defaults_to_six() {
+        with_batch_size_env(None, || {
+            assert_eq!(resolve_batch_size(), DEFAULT_GROUPS_PER_BATCH);
+        });
+    }
+
+    fn with_backend_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let key = "FOUNDRY_DISTILL_BACKEND";
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match previous {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn with_batch_size_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let key = "FOUNDRY_DISTILL_BATCH_SIZE";
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match previous {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 }

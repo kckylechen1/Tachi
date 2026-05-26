@@ -411,6 +411,30 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         None
     };
 
+    if let Commands::Distill { action } = &command {
+        use crate::cli::DistillAction;
+        let DistillAction::Run { db } = action;
+        let target_project = db
+            .clone()
+            .map(|p| expand_user_path(p.to_string_lossy().as_ref()))
+            .or(project_db_path.clone())
+            .ok_or_else(|| {
+                "distill run requires a project DB: pass --project-db PATH or `distill run --db PATH`"
+                    .to_string()
+            })?;
+        if !target_project.exists() {
+            return Err(format!(
+                "project DB not found: {}",
+                target_project.display()
+            )
+            .into());
+        }
+        let server = MemoryServer::new(global_db_path.clone(), Some(target_project.clone()))?;
+        let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
+        super::print_pretty_json(&serde_json::to_value(report)?)?;
+        return Ok(());
+    }
+
     if cli.daemon && project_db_path.is_some() {
         if explicit_project_db {
             eprintln!(
