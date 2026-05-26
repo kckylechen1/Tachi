@@ -12,13 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tachi distill run --db PATH`**: manual one-shot daily batch distill against any project DB.
 - **`FOUNDRY_DISTILL_BACKEND`**: choose `raw_api` (default) or `claude_cli` for daily batch distill.
 - **`FOUNDRY_DISTILL_BATCH_SIZE`**: tune groups per LLM call (default 6).
+- **`tachi_memory` actions**: `briefing`, `checkpoint`, `alerts`, `ask`, `consolidate`, `progress`, `readiness`.
+- **`tachi watcher`**: passive Claude JSONL transcript discovery and capture helpers.
+- **Status diagnostics**: health score, API key drift detection, provider probes, distill marker staleness.
 
 ### Changed
 
 - Daily batch distill defaults to SiliconFlow raw API via the `DISTILL_*` lane; Claude CLI remains opt-in.
 - API batches split and retry on JSON parse failure before per-group fallback.
 - Manifest/doctor skip archival and backup DB paths to reduce noisy status/backfill hints.
+- Secret scrubbing on save/progress; `scrub_secrets` regexes compiled once via `OnceLock`.
 
+### Fixed
+
+- `batches_dispatched` metric counts split API distill retries accurately.
+- Progress `status.json` updates use file locking; JSONL watcher scan runs off the async executor.
+- Config.env discovery uses `dirs::home_dir()`; macOS keychain probe skipped on other platforms.
+
+## [1.2.0] - 2026-05-25
 
 Forty-eight commits since v1.1.1. Major themes: shell orchestration, dispatch v2, daily distill, health/observability, search/wiki hygiene, guide layer, and OpenClaw per-agent routing.
 
