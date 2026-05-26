@@ -37,7 +37,7 @@ use super::helpers::*;
 use super::maintenance::{
     job_metadata_string, job_metadata_usize, job_metadata_value, with_foundry_store_read,
 };
-use super::recall::{rerank_rows, value_id, value_path, value_relevance, value_topic};
+use super::recall::{rerank_rows_with_outcome, value_id, value_path, value_relevance, value_topic};
 use super::*;
 use serde_json::json;
 
@@ -161,7 +161,8 @@ pub(super) async fn process_recall_rerank_cache_job(
             row.get("source").and_then(serde_json::Value::as_str)
                 != Some(FOUNDRY_RECALL_RERANK_CACHE_SOURCE)
         });
-        let reranked = rerank_rows(server, &query, rows, top_k).await;
+        let (reranked, rerank_outcome) =
+            rerank_rows_with_outcome(server, &query, rows, top_k).await;
         if reranked.is_empty() {
             continue;
         }
@@ -207,6 +208,7 @@ pub(super) async fn process_recall_rerank_cache_job(
                 "source_memory_ids": item.memory_ids.clone(),
                 "result_ids": result_ids.clone(),
                 "result_scores": result_scores,
+                "rerank_outcome": format!("{:?}", rerank_outcome).to_ascii_lowercase(),
                 "job_id": item.job.id.clone(),
                 "path_prefix": item.path_prefix.clone(),
             }),

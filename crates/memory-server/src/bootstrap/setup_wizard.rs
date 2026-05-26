@@ -167,6 +167,25 @@ pub(super) async fn run_interactive_wizard(
         .default(true)
         .interact()?;
 
+    if detected > 0 {
+        let install_rules = Confirm::with_theme(&theme)
+            .with_prompt(
+                "  Install/update Tachi agent memory rules in detected agent config files?",
+            )
+            .default(true)
+            .interact()?;
+        if install_rules {
+            let installed = install_agent_memory_rules(home)?;
+            if installed.is_empty() {
+                println!("    (no supported writable agent rule files found)");
+            } else {
+                for path in installed {
+                    println!("    updated {}", path.display());
+                }
+            }
+        }
+    }
+
     // ─── [4/5] Pipeline ────────────────────────────────────────────────────
     println!("\n[4/5] Pipeline");
     let current_pipeline = env_vars
@@ -309,6 +328,76 @@ fn init_vault_inline(
         .map_err(|e| format!("vault_set_config: {e}"))?;
 
     Ok(())
+}
+
+const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
+const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
+
+fn agent_memory_rules_block() -> String {
+    format!(
+        "{AGENT_RULES_START}\n\
+## Tachi Memory Rules\n\n\
+- At session start on non-trivial work, call `tachi_status` and `tachi_memory` with `action=\"briefing\"`.\n\
+- Before handoff or after important decisions, call `tachi_memory` with `action=\"checkpoint\"` and a concise summary plus next steps.\n\
+- When stuck or after repeated failed attempts, call `tachi_memory` with `action=\"alerts\"` or `action=\"ask\"` before patching another layer.\n\
+- Save durable facts, decisions, commands, file paths, and error signatures; do not save raw transcripts or secrets.\n\
+- Treat `tachi_status` warnings about provider keys, vector coverage, and failed Foundry jobs as active operational context.\n\
+{AGENT_RULES_END}\n"
+    )
+}
+
+fn merge_managed_block(existing: &str, block: &str) -> String {
+    if let Some(start) = existing.find(AGENT_RULES_START) {
+        if let Some(rel_end) = existing[start..].find(AGENT_RULES_END) {
+            let end = start + rel_end + AGENT_RULES_END.len();
+            let mut out = String::new();
+            out.push_str(existing[..start].trim_end());
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(block.trim_end());
+            let tail = existing[end..].trim_start();
+            if !tail.is_empty() {
+                out.push_str("\n\n");
+                out.push_str(tail);
+            }
+            out.push('\n');
+            return out;
+        }
+    }
+
+    let mut out = existing.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str(block.trim_end());
+    out.push('\n');
+    out
+}
+
+fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let candidates = [
+        home.join(".claude").join("CLAUDE.md"),
+        home.join(".codex").join("AGENTS.md"),
+        home.join(".gemini").join("GEMINI.md"),
+    ];
+    let block = agent_memory_rules_block();
+    let mut updated = Vec::new();
+    for path in candidates {
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        if !parent.exists() {
+            continue;
+        }
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let merged = merge_managed_block(&existing, &block);
+        if merged != existing {
+            std::fs::write(&path, merged)?;
+        }
+        updated.push(path);
+    }
+    Ok(updated)
 }
 
 // ─── Pure helpers (unit-tested) ──────────────────────────────────────────────
@@ -474,5 +563,20 @@ mod tests {
         assert!(!looks_like_api_key("has spaces in it nope"));
         assert!(looks_like_api_key("voy_1234567890abcdef"));
         assert!(looks_like_api_key("sk-proj-ABCDEFG1234567890"));
+    }
+
+    #[test]
+    fn merge_managed_block_appends_and_replaces() {
+        let block = agent_memory_rules_block();
+        let first = merge_managed_block("# Existing\n", &block);
+        assert!(first.contains("# Existing"));
+        assert!(first.contains(AGENT_RULES_START));
+        assert!(first.contains("action=\"briefing\""));
+
+        let replacement = format!("{AGENT_RULES_START}\nold rules\n{AGENT_RULES_END}\n");
+        let second = merge_managed_block(&first, &replacement);
+        assert!(second.contains("old rules"));
+        assert!(!second.contains("action=\"briefing\""));
+        assert_eq!(second.matches(AGENT_RULES_START).count(), 1);
     }
 }

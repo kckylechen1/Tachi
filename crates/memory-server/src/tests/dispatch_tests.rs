@@ -271,6 +271,10 @@ async fn v2_two_stage_smoke() {
     assert!(trajectory.contains("\"event\":\"dispatch_started\""));
     assert!(trajectory.contains("\"event\":\"plan_generated\""));
     assert!(trajectory.contains("\"event\":\"execute_started\""));
+    let progress =
+        std::fs::read_to_string(run_dir.join("progress.jsonl")).expect("progress present");
+    assert!(progress.contains("\"event\":\"dispatch_started\""));
+    assert!(progress.contains("\"event\":\"plan_generated\""));
 
     // Wait briefly for the spawned stage-2 task to write status.json /
     // result.md / dispatch_finished trajectory line.

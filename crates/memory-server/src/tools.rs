@@ -91,6 +91,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "save_memory",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_save_memory(self, params).await
     }
 
@@ -111,6 +120,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "remember",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_remember(self, params).await
     }
 
@@ -173,7 +191,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Health check: daemon status, vector coverage, foundry queue depth, and active warnings. Call this at session start to detect issues like a dead daemon or missing embeddings."
+        description = "Cheap health check: daemon status, vector coverage, foundry queue depth, provider key drift/auth-failure inference, model lane config, and agent readiness warnings. Call at session start; use `tachi status --probe-keys` or `tachi doctor --probe-keys` for live provider calls."
     )]
     pub(crate) async fn tachi_status(&self) -> Result<String, String> {
         crate::status_ops::handle_tachi_status(self).await
@@ -342,6 +360,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<WikiWriteParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "tachi_wiki_write",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_tachi_wiki_write(self, params).await
     }
 
@@ -376,7 +403,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful."
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append a progress_check event to .tachi/runs/<flow_id>/progress.jsonl."
     )]
     pub(crate) async fn tachi_progress_check(
         &self,
@@ -426,6 +453,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<ExtractFactsParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "extract_facts",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_extract_facts(self, params).await
     }
 
@@ -1156,7 +1192,7 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
-        description = "Unified memory facade: search memories, save a new memory/note, or extract facts from text. Use action='search', 'save', or 'extract_facts'."
+        description = "Unified memory facade: search/save/extract facts plus agent session UX. Actions: search, save, extract_facts, briefing, checkpoint, alerts, ask, consolidate, progress, readiness. Use briefing at session start, progress for append-only JSONL long-run updates, checkpoint before handoff, ask with synthesize=true only when LLM synthesis is worth the cost."
     )]
     pub(crate) async fn tachi_memory(
         &self,
@@ -1261,7 +1297,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. (Alias: tachi_progress_check)"
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl. (Alias: tachi_progress_check)"
     )]
     pub(crate) async fn tachi_unstick(
         &self,
@@ -1360,6 +1396,16 @@ impl MemoryServer {
                 handle_wiki_browse(self, browse_params)
             }
             "write" => {
+                if let Some(body) = crate::cli_client::maybe_forward_write(
+                    self.global_db_path.as_path(),
+                    "tachi_wiki",
+                    &params,
+                )
+                .await
+                {
+                    return Ok(body);
+                }
+
                 let title = params
                     .title
                     .clone()

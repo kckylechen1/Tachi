@@ -40,10 +40,18 @@ pub(crate) async fn handle_run_skill(
     let def: serde_json::Value = serde_json::from_str(&cap.definition)
         .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
 
+    let skill_content = def
+        .get("content")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let prompt_template = def["prompt"]
         .as_str()
         .or_else(|| def["template"].as_str())
-        .ok_or_else(|| "skill definition missing 'prompt' field".to_string())?;
+        .or(skill_content)
+        .ok_or_else(|| {
+            "skill definition missing 'prompt', 'template', or 'content' field".to_string()
+        })?;
 
     let mut resolved_prompt = prompt_template.to_string();
     if let Some(args_obj) = params.args.as_object() {
@@ -68,10 +76,18 @@ pub(crate) async fn handle_run_skill(
     let result = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
         Ok(mock_response.to_string())
     } else {
+        let default_system = "You are an AI assistant executing a specialized skill.";
         let system = def
             .get("system")
             .and_then(|v| v.as_str())
-            .unwrap_or("You are an AI assistant executing a specialized skill.");
+            .or_else(|| {
+                if def["prompt"].as_str().is_none() && def["template"].as_str().is_none() {
+                    skill_content
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(default_system);
         let model = def.get("model").and_then(|v| v.as_str());
         let temperature = def
             .get("temperature")

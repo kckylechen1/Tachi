@@ -180,6 +180,16 @@ pub(super) fn append_trajectory_event(trajectory_path: &std::path::Path, event: 
     {
         let _ = writeln!(f, "{}", line);
     }
+    if let Some(run_dir) = trajectory_path.parent() {
+        let progress_path = run_dir.join("progress.jsonl");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(progress_path)
+        {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
 }
 
 /// Write (or overwrite) `<run_dir>/status.json` with the V2 audit fields.

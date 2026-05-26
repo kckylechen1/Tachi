@@ -172,6 +172,10 @@ pub(crate) struct ProgressCheckParams {
     /// Number of relevant wiki hits to return.
     #[serde(default = "default_copilot_top_k")]
     pub top_k: usize,
+
+    /// Optional flow id for append-only progress.jsonl logging under .tachi/runs/<flow_id>.
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }
 
 // ─── Agent Evolution ────────────────────────────────────────────────────────

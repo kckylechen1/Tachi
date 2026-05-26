@@ -212,6 +212,10 @@ pub(super) async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Watcher { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
         Commands::Foundry { .. } => {
             // Pre-handled above before run_cli_command dispatch.
             Ok(())

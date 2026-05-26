@@ -236,7 +236,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
 }
 
 #[tokio::test]
-async fn wiki_search_includes_related_entries_for_top_results() {
+async fn wiki_search_returns_compact_hits_without_related_entries() {
     let mut alpha = make_entry("wiki-search-alpha");
     alpha.path = "/wiki/engineering/debugging/search-alpha".to_string();
     alpha.summary = "MCP schema debugging".to_string();
@@ -269,11 +269,13 @@ async fn wiki_search_includes_related_entries_for_top_results() {
         .expect("wiki search should succeed");
     let json: Value = serde_json::from_str(&response).expect("wiki search json");
     assert!(json["results"].as_array().is_some_and(|results| {
-        results.iter().any(|entry| {
-            entry["related_entries"]
-                .as_array()
-                .is_some_and(|related| !related.is_empty())
-        })
+        !results.is_empty()
+            && results.iter().all(|entry| {
+                entry.get("text").is_none()
+                    && entry.get("metadata").is_none()
+                    && entry.get("related_entries").is_none()
+                    && entry.get("summary").is_some()
+            })
     }));
 }
 

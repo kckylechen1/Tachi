@@ -1,5 +1,8 @@
 use super::*;
+use crate::utils::stable_hash;
 use std::collections::hash_map::Entry;
+
+const REDACTED_SECRET: &str = "[REDACTED]";
 
 fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
     entry.importance >= 0.5 || entry.vector.is_some()
@@ -32,11 +35,49 @@ fn should_supersede(
         && path_root(&new_entry.path) == path_root(&old_entry.path)
 }
 
+pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
+    let mut redactions = 0usize;
+    let mut out = text.to_string();
+    // Structured assignments before bare token patterns so `api_key=sk-...`
+    // counts as one redaction, not two overlapping hits.
+    let patterns = [
+        r#"(?i)(Authorization\s*:\s*Bearer\s+)([^\s`'\"]+)"#,
+        r#"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s`'\"]{8,})"#,
+        r"(?i)\b(sk-[A-Za-z0-9_-]{20,})\b",
+        r"(?i)\b(voy-[A-Za-z0-9_-]{20,})\b",
+        r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{20,})\b",
+        r"(?i)\b(gh[pousr]_[A-Za-z0-9_]{20,})\b",
+        r"(?i)\b(AKIA[0-9A-Z]{16})\b",
+    ];
+    for pattern in patterns {
+        let Ok(re) = regex::Regex::new(pattern) else {
+            continue;
+        };
+        let matches = re.find_iter(&out).count();
+        if matches == 0 {
+            continue;
+        }
+        redactions += matches;
+        out = re
+            .replace_all(&out, |caps: &regex::Captures<'_>| {
+                if caps.len() > 2 {
+                    format!("{}{}", &caps[1], REDACTED_SECRET)
+                } else {
+                    REDACTED_SECRET.to_string()
+                }
+            })
+            .to_string();
+    }
+    (out, redactions)
+}
+
 pub(crate) async fn handle_save_memory(
     server: &MemoryServer,
     params: SaveMemoryParams,
 ) -> Result<String, String> {
-    if !params.force && memory_core::is_noise_text(&params.text) {
+    let original_text = params.text;
+    let (safe_text, secret_redactions) = scrub_secrets(&original_text);
+    if !params.force && memory_core::is_noise_text(&safe_text) {
         return serde_json::to_string(&json!({
             "saved": false,
             "noise": true,
@@ -52,7 +93,7 @@ pub(crate) async fn handle_save_memory(
     let gate_mode = crate::capture_gate::GateMode::from_env();
     let gate_decision = crate::capture_gate::evaluate(
         &crate::capture_gate::GateInput::new(
-            &params.text,
+            &safe_text,
             &params.path,
             params.domain.as_deref(),
             params.force,
@@ -135,7 +176,7 @@ pub(crate) async fn handle_save_memory(
         id: id.clone(),
         path,
         summary,
-        text: params.text,
+        text: safe_text,
         importance,
         timestamp: timestamp.clone(),
         category,
@@ -206,6 +247,13 @@ pub(crate) async fn handle_save_memory(
     }
     if let Some(violations) = gate_warnings {
         response.insert("capture_gate_warnings".into(), json!(violations));
+    }
+    if secret_redactions > 0 {
+        response.insert("secret_redactions".into(), json!(secret_redactions));
+        response.insert(
+            "secret_redaction_warning".into(),
+            json!("Potential secrets were redacted before persistence."),
+        );
     }
 
     if params.auto_link && !entry.entities.is_empty() {
@@ -365,7 +413,12 @@ pub(super) async fn search_memory_rows(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
 ) -> Result<Vec<serde_json::Value>, String> {
-    if memory_core::should_skip_query(&params.query) {
+    if !params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"))
+        && memory_core::should_skip_query(&params.query)
+    {
         return Ok(vec![]);
     }
     let top_k = params.top_k.max(1);
@@ -715,8 +768,20 @@ pub(crate) async fn handle_search_memory(
     let mut rows = search_memory_rows(server, search_params).await?;
     if params.enable_rerank && rows.len() > top_k {
         if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
-            rows =
-                crate::foundry_runtime_ops::rerank_rows(server, &params.query, rows, top_k).await;
+            let (reranked, outcome) = crate::foundry_runtime_ops::rerank_rows_with_outcome(
+                server,
+                &params.query,
+                rows,
+                top_k,
+            )
+            .await;
+            if outcome == crate::foundry_runtime_ops::RerankOutcome::Fallback {
+                eprintln!(
+                    "[search_memory] rerank fail-open: query_hash={} top_k={}",
+                    stable_hash(&params.query), top_k
+                );
+            }
+            rows = reranked;
         } else {
             rows.truncate(top_k);
         }

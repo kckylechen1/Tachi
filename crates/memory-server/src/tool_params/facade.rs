@@ -162,16 +162,16 @@ pub(crate) struct TachiSaveParams {
     pub source: Option<String>,
 }
 
-// ─── Facade: unified memory (search / save / extract_facts) ──────────────────
+// ─── Facade: unified memory / agent session UX ───────────────────────────────
 
 fn default_memory_top_k() -> usize {
     6
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiMemoryParams {
-    /// Action: "search", "save", or "extract_facts"
+    /// Action: "search", "save", "extract_facts", "briefing", "checkpoint", "alerts", "ask", "consolidate", "progress", or "readiness"
     pub action: String,
 
     // --- search fields ---
@@ -193,6 +193,12 @@ pub(crate) struct TachiMemoryParams {
     pub include_archived: bool,
     #[serde(default)]
     pub enable_rerank: bool,
+    /// When action="ask" or action="consolidate", optionally call the configured LLM to synthesize from evidence.
+    #[serde(default)]
+    pub synthesize: bool,
+    /// Optional model override for synthesis calls.
+    #[serde(default)]
+    pub model: Option<String>,
 
     // --- save fields ---
     #[serde(default)]
@@ -221,6 +227,14 @@ pub(crate) struct TachiMemoryParams {
     pub force: bool,
     #[serde(default)]
     pub source: Option<String>,
+
+    // --- progress / long-running command fields ---
+    #[serde(default)]
+    pub flow_id: Option<String>,
+    #[serde(default)]
+    pub event: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
 
     // --- shared ---
     #[serde(default)]
@@ -465,7 +479,7 @@ pub(crate) struct TachiCompleteParams {
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiWikiParams {
     /// Action: "search", "browse", or "write"
     pub action: String,

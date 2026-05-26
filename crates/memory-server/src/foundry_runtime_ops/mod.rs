@@ -10,7 +10,14 @@ mod maintenance;
 mod recall;
 mod recall_cache;
 
-pub(crate) use recall::rerank_rows;
+pub(crate) use recall::rerank_rows_with_outcome;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RerankOutcome {
+    Applied,
+    Fallback,
+    NotNeeded,
+}
 
 #[cfg(test)]
 mod tests;
