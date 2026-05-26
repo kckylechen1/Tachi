@@ -36,23 +36,25 @@ fn should_supersede(
 }
 
 pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
+    static REGEXES: std::sync::OnceLock<Vec<regex::Regex>> = std::sync::OnceLock::new();
+    let regexes = REGEXES.get_or_init(|| {
+        [
+            r#"(?i)(Authorization\s*:\s*Bearer\s+)([^\s`'\"]+)"#,
+            r#"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s`'\"]{8,})"#,
+            r"(?i)\b(sk-[A-Za-z0-9_-]{20,})\b",
+            r"(?i)\b(voy-[A-Za-z0-9_-]{20,})\b",
+            r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{20,})\b",
+            r"(?i)\b(gh[pousr]_[A-Za-z0-9_]{20,})\b",
+            r"(?i)\b(AKIA[0-9A-Z]{16})\b",
+        ]
+        .iter()
+        .filter_map(|pattern| regex::Regex::new(pattern).ok())
+        .collect()
+    });
+
     let mut redactions = 0usize;
     let mut out = text.to_string();
-    // Structured assignments before bare token patterns so `api_key=sk-...`
-    // counts as one redaction, not two overlapping hits.
-    let patterns = [
-        r#"(?i)(Authorization\s*:\s*Bearer\s+)([^\s`'\"]+)"#,
-        r#"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s`'\"]{8,})"#,
-        r"(?i)\b(sk-[A-Za-z0-9_-]{20,})\b",
-        r"(?i)\b(voy-[A-Za-z0-9_-]{20,})\b",
-        r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{20,})\b",
-        r"(?i)\b(gh[pousr]_[A-Za-z0-9_]{20,})\b",
-        r"(?i)\b(AKIA[0-9A-Z]{16})\b",
-    ];
-    for pattern in patterns {
-        let Ok(re) = regex::Regex::new(pattern) else {
-            continue;
-        };
+    for re in regexes {
         let matches = re.find_iter(&out).count();
         if matches == 0 {
             continue;

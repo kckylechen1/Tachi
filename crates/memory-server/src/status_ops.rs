@@ -1473,8 +1473,7 @@ fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
 
 fn collect_config_env_key_names() -> HashSet<String> {
     let mut paths = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        let home = PathBuf::from(home);
+    if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".tachi").join("config.env"));
         paths.push(home.join(".sigil").join("config.env"));
     }
@@ -1848,6 +1847,10 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
 fn load_keychain_vault_api_key_values(
     vault_db_path: &Path,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    if !cfg!(target_os = "macos") {
+        return Ok(Vec::new());
+    }
+
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     let output = std::process::Command::new("security")

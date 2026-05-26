@@ -208,6 +208,14 @@ async fn handle_memory_briefing(
         .await?,
     );
     let compressed_health = compress_health(&status, &wiki_lint, &board);
+    let passive_watcher = tokio::task::spawn_blocking(claude_jsonl_passive_watcher_status)
+        .await
+        .unwrap_or_else(|err| {
+            json!({
+                "status": "error",
+                "error": err.to_string(),
+            })
+        });
 
     serde_json::to_string(&json!({
         "status": "completed",
@@ -219,7 +227,7 @@ async fn handle_memory_briefing(
         "wiki_lint": wiki_lint,
         "kanban": board,
         "recent_checkpoints": crate::status_ops::list_recent_checkpoint_entries(server, 5),
-        "passive_watcher": claude_jsonl_passive_watcher_status(),
+        "passive_watcher": passive_watcher,
         "context": hits,
         "recommended_agent_habit": [
             "Call tachi_memory action='briefing' near session start when the task is non-trivial.",
@@ -662,27 +670,63 @@ fn append_jsonl(path: &Path, value: &Value) -> Result<(), String> {
 
 fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
     let status_path = run_dir.join("status.json");
-    let mut status = std::fs::read_to_string(&status_path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-        .unwrap_or_else(|| json!({}));
-    if !status.is_object() {
-        status = json!({});
+    with_progress_status_lock(&status_path, || {
+        let mut status = std::fs::read_to_string(&status_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .unwrap_or_else(|| json!({}));
+        if !status.is_object() {
+            status = json!({});
+        }
+        let obj = status
+            .as_object_mut()
+            .ok_or_else(|| "progress status was not a JSON object".to_string())?;
+        obj.insert("flow_id".to_string(), line["flow_id"].clone());
+        obj.insert("updated_at".to_string(), line["timestamp"].clone());
+        obj.insert("last_event".to_string(), line["event"].clone());
+        if !line["state"].is_null() {
+            obj.insert("state".to_string(), line["state"].clone());
+        }
+        if !line["title"].is_null() {
+            obj.insert("title".to_string(), line["title"].clone());
+        }
+        let body =
+            serde_json::to_string_pretty(&status).map_err(|e| format!("serialize status: {e}"))?;
+        std::fs::write(&status_path, body)
+            .map_err(|e| format!("write {}: {e}", status_path.display()))
+    })
+}
+
+#[cfg(unix)]
+fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+
+    let lock_path = status_path.with_extension("json.lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open lock {}: {e}", lock_path.display()))?;
+    let fd = lock_file.as_raw_fd();
+    let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if rc != 0 {
+        return Err(format!(
+            "flock {}: {}",
+            lock_path.display(),
+            std::io::Error::last_os_error()
+        ));
     }
-    let obj = status
-        .as_object_mut()
-        .ok_or_else(|| "progress status was not a JSON object".to_string())?;
-    obj.insert("flow_id".to_string(), line["flow_id"].clone());
-    obj.insert("updated_at".to_string(), line["timestamp"].clone());
-    obj.insert("last_event".to_string(), line["event"].clone());
-    if !line["state"].is_null() {
-        obj.insert("state".to_string(), line["state"].clone());
+    let result = f();
+    unsafe {
+        libc::flock(fd, libc::LOCK_UN);
     }
-    if !line["title"].is_null() {
-        obj.insert("title".to_string(), line["title"].clone());
-    }
-    let body = serde_json::to_string_pretty(&status).map_err(|e| format!("serialize status: {e}"))?;
-    std::fs::write(&status_path, body).map_err(|e| format!("write {}: {e}", status_path.display()))
+    result
+}
+
+#[cfg(not(unix))]
+fn with_progress_status_lock<T>(_status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    f()
 }
 
 fn claude_jsonl_passive_watcher_status() -> Value {
