@@ -182,6 +182,11 @@ struct RateLimiter {
     burst: u64,
 }
 
+struct ToolRuntime {
+    cache: HashMap<String, CachedResult>,
+    dead_letters: VecDeque<DeadLetter>,
+}
+
 // ─── Server State ─────────────────────────────────────────────────────────────
 
 /// TTL for cached tool results (Phantom Tools)
@@ -386,12 +391,10 @@ struct MemoryServer {
     skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
-    // ─── Phantom Tools (result caching) ──────────────────────────────────────
-    tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
+    // ─── Tool Runtime (cache + DLQ) ──────────────────────────────────────────
+    tool_runtime: Arc<StdMutex<ToolRuntime>>,
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
-    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
@@ -532,10 +535,12 @@ impl MemoryServer {
             skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
-            tool_cache: Arc::new(StdMutex::new(HashMap::new())),
+            tool_runtime: Arc::new(StdMutex::new(ToolRuntime {
+                cache: HashMap::new(),
+                dead_letters: VecDeque::new(),
+            })),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
@@ -663,6 +668,10 @@ impl MemoryServer {
 
     pub(crate) fn rate_limiter_lock(&self) -> std::sync::MutexGuard<'_, RateLimiter> {
         self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn tool_runtime_lock(&self) -> std::sync::MutexGuard<'_, ToolRuntime> {
+        self.tool_runtime.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Path to this server's global memory DB (canonicalized at boot).
