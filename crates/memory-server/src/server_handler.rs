@@ -14,7 +14,7 @@ fn tool_not_found_error() -> rmcp::ErrorData {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') to recall wiki lessons, prior memories, and useful skills. When stuck after repeated attempts, search wiki with tachi_wiki(action='search') and inspect tachi_status. Store durable debugging lessons with tachi_wiki(action='write').")
+            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') or tachi_memory(action='briefing'). Memory/wiki tools return Markdown recall data only — pass `project` to target ~/.tachi/projects/<name>/memory.db explicitly. System diagnostics: tachi_status or tachi_doctor. Store durable lessons with tachi_wiki(action='write').")
     }
 
     fn list_tools(
@@ -135,9 +135,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
-                if let Ok(mut cache) = self.tool_cache.lock() {
-                    cache.clear();
-                }
+                self.tool_runtime_lock().cache.clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
@@ -159,12 +157,14 @@ impl ServerHandler for MemoryServer {
                 let key = stable_hash(&format!("{}{}", name, args_str));
 
                 // Check cache
-                if let Ok(cache) = self.tool_cache.lock() {
-                    if let Some(cached) = cache.get(&key) {
+                {
+                    let rt = self.tool_runtime_lock();
+                    if let Some(cached) = rt.cache.get(&key) {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
-                            self.cache_hits
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let mut hit = cached.result.clone();
+                            let hit = cached.result.clone();
+                            drop(rt);
+                            self.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let mut hit = hit;
                             if let Some(warn) = stuck_warning.clone() {
                                 hit.content.push(rmcp::model::Content::text(warn));
                             }
@@ -258,11 +258,10 @@ impl ServerHandler for MemoryServer {
 
                     let dl_id = dl.id.clone();
                     {
-                        let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
-                        dlq.push_back(dl);
-                        // Enforce ring buffer max
-                        while dlq.len() > DLQ_MAX_ENTRIES {
-                            dlq.pop_front();
+                        let mut rt = self.tool_runtime_lock();
+                        rt.dead_letters.push_back(dl);
+                        while rt.dead_letters.len() > DLQ_MAX_ENTRIES {
+                            rt.dead_letters.pop_front();
                         }
                     }
 
@@ -277,9 +276,8 @@ impl ServerHandler for MemoryServer {
                             .await;
 
                         {
-                            let mut dlq =
-                                self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
-                            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == dl_id) {
+                            let mut rt = self.tool_runtime_lock();
+                            if let Some(dl) = rt.dead_letters.iter_mut().find(|dl| dl.id == dl_id) {
                                 dl.retry_count = 1;
                                 if retry_result.is_ok() {
                                     dl.status = "resolved".to_string();
@@ -294,9 +292,10 @@ impl ServerHandler for MemoryServer {
 
                         if retry_result.is_ok() {
                             // Cache the retry result if applicable
-                            if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
-                                if let Ok(mut cache) = self.tool_cache.lock() {
-                                    cache.insert(
+                            if let Some(key) = &cache_key {
+                                if let Ok(ref res) = retry_result {
+                                    let mut rt = self.tool_runtime_lock();
+                                    rt.cache.insert(
                                         key.clone(),
                                         CachedResult {
                                             result: res.clone(),
@@ -319,34 +318,31 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
-                if let Ok(mut cache) = self.tool_cache.lock() {
-                    // Evict expired entries when cache exceeds cap
-                    if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
-                        cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
-                        // If still over cap after TTL eviction, remove oldest entries
-                        if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
-                            let mut oldest_key = None;
-                            let mut oldest_age = Duration::ZERO;
-                            for (k, v) in cache.iter() {
-                                let age = v.created_at.elapsed();
-                                if age > oldest_age {
-                                    oldest_age = age;
-                                    oldest_key = Some(k.clone());
-                                }
-                            }
-                            if let Some(k) = oldest_key {
-                                cache.remove(&k);
+                let mut rt = self.tool_runtime_lock();
+                if rt.cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                    rt.cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
+                    if rt.cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                        let mut oldest_key = None;
+                        let mut oldest_age = Duration::ZERO;
+                        for (k, v) in rt.cache.iter() {
+                            let age = v.created_at.elapsed();
+                            if age > oldest_age {
+                                oldest_age = age;
+                                oldest_key = Some(k.clone());
                             }
                         }
+                        if let Some(k) = oldest_key {
+                            rt.cache.remove(&k);
+                        }
                     }
-                    cache.insert(
-                        key.clone(),
-                        CachedResult {
-                            result: res.clone(),
-                            created_at: Instant::now(),
-                        },
-                    );
                 }
+                rt.cache.insert(
+                    key.clone(),
+                    CachedResult {
+                        result: res.clone(),
+                        created_at: Instant::now(),
+                    },
+                );
             }
 
             // ─── Stuck detection: append soft warning block ──────────────

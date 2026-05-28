@@ -4,7 +4,7 @@ Backfill script: reads Gemini CLI session transcripts and uses SIGIL's
 extractor (Qwen3.5-27B) + Voyage-4 to extract and store memories.
 
 Usage:
-    cd /Users/kckylechen/Desktop/SIGIL
+    cd <PROJECT_ROOT>
     .venv/bin/python scripts/backfill_gemini_cli.py [--since YYYY-MM-DD] [--project NAME] [--dry-run]
 
 Environment (loaded from ~/.secrets/master.env):

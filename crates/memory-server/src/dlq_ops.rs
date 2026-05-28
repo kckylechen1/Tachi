@@ -7,12 +7,9 @@ pub(crate) async fn handle_dlq_list(
     let limit = params.limit.unwrap_or(50).min(200);
     let now = Utc::now();
 
-    let mut dlq = server
-        .dead_letters
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut rt = server.tool_runtime_lock();
 
-    dlq.retain(|dl| {
+    rt.dead_letters.retain(|dl| {
         if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&dl.timestamp) {
             (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64
         } else {
@@ -20,7 +17,7 @@ pub(crate) async fn handle_dlq_list(
         }
     });
 
-    let entries: Vec<serde_json::Value> = dlq
+    let entries: Vec<serde_json::Value> = rt.dead_letters
         .iter()
         .filter(|dl| {
             if let Some(ref filter) = params.status_filter {
@@ -45,8 +42,8 @@ pub(crate) async fn handle_dlq_list(
         })
         .collect();
 
-    let total = dlq.len();
-    drop(dlq);
+    let total = rt.dead_letters.len();
+    drop(rt);
 
     serde_json::to_string(&json!({
         "total": total,
@@ -61,17 +58,14 @@ pub(crate) async fn handle_dlq_retry(
     params: DlqRetryParams,
 ) -> Result<String, String> {
     let dead_letter = {
-        let mut dlq = server
-            .dead_letters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let pos = dlq.iter().position(|dl| dl.id == params.dead_letter_id);
+        let mut rt = server.tool_runtime_lock();
+        let pos = rt.dead_letters.iter().position(|dl| dl.id == params.dead_letter_id);
         match pos {
             Some(idx) => {
-                let mut dl = dlq[idx].clone();
+                let mut dl = rt.dead_letters[idx].clone();
                 dl.retry_count += 1;
                 dl.status = "retrying".to_string();
-                dlq[idx] = dl.clone();
+                rt.dead_letters[idx] = dl.clone();
                 dl
             }
             None => {
@@ -89,11 +83,8 @@ pub(crate) async fn handle_dlq_retry(
 
     match retry_result {
         Ok(res) => {
-            let mut dlq = server
-                .dead_letters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+            let mut rt = server.tool_runtime_lock();
+            if let Some(dl) = rt.dead_letters.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
                 dl.status = "resolved".to_string();
             }
             let text = res
@@ -115,11 +106,8 @@ pub(crate) async fn handle_dlq_retry(
             .map_err(|e| format!("serialize: {e}"))
         }
         Err(e) => {
-            let mut dlq = server
-                .dead_letters
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+            let mut rt = server.tool_runtime_lock();
+            if let Some(dl) = rt.dead_letters.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
                 if dl.retry_count >= dl.max_retries {
                     dl.status = "abandoned".to_string();
                 } else {

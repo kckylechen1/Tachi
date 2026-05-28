@@ -30,10 +30,12 @@ pub(crate) struct TachiSearchParams {
 
     /// Optional named project DB
     #[serde(default)]
+    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB.")]
     pub project: Option<String>,
 
     /// Optional domain filter
     #[serde(default)]
+    #[schemars(description = "Optional domain tag filter (e.g. equity_trading, agent). Does not select the DB — combine with project for explicit library targeting.")]
     pub domain: Option<String>,
 
     #[serde(default)]
@@ -238,8 +240,10 @@ pub(crate) struct TachiMemoryParams {
 
     // --- shared ---
     #[serde(default)]
+    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response).")]
     pub project: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional domain tag filter. Does not select the DB — combine with project for explicit library targeting.")]
     pub domain: Option<String>,
 }
 
@@ -510,8 +514,10 @@ pub(crate) struct TachiWikiParams {
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library.")]
     pub project: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional domain tag filter for wiki entries.")]
     pub domain: Option<String>,
     #[serde(default)]
     pub force: bool,

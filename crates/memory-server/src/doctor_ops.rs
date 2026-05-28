@@ -22,7 +22,7 @@ pub(crate) async fn handle_tachi_doctor_scan() -> Result<String, String> {
         obj.insert(
             "provider_keys".to_string(),
             json!({
-                "keys": crate::status_ops::provider_key_status_json(&global_db_path),
+                "keys": crate::status_ops::status_health::provider_key_status_json(&global_db_path),
                 "probes": [],
                 "probe_note": "MCP doctor scan is read-only; run `tachi doctor --probe-keys` for live provider probes."
             }),
@@ -30,7 +30,7 @@ pub(crate) async fn handle_tachi_doctor_scan() -> Result<String, String> {
         obj.insert(
             "models".to_string(),
             json!({
-                "lanes": crate::status_ops::model_lanes_json(),
+                "lanes": crate::status_ops::status_health::model_lanes_json(),
                 "probe_note": "run `tachi doctor --probe-keys` or `tachi status --probe-keys` to live-test lanes"
             }),
         );

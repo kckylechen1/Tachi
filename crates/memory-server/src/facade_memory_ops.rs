@@ -4,11 +4,12 @@
 //! the `#[tool]` wrapper thin. The wrapper in `impl MemoryServer` simply
 //! delegates to [`handle_tachi_memory`].
 
+use crate::agent_markdown;
+use crate::db_context;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::facade_search_ops::handle_tachi_search;
-use crate::memory_ops::handle_memory_stats;
+use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
-use crate::wiki_ops::handle_wiki_lint;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -158,89 +159,111 @@ async fn handle_memory_briefing(
         .or_else(|| params.title.clone())
         .unwrap_or_else(|| "current task recent decisions blockers next steps".to_string());
     let top_k = params.top_k.max(1).min(12);
+    let include_wiki = !matches!(
+        params.scope.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        Some("memory")
+    );
 
-    let search_params = TachiSearchParams {
-        query,
-        scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
-        top_k,
+    let ctx = db_context::describe_db_context(
+        server,
+        params.project.as_deref(),
+        params.domain.as_deref(),
+    );
+
+    // Memory first — structured rows agents can scan immediately.
+    let mem_params = SearchMemoryParams {
+        query: query.clone(),
+        query_vec: None,
+        top_k: top_k.saturating_mul(2).max(top_k),
         path_prefix: params.path_prefix.clone(),
+        include_archived: params.include_archived,
+        candidates_per_channel: 20,
+        mmr_threshold: Some(0.85),
+        graph_expand_hops: 1,
+        graph_relation_filter: None,
+        weights: None,
+        agent_role: None,
         project: params.project.clone(),
         domain: params.domain.clone(),
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),
-        category: params.category.clone(),
-        include_archived: params.include_archived,
         enable_rerank: params.enable_rerank,
     };
+    let memories = slim_memory_rows(parse_evidence_array(
+        handle_search_memory(server, mem_params).await?,
+    ));
 
-    let hits = parse_json_or_empty(handle_tachi_search(server, search_params).await?);
-    let status = parse_json_or_empty(crate::status_ops::handle_tachi_status(server).await?);
-    let stats = parse_json_or_empty(handle_memory_stats(server).await?);
-    let wiki_lint = parse_json_or_empty(
-        handle_wiki_lint(
-            server,
-            WikiLintParams {
-                path_prefix: Some("/wiki".to_string()),
-                checks: vec![
-                    "orphans".to_string(),
-                    "stale".to_string(),
-                    "dirty_data".to_string(),
-                    "duplicates".to_string(),
-                    "missing_edges".to_string(),
-                ],
-                limit: top_k.max(10).min(50),
-                stale_days: 90,
-                missing_edge_threshold: 0.72,
-                contradiction_threshold: 0.75,
-            },
-        )
-        .await?,
-    );
-    let board = parse_json_or_empty(
+    let wiki = if include_wiki {
+        slim_memory_rows(parse_evidence_array(
+            serde_json::to_string(
+                &search_memory_rows(
+                    server,
+                    SearchMemoryParams {
+                        query: query.clone(),
+                        query_vec: None,
+                        top_k: top_k.min(5),
+                        path_prefix: Some(
+                            params
+                                .path_prefix
+                                .clone()
+                                .unwrap_or_else(|| "/wiki".to_string()),
+                        ),
+                        include_archived: params.include_archived,
+                        candidates_per_channel: 20,
+                        mmr_threshold: Some(0.85),
+                        graph_expand_hops: 1,
+                        graph_relation_filter: None,
+                        weights: None,
+                        agent_role: None,
+                        project: params.project.clone(),
+                        domain: params.domain.clone(),
+                        file_context: params.file_context.clone(),
+                        error_context: params.error_context.clone(),
+                        enable_rerank: false,
+                    },
+                )
+                .await?,
+            )
+            .map_err(|e| format!("serialize wiki rows: {e}"))?,
+        ))
+    } else {
+        json!([])
+    };
+
+    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
+    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let health_summary = json!({
+        "health_score": if warnings.is_empty() { 95 } else { 85 },
+        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
+        "wiki": wiki_counts,
+    });
+    let board = slim_kanban(parse_json_or_empty(
         crate::dispatch_ops::handle_tachi_board(
             server,
             TachiBoardParams {
                 state_filter: Some("all".to_string()),
-                limit: Some(top_k.min(10)),
+                limit: Some(top_k.min(5)),
                 project: params.project.clone(),
             },
         )
         .await?,
-    );
-    let compressed_health = compress_health(&status, &wiki_lint, &board);
-    let passive_watcher = tokio::task::spawn_blocking(claude_jsonl_passive_watcher_status)
-        .await
-        .unwrap_or_else(|err| {
-            json!({
-                "status": "error",
-                "error": err.to_string(),
-            })
-        });
+    ));
+    let checkpoints = json!(crate::status_ops::list_recent_checkpoint_entries(server, 3));
 
-    serde_json::to_string(&json!({
-        "status": "completed",
-        "mode": "briefing",
-        "generated_at": Utc::now().to_rfc3339(),
-        "health_summary": compressed_health,
-        "health": status,
-        "stats": stats,
-        "wiki_lint": wiki_lint,
-        "kanban": board,
-        "recent_checkpoints": crate::status_ops::list_recent_checkpoint_entries(server, 5),
-        "passive_watcher": passive_watcher,
-        "context": hits,
-        "recommended_agent_habit": [
-            "Call tachi_memory action='briefing' near session start when the task is non-trivial.",
-            "Call action='checkpoint' before handoff or after important decisions.",
-            "Call action='alerts' when health warnings or wiki hygiene may affect work."
-        ]
-    }))
-    .map_err(|e| format!("serialize briefing: {e}"))
+    Ok(agent_markdown::format_briefing(
+        &ctx,
+        &query,
+        &memories,
+        &wiki,
+        &health_summary,
+        &board,
+        &checkpoints,
+    ))
 }
 
 async fn handle_memory_checkpoint(
     server: &MemoryServer,
-    params: TachiMemoryParams,
+    mut params: TachiMemoryParams,
 ) -> Result<String, String> {
     if let Some(body) = crate::cli_client::maybe_forward_write(
         server.global_db_path.as_path(),
@@ -254,18 +277,18 @@ async fn handle_memory_checkpoint(
 
     let text = params
         .text
-        .clone()
+        .take()
         .or_else(|| params.summary.clone())
         .ok_or_else(|| "text or summary is required when action='checkpoint'".to_string())?;
     let title = params
         .title
-        .clone()
+        .take()
         .unwrap_or_else(|| "Agent checkpoint".to_string());
     let checkpoint_text = format!(
         "Checkpoint: {title}\n\n{text}\n\nRecorded at: {}",
         Utc::now().to_rfc3339()
     );
-    let path = params.path.clone().or_else(|| {
+    let path = params.path.take().or_else(|| {
         Some(format!(
             "/agent/checkpoints/{}",
             Utc::now().format("%Y-%m-%d")
@@ -273,33 +296,36 @@ async fn handle_memory_checkpoint(
     });
     let save_params = TachiSaveParams {
         text: checkpoint_text,
-        id: params.id.clone(),
+        id: params.id.take(),
         kind: Some("memory".to_string()),
         title: Some(title),
-        summary: params.summary.clone(),
+        summary: params.summary.take(),
         path,
         importance: params.importance.or(Some(0.8)),
         category: params
             .category
-            .clone()
+            .take()
             .or_else(|| Some("experience".to_string())),
-        keywords: merge_keywords(params.keywords.clone(), &["checkpoint", "agent-session"]),
-        entities: params.entities.clone(),
-        scope: params.scope.clone().or_else(|| Some("project".to_string())),
-        project: params.project.clone(),
-        domain: params.domain.clone(),
+        keywords: merge_keywords(
+            std::mem::take(&mut params.keywords),
+            &["checkpoint", "agent-session"],
+        ),
+        entities: std::mem::take(&mut params.entities),
+        scope: params.scope.take().or_else(|| Some("project".to_string())),
+        project: params.project.take(),
+        domain: params.domain.take(),
         retention_policy: params
             .retention_policy
-            .clone()
+            .take()
             .or_else(|| Some("durable".to_string())),
         force: true,
         topic: params
             .topic
-            .clone()
+            .take()
             .or_else(|| Some("checkpoint".to_string())),
         source: params
             .source
-            .clone()
+            .take()
             .or_else(|| Some("tachi_checkpoint".to_string())),
     };
     handle_tachi_save(server, save_params).await
@@ -365,31 +391,18 @@ async fn handle_memory_alerts(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let status = parse_json_or_empty(crate::status_ops::handle_tachi_status(server).await?);
-    let lint_params = WikiLintParams {
-        path_prefix: params
-            .path_prefix
-            .clone()
-            .or_else(|| Some("/wiki".to_string())),
-        checks: vec![
-            "orphans".to_string(),
-            "stale".to_string(),
-            "dirty_data".to_string(),
-            "duplicates".to_string(),
-        ],
-        limit: params.top_k.max(10).min(100),
-        stale_days: 90,
-        missing_edge_threshold: 0.72,
-        contradiction_threshold: 0.75,
-    };
-    let wiki_alerts = parse_json_or_empty(handle_wiki_lint(server, lint_params).await?);
-    serde_json::to_string(&json!({
-        "status": "completed",
-        "mode": "alerts",
-        "health": status,
-        "wiki": wiki_alerts,
-    }))
-    .map_err(|e| format!("serialize alerts: {e}"))
+    let ctx = db_context::describe_db_context(
+        server,
+        params.project.as_deref(),
+        params.domain.as_deref(),
+    );
+    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
+    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    Ok(agent_markdown::format_alerts(
+        &ctx,
+        &warnings,
+        &wiki_counts,
+    ))
 }
 
 async fn handle_memory_ask(
@@ -531,7 +544,7 @@ async fn handle_memory_readiness(
     server: &MemoryServer,
     _params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let status = parse_json_or_empty(crate::status_ops::handle_tachi_status(server).await?);
+    let status = parse_json_or_empty(crate::status_ops::handle_tachi_status_full(server).await?);
     let runtime = parse_json_or_empty(crate::memory_ops::handle_runtime_info(server).await?);
     let tools = [
         "tachi_status",
@@ -574,34 +587,46 @@ fn parse_json_or_empty(raw: String) -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }))
 }
 
-fn compress_health(status: &Value, wiki_lint: &Value, board: &Value) -> Value {
-    let warnings = status
-        .get("warnings")
-        .and_then(|v| v.as_array())
-        .map(|rows| rows.iter().take(6).cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    json!({
-        "health_score": status.get("health_score"),
-        "warnings": warnings,
-        "failed_jobs": status.pointer("/databases/failed_jobs"),
-        "low_vector_coverage_count": status.pointer("/databases/low_vector_coverage").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
-        "provider_auth_failure_count": status.pointer("/databases/provider_auth_failures").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
-        "wiki": {
-            "orphans": array_len(wiki_lint.get("orphans")),
-            "stale_nodes": array_len(wiki_lint.get("stale_nodes")),
-            "dirty_data": array_len(wiki_lint.get("dirty_data")),
-            "duplicates": array_len(wiki_lint.get("duplicates")),
-            "missing_edge_hints": array_len(wiki_lint.get("missing_edge_hints")),
-        },
-        "kanban": {
-            "count": board.get("count"),
-            "filter": board.get("filter"),
-        }
-    })
+fn slim_memory_rows(value: Value) -> Value {
+    let rows = match value {
+        Value::Array(rows) => rows,
+        other => vec![other],
+    };
+    Value::Array(
+        rows.into_iter()
+            .take(12)
+            .map(|row| {
+                json!({
+                    "id": row.get("id"),
+                    "db": row.get("db"),
+                    "path": row.get("path"),
+                    "summary": row.get("summary"),
+                    "topic": row.get("topic"),
+                    "relevance": row.get("relevance"),
+                })
+            })
+            .collect(),
+    )
 }
 
-fn array_len(value: Option<&Value>) -> usize {
-    value.and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0)
+fn slim_kanban(value: Value) -> Value {
+    json!({
+        "count": value.get("count"),
+        "tasks": value
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .take(5)
+            .map(|task| {
+                json!({
+                    "summary": task.get("summary"),
+                    "state": task.get("state"),
+                    "updated_at": task.get("updated_at"),
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 async fn synthesize_answer(
@@ -709,6 +734,8 @@ fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T
         .open(&lock_path)
         .map_err(|e| format!("open lock {}: {e}", lock_path.display()))?;
     let fd = lock_file.as_raw_fd();
+    // SAFETY: `fd` is borrowed from a valid open `File`. `flock(LOCK_EX)` only
+    // passes integer flags to the OS and does not dereference Rust pointers.
     let rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
     if rc != 0 {
         return Err(format!(
@@ -718,6 +745,9 @@ fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T
         ));
     }
     let result = f();
+    // SAFETY: `fd` is still valid — the lock file remains in scope. `flock(LOCK_UN)`
+    // is a pure kernel operation; failure is non-fatal because the descriptor close
+    // will release the lock anyway.
     unsafe {
         libc::flock(fd, libc::LOCK_UN);
     }

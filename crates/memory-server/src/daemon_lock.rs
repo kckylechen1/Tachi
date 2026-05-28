@@ -51,7 +51,6 @@ impl From<std::io::Error> for DaemonLockError {
 ///
 /// While alive, holds an exclusive `flock` on the PID file. Dropping releases
 /// the lock and removes the PID file (best-effort).
-#[allow(dead_code)]
 pub struct DaemonLock {
     file: File,
     path: PathBuf,
@@ -66,7 +65,6 @@ impl DaemonLock {
     ///   stealing from a dead previous owner).
     /// - `Err(AlreadyRunning { pid })` if a live process holds the lock.
     /// - `Err(Io)` for filesystem/syscall failures.
-    #[allow(dead_code)]
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self, DaemonLockError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -110,7 +108,6 @@ impl DaemonLock {
     }
 
     /// Return the PID file path the lock was acquired against.
-    #[allow(dead_code)]
     pub fn pid_path(&self) -> &Path {
         &self.path
     }
@@ -176,7 +173,6 @@ fn read_pid(file: &File) -> std::io::Result<i32> {
 /// Check whether `pid` refers to a live process this user can signal. Uses
 /// `kill(pid, 0)` which performs the permission and existence check without
 /// delivering a signal. Returns `false` for pid<=1.
-#[allow(dead_code)]
 pub fn process_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
@@ -196,7 +192,6 @@ pub fn process_alive(pid: i32) -> bool {
 
 /// Read the PID currently recorded in `path` without taking the lock. Returns
 /// `None` if the file does not exist or is empty/unparseable.
-#[allow(dead_code)]
 pub fn read_pid_file(path: impl AsRef<Path>) -> Option<i32> {
     let mut s = String::new();
     let mut f = std::fs::File::open(path).ok()?;

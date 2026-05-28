@@ -56,7 +56,7 @@ pub(super) async fn run_doctor_command(
             );
             obj.insert(
                 "models".into(),
-                serde_json::to_value(crate::status_ops::model_lanes_json())?,
+                serde_json::to_value(crate::status_ops::status_health::model_lanes_json())?,
             );
         }
         print_pretty_json(&full)
@@ -119,7 +119,7 @@ pub(super) async fn run_doctor_command(
 #[derive(Debug, serde::Serialize)]
 struct ProviderKeyReport {
     keys: Vec<ProviderKeyStatus>,
-    probes: Vec<crate::status_ops::ProviderProbeResult>,
+    probes: Vec<crate::status_ops::status_health::ProviderProbeResult>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -133,7 +133,7 @@ struct ProviderKeyStatus {
 }
 
 // Use the canonical key definitions from status_ops to avoid divergence.
-use crate::status_ops::API_KEY_DEFS;
+use crate::status_ops::status_health::API_KEY_DEFS;
 
 async fn collect_provider_key_report(
     global_db_path: &std::path::Path,
@@ -141,7 +141,7 @@ async fn collect_provider_key_report(
 ) -> ProviderKeyReport {
     let keys = collect_provider_key_status(global_db_path);
     let probes = if probe_keys {
-        crate::status_ops::run_provider_probes(global_db_path).await
+        crate::status_ops::status_health::run_provider_probes(global_db_path).await
     } else {
         Vec::new()
     };
@@ -149,7 +149,7 @@ async fn collect_provider_key_report(
 }
 
 fn collect_provider_key_status(global_db_path: &std::path::Path) -> Vec<ProviderKeyStatus> {
-    let statuses = crate::status_ops::provider_key_status_json(global_db_path);
+    let statuses = crate::status_ops::status_health::provider_key_status_json(global_db_path);
     statuses
         .as_array()
         .cloned()

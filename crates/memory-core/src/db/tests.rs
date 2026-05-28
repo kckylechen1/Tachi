@@ -715,3 +715,157 @@ fn vault_touch_entry_returns_post_touch_count() {
         .unwrap();
     assert_eq!(db_count, c3);
 }
+
+#[test]
+fn normalize_for_write_clamps_fields() {
+    let mut e = make_entry("norm-1", "normalize test");
+    e.path = "project/alpha".into();
+    e.source = "user".into();
+    e.category = "FACT".into();
+    e.scope = "PROJECT".into();
+    e.importance = 1.5;
+    normalize_for_write(&mut e);
+    assert!(e.path.starts_with('/'), "path should be normalized to start with /");
+    assert_eq!(e.category, "fact", "category should be lowercase");
+    assert_eq!(e.scope, "project", "scope should be lowercase");
+    assert!((e.importance - 1.0).abs() < f64::EPSILON, "importance should be clamped to 1.0");
+}
+
+#[test]
+fn normalize_for_write_empty_id_rejected_by_upsert() {
+    let mut e = make_entry(" ", "empty id test");
+    let err = upsert(&mut make_conn(), &e, false);
+    assert!(err.is_err(), "empty id should be rejected");
+}
+
+#[test]
+fn fetch_by_ids_returns_entries() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("fid-1", "alpha memory"), false).unwrap();
+    upsert(&mut conn, &make_entry("fid-2", "beta memory"), false).unwrap();
+    upsert(&mut conn, &make_entry("fid-3", "gamma memory"), false).unwrap();
+
+    let result = fetch_by_ids(&conn, &["fid-1".into(), "fid-3".into()], false).unwrap();
+    assert_eq!(result.len(), 2);
+    assert!(result.contains_key("fid-1"));
+    assert!(result.contains_key("fid-3"));
+    assert!(!result.contains_key("fid-2"));
+}
+
+#[test]
+fn fetch_by_ids_empty_input() {
+    let conn = make_conn();
+    let result = fetch_by_ids(&conn, &[], false).unwrap();
+    assert!(result.is_empty());
+}
+
+#[test]
+fn get_all_returns_ordered_by_timestamp() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("ga-1", "first memory"), false).unwrap();
+    upsert(&mut conn, &make_entry("ga-2", "second memory"), false).unwrap();
+
+    let all = get_all(&conn, 10, false).unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn get_all_respects_limit() {
+    let mut conn = make_conn();
+    for i in 0..5 {
+        upsert(&mut conn, &make_entry(&format!("lim-{i}"), &format!("entry {i}")), false).unwrap();
+    }
+    let limited = get_all(&conn, 2, false).unwrap();
+    assert_eq!(limited.len(), 2);
+}
+
+#[test]
+fn list_by_path_filters_prefix() {
+    let mut conn = make_conn();
+    let mut e1 = make_entry("lp-1", "under project");
+    e1.path = "/project/alpha".into();
+    upsert(&mut conn, &e1, false).unwrap();
+
+    let mut e2 = make_entry("lp-2", "under docs");
+    e2.path = "/docs/beta".into();
+    upsert(&mut conn, &e2, false).unwrap();
+
+    let project_entries = list_by_path(&conn, "/project", 10, false).unwrap();
+    assert_eq!(project_entries.len(), 1);
+    assert_eq!(project_entries[0].id, "lp-1");
+}
+
+#[test]
+fn list_by_path_empty_prefix_returns_all() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("lbe-1", "any"), false).unwrap();
+    upsert(&mut conn, &make_entry("lbe-2", "any other"), false).unwrap();
+    let all = list_by_path(&conn, "/", 10, false).unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn archive_memory_marks_archived() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("arch-1", "to be archived"), false).unwrap();
+
+    let ok = archive_memory(&conn, "arch-1").unwrap();
+    assert!(ok, "archive should return true for existing entry");
+
+    let archived_flag: bool = conn
+        .query_row(
+            "SELECT archived FROM memories WHERE id = 'arch-1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(archived_flag, "entry should be archived");
+
+    let not_found = archive_memory(&conn, "nonexistent").unwrap();
+    assert!(!not_found, "archive should return false for nonexistent");
+}
+
+#[test]
+fn archive_excluded_from_default_fetch() {
+    let mut conn = make_conn();
+    upsert(&mut conn, &make_entry("arch-fetch-1", "visible before archive"), false).unwrap();
+    archive_memory(&conn, "arch-fetch-1").unwrap();
+
+    let active = get_all(&conn, 10, false).unwrap();
+    assert!(
+        !active.iter().any(|e| e.id == "arch-fetch-1"),
+        "archived entry should not appear in default get_all"
+    );
+
+    let with_archived = get_all(&conn, 10, true).unwrap();
+    assert!(
+        with_archived.iter().any(|e| e.id == "arch-fetch-1"),
+        "archived entry should appear when include_archived=true"
+    );
+}
+
+#[test]
+fn try_claim_event_deduplicates() {
+    let conn = make_conn();
+    let claimed_first = try_claim_event(&conn, "hash-claim-1", "evt-1", "ingest").unwrap();
+    assert!(claimed_first, "first claim should succeed");
+
+    let claimed_again = try_claim_event(&conn, "hash-claim-1", "evt-1", "ingest").unwrap();
+    assert!(!claimed_again, "duplicate claim should be rejected");
+}
+
+#[test]
+fn release_event_claim_allows_reclaim() {
+    let conn = make_conn();
+    try_claim_event(&conn, "hash-rel-1", "evt-1", "ingest").unwrap();
+    release_event_claim(&conn, "hash-rel-1", "ingest").unwrap();
+
+    let reclaimed = try_claim_event(&conn, "hash-rel-1", "evt-1", "ingest").unwrap();
+    assert!(reclaimed, "should be able to reclaim after release");
+}
+
+#[test]
+fn release_event_claim_idempotent() {
+    let conn = make_conn();
+    release_event_claim(&conn, "nonexistent", "worker").unwrap();
+}
