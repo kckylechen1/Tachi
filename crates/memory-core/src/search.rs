@@ -243,6 +243,26 @@ fn quality_multiplier(entry: &MemoryEntry) -> f64 {
     1.0
 }
 
+fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<String, f64> {
+    let max_score = results
+        .iter()
+        .map(|result| result.score.final_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    results
+        .iter()
+        .map(|result| {
+            let weight = if max_score > 0.0 {
+                result.score.final_score / max_score
+            } else {
+                1.0
+            };
+            (result.entry.id.clone(), weight.clamp(0.05, 1.0))
+        })
+        .collect()
+}
+
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
 ///
 /// Execution plan:
@@ -441,14 +461,15 @@ pub fn hybrid_search(
                 .map(|r| r.score.final_score * 0.5)
                 .unwrap_or(0.1);
 
-            let activations = crate::scorer::graph_spreading_activation(
-                &seed_ids,
+            let seed_weights = normalized_seed_weights(&results);
+            let activations = crate::scorer::graph_spreading_activation_with_seed_weights(
+                &seed_weights,
                 &expand_result.edges,
                 opts.graph_expand_hops,
                 0.5,
             );
 
-            let new_entries: Vec<SearchResult> = expand_result
+            let mut new_entries: Vec<SearchResult> = expand_result
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
@@ -478,6 +499,13 @@ pub fn hybrid_search(
                     }
                 })
                 .collect();
+            new_entries.sort_by(|a, b| {
+                b.score
+                    .final_score
+                    .partial_cmp(&a.score.final_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.entry.id.cmp(&b.entry.id))
+            });
 
             results.extend(new_entries);
         }
@@ -498,8 +526,8 @@ pub fn hybrid_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
-    use crate::types::MemoryEntry;
+    use crate::db::{add_edge, init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
+    use crate::types::{MemoryEdge, MemoryEntry};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -682,5 +710,70 @@ mod tests {
         assert!(!results
             .iter()
             .any(|result| result.entry.id == "wiki-operation-log"));
+    }
+
+    #[test]
+    fn graph_expansion_orders_neighbors_by_spreading_activation() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "seed",
+            "TrendLock durable decision rule",
+            &["trendlock"],
+        );
+        insert(
+            &mut conn,
+            "support",
+            "Support note only reachable by graph",
+            &["support"],
+        );
+        insert(
+            &mut conn,
+            "related",
+            "Related note only reachable by graph",
+            &["related"],
+        );
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "related".to_string(),
+                relation: "related_to".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "support".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+
+        let opts = SearchOptions {
+            top_k: 1,
+            record_access: false,
+            graph_expand_hops: 1,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["seed", "support", "related"]);
+        assert!(results[1].score.final_score > results[2].score.final_score);
     }
 }
