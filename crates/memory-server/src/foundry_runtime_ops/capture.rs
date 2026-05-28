@@ -305,7 +305,7 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
-    let _ = server.enrich_tx.try_send(EnrichmentItem {
+    let _ = server.enrichment_lock().enrich_tx.try_send(EnrichmentItem {
         id: entry.id.clone(),
         text: entry.text.clone(),
         summary: entry.summary.clone(),

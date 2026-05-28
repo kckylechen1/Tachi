@@ -43,7 +43,7 @@ pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
 impl MemoryServer {
     pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
-        if let Err(err) = self.enrich_tx.try_send(item) {
+        if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
             eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
         }
     }

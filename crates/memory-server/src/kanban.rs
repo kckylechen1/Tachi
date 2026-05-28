@@ -20,73 +20,49 @@ fn default_inbox_limit() -> usize {
     100
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct PostCardParams {
-    /// Source agent ID (e.g. "hapi")
     pub from_agent: String,
-    /// Destination agent ID, or "*" for broadcast
     pub to_agent: String,
-    /// Short card title
     pub title: String,
-    /// Card body content
     pub body: String,
-    /// Priority: low | medium | high | critical
     #[serde(default = "default_card_priority")]
     pub priority: String,
-    /// Card type: request | report | alert | handoff
     #[serde(default = "default_card_type")]
     pub card_type: String,
-    /// Optional thread correlation ID
     #[serde(default)]
     pub thread_id: Option<String>,
-    /// Workspace or project identifier this card relates to
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Project identifier (legacy alias for workspace_id)
     #[serde(default)]
     pub project_id: Option<String>,
-    /// Conversation/session ID that spawned this card
     #[serde(default)]
     pub conversation_id: Option<String>,
-    /// Agent session identifier (unique per agent instance)
     #[serde(default)]
     pub agent_session_id: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct CheckInboxParams {
-    /// Agent ID receiving cards
     pub agent_id: String,
-    /// Optional status filter (e.g. "open")
     #[serde(default)]
     pub status_filter: Option<String>,
-    /// Optional ISO timestamp lower bound (inclusive)
     #[serde(default)]
     pub since: Option<String>,
-    /// Include broadcast cards addressed to "*"
     #[serde(default = "default_include_broadcast")]
     pub include_broadcast: bool,
-    /// Maximum cards returned
     #[serde(default = "default_inbox_limit")]
     pub limit: usize,
-    /// Optional workspace filter — only return cards from this workspace
     #[serde(default)]
     pub workspace_id: Option<String>,
-    /// Optional conversation filter — only return cards from this conversation
     #[serde(default)]
     pub conversation_id: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct UpdateCardParams {
-    /// Kanban card memory ID
     pub card_id: String,
-    /// New status: open | acknowledged | resolved | expired
     pub new_status: String,
-    /// Optional threaded response appended to the card
     #[serde(default)]
     pub response_text: Option<String>,
 }

@@ -194,7 +194,7 @@ impl MemoryServer {
         description = "Cheap health check: daemon status, vector coverage, foundry queue depth, provider key drift/auth-failure inference, model lane config, and agent readiness warnings. Call at session start; use `tachi status --probe-keys` or `tachi doctor --probe-keys` for live provider calls."
     )]
     pub(crate) async fn tachi_status(&self) -> Result<String, String> {
-        crate::status_ops::handle_tachi_status(self).await
+        crate::status_ops::handle_tachi_status_agent(self).await
     }
 
     #[tool(
@@ -1189,7 +1189,7 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
-        description = "Unified memory facade: search/save/extract facts plus agent session UX. Actions: search, save, extract_facts, briefing, checkpoint, alerts, ask, consolidate, progress, readiness. Use briefing at session start, progress for append-only JSONL long-run updates, checkpoint before handoff, ask with synthesize=true only when LLM synthesis is worth the cost."
+        description = "Unified memory facade for recall and session UX. Returns readable Markdown (not raw JSON). Actions: search, save, briefing, checkpoint, alerts, ask, etc. Pass `project` to target ~/.tachi/projects/<name>/memory.db explicitly; omit to use global + daemon-bound workspace DB (shown in response). Diagnostics belong in tachi_status / tachi_doctor — not here."
     )]
     pub(crate) async fn tachi_memory(
         &self,
@@ -1356,7 +1356,7 @@ impl MemoryServer {
     // ─── Facade: wiki (search / browse / write) ─────────────────────────────
 
     #[tool(
-        description = "Unified wiki facade: search, browse, or write wiki entries. Use action='search', 'browse', or 'write'."
+        description = "Unified wiki facade: search, browse, or write wiki entries. Returns readable Markdown. Pass `project` to target a named library explicitly. Diagnostics belong in tachi_status / tachi_doctor."
     )]
     pub(crate) async fn tachi_wiki(
         &self,

@@ -75,9 +75,9 @@ async fn hub_register_defers_mcp_discovery_until_review() {
         "registration should not persist discovery results before approval"
     );
 
-    let proxy_tools = server.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
-        !proxy_tools.contains_key("discovery-fails"),
+        !lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools")
+            .contains_key("discovery-fails"),
         "pending capability should not cache proxy tools"
     );
 }

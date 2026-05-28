@@ -215,11 +215,11 @@ async fn vault_rotation_prefix_get_round_robin_works() {
 
 #[tokio::test]
 async fn vault_auto_lock_expires_cached_key() {
-    let mut server = make_server();
+    let server = make_server();
     // Use a longer timeout than the slowest CI step between init/set so the
     // setup itself does not race the auto-lock; the test then forces
     // expiration by rewinding `vault_unlock_time` below.
-    server.vault_auto_lock_after_secs = 30;
+    server.vault_write().auto_lock_after_secs = 30;
 
     server
         .vault_init(Parameters(VaultInitParams {
@@ -241,7 +241,7 @@ async fn vault_auto_lock_expires_cached_key() {
         .await
         .expect("vault_set should succeed");
 
-    *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
+    server.vault_write().unlock_time =
         Some(Instant::now() - Duration::from_secs(60));
 
     let err = server
@@ -316,7 +316,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         "expected temporary lockout error, got: {blocked_err}"
     );
 
-    *lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts") =
+    server.vault_write().failed_attempts =
         (5, Some(Instant::now() - Duration::from_secs(1)));
 
     server
@@ -326,7 +326,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         .await
         .expect("vault_unlock should succeed after lockout expiry");
 
-    let state = *lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts");
+    let state = server.vault_read().failed_attempts;
     assert_eq!(state.0, 0);
     assert!(
         state.1.is_none(),
