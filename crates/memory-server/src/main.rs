@@ -341,6 +341,15 @@ struct HandoffMemo {
     acknowledged: bool,
 }
 
+pub(crate) struct EnrichmentRuntime {
+    pub(crate) enrich_tx: mpsc::Sender<EnrichmentItem>,
+}
+
+pub(crate) struct FoundryRuntime {
+    pub(crate) foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
+    pub(crate) foundry_stats: Arc<FoundryWorkerStats>,
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
@@ -379,10 +388,9 @@ struct MemoryServer {
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
-    enrich_tx: mpsc::Sender<EnrichmentItem>,
+    enrichment: Arc<StdMutex<EnrichmentRuntime>>,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
-    foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
-    foundry_stats: Arc<FoundryWorkerStats>,
+    foundry: Arc<StdMutex<FoundryRuntime>>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
     vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
     vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
@@ -532,9 +540,8 @@ impl MemoryServer {
             dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
-            enrich_tx,
-            foundry_tx,
-            foundry_stats,
+            enrichment: Arc::new(StdMutex::new(EnrichmentRuntime { enrich_tx })),
+            foundry: Arc::new(StdMutex::new(FoundryRuntime { foundry_tx, foundry_stats })),
             vault_key: Arc::new(StdRwLock::new(None)),
             vault_unlock_time: Arc::new(StdRwLock::new(None)),
             vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
@@ -585,7 +592,7 @@ impl MemoryServer {
                             path_prefix: job.path_prefix,
                             memory_ids: job.memory_ids,
                         };
-                        if replay_server.foundry_tx.try_send(item).is_ok() {
+                        if replay_server.foundry_lock().foundry_tx.try_send(item).is_ok() {
                             count += 1;
                         }
                     }
@@ -635,8 +642,16 @@ impl MemoryServer {
     /// Clone the foundry maintenance sender so external supervisors
     /// (e.g. the multi-DB FoundryScheduler) can re-inject jobs into the
     /// same in-process worker that handles enrichment-driven enqueues.
+    pub(crate) fn enrichment_lock(&self) -> std::sync::MutexGuard<'_, EnrichmentRuntime> {
+        lock_or_recover(&self.enrichment, "enrichment")
+    }
+
+    pub(crate) fn foundry_lock(&self) -> std::sync::MutexGuard<'_, FoundryRuntime> {
+        lock_or_recover(&self.foundry, "foundry")
+    }
+
     pub(crate) fn foundry_tx_clone(&self) -> mpsc::Sender<FoundryMaintenanceItem> {
-        self.foundry_tx.clone()
+        self.foundry_lock().foundry_tx.clone()
     }
 
     /// Path to this server's global memory DB (canonicalized at boot).
