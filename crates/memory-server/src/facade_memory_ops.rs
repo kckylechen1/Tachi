@@ -263,7 +263,7 @@ async fn handle_memory_briefing(
 
 async fn handle_memory_checkpoint(
     server: &MemoryServer,
-    params: TachiMemoryParams,
+    mut params: TachiMemoryParams,
 ) -> Result<String, String> {
     if let Some(body) = crate::cli_client::maybe_forward_write(
         server.global_db_path.as_path(),
@@ -277,18 +277,18 @@ async fn handle_memory_checkpoint(
 
     let text = params
         .text
-        .clone()
+        .take()
         .or_else(|| params.summary.clone())
         .ok_or_else(|| "text or summary is required when action='checkpoint'".to_string())?;
     let title = params
         .title
-        .clone()
+        .take()
         .unwrap_or_else(|| "Agent checkpoint".to_string());
     let checkpoint_text = format!(
         "Checkpoint: {title}\n\n{text}\n\nRecorded at: {}",
         Utc::now().to_rfc3339()
     );
-    let path = params.path.clone().or_else(|| {
+    let path = params.path.take().or_else(|| {
         Some(format!(
             "/agent/checkpoints/{}",
             Utc::now().format("%Y-%m-%d")
@@ -296,33 +296,33 @@ async fn handle_memory_checkpoint(
     });
     let save_params = TachiSaveParams {
         text: checkpoint_text,
-        id: params.id.clone(),
+        id: params.id.take(),
         kind: Some("memory".to_string()),
         title: Some(title),
-        summary: params.summary.clone(),
+        summary: params.summary.take(),
         path,
         importance: params.importance.or(Some(0.8)),
         category: params
             .category
-            .clone()
+            .take()
             .or_else(|| Some("experience".to_string())),
         keywords: merge_keywords(params.keywords.clone(), &["checkpoint", "agent-session"]),
         entities: params.entities.clone(),
-        scope: params.scope.clone().or_else(|| Some("project".to_string())),
-        project: params.project.clone(),
-        domain: params.domain.clone(),
+        scope: params.scope.take().or_else(|| Some("project".to_string())),
+        project: params.project.take(),
+        domain: params.domain.take(),
         retention_policy: params
             .retention_policy
-            .clone()
+            .take()
             .or_else(|| Some("durable".to_string())),
         force: true,
         topic: params
             .topic
-            .clone()
+            .take()
             .or_else(|| Some("checkpoint".to_string())),
         source: params
             .source
-            .clone()
+            .take()
             .or_else(|| Some("tachi_checkpoint".to_string())),
     };
     handle_tachi_save(server, save_params).await

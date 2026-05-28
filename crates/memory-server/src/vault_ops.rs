@@ -14,80 +14,56 @@ fn default_secret_type() -> String {
     "api_key".to_string()
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultInitParams {
-    /// Master password for the vault
     pub password: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultUnlockParams {
-    /// Master password for the vault
     pub password: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultSetParams {
-    /// Secret name (e.g., "OPENAI_API_KEY")
     pub name: String,
-    /// Secret value (will be encrypted)
     pub value: String,
-    /// Secret type: api_key, oauth_token, json_blob, cookie, other
     #[serde(default = "default_secret_type")]
     pub secret_type: String,
-    /// Optional human-readable description
     #[serde(default)]
     pub description: String,
-    /// Agent IDs allowed to read this secret. When absent, any caller may read it.
     #[serde(default)]
     pub allowed_agents: Option<Vec<String>>,
-    /// If true and secret name ends with _N pattern, set up key rotation
     #[serde(default)]
     pub enable_rotation: bool,
-    /// Rotation strategy: round_robin, random, least_recently_used (default: round_robin)
     #[serde(default)]
     pub rotation_strategy: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultGetParams {
-    /// Secret name to retrieve
     pub name: String,
-    /// Agent ID requesting the secret. Required when allowed_agents is set.
     #[serde(default)]
     pub agent_id: Option<String>,
-    /// If true and this is a rotation prefix, auto-select next key
     #[serde(default)]
     pub auto_rotate: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultListParams {
-    /// Optional filter by secret type
     #[serde(default)]
     pub secret_type: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultRemoveParams {
-    /// Secret name to remove
     pub name: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultSetupRotationParams {
-    /// Key prefix (e.g., "GEMINI_API_KEY" for GEMINI_API_KEY_1, GEMINI_API_KEY_2)
     pub prefix: String,
-    /// Total number of keys in rotation
     pub total_keys: i64,
-    /// Rotation strategy: round_robin, random, least_recently_used
     #[serde(default = "default_rotation_strategy")]
     pub strategy: String,
 }
