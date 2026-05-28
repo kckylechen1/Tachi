@@ -556,7 +556,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         probe_keys,
     } = &command
     {
-        return crate::status_ops::run_status(
+        return crate::status_ops::status_cli::run_status(
             *watch,
             *json,
             *hide_orphans,
@@ -569,15 +569,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Daemon { action } = &command {
-        return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+        return crate::status_ops::status_cli::run_daemon(action.clone(), &app_home).await;
     }
 
     if let Commands::Watcher { action } = &command {
-        return crate::status_ops::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
+        return crate::status_ops::status_cli::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
     }
 
     if let Commands::Foundry { action } = &command {
-        return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
+        return crate::status_ops::status_cli::run_foundry(action.clone(), &app_home, &global_db_path).await;
     }
 
     if let Commands::Repair {
