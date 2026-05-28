@@ -1023,12 +1023,11 @@ impl MemoryServer {
     }
 
     pub(super) fn clear_proxy_tools(&self, server_name: &str) {
-        let mut tools = lock_or_recover(&self.proxy_tools, "proxy_tools");
-        tools.remove(server_name);
+        self.tool_discovery_lock().proxy_tools.remove(server_name);
     }
 
     pub(super) fn cache_proxy_tools(&self, server_name: &str, tools: Vec<rmcp::model::Tool>) {
-        lock_or_recover(&self.proxy_tools, "proxy_tools").insert(server_name.to_string(), tools);
+        self.tool_discovery_lock().proxy_tools.insert(server_name.to_string(), tools);
     }
 
     pub(super) async fn connect_mcp_service(
@@ -1466,11 +1465,12 @@ impl MemoryServer {
                 .await;
         }
 
+        let discovery_timeout = self.tool_discovery_lock().mcp_discovery_timeout;
         let client = self
-            .connect_mcp_service(capability_id, None, def, self.mcp_discovery_timeout)
+            .connect_mcp_service(capability_id, None, def, discovery_timeout)
             .await?;
         let list_result =
-            tokio::time::timeout(self.mcp_discovery_timeout, client.peer().list_all_tools()).await;
+            tokio::time::timeout(discovery_timeout, client.peer().list_all_tools()).await;
         let cancel_result = client.cancel().await;
 
         match list_result {
@@ -1481,7 +1481,7 @@ impl MemoryServer {
             Ok(Err(e)) => Err(format!("list_tools failed: {e}")),
             Err(_) => Err(format!(
                 "list_tools timed out after {}ms",
-                self.mcp_discovery_timeout.as_millis()
+                discovery_timeout.as_millis()
             )),
         }
     }

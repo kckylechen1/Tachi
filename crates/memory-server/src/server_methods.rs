@@ -582,7 +582,7 @@ impl MemoryServer {
                 None,
             )
         })?;
-        Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
+        Ok(resolve_mcp_tool_exposure(&def, self.tool_discovery_lock().mcp_tool_exposure_mode))
     }
 
     pub(super) fn get_sandbox_policy_for_capability(&self, capability_id: &str) -> Option<Value> {
@@ -678,27 +678,28 @@ impl MemoryServer {
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
-        lock_or_recover(&self.skill_tools, "skill_tools").insert(tool_name.clone(), cap.id.clone());
-        lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").insert(tool_name.clone(), tool);
+        {
+            let mut td = self.tool_discovery_lock();
+            td.skill_tools.insert(tool_name.clone(), cap.id.clone());
+            td.skill_tool_defs.insert(tool_name.clone(), tool);
+        }
         Ok(tool_name)
     }
 
     pub(super) fn unregister_skill_tool(&self, skill_id: &str) -> Result<Option<String>, String> {
         let removed_tool_name = {
-            let mut map = lock_or_recover(&self.skill_tools, "skill_tools");
-            let tool_name = map
+            let mut td = self.tool_discovery_lock();
+            let tool_name = td
+                .skill_tools
                 .iter()
                 .find(|(_, id)| id.as_str() == skill_id)
                 .map(|(name, _)| name.clone());
             if let Some(ref name) = tool_name {
-                map.remove(name);
+                td.skill_tools.remove(name);
+                td.skill_tool_defs.remove(name);
             }
             tool_name
         };
-
-        if let Some(ref name) = removed_tool_name {
-            lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").remove(name);
-        }
 
         Ok(removed_tool_name)
     }
@@ -709,12 +710,8 @@ impl MemoryServer {
         arguments: Option<rmcp::model::JsonObject>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let skill_id = self
+            .tool_discovery_lock()
             .skill_tools
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
-                e.into_inner()
-            })
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
@@ -794,12 +791,8 @@ impl MemoryServer {
         let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
 
         if self
+            .tool_discovery_lock()
             .skill_tools
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
-                e.into_inner()
-            })
             .contains_key(tool_name)
         {
             return self.call_skill_tool(tool_name, args_obj).await;

@@ -307,6 +307,16 @@ impl Clone for CachedResult {
     }
 }
 
+struct ToolDiscovery {
+    proxy_tools: HashMap<String, Vec<rmcp::model::Tool>>,
+    skill_tools: HashMap<String, String>,
+    skill_tool_defs: HashMap<String, rmcp::model::Tool>,
+    tool_cache: HashMap<String, CachedResult>,
+    dead_letters: VecDeque<DeadLetter>,
+    mcp_discovery_timeout: Duration,
+    mcp_tool_exposure_mode: McpToolExposureMode,
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct ProjectDbState {
@@ -365,19 +375,12 @@ struct MemoryServer {
     pub(crate) claude_pool: Arc<claude_pool::ClaudePool>,
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
-    proxy_tools: Arc<StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>>,
-    skill_tools: Arc<StdMutex<HashMap<String, String>>>,
-    skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
+    tool_discovery: Arc<StdMutex<ToolDiscovery>>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
-    // ─── Phantom Tools (result caching) ──────────────────────────────────────
-    tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
+    // ─── Phantom Tools (result caching — lock-free counters) ──────────────
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
-    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
-    mcp_discovery_timeout: Duration,
-    mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::Sender<EnrichmentItem>,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
@@ -521,17 +524,19 @@ impl MemoryServer {
             llm: llm.clone(),
             claude_pool,
             pipeline_enabled,
-            proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
+            tool_discovery: Arc::new(StdMutex::new(ToolDiscovery {
+                proxy_tools: HashMap::new(),
+                skill_tools: HashMap::new(),
+                skill_tool_defs: HashMap::new(),
+                tool_cache: HashMap::new(),
+                dead_letters: VecDeque::new(),
+                mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
+                mcp_tool_exposure_mode,
+            })),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
-            tool_cache: Arc::new(StdMutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
-            mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
-            mcp_tool_exposure_mode,
             enrich_tx,
             foundry_tx,
             foundry_stats,
@@ -618,6 +623,10 @@ impl MemoryServer {
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 
         Ok(server)
+    }
+
+    pub(crate) fn tool_discovery_lock(&self) -> std::sync::MutexGuard<'_, ToolDiscovery> {
+        lock_or_recover(&self.tool_discovery, "tool_discovery")
     }
 
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
