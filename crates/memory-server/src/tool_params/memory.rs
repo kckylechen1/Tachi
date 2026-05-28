@@ -118,6 +118,10 @@ fn default_wiki_stale_days() -> u32 {
     90
 }
 
+fn default_include_skill_quality() -> bool {
+    false
+}
+
 fn default_wiki_write_importance() -> f64 {
     0.85
 }
@@ -868,6 +872,10 @@ pub(crate) struct WikiLintParams {
     /// Similarity threshold for contradiction candidates
     #[serde(default = "default_contradiction_threshold")]
     pub contradiction_threshold: f64,
+
+    /// When false, skip expensive skill-quality guard refresh (briefing uses this).
+    #[serde(default = "default_include_skill_quality")]
+    pub include_skill_quality: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]

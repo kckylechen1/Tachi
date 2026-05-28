@@ -4,33 +4,35 @@
 //! the `#[tool]` wrapper thin. The wrapper in `impl MemoryServer` simply
 //! delegates to [`handle_tachi_search`].
 
-use crate::copilot_ops::handle_tachi_wiki_search;
-use crate::memory_search_ops::handle_search_memory;
+use crate::agent_markdown;
+use crate::db_context;
+use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
+use serde_json::Value;
 
-fn is_wiki_row(row: &serde_json::Value) -> bool {
+fn is_wiki_row(row: &Value) -> bool {
     row.get("path")
-        .and_then(serde_json::Value::as_str)
+        .and_then(Value::as_str)
         .is_some_and(|path| path == "/wiki" || path.starts_with("/wiki/"))
         || row
             .get("metadata")
             .and_then(|metadata| metadata.get("wiki"))
-            .and_then(serde_json::Value::as_bool)
+            .and_then(Value::as_bool)
             .unwrap_or(false)
         || row
             .get("domain")
-            .and_then(serde_json::Value::as_str)
+            .and_then(Value::as_str)
             .is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
 }
 
-fn filter_memory_rows(raw: String, top_k: usize) -> String {
-    let Ok(mut rows) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
-        return raw;
+fn parse_memory_rows(raw: String, top_k: usize) -> Value {
+    let Ok(mut rows) = serde_json::from_str::<Vec<Value>>(&raw) else {
+        return Value::Array(vec![]);
     };
     rows.retain(|row| !is_wiki_row(row));
     rows.truncate(top_k);
-    serde_json::to_string(&rows).unwrap_or(raw)
+    Value::Array(rows)
 }
 
 pub(crate) async fn handle_tachi_search(
@@ -38,37 +40,18 @@ pub(crate) async fn handle_tachi_search(
     params: TachiSearchParams,
 ) -> Result<String, String> {
     let scope = params.scope.to_ascii_lowercase();
-    let mut parts = Vec::new();
+    let ctx = db_context::describe_db_context(
+        server,
+        params.project.as_deref(),
+        params.domain.as_deref(),
+    );
 
-    // Normalize scope: "wiki", "memory", "all" are the valid subsystem selectors.
-    // "project", "global", "user" are DB-target hints that callers sometimes pass
-    // by analogy with save_memory's scope parameter. Treat them as "all".
     let effective_scope = match scope.as_str() {
         "wiki" | "memory" | "all" => scope.as_str(),
         _ => "all",
     };
     let scope_remapped = effective_scope != scope.as_str();
-
-    if effective_scope == "wiki" || effective_scope == "all" {
-        let wiki_params = WikiSearchParams {
-            query: params.query.clone(),
-            path_prefix: params.path_prefix.clone(),
-            category: params.category.clone(),
-            top_k: params.top_k,
-            include_archived: params.include_archived,
-            agent_role: None,
-            project: params.project.clone(),
-            domain: params.domain.clone(),
-            file_context: params.file_context.clone(),
-            error_context: params.error_context.clone(),
-            weights: None,
-        };
-        let wiki_result = handle_tachi_wiki_search(server, wiki_params).await;
-        match wiki_result {
-            Ok(r) => parts.push(format!("## Wiki results\n{}", r)),
-            Err(e) => parts.push(format!("## Wiki results\nError: {e}")),
-        }
-    }
+    let mut sections: Vec<(String, Value)> = Vec::new();
 
     if effective_scope == "memory" || effective_scope == "all" {
         let mem_params = SearchMemoryParams {
@@ -89,23 +72,50 @@ pub(crate) async fn handle_tachi_search(
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
         };
-        let mem_result = handle_search_memory(server, mem_params).await;
-        match mem_result {
-            Ok(r) => parts.push(format!(
-                "## Memory results\n{}",
-                filter_memory_rows(r, params.top_k)
+        match handle_search_memory(server, mem_params).await {
+            Ok(raw) => sections.push((
+                "Memory".to_string(),
+                parse_memory_rows(raw, params.top_k),
             )),
-            Err(e) => parts.push(format!("## Memory results\nError: {e}")),
+            Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
 
-    let mut output = parts.join("\n\n");
+    if effective_scope == "wiki" || effective_scope == "all" {
+        let wiki_params = SearchMemoryParams {
+            query: params.query.clone(),
+            query_vec: None,
+            top_k: params.top_k,
+            path_prefix: Some(
+                params
+                    .path_prefix
+                    .clone()
+                    .unwrap_or_else(|| "/wiki".to_string()),
+            ),
+            include_archived: params.include_archived,
+            candidates_per_channel: params.top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
+            enable_rerank: false,
+        };
+        match search_memory_rows(server, wiki_params).await {
+            Ok(rows) => sections.push(("Wiki".to_string(), Value::Array(rows))),
+            Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
+        }
+    }
+
+    let mut output = agent_markdown::format_search_sections(&ctx, &params.query, &sections);
     if scope_remapped {
         output = format!(
-            "> **Note**: scope='{}' was interpreted as 'all' (search both wiki and memory). \
-             The `scope` parameter selects *which subsystems* to search (wiki/memory/all), \
-             not which DB. Use the `project` parameter to target a specific project DB.\n\n{}",
-            scope, output
+            "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/memory.db`.\n\n{output}",
+            scope
         );
     }
 

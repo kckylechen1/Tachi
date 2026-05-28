@@ -778,7 +778,7 @@ pub(super) struct BracketSelfEvolutionNote {
 
 fn bracket_note_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)").unwrap())
+    REGEX.get_or_init(|| Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)").expect("bracket_note_regex is a valid compile-time regex"))
 }
 
 fn bracket_strategy_regexes() -> &'static [Regex] {
@@ -796,7 +796,7 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
                 r"策略失败|无效",
             ]
             .into_iter()
-            .map(|pattern| Regex::new(pattern).unwrap())
+            .map(|pattern| Regex::new(pattern).expect("bracket_strategy regex is a valid compile-time pattern"))
             .collect()
         })
         .as_slice()
@@ -804,12 +804,12 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
 
 fn bracket_decision_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"记住了|下次我要|下次我会|以后").unwrap())
+    REGEX.get_or_init(|| Regex::new(r"记住了|下次我要|下次我会|以后").expect("bracket_decision_regex is a valid compile-time regex"))
 }
 
 fn bracket_preference_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃").unwrap())
+    REGEX.get_or_init(|| Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃").expect("bracket_preference_regex is a valid compile-time regex"))
 }
 
 pub(super) fn build_bracket_self_evolution_id(agent_id: &str, note_text: &str) -> String {

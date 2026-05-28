@@ -12,7 +12,6 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
-lazy_static = { workspace = true }
 regex = { workspace = true }
 libsimple = "~0.7"
 sqlite-vec = { workspace = true }
