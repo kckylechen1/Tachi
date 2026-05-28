@@ -48,6 +48,9 @@ pub struct SearchOptions {
     /// Optional filter for graph edges: "causes", "follows", "related_to", etc.
     /// None = traverse all relation types.
     pub graph_relation_filter: Option<String>,
+    /// Point-in-time validity filter. When set, only memories valid at this ISO
+    /// timestamp are returned.
+    pub as_of: Option<String>,
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -73,8 +76,25 @@ impl Default for SearchOptions {
             mmr_threshold: Some(0.85),
             graph_expand_hops: 0,
             graph_relation_filter: None,
+            as_of: None,
         }
     }
+}
+
+fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
+    let Some(as_of) = as_of else {
+        return true;
+    };
+    let valid_from = if entry.valid_from.trim().is_empty() {
+        entry.timestamp.as_str()
+    } else {
+        entry.valid_from.as_str()
+    };
+    valid_from <= as_of
+        && entry
+            .valid_until
+            .as_deref()
+            .map_or(true, |until| until > as_of)
 }
 
 fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
@@ -257,6 +277,11 @@ pub fn hybrid_search(
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
     let n = opts.candidates_per_channel;
+    let as_of_utc = opts
+        .as_of
+        .as_deref()
+        .map(crate::db::normalize_utc_iso)
+        .transpose()?;
     let include_superseded =
         opts.include_superseded || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED");
 
@@ -270,6 +295,7 @@ pub fn hybrid_search(
                 opts.include_archived,
                 include_superseded,
                 opts.path_prefix.as_deref(),
+                as_of_utc.as_deref(),
             )?
         } else {
             HashMap::new()
@@ -286,6 +312,7 @@ pub fn hybrid_search(
         opts.include_archived,
         include_superseded,
         opts.path_prefix.as_deref(),
+        as_of_utc.as_deref(),
     )?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
@@ -320,6 +347,9 @@ pub fn hybrid_search(
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
         .filter(|(id, e)| {
+            if !valid_at(e, as_of_utc.as_deref()) {
+                return false;
+            }
             if !include_superseded && superseded_ids.contains(*id) {
                 return false;
             }
@@ -452,6 +482,7 @@ pub fn hybrid_search(
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
+                .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
                 .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
                 .filter(|entry| {
                     if include_superseded {
@@ -526,6 +557,8 @@ mod tests {
             text: text.into(),
             importance: 0.7,
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
@@ -651,6 +684,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&"new".to_string()));
         assert!(!ids.contains(&"old".to_string()));
+    }
+
+    #[test]
+    fn hybrid_search_respects_as_of_validity_window() {
+        let mut conn = setup();
+        let mut old = memory_entry("temporal-old", "TemporalHybridNeedle old memory", &[]);
+        old.valid_from = "2026-01-01T00:00:00Z".to_string();
+        old.valid_until = Some("2026-02-01T00:00:00Z".to_string());
+        upsert(&mut conn, &old, false).unwrap();
+
+        let mut new = memory_entry("temporal-new", "TemporalHybridNeedle new memory", &[]);
+        new.valid_from = "2026-02-01T00:00:00Z".to_string();
+        upsert(&mut conn, &new, false).unwrap();
+
+        let january = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-01-15T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(january.contains(&"temporal-old".to_string()));
+        assert!(!january.contains(&"temporal-new".to_string()));
+
+        let march = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-03-01T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(!march.contains(&"temporal-old".to_string()));
+        assert!(march.contains(&"temporal-new".to_string()));
     }
 
     #[test]

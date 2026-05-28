@@ -520,6 +520,8 @@ pub(crate) async fn handle_tachi_dispatch(
                     retention_policy: Some("durable".to_string()),
                     domain: Some("system".to_string()),
                     timestamp: None,
+                    valid_from: None,
+                    valid_until: None,
                     metadata: Some(metadata),
                 };
                 let _ =

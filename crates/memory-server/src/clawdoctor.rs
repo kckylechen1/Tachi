@@ -209,6 +209,8 @@ async fn save_incident_memory(server: &MemoryServer, text: &str) {
         text: text.to_string(),
         importance: 0.9,
         timestamp,
+        valid_from: String::new(),
+        valid_until: None,
         category: "experience".to_string(),
         topic: "clawdoctor".to_string(),
         keywords: vec![

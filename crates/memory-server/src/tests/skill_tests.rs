@@ -248,6 +248,8 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
                 text: "cargo workspace chunking graph edge reference".to_string(),
                 importance: 0.8,
                 timestamp: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_until: None,
                 category: "fact".to_string(),
                 topic: "reference".to_string(),
                 keywords: vec![],

@@ -613,6 +613,8 @@ pub(crate) async fn handle_wiki_ingest(
         text: content.clone(),
         importance: 0.8,
         timestamp: timestamp.clone(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "experience".to_string(),
         topic: topic.clone(),
         keywords,
@@ -789,6 +791,8 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
         text: log_line.clone(),
         importance: 0.3,
         timestamp: now,
+        valid_from: String::new(),
+        valid_until: None,
         category: "other".to_string(),
         topic: "wiki_log".to_string(),
         keywords: vec!["wiki".to_string(), "log".to_string()],
@@ -1183,6 +1187,7 @@ pub(crate) async fn handle_wiki_search(
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -1313,7 +1318,9 @@ pub(crate) fn handle_wiki_browse(
 // ─── Wiki Lint ──────────────────────────────────────────────────────────────
 
 /// Count-only wiki hygiene for agent alerts/briefing — never runs skill-quality guards.
-pub(crate) async fn wiki_hygiene_counts(server: &MemoryServer) -> Result<serde_json::Value, String> {
+pub(crate) async fn wiki_hygiene_counts(
+    server: &MemoryServer,
+) -> Result<serde_json::Value, String> {
     let lint = handle_wiki_lint(
         server,
         WikiLintParams {
@@ -1331,8 +1338,7 @@ pub(crate) async fn wiki_hygiene_counts(server: &MemoryServer) -> Result<serde_j
         },
     )
     .await?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&lint).unwrap_or_else(|_| json!({}));
+    let parsed: serde_json::Value = serde_json::from_str(&lint).unwrap_or_else(|_| json!({}));
     Ok(json!({
         "orphans": parsed.get("orphans").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
         "stale_nodes": parsed.get("stale_nodes").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),

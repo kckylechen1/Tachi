@@ -183,6 +183,8 @@ pub(crate) async fn handle_distill_trajectory(
         text: distilled_markdown.clone(),
         importance,
         timestamp: timestamp.clone(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "decision".to_string(),
         topic: sanitize_safe_path_name(params.skill_path.trim_matches('/')),
         keywords: vec![

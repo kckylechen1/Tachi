@@ -1,7 +1,9 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 use crate::error::MemoryError;
+
+use super::common::normalize_utc_iso;
 
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     init_schema_inner(conn)
@@ -54,6 +56,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             text         TEXT NOT NULL DEFAULT '',
             importance   REAL NOT NULL DEFAULT 0.7,
             timestamp    TEXT NOT NULL,
+            valid_from   TEXT NOT NULL DEFAULT '',
+            valid_until  TEXT,
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
@@ -404,6 +408,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "created_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "updated_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "revision", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "memories", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "valid_until", "TEXT")?;
 
     // Retention policy and domain columns for Issue #38 and #32
     ensure_column(conn, "memories", "retention_policy", "TEXT")?;
@@ -476,6 +482,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_valid_time  ON memories(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_derived_source       ON derived_items(source);
         CREATE INDEX IF NOT EXISTS idx_derived_path         ON derived_items(path);
         CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
@@ -500,6 +507,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "UPDATE memories SET revision = 1 WHERE revision IS NULL OR revision <= 0",
         [],
     )?;
+    normalize_memory_validity_columns(conn)?;
 
     ensure_fts_backfilled(conn)?;
 
@@ -507,6 +515,52 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
+    Ok(())
+}
+
+fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryError> {
+    let rows = {
+        let mut stmt =
+            conn.prepare("SELECT id, timestamp, valid_from, valid_until FROM memories")?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row?);
+        }
+        rows
+    };
+
+    for (id, timestamp, valid_from, valid_until) in rows {
+        let valid_from_raw = valid_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(timestamp.trim());
+        let normalized_from =
+            normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
+        let normalized_until = valid_until
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
+        if valid_from.as_deref() == Some(normalized_from.as_str())
+            && valid_until == normalized_until
+        {
+            continue;
+        }
+        conn.execute(
+            "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
+            params![id, normalized_from, normalized_until],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -728,6 +782,8 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             text         TEXT NOT NULL DEFAULT '',
             importance   REAL NOT NULL DEFAULT 0.7,
             timestamp    TEXT NOT NULL,
+            valid_from   TEXT NOT NULL DEFAULT '',
+            valid_until  TEXT,
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
@@ -756,13 +812,14 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         );
 
         INSERT INTO memories_new
-            (id, path, summary, text, importance, timestamp, category, topic,
-             keywords, persons, entities, location, source, scope, archived,
+            (id, path, summary, text, importance, timestamp, valid_from, valid_until,
+             category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by)
         SELECT
-             id, path, summary, text, importance, timestamp, category, topic,
-             keywords, persons, entities, location, source, scope, archived,
+             id, path, summary, text, importance, timestamp,
+             COALESCE(NULLIF(valid_from, ''), timestamp), valid_until,
+             category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by
         FROM memories;
@@ -775,6 +832,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_valid_time  ON memories(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
         CREATE INDEX IF NOT EXISTS idx_memories_domain      ON memories(domain);
         CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by);

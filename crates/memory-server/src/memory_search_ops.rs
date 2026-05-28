@@ -570,6 +570,11 @@ pub(crate) async fn handle_save_memory(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let valid_from = params
+        .valid_from
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| timestamp.clone());
     let requested_scope = params.scope.clone();
     let named_project = params.project.clone();
     let (target_db, warning) = if named_project.is_some() {
@@ -624,6 +629,8 @@ pub(crate) async fn handle_save_memory(
         text: safe_text,
         importance,
         timestamp: timestamp.clone(),
+        valid_from,
+        valid_until: params.valid_until,
         category,
         topic,
         keywords,
@@ -899,6 +906,8 @@ pub(crate) async fn handle_remember(
         retention_policy: params.retention_policy,
         domain: params.domain,
         timestamp: None,
+        valid_from: params.valid_from,
+        valid_until: params.valid_until,
         metadata: Some(json!({ "shortcut": "remember" })),
     };
 
@@ -1323,6 +1332,7 @@ pub(crate) async fn handle_find_similar_memory(
         graph_expand_hops: 0,
         graph_relation_filter: None,
         domain: None,
+        as_of: None,
     };
 
     let global_results = server.with_global_store_read(|store| {
@@ -1347,6 +1357,7 @@ pub(crate) async fn handle_find_similar_memory(
             graph_expand_hops: 0,
             graph_relation_filter: None,
             domain: None,
+            as_of: None,
         };
 
         let project_results = server.with_project_store_read(|store| {
@@ -1459,6 +1470,8 @@ mod tests {
             text: text.into(),
             importance: 0.7,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],

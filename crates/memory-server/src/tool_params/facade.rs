@@ -30,12 +30,16 @@ pub(crate) struct TachiSearchParams {
 
     /// Optional named project DB
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB.")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB."
+    )]
     pub project: Option<String>,
 
     /// Optional domain filter
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter (e.g. equity_trading, agent). Does not select the DB — combine with project for explicit library targeting.")]
+    #[schemars(
+        description = "Optional domain tag filter (e.g. equity_trading, agent). Does not select the DB — combine with project for explicit library targeting."
+    )]
     pub domain: Option<String>,
 
     #[serde(default)]
@@ -55,6 +59,10 @@ pub(crate) struct TachiSearchParams {
     /// Enable adaptive Voyage reranking for close top results in memory search.
     #[serde(default)]
     pub enable_rerank: bool,
+
+    /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────
@@ -162,6 +170,13 @@ pub(crate) struct TachiSaveParams {
     /// Source identifier (used when kind="facts" or kind="extract_facts")
     #[serde(default)]
     pub source: Option<String>,
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -195,6 +210,8 @@ pub(crate) struct TachiMemoryParams {
     pub include_archived: bool,
     #[serde(default)]
     pub enable_rerank: bool,
+    #[serde(default)]
+    pub as_of: Option<String>,
     /// When action="ask" or action="consolidate", optionally call the configured LLM to synthesize from evidence.
     #[serde(default)]
     pub synthesize: bool,
@@ -229,6 +246,10 @@ pub(crate) struct TachiMemoryParams {
     pub force: bool,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_until: Option<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]
@@ -240,10 +261,14 @@ pub(crate) struct TachiMemoryParams {
 
     // --- shared ---
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response).")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
+    )]
     pub project: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter. Does not select the DB — combine with project for explicit library targeting.")]
+    #[schemars(
+        description = "Optional domain tag filter. Does not select the DB — combine with project for explicit library targeting."
+    )]
     pub domain: Option<String>,
 }
 
@@ -514,7 +539,9 @@ pub(crate) struct TachiWikiParams {
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library.")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library."
+    )]
     pub project: Option<String>,
     #[serde(default)]
     #[schemars(description = "Optional domain tag filter for wiki entries.")]

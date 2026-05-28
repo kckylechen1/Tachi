@@ -427,6 +427,8 @@ pub(crate) async fn handle_tachi_wiki_write(
             retention_policy: Some(params.retention_policy),
             domain: params.domain.or_else(|| Some("wiki".to_string())),
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: Some(wiki_metadata),
         },
     )
@@ -549,6 +551,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -591,6 +594,7 @@ pub(crate) async fn handle_tachi_task_brief(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -613,6 +617,7 @@ pub(crate) async fn handle_tachi_task_brief(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -690,6 +695,7 @@ pub(crate) async fn handle_tachi_progress_check(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -806,6 +812,7 @@ async fn build_route_recommendation(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await

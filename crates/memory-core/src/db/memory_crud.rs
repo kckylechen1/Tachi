@@ -58,6 +58,16 @@ pub fn upsert(
         .or_else(|| default_retention_for(&path, &source).map(str::to_string));
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
+    let valid_from_utc = if entry.valid_from.trim().is_empty() {
+        timestamp_utc.clone()
+    } else {
+        normalize_utc_iso(&entry.valid_from)?
+    };
+    let valid_until_utc = entry
+        .valid_until
+        .as_deref()
+        .map(normalize_utc_iso)
+        .transpose()?;
     let last_access_utc = entry
         .last_access
         .as_deref()
@@ -77,17 +87,19 @@ pub fn upsert(
     tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
-               timestamp, category, topic, keywords, persons, entities,
+               timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
                location, source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
                retention_policy, domain)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
                text         = excluded.text,
                importance   = excluded.importance,
                timestamp    = excluded.timestamp,
+               valid_from   = excluded.valid_from,
+               valid_until  = excluded.valid_until,
                category     = excluded.category,
                topic        = excluded.topic,
                keywords     = excluded.keywords,
@@ -112,6 +124,8 @@ pub fn upsert(
             entry.text,
             entry.importance,
             timestamp_utc,
+            valid_from_utc,
+            valid_until_utc,
             category,
             entry.topic,
             kws_json,
@@ -408,9 +422,11 @@ pub fn search_vec(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
+    as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let mut stmt = conn.prepare(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -418,9 +434,10 @@ pub fn search_vec(
            WHERE v.embedding MATCH ?1
               AND k = ?3
               AND (?2 = 1 OR m.archived = 0)
-              AND (?4 = 1 OR m.superseded_by IS NULL)
-              AND (?5 IS NULL OR m.path LIKE ?5)
-            ORDER BY v.distance"#,
+               AND (?4 = 1 OR m.superseded_by IS NULL)
+               AND (?5 IS NULL OR m.path LIKE ?5)
+               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+             ORDER BY v.distance"#,
     )?;
 
     let rows = stmt.query_map(
@@ -429,7 +446,8 @@ pub fn search_vec(
             include_archived as i64,
             top_k as i64,
             include_superseded as i64,
-            path_like
+            path_like,
+            as_of_utc.as_deref()
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -460,7 +478,9 @@ pub fn search_fts(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
+    as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
@@ -480,10 +500,11 @@ pub fn search_fts(
            FROM memories_fts
            JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH simple_query(?1)
-             AND (?2 = 1 OR m.archived = 0)
-             AND (?4 = 1 OR m.superseded_by IS NULL)
-             AND (?5 IS NULL OR m.path LIKE ?5)
-            ORDER BY bm25(memories_fts)
+              AND (?2 = 1 OR m.archived = 0)
+              AND (?4 = 1 OR m.superseded_by IS NULL)
+              AND (?5 IS NULL OR m.path LIKE ?5)
+              AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+             ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
     )?;
 
@@ -493,7 +514,8 @@ pub fn search_fts(
             include_archived as i64,
             limit as i64,
             include_superseded as i64,
-            path_like
+            path_like,
+            as_of_utc.as_deref()
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -547,7 +569,7 @@ pub fn fetch_by_ids(
             .collect::<Vec<_>>()
             .join(",");
         let mut sql = format!(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
              FROM memories WHERE id IN ({})",
             placeholders
         );
@@ -602,10 +624,10 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories ORDER BY timestamp DESC LIMIT ?"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -642,13 +664,13 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC
@@ -671,7 +693,7 @@ pub fn find_active_wiki_entry_by_path_or_topic(
     topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        r#"SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        r#"SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL

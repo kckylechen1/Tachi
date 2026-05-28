@@ -229,6 +229,14 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub timestamp: Option<String>,
 
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
+
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
@@ -287,6 +295,14 @@ pub(crate) struct RememberParams {
     /// Optional retention policy.
     #[serde(default)]
     pub retention_policy: Option<String>,
+
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 
     /// Bypass noise filter (forwarded to save_memory). Defaults to false.
     #[serde(default)]
@@ -382,6 +398,10 @@ pub(crate) struct SearchMemoryParams {
     /// Enable adaptive Voyage reranking when top hybrid scores are close.
     #[serde(default)]
     pub enable_rerank: bool,
+
+    /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 impl SearchMemoryParams {
@@ -411,6 +431,7 @@ impl SearchMemoryParams {
             // Keep search path read-only so multiple search requests can run concurrently.
             record_access: false,
             domain: self.domain.clone(),
+            as_of: self.as_of.clone(),
             ..Default::default()
         }
     }
@@ -1067,6 +1088,8 @@ pub(crate) fn fact_to_entry(
         text,
         importance,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic,
         keywords,

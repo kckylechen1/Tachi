@@ -142,6 +142,7 @@ pub(super) async fn process_recall_rerank_cache_job(
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await?;
@@ -229,6 +230,8 @@ pub(super) async fn process_recall_rerank_cache_job(
             text,
             importance: 0.35,
             timestamp,
+            valid_from: String::new(),
+            valid_until: None,
             category: "other".to_string(),
             topic: "recall_rerank_cache".to_string(),
             keywords: vec![

@@ -22,6 +22,8 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
         text: text.into(),
         importance: 0.7,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".into(),
         topic: "".into(),
         keywords: vec!["test".into()],
@@ -47,7 +49,7 @@ fn upsert_and_fts() {
     let e = make_entry("abc", "Rust is a systems programming language");
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "systems programming", 5, false, false, None).unwrap();
+    let results = search_fts(&conn, "systems programming", 5, false, false, None, None).unwrap();
     assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
 }
 
@@ -59,8 +61,169 @@ fn upsert_idempotent() {
     e.text = "updated text".into();
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "updated", 5, false, false, None).unwrap();
+    let results = search_fts(&conn, "updated", 5, false, false, None, None).unwrap();
     assert!(results.contains_key("dup"));
+}
+
+#[test]
+fn upsert_defaults_valid_from_to_timestamp() {
+    let mut conn = make_conn();
+    let mut entry = make_entry("temporal-default", "temporal default memory");
+    entry.timestamp = "2026-01-01T00:00:00Z".to_string();
+    entry.valid_from = String::new();
+
+    upsert(&mut conn, &entry, false).unwrap();
+
+    let stored = fetch_by_ids(&conn, &["temporal-default".to_string()], false)
+        .unwrap()
+        .remove("temporal-default")
+        .unwrap();
+    assert_eq!(stored.valid_from, "2026-01-01T00:00:00.000Z");
+    assert_eq!(stored.valid_until, None);
+}
+
+#[test]
+fn init_schema_backfills_valid_from_for_legacy_rows() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        r#"
+        CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL DEFAULT '/',
+            summary TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL DEFAULT '',
+            importance REAL NOT NULL DEFAULT 0.7,
+            timestamp TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'fact',
+            topic TEXT NOT NULL DEFAULT '',
+            keywords TEXT NOT NULL DEFAULT '[]',
+            persons TEXT NOT NULL DEFAULT '[]',
+            entities TEXT NOT NULL DEFAULT '[]',
+            location TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'manual',
+            scope TEXT NOT NULL DEFAULT 'general',
+            archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT '',
+            access_count INTEGER NOT NULL DEFAULT 0,
+            last_access TEXT,
+            revision INTEGER NOT NULL DEFAULT 1,
+            metadata TEXT NOT NULL DEFAULT '{}',
+            retention_policy TEXT,
+            domain TEXT,
+            superseded_by TEXT
+        );
+        INSERT INTO memories
+            (id, text, timestamp, keywords, persons, entities, metadata)
+        VALUES
+            ('legacy-valid-from', 'legacy temporal row', '2026-02-03T04:05:06Z', '[]', '[]', '[]', '{}');
+        "#,
+    )
+    .unwrap();
+
+    init_schema(&conn).unwrap();
+
+    let valid_from: String = conn
+        .query_row(
+            "SELECT valid_from FROM memories WHERE id = 'legacy-valid-from'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(valid_from, "2026-02-03T04:05:06.000Z");
+}
+
+#[test]
+fn search_fts_respects_as_of_validity_window() {
+    let mut conn = make_conn();
+
+    let mut expired = make_entry("temporal-old", "TemporalNeedle old memory");
+    expired.valid_from = "2026-01-01T00:00:00Z".to_string();
+    expired.valid_until = Some("2026-02-01T00:00:00Z".to_string());
+    upsert(&mut conn, &expired, false).unwrap();
+
+    let mut active = make_entry("temporal-new", "TemporalNeedle new memory");
+    active.valid_from = "2026-02-01T00:00:00Z".to_string();
+    upsert(&mut conn, &active, false).unwrap();
+
+    let january = search_fts(
+        &conn,
+        "TemporalNeedle",
+        5,
+        false,
+        false,
+        None,
+        Some("2026-01-15T00:00:00.000Z"),
+    )
+    .unwrap();
+    assert!(january.contains_key("temporal-old"));
+    assert!(!january.contains_key("temporal-new"));
+
+    let march = search_fts(
+        &conn,
+        "TemporalNeedle",
+        5,
+        false,
+        false,
+        None,
+        Some("2026-03-01T00:00:00.000Z"),
+    )
+    .unwrap();
+    assert!(!march.contains_key("temporal-old"));
+    assert!(march.contains_key("temporal-new"));
+}
+
+#[test]
+fn search_vec_respects_as_of_validity_window() {
+    let mut conn = make_conn();
+    let has_vec: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if has_vec == 0 {
+        return;
+    }
+
+    let mut old = make_entry("temporal-vec-old", "Temporal vector old memory");
+    old.valid_from = "2026-01-01T00:00:00Z".to_string();
+    old.valid_until = Some("2026-02-01T00:00:00Z".to_string());
+    old.vector = Some(vec![0.1_f32; 1024]);
+    upsert(&mut conn, &old, true).unwrap();
+
+    let mut new = make_entry("temporal-vec-new", "Temporal vector new memory");
+    new.valid_from = "2026-02-01T00:00:00Z".to_string();
+    new.vector = Some(vec![0.1_f32; 1024]);
+    upsert(&mut conn, &new, true).unwrap();
+
+    let query = vec![0.1_f32; 1024];
+    let january = search_vec(
+        &conn,
+        &query,
+        5,
+        false,
+        false,
+        None,
+        Some("2026-01-15T00:00:00.000Z"),
+    )
+    .unwrap();
+    assert!(january.contains_key("temporal-vec-old"));
+    assert!(!january.contains_key("temporal-vec-new"));
+
+    let march = search_vec(
+        &conn,
+        &query,
+        5,
+        false,
+        false,
+        None,
+        Some("2026-03-01T00:00:00.000Z"),
+    )
+    .unwrap();
+    assert!(!march.contains_key("temporal-vec-old"));
+    assert!(march.contains_key("temporal-vec-new"));
 }
 
 #[test]
@@ -125,7 +288,7 @@ fn search_vec_knn_with_k_constraint() {
     upsert(&mut conn, &e, true).unwrap();
 
     let query = vec![0.1_f32; 1024];
-    let results = search_vec(&conn, &query, 3, false, false, None).unwrap();
+    let results = search_vec(&conn, &query, 3, false, false, None, None).unwrap();
     assert!(results.contains_key("vec-1"));
 }
 
@@ -149,7 +312,7 @@ fn delete_existing() {
     assert_eq!(count, 0);
 
     // Verify it's gone from FTS
-    let fts_results = search_fts(&conn, "deleted", 5, false, false, None).unwrap();
+    let fts_results = search_fts(&conn, "deleted", 5, false, false, None, None).unwrap();
     assert!(!fts_results.contains_key("del-1"));
 }
 
@@ -171,6 +334,7 @@ fn search_fts_respects_path_prefix() {
         false,
         false,
         Some("/project"),
+        None,
     )
     .unwrap();
     assert!(results.contains_key("proj-1"));
@@ -186,11 +350,11 @@ fn raw_search_channels_exclude_superseded_by_default() {
     upsert(&mut conn, &new, false).unwrap();
     supersede_memory(&conn, "old", "new").unwrap();
 
-    let results = search_fts(&conn, "TrendLock", 5, false, false, None).unwrap();
+    let results = search_fts(&conn, "TrendLock", 5, false, false, None, None).unwrap();
     assert!(results.contains_key("new"));
     assert!(!results.contains_key("old"));
 
-    let with_superseded = search_fts(&conn, "TrendLock", 5, false, true, None).unwrap();
+    let with_superseded = search_fts(&conn, "TrendLock", 5, false, true, None, None).unwrap();
     assert!(with_superseded.contains_key("old"));
 }
 
@@ -725,15 +889,21 @@ fn normalize_for_write_clamps_fields() {
     e.scope = "PROJECT".into();
     e.importance = 1.5;
     normalize_for_write(&mut e);
-    assert!(e.path.starts_with('/'), "path should be normalized to start with /");
+    assert!(
+        e.path.starts_with('/'),
+        "path should be normalized to start with /"
+    );
     assert_eq!(e.category, "fact", "category should be lowercase");
     assert_eq!(e.scope, "project", "scope should be lowercase");
-    assert!((e.importance - 1.0).abs() < f64::EPSILON, "importance should be clamped to 1.0");
+    assert!(
+        (e.importance - 1.0).abs() < f64::EPSILON,
+        "importance should be clamped to 1.0"
+    );
 }
 
 #[test]
 fn normalize_for_write_empty_id_rejected_by_upsert() {
-    let mut e = make_entry(" ", "empty id test");
+    let e = make_entry(" ", "empty id test");
     let err = upsert(&mut make_conn(), &e, false);
     assert!(err.is_err(), "empty id should be rejected");
 }
@@ -773,7 +943,12 @@ fn get_all_returns_ordered_by_timestamp() {
 fn get_all_respects_limit() {
     let mut conn = make_conn();
     for i in 0..5 {
-        upsert(&mut conn, &make_entry(&format!("lim-{i}"), &format!("entry {i}")), false).unwrap();
+        upsert(
+            &mut conn,
+            &make_entry(&format!("lim-{i}"), &format!("entry {i}")),
+            false,
+        )
+        .unwrap();
     }
     let limited = get_all(&conn, 2, false).unwrap();
     assert_eq!(limited.len(), 2);
@@ -828,7 +1003,12 @@ fn archive_memory_marks_archived() {
 #[test]
 fn archive_excluded_from_default_fetch() {
     let mut conn = make_conn();
-    upsert(&mut conn, &make_entry("arch-fetch-1", "visible before archive"), false).unwrap();
+    upsert(
+        &mut conn,
+        &make_entry("arch-fetch-1", "visible before archive"),
+        false,
+    )
+    .unwrap();
     archive_memory(&conn, "arch-fetch-1").unwrap();
 
     let active = get_all(&conn, 10, false).unwrap();

@@ -1030,6 +1030,8 @@ async fn save_daily_health_wiki(
             force: true,
             topic: Some("daily-health".to_string()),
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await?;
     Ok(())

@@ -54,6 +54,8 @@ pub(super) async fn init_kanban_task(
             retention_policy: Some("durable".to_string()),
             domain: Some("system".to_string()),
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: Some(metadata),
         },
     )
@@ -175,6 +177,8 @@ pub(crate) async fn update_kanban_state(
                 retention_policy: Some("durable".to_string()),
                 domain: Some("system".to_string()),
                 timestamp: None,
+                valid_from: None,
+                valid_until: None,
                 metadata: Some(meta),
             },
         )
