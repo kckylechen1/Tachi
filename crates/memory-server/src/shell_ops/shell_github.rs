@@ -124,7 +124,7 @@ pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value,
     deep_merge(github, patch);
     let merged = github.clone();
     obj.insert("updated_at".into(), json!(Utc::now().to_rfc3339()));
-    write_status(run_dir, &Value::Object(obj.clone()))?;
+    write_status(run_dir, &status)?;
     Ok(merged)
 }
 
@@ -145,15 +145,15 @@ pub(crate) fn append_github_event(
             kind, GITHUB_EVENT_KINDS
         ));
     }
-    let mut event = serde_json::Map::new();
-    if let Value::Object(p) = payload {
-        for (k, v) in p {
-            if matches!(k.as_str(), "event" | "flow_id" | "timestamp") {
-                continue;
-            }
-            event.insert(k, v);
+    let mut event = match payload {
+        Value::Object(mut p) => {
+            p.remove("event");
+            p.remove("flow_id");
+            p.remove("timestamp");
+            p
         }
-    }
+        _ => serde_json::Map::new(),
+    };
     event.insert("event".into(), json!(kind));
     event.insert("flow_id".into(), json!(flow_id));
     event.insert("timestamp".into(), json!(Utc::now().to_rfc3339()));
