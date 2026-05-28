@@ -14,11 +14,9 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 fn current_agent_id(server: &MemoryServer) -> Option<String> {
-    let guard = server
-        .agent_profile
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
+    let guard = server.agent_runtime_read();
     guard
+        .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.trim().to_string())
         .filter(|agent_id| !agent_id.is_empty())
@@ -340,15 +338,12 @@ pub(crate) async fn handle_handoff_leave(
     let entry = memo_to_memory_entry(server, &memo);
     server.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
 
-    let mut memos = server
-        .handoff_memos
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    memos.push(memo);
+    let mut memos = server.agent_runtime_write();
+    memos.handoff_memos.push(memo);
 
-    if memos.len() > HANDOFF_MEMORY_LIMIT {
-        let drain_count = memos.len() - HANDOFF_MEMORY_LIMIT;
-        memos.drain(..drain_count);
+    if memos.handoff_memos.len() > HANDOFF_MEMORY_LIMIT {
+        let drain_count = memos.handoff_memos.len() - HANDOFF_MEMORY_LIMIT;
+        memos.handoff_memos.drain(..drain_count);
     }
 
     serde_json::to_string(&json!({
@@ -383,11 +378,8 @@ pub(crate) async fn handle_handoff_check(
             server.with_global_store(|store| upsert_acknowledged_entry(store, entry, agent_id))?;
         }
 
-        let mut memos = server
-            .handoff_memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for memo in memos.iter_mut() {
+        let mut rt = server.agent_runtime_write();
+        for memo in rt.handoff_memos.iter_mut() {
             if memo_matches_agent(memo, agent_id) {
                 memo.acknowledged = true;
             }

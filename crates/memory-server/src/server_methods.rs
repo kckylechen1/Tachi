@@ -9,11 +9,11 @@ pub(super) struct ResolvedCallTarget {
 
 impl MemoryServer {
     pub(super) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
-        *write_or_recover(&self.tool_profile, "tool_profile") = profile;
+        self.agent_runtime_write().tool_profile = profile;
     }
 
     pub(super) fn active_tool_profile(&self) -> Option<ToolProfile> {
-        *read_or_recover(&self.tool_profile, "tool_profile")
+        self.agent_runtime_read().tool_profile.clone()
     }
 
     pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {
@@ -855,8 +855,8 @@ impl MemoryServer {
 
         // Read agent profile overrides (if registered)
         let (effective_rpm, effective_burst) = {
-            let profile = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
-            match profile.as_ref() {
+            let rt = self.agent_runtime_read();
+            match rt.agent_profile.as_ref() {
                 Some(p) => (
                     p.rate_limit_rpm.unwrap_or(self.rate_limit_rpm),
                     p.rate_limit_burst.unwrap_or(self.rate_limit_burst),

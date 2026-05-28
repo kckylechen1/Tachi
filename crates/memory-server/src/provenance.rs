@@ -8,11 +8,8 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 fn current_agent_profile(server: &MemoryServer) -> Option<serde_json::Value> {
-    let guard = server
-        .agent_profile
-        .read()
-        .unwrap_or_else(|e| e.into_inner());
-    guard.as_ref().map(|profile| {
+    let guard = server.agent_runtime_read();
+    guard.agent_profile.as_ref().map(|profile| {
         json!({
             "agent_id": profile.agent_id,
             "display_name": profile.display_name,

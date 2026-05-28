@@ -26,7 +26,8 @@ fn build_foundry_job(
     server: &MemoryServer,
     params: &SynthesizeAgentEvolutionParams,
 ) -> memory_core::FoundryJobSpec {
-    let requested_by = read_or_recover(&server.agent_profile, "agent_profile")
+    let requested_by = server.agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone());
 
@@ -777,7 +778,8 @@ async fn write_document_if_requested(path: &str, content: &str) -> Result<(), St
 }
 
 fn mark_proposal_applied(server: &MemoryServer, proposal_id: &str) -> Result<(), String> {
-    let reviewer = read_or_recover(&server.agent_profile, "agent_profile")
+    let reviewer = server.agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone());
     let mut review = load_review_state(server, proposal_id)?.unwrap_or_else(|| json!({}));
@@ -947,7 +949,8 @@ pub(crate) async fn handle_review_agent_evolution_proposal(
     params: ReviewAgentEvolutionProposalParams,
 ) -> Result<String, String> {
     let status = parse_review_status(&params.status)?;
-    let reviewer = read_or_recover(&server.agent_profile, "agent_profile")
+    let reviewer = server.agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone());
     let review = json!({
