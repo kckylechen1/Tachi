@@ -112,12 +112,14 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_path = workspace_dir.join("plan.md");
     // V1 writes the assembled prompt as a placeholder plan.md (legacy);
     // V2 will overwrite this with the real LLM-generated plan below.
-    std::fs::write(&plan_path, &base_prompt)
+    tokio::fs::write(&plan_path, &base_prompt)
+        .await
         .map_err(|e| format!("Failed to write plan file: {e}"))?;
 
     // Write prompt.md (full assembled prompt for tracked run)
     let prompt_md_path = workspace_dir.join("prompt.md");
-    std::fs::write(&prompt_md_path, &base_prompt)
+    tokio::fs::write(&prompt_md_path, &base_prompt)
+        .await
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
 
     // Write context.md (summary of injected context/skills — for MVP, same as prompt)
@@ -136,7 +138,8 @@ pub(crate) async fn handle_tachi_dispatch(
         sections.push(base_prompt.clone());
         sections.join("\n\n")
     };
-    std::fs::write(&context_md_path, &context_summary)
+    tokio::fs::write(&context_md_path, &context_summary)
+        .await
         .map_err(|e| format!("Failed to write context.md: {e}"))?;
 
     // Write trajectory.jsonl — initial dispatch_started event
@@ -152,10 +155,12 @@ pub(crate) async fn handle_tachi_dispatch(
         });
         let line = serde_json::to_string(&started_event)
             .map_err(|e| format!("Failed to serialize started event: {e}"))?;
-        std::fs::write(&trajectory_path, format!("{}\n", line))
+        tokio::fs::write(&trajectory_path, format!("{}\n", line))
+            .await
             .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
         let progress_path = workspace_dir.join("progress.jsonl");
-        std::fs::write(&progress_path, format!("{}\n", line))
+        tokio::fs::write(&progress_path, format!("{}\n", line))
+            .await
             .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
     }
 

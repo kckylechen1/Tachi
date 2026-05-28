@@ -122,12 +122,36 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
         llm.set_provider_secrets(secrets);
     }
 
+    // Run all three probes concurrently — reduces worst-case latency from
+    // 15+15+20 = 50s to max(15,15,20) = 20s.
+    let rerank_docs = vec![
+        "Tachi stores operational memory".to_string(),
+        "Unrelated weather note".to_string(),
+    ];
+    let llm_embed = llm.clone();
+    let llm_rerank = llm.clone();
+    let (embed, rerank, chat) = tokio::join!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            llm_embed.embed_voyage("tachi provider probe", "document"),
+        ),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            llm_rerank.rerank_voyage("tachi provider probe", &rerank_docs, 1),
+        ),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            llm.call_extract_llm(
+                "Return exactly OK.",
+                "Provider probe. Reply OK only.",
+                None,
+                0.0,
+                8,
+            ),
+        ),
+    );
+
     let mut out = Vec::new();
-    let embed = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        llm.embed_voyage("tachi provider probe", "document"),
-    )
-    .await;
     out.push(match embed {
         Ok(Ok(vec)) => ProviderProbeResult {
             name: "voyage_embed".to_string(),
@@ -145,19 +169,6 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
             message: Some("timed out after 15s".to_string()),
         },
     });
-
-    let rerank = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        llm.rerank_voyage(
-            "tachi provider probe",
-            &[
-                "Tachi stores operational memory".to_string(),
-                "Unrelated weather note".to_string(),
-            ],
-            1,
-        ),
-    )
-    .await;
     out.push(match rerank {
         Ok(Ok(rows)) => ProviderProbeResult {
             name: "voyage_rerank".to_string(),
@@ -175,18 +186,6 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
             message: Some("timed out after 15s".to_string()),
         },
     });
-
-    let chat = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        llm.call_extract_llm(
-            "Return exactly OK.",
-            "Provider probe. Reply OK only.",
-            None,
-            0.0,
-            8,
-        ),
-    )
-    .await;
     out.push(match chat {
         Ok(Ok(text)) => ProviderProbeResult {
             name: "chat_extract".to_string(),

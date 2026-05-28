@@ -98,6 +98,7 @@ fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
         && entry
             .valid_until
             .as_deref()
+            .filter(|s| !s.trim().is_empty())
             .map_or(true, |until| until > as_of)
 }
 

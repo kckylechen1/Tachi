@@ -258,6 +258,15 @@ impl MemoryServer {
 
     /// Resolve a named project's DB path: `~/.tachi/projects/{name}/memory.db`
     pub(super) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
+        // Guard: reject names that could escape the projects/ directory.
+        if project_name.is_empty()
+            || project_name.contains('/')
+            || project_name.contains('\\')
+            || project_name.contains("..")
+            || project_name.starts_with('.')
+        {
+            return Err(format!("Invalid project name '{project_name}'"));
+        }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let app_home = std::env::var("TACHI_HOME")
             .map(|v| {

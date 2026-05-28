@@ -126,56 +126,59 @@ fn collect_contradiction_candidates(
         return Ok(vec![]);
     }
 
+    // Single combined search (space-separated entities as one FTS/semantic
+    // query) instead of N per-entity searches — avoids N+1 DB round-trips.
+    // We fetch a generous pool; the final truncate keeps only the top 3.
+    let combined_query = entry.entities.join(" ");
+    let pool_size = (CONTRADICTION_MAX_CANDIDATES * 8).max(24);
+    let results = store
+        .search(
+            &combined_query,
+            Some(memory_core::SearchOptions {
+                top_k: pool_size,
+                record_access: false,
+                include_superseded: false,
+                ..Default::default()
+            }),
+        )
+        .map_err(|e| format!("contradiction candidate search: {e}"))?;
+
     let mut seen_targets = HashSet::<String>::new();
     let mut candidates = Vec::<ContradictionCandidate>::new();
-    for entity in &entry.entities {
-        let results = store
-            .search(
-                entity,
-                Some(memory_core::SearchOptions {
-                    top_k: 8,
-                    record_access: false,
-                    include_superseded: false,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|e| format!("contradiction candidate search: {e}"))?;
-
-        for result in results {
-            if result.entry.id == entry.id || !seen_targets.insert(result.entry.id.clone()) {
-                continue;
-            }
-            let shared: Vec<String> = result
-                .entry
-                .entities
-                .iter()
-                .filter(|candidate| entry.entities.contains(candidate))
-                .cloned()
-                .collect();
-            if shared.is_empty() {
-                continue;
-            }
-
-            let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
-                continue;
-            };
-            if !should_consider_contradiction(
-                entry,
-                &result.entry,
-                shared.len(),
-                similarity,
-                result.score.symbolic,
-            ) {
-                continue;
-            }
-
-            candidates.push(ContradictionCandidate {
-                entry: result.entry,
-                shared_entities: shared,
-                similarity,
-                symbolic_score: result.score.symbolic,
-            });
+    for result in results {
+        if result.entry.id == entry.id || !seen_targets.insert(result.entry.id.clone()) {
+            continue;
         }
+        let shared: Vec<String> = result
+            .entry
+            .entities
+            .iter()
+            .filter(|candidate| entry.entities.contains(candidate))
+            .cloned()
+            .collect();
+        if shared.is_empty() {
+            continue;
+        }
+
+        let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
+            continue;
+        };
+        if !should_consider_contradiction(
+            entry,
+            &result.entry,
+            shared.len(),
+            similarity,
+            result.score.symbolic,
+        ) {
+            continue;
+        }
+
+        candidates.push(ContradictionCandidate {
+            entry: result.entry,
+            shared_entities: shared,
+            similarity,
+            symbolic_score: result.score.symbolic,
+        });
     }
 
     candidates.sort_by(|a, b| {

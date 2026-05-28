@@ -1449,11 +1449,16 @@ pub(crate) async fn handle_wiki_lint(
         .iter()
         .any(|check| check == "contradictions" || check == "missing_edges" || check == "duplicates")
     {
-        for i in 0..nodes.len() {
-            for j in (i + 1)..nodes.len() {
-                let left = &nodes[i].0;
-                let right = &nodes[j].0;
-                if nodes[i].1 != nodes[j].1 {
+        // Cap pairwise comparison to avoid O(n²) blowup on large wikis.
+        // At 500 nodes the nested loop produces ≤124,750 pairs, which is
+        // fast enough for an interactive lint call.
+        const PAIRWISE_NODE_CAP: usize = 500;
+        let nodes_for_pairwise = &nodes[..nodes.len().min(PAIRWISE_NODE_CAP)];
+        for i in 0..nodes_for_pairwise.len() {
+            for j in (i + 1)..nodes_for_pairwise.len() {
+                let left = &nodes_for_pairwise[i].0;
+                let right = &nodes_for_pairwise[j].0;
+                if nodes_for_pairwise[i].1 != nodes_for_pairwise[j].1 {
                     continue;
                 }
                 let similarity = token_cosine_similarity(&left.text, &right.text);
@@ -1467,7 +1472,7 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes[i].1.as_str(),
+                        "db": nodes_for_pairwise[i].1.as_str(),
                     }));
                 }
                 if checks.iter().any(|check| check == "duplicates") && similarity > 0.95 {
@@ -1477,7 +1482,7 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes[i].1.as_str(),
+                        "db": nodes_for_pairwise[i].1.as_str(),
                     }));
                 }
                 if checks.iter().any(|check| check == "contradictions") {
@@ -1489,7 +1494,7 @@ pub(crate) async fn handle_wiki_lint(
                             "left_path": left.path,
                             "right_path": right.path,
                             "score": contradiction,
-                            "db": nodes[i].1.as_str(),
+                            "db": nodes_for_pairwise[i].1.as_str(),
                         }));
                     }
                 }

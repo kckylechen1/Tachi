@@ -351,7 +351,9 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
     let Some(path) = watcher.get("latest_jsonl").and_then(|v| v.as_str()) else {
         return Ok(None);
     };
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {path}: {e}"))?;
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("read {path}: {e}"))?;
     let summary = summarize_jsonl_tail(&raw);
     if summary.trim().is_empty() {
         return Ok(Some(json!({

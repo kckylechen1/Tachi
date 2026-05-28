@@ -450,7 +450,10 @@ pub fn hybrid_score(
                 .map(|rank| 0.5 / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let rrf_score = vec_part + fts_part + symbolic_part;
-            blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_ranks.as_ref())
+            let blended = blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_ranks.as_ref());
+            // Decay re-injected as a proportional bonus so recency still
+            // influences ranking in RRF mode (scaled to the RRF score range).
+            blended + weights.decay * ds / rrf_k
         } else {
             weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds
         };

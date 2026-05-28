@@ -66,6 +66,7 @@ pub fn upsert(
     let valid_until_utc = entry
         .valid_until
         .as_deref()
+        .filter(|s| !s.trim().is_empty())
         .map(normalize_utc_iso)
         .transpose()?;
     let last_access_utc = entry
