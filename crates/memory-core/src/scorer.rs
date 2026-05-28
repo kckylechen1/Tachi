@@ -273,7 +273,7 @@ fn normalized_rank_score(rank: usize, total: usize) -> f64 {
 }
 
 fn blend_rrf_with_vector_signal(
-    id: &String,
+    id: &str,
     rrf_score: f64,
     vec_scores: &HashMap<String, f64>,
     vec_ranks: Option<&HashMap<String, usize>>,
@@ -337,8 +337,14 @@ pub fn graph_spreading_activation(
                 if propagated <= 0.0 {
                     continue;
                 }
+                let current_active = activation.get(target).copied().unwrap_or(0.0);
+                if propagated <= current_active {
+                    continue;
+                }
                 let slot = next.entry(target.clone()).or_insert(0.0);
-                *slot = (*slot).max(propagated);
+                if propagated > *slot {
+                    *slot = propagated;
+                }
             }
         }
 
