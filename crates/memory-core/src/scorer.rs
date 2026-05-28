@@ -365,7 +365,10 @@ pub fn graph_spreading_activation_with_seed_weights(
                 if propagated <= 0.0 {
                     continue;
                 }
-                *propagated_by_target.entry(target.clone()).or_insert(0.0) += propagated;
+                propagated_by_target
+                    .entry(target.clone())
+                    .and_modify(|acc| *acc = 1.0 - (1.0 - *acc) * (1.0 - propagated))
+                    .or_insert(propagated);
             }
         }
 

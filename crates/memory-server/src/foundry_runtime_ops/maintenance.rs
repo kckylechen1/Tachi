@@ -1021,6 +1021,12 @@ async fn process_memory_neighborhood_job(
 ) -> Result<usize, String> {
     let mut updated = 0usize;
 
+    let avg_importance = with_foundry_store_read(server, item, |store| {
+        store
+            .avg_importance()
+            .map_err(|e| format!("Failed to compute average importance: {e}"))
+    })?;
+
     for memory_id in &item.memory_ids {
         let Some(entry) = with_foundry_store_read(server, item, |store| {
             store
@@ -1114,18 +1120,20 @@ async fn process_memory_neighborhood_job(
             continue;
         }
 
-        let (avg_importance, contradiction_count, same_topic_count) =
+        let (contradiction_count, same_topic_count) =
             with_foundry_store_read(server, item, |store| {
-                let avg_importance = store
-                    .avg_importance()
-                    .map_err(|e| format!("Failed to compute average importance: {e}"))?;
                 let contradiction_count = store
                     .get_contradiction_count(&entry.id)
                     .map_err(|e| format!("Failed to count contradictions for {}: {e}", entry.id))?;
-                let same_topic_count = store.count_same_topic(&entry.topic).map_err(|e| {
-                    format!("Failed to count same-topic memories for {}: {e}", entry.id)
-                })?;
-                Ok((avg_importance, contradiction_count, same_topic_count))
+                let topic = entry.topic.trim();
+                let same_topic_count = if topic.is_empty() {
+                    0u32
+                } else {
+                    store.count_same_topic(topic).map_err(|e| {
+                        format!("Failed to count same-topic memories for {}: {e}", entry.id)
+                    })?
+                };
+                Ok((contradiction_count, same_topic_count))
             })?;
         let insight = infer_memory_insight(
             &entry,

@@ -229,6 +229,8 @@ fn test_memory_entry(id: &str, topic: &str, importance: f64, access_count: i64) 
         vector: None,
         retention_policy: None,
         domain: None,
+        valid_from: String::new(),
+        valid_until: None,
     }
 }
 

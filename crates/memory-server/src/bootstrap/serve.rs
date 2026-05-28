@@ -423,11 +423,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                     .to_string()
             })?;
         if !target_project.exists() {
-            return Err(format!(
-                "project DB not found: {}",
-                target_project.display()
-            )
-            .into());
+            return Err(format!("project DB not found: {}", target_project.display()).into());
         }
         let server = MemoryServer::new(global_db_path.clone(), Some(target_project.clone()))?;
         let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
@@ -573,11 +569,21 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Watcher { action } = &command {
-        return crate::status_ops::status_cli::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
+        return crate::status_ops::status_cli::run_watcher(
+            action.clone(),
+            &global_db_path,
+            project_db_path.clone(),
+        )
+        .await;
     }
 
     if let Commands::Foundry { action } = &command {
-        return crate::status_ops::status_cli::run_foundry(action.clone(), &app_home, &global_db_path).await;
+        return crate::status_ops::status_cli::run_foundry(
+            action.clone(),
+            &app_home,
+            &global_db_path,
+        )
+        .await;
     }
 
     if let Commands::Repair {

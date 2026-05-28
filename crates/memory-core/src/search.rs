@@ -216,7 +216,8 @@ fn expanded_fts_queries(query: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut queries = vec![query.trim().to_string()];
+    let mut queries = Vec::new();
+    push_unique(&mut queries, query.trim());
     for (idx, token) in tokens.iter().enumerate() {
         for replacement in token_expansion_variants(token) {
             let mut expanded = Vec::with_capacity(tokens.len() + replacement.len());
@@ -275,6 +276,7 @@ fn search_fts_with_expansion(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
+    as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let mut merged = HashMap::new();
     for (idx, fts_query) in expanded_fts_queries(query).into_iter().enumerate() {
@@ -290,6 +292,7 @@ fn search_fts_with_expansion(
             include_archived,
             include_superseded,
             path_prefix,
+            as_of,
         )? {
             let adjusted = score * factor;
             merged

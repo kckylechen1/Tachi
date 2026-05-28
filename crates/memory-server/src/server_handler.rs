@@ -28,17 +28,11 @@ impl ServerHandler for MemoryServer {
             let mut tools: Vec<rmcp::model::Tool> = all_native;
 
             // Add proxy tools from registered MCP servers
-            let proxy_snapshot = lock_or_recover(
-                &self.tool_discovery.proxy_tools,
-                "proxy_tools",
-            )
-            .clone();
+            let proxy_snapshot =
+                lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools").clone();
             let mcp_tool_exposure_mode = self.tool_discovery.mcp_tool_exposure_mode;
-            let skill_tool_defs_snapshot = lock_or_recover(
-                &self.tool_discovery.skill_tool_defs,
-                "skill_tool_defs",
-            )
-            .clone();
+            let skill_tool_defs_snapshot =
+                lock_or_recover(&self.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
 
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
@@ -60,8 +54,7 @@ impl ServerHandler for MemoryServer {
                         continue;
                     }
                 };
-                let exposure_mode =
-                    resolve_mcp_tool_exposure(&cap_def, mcp_tool_exposure_mode);
+                let exposure_mode = resolve_mcp_tool_exposure(&cap_def, mcp_tool_exposure_mode);
                 if exposure_mode == McpToolExposureMode::Gateway {
                     continue;
                 }
@@ -198,7 +191,8 @@ impl ServerHandler for MemoryServer {
                     let exposure = self.tool_discovery.mcp_tool_exposure_mode;
                     if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
-                            "Direct skill tools are disabled for gateway mode; use run_skill".to_string(),
+                            "Direct skill tools are disabled for gateway mode; use run_skill"
+                                .to_string(),
                             None,
                         ))
                     } else {

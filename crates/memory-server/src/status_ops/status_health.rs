@@ -33,7 +33,12 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "SiliconFlow/Qwen background LLM",
         required: true,
         deprecated: false,
-        aliases: &["EXTRACT_API_KEY", "SUMMARY_API_KEY", "DISTILL_API_KEY", "REASONING_API_KEY"],
+        aliases: &[
+            "EXTRACT_API_KEY",
+            "SUMMARY_API_KEY",
+            "DISTILL_API_KEY",
+            "REASONING_API_KEY",
+        ],
     },
     ApiKeyDef {
         key: "MINIMAX_API_KEY",
@@ -448,9 +453,16 @@ fn is_auth_error(reason: &str) -> bool {
         || lower.contains("permission denied")
 }
 
-pub(crate) fn infer_provider_from_failed_job(kind: &str, lane: Option<&str>, reason: &str) -> Option<String> {
+pub(crate) fn infer_provider_from_failed_job(
+    kind: &str,
+    lane: Option<&str>,
+    reason: &str,
+) -> Option<String> {
     let explicit = infer_provider_from_auth_error(reason);
-    if explicit.as_deref().is_some_and(|provider| provider != "UNKNOWN") {
+    if explicit
+        .as_deref()
+        .is_some_and(|provider| provider != "UNKNOWN")
+    {
         return explicit;
     }
     if !is_auth_error(reason) {
@@ -516,7 +528,10 @@ pub(crate) fn apply_inferred_provider_failures(api_keys: &mut [ApiKeyStatus], db
     }
 }
 
-pub(crate) fn agent_readiness_json(app_home: &std::path::Path, snapshot: &crate::status_ops::StatusSnapshot) -> serde_json::Value {
+pub(crate) fn agent_readiness_json(
+    app_home: &std::path::Path,
+    snapshot: &crate::status_ops::StatusSnapshot,
+) -> serde_json::Value {
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let agent_rule_files = vec![
         ("claude", home.join(".claude").join("CLAUDE.md")),
@@ -541,7 +556,10 @@ pub(crate) fn agent_readiness_json(app_home: &std::path::Path, snapshot: &crate:
         ("claude", home.join(".claude").join("mcp.json")),
         ("cursor", home.join(".cursor").join("mcp.json")),
         ("gemini", home.join(".gemini").join("mcp.json")),
-        ("amp", home.join("Library/Application Support/Amp/settings.json")),
+        (
+            "amp",
+            home.join("Library/Application Support/Amp/settings.json"),
+        ),
     ];
     let mcp: Vec<_> = mcp_configs
         .into_iter()

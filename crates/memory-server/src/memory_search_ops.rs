@@ -87,9 +87,11 @@ fn should_reinforce(
 
 fn numbers_in_text(text: &str) -> HashSet<String> {
     static NUMBER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = NUMBER_RE.get_or_init(|| regex::Regex::new(r"\b\d+(?:\.\d+)?%?\b").unwrap());
+    let re = NUMBER_RE.get_or_init(|| {
+        regex::Regex::new(r"\b\d{1,3}(?:,\d{3})*(?:\.\d+)?%?\b|\b\d+(?:\.\d+)?%?\b").unwrap()
+    });
     re.find_iter(text)
-        .map(|m| m.as_str().to_ascii_lowercase())
+        .map(|m| m.as_str().replace(',', "").to_ascii_lowercase())
         .collect()
 }
 

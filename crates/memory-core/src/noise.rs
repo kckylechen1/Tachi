@@ -157,7 +157,10 @@ pub fn should_skip_query(query: &str) -> bool {
     let char_count = trimmed.chars().count();
 
     // Force retrieve if query has memory-related intent (checked FIRST)
-    if force_retrieve_patterns().iter().any(|p| p.is_match(trimmed)) {
+    if force_retrieve_patterns()
+        .iter()
+        .any(|p| p.is_match(trimmed))
+    {
         return false;
     }
 

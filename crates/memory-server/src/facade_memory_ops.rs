@@ -656,15 +656,17 @@ fn slim_kanban(value: Value) -> Value {
 
 fn evidence_rows(value: &Value) -> Vec<&Value> {
     match value {
-        Value::Array(rows) => rows.iter().collect(),
+        Value::Array(rows) => rows.iter().filter(|v| !v.is_null()).collect(),
         Value::Object(map) => map
             .values()
             .flat_map(|value| match value {
-                Value::Array(rows) => rows.iter().collect::<Vec<_>>(),
-                _ => vec![value],
+                Value::Array(rows) => rows.iter().filter(|v| !v.is_null()).collect::<Vec<_>>(),
+                other if !other.is_null() => vec![other],
+                _ => vec![],
             })
             .collect(),
-        other => vec![other],
+        other if !other.is_null() => vec![other],
+        _ => vec![],
     }
 }
 
@@ -681,12 +683,16 @@ fn evidence_score(row: &Value) -> f64 {
 }
 
 fn evidence_ref(row: &Value) -> Value {
+    let relevance = row
+        .get("relevance")
+        .and_then(Value::as_f64)
+        .unwrap_or_else(|| evidence_score(row));
     json!({
         "id": row.get("id"),
         "path": row.get("path"),
         "summary": row.get("summary"),
         "topic": row.get("topic"),
-        "relevance": row.get("relevance"),
+        "relevance": relevance,
     })
 }
 

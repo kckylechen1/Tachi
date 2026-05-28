@@ -29,13 +29,11 @@ pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> 
             .get("summary")
             .and_then(Value::as_str)
             .unwrap_or("(no summary)");
-        let path = row
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("/");
+        let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         out.push(format!(
-            "\n{}. **{topic}** ({db}, relevance {relevance})\n   - {summary}\n   - Path: `{path}`"
-        , idx + 1));
+            "\n{}. **{topic}** ({db}, relevance {relevance})\n   - {summary}\n   - Path: `{path}`",
+            idx + 1
+        ));
     }
     out.join("\n")
 }
@@ -80,9 +78,18 @@ pub(crate) fn format_briefing(
         if wiki_h.is_some() {
             out.push(format!(
                 "- Wiki hygiene: {} orphan(s), {} stale, {} duplicate(s)",
-                wiki_h.and_then(|v| v.get("orphans")).and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.and_then(|v| v.get("stale_nodes")).and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.and_then(|v| v.get("duplicates")).and_then(Value::as_u64).unwrap_or(0),
+                wiki_h
+                    .and_then(|v| v.get("orphans"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                wiki_h
+                    .and_then(|v| v.get("stale_nodes"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                wiki_h
+                    .and_then(|v| v.get("duplicates"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
             ));
         }
     }
@@ -136,7 +143,10 @@ pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &
         }
     }
 
-    let orphans = wiki_counts.get("orphans").and_then(Value::as_u64).unwrap_or(0);
+    let orphans = wiki_counts
+        .get("orphans")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let stale = wiki_counts
         .get("stale_nodes")
         .and_then(Value::as_u64)
@@ -179,10 +189,7 @@ pub(crate) fn format_wiki_search(
                 .get("summary")
                 .and_then(Value::as_str)
                 .unwrap_or("(no summary)");
-            let path = row
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or("/wiki");
+            let path = row.get("path").and_then(Value::as_str).unwrap_or("/wiki");
             let relevance = row
                 .get("relevance")
                 .map(|v| v.to_string())
@@ -196,7 +203,11 @@ pub(crate) fn format_wiki_search(
     out.join("\n")
 }
 
-pub(crate) fn format_search_sections(ctx: &DbContext, query: &str, sections: &[(String, Value)]) -> String {
+pub(crate) fn format_search_sections(
+    ctx: &DbContext,
+    query: &str,
+    sections: &[(String, Value)],
+) -> String {
     let mut out = vec![
         format!("## Tachi search: \"{query}\""),
         format_db_context_markdown(ctx),
@@ -221,18 +232,12 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
     }
     let mut out = Vec::new();
     for (idx, row) in items.iter().take(limit).enumerate() {
-        let topic = row
-            .get("topic")
-            .and_then(Value::as_str)
-            .unwrap_or("entry");
+        let topic = row.get("topic").and_then(Value::as_str).unwrap_or("entry");
         let summary = row
             .get("summary")
             .and_then(Value::as_str)
             .unwrap_or("(no summary)");
-        let path = row
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("/");
+        let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         let id = row.get("id").and_then(Value::as_str);
         let relevance = row
             .get("relevance")
