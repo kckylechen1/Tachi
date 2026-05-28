@@ -162,13 +162,21 @@ fn record_vault_audit(
 
 /// Check if vault is unlocked and return the cached key.
 fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
+    let v = server.vault_read();
+    if let Some(unlock_time) = v.unlock_time {
+        if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
+            return v
+                .key
+                .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string());
+        }
+    }
+    drop(v);
+
     if maybe_auto_lock_vault(server) {
         return Err("Vault auto-locked. Call vault_unlock first.".into());
     }
 
-    server.vault_read()
-        .key
-        .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())
+    Err("Vault is locked. Call vault_unlock first.".to_string())
 }
 
 /// Check if vault is initialized.
@@ -204,10 +212,6 @@ fn record_vault_unlock_failure(server: &MemoryServer) -> Result<String, String> 
         ));
     }
     Err("Wrong password".to_string())
-}
-
-fn reset_vault_unlock_failures(server: &MemoryServer) {
-    server.vault_write().failed_attempts = (0, None);
 }
 
 fn ensure_agent_allowed(entry: &VaultEntry, agent_id: Option<&str>) -> Result<(), String> {
@@ -443,8 +447,8 @@ pub(crate) async fn handle_vault_init(
             let mut v = server.vault_write();
             v.key = Some(key);
             v.unlock_time = Some(Instant::now());
+            v.failed_attempts = (0, None);
         }
-        reset_vault_unlock_failures(server);
 
         serde_json::to_string(&json!({
             "initialized": true,
@@ -491,8 +495,8 @@ pub(crate) async fn handle_vault_unlock(
             let mut v = server.vault_write();
             v.key = Some(key);
             v.unlock_time = Some(Instant::now());
+            v.failed_attempts = (0, None);
         }
-        reset_vault_unlock_failures(server);
 
         serde_json::to_string(&json!({
             "unlocked": true

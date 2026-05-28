@@ -854,21 +854,24 @@ impl MemoryServer {
         let now = Instant::now();
 
         // Read agent profile overrides (if registered)
-        let (effective_rpm, effective_burst) = {
+        let overrides = {
             let profile = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
-            let rl = self.rate_limiter_lock();
-            match profile.as_ref() {
-                Some(p) => (
-                    p.rate_limit_rpm.unwrap_or(rl.rpm),
-                    p.rate_limit_burst.unwrap_or(rl.burst),
-                ),
-                None => (rl.rpm, rl.burst),
-            }
+            profile
+                .as_ref()
+                .map(|p| (p.rate_limit_rpm, p.rate_limit_burst))
+        };
+
+        let mut rl = self.rate_limiter_lock();
+        let (effective_rpm, effective_burst) = match overrides {
+            Some((rpm_override, burst_override)) => (
+                rpm_override.unwrap_or(rl.rpm),
+                burst_override.unwrap_or(rl.burst),
+            ),
+            None => (rl.rpm, rl.burst),
         };
 
         // ── RPM check ────────────────────────────────────────────────────
         if effective_rpm > 0 {
-            let mut rl = self.rate_limiter_lock();
             let windows = &mut rl.windows;
 
             // Evict stale sessions when map exceeds cap
@@ -913,7 +916,6 @@ impl MemoryServer {
         let mut soft_warning: Option<String> = None;
         if effective_burst > 0 {
             let burst_key = format!("{}:{}:{}", session_id, tool_name, args_hash);
-            let mut rl = self.rate_limiter_lock();
             let bursts = &mut rl.bursts;
 
             // Evict stale burst keys when map exceeds cap
