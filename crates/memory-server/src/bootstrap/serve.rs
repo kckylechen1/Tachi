@@ -699,9 +699,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 return Err("keychain password doesn't match vault".into());
             }
 
-            *crate::write_or_recover(&server.vault_key, "vault_key") = Some(key);
-            *crate::write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
-                Some(std::time::Instant::now());
+            {
+                let mut v = server.vault_write();
+                v.key = Some(key);
+                v.unlock_time = Some(std::time::Instant::now());
+            }
             let loaded = server.refresh_llm_provider_secrets_from_vault()?;
             eprintln!("[vault] loaded {loaded} provider key(s) from unlocked vault");
             Ok(true)

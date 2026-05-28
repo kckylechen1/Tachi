@@ -1332,7 +1332,6 @@ name = "memory-core"
 version = "1.2.0"
 dependencies = [
  "chrono",
- "lazy_static",
  "libsimple",
  "regex",
  "rusqlite",

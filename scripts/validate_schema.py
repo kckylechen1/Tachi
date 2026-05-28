@@ -24,10 +24,12 @@ def extract_schema():
     """通过编译时宏提取 schema"""
     print("🔍 检查 IngestEventParams 结构...")
 
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
     # 检查 main.rs 中的定义
-    with open(
-        "/Users/kckylechen/Desktop/Sigil/crates/memory-server/src/main.rs", "r"
-    ) as f:
+    main_rs_path = os.path.join(PROJECT_ROOT, "crates", "memory-server", "src", "main.rs")
+    with open(main_rs_path, "r") as f:
         content = f.read()
 
     # 查找 Message 结构体

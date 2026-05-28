@@ -92,7 +92,7 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
             "keys": ["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "distill": {
-            "provider": "claude-cli-first, extract fallback",
+            "provider": "raw_api default (FOUNDRY_DISTILL_BACKEND), claude_cli optional",
             "keys": ["DISTILL_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "reasoning": {

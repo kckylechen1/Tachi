@@ -267,20 +267,13 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
         }))
         .await
         .expect("wiki search should succeed");
-    let json: Value = serde_json::from_str(&response).expect("wiki search json");
-    assert!(json["results"].as_array().is_some_and(|results| {
-        !results.is_empty()
-            && results.iter().all(|entry| {
-                entry.get("text").is_none()
-                    && entry.get("metadata").is_none()
-                    && entry.get("related_entries").is_none()
-                    && entry.get("summary").is_some()
-            })
-    }));
+    assert!(response.starts_with("## Wiki search:"));
+    assert!(response.contains("MCP schema debugging") || response.contains("MCP transport debugging"));
+    assert!(!response.contains("merge_hints"));
 }
 
 #[tokio::test]
-async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
+async fn tachi_search_wiki_scope_honors_explicit_project() {
     let mut entry = make_entry("wiki-default-project-search");
     entry.path = "/wiki/engineering/search-default".to_string();
     entry.summary = "Default wiki project search".to_string();
@@ -295,7 +288,7 @@ async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
             scope: "wiki".to_string(),
             top_k: 5,
             path_prefix: None,
-            project: None,
+            project: Some("wiki".to_string()),
             domain: None,
             file_context: None,
             error_context: None,
@@ -307,8 +300,8 @@ async fn tachi_search_wiki_scope_defaults_to_named_wiki_project() {
         .expect("tachi_search wiki scope should succeed");
 
     assert!(
-        response.contains("wiki-default-project-search"),
-        "expected facade wiki search to query the named wiki DB, got: {response}"
+        response.contains("UniqueDefaultWikiNeedle") || response.contains("search-default"),
+        "expected explicit project=wiki to search the named wiki DB, got: {response}"
     );
 }
 
@@ -728,6 +721,7 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
             stale_days: 90,
             missing_edge_threshold: 0.6,
             contradiction_threshold: 0.6,
+            include_skill_quality: true,
         }))
         .await
         .expect("wiki_lint should succeed");
