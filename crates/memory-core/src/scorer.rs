@@ -312,20 +312,41 @@ pub fn graph_spreading_activation(
     max_hops: u32,
     decay: f64,
 ) -> HashMap<String, f64> {
-    if seed_ids.is_empty() || max_hops == 0 {
+    let seed_weights = seed_ids
+        .iter()
+        .map(|id| (id.clone(), 1.0))
+        .collect::<HashMap<_, _>>();
+    graph_spreading_activation_with_seed_weights(&seed_weights, edges, max_hops, decay)
+}
+
+pub fn graph_spreading_activation_with_seed_weights(
+    seed_weights: &HashMap<String, f64>,
+    edges: &[crate::types::MemoryEdge],
+    max_hops: u32,
+    decay: f64,
+) -> HashMap<String, f64> {
+    if seed_weights.is_empty() || max_hops == 0 {
         return HashMap::new();
     }
 
-    let seeds: HashSet<&String> = seed_ids.iter().collect();
-    let mut activation: HashMap<String, f64> =
-        seed_ids.iter().map(|id| (id.clone(), 1.0)).collect();
+    let seeds: HashSet<&String> = seed_weights.keys().collect();
+    let mut activation: HashMap<String, f64> = seed_weights
+        .iter()
+        .filter_map(|(id, weight)| {
+            let weight = if weight.is_finite() { *weight } else { 0.0 }.clamp(0.0, 1.0);
+            (weight > 0.0).then(|| (id.clone(), weight))
+        })
+        .collect();
+    if activation.is_empty() {
+        return HashMap::new();
+    }
     let mut frontier = activation.clone();
 
     for _ in 0..max_hops {
         if frontier.is_empty() {
             break;
         }
-        let mut next = HashMap::<String, f64>::new();
+        let mut propagated_by_target = HashMap::<String, f64>::new();
         for edge in edges {
             for (source, target) in [
                 (&edge.source_id, &edge.target_id),
@@ -334,6 +355,9 @@ pub fn graph_spreading_activation(
                 let Some(parent_activation) = frontier.get(source).copied() else {
                     continue;
                 };
+                if seeds.contains(target) {
+                    continue;
+                }
                 let propagated = parent_activation
                     * edge.weight.clamp(0.0, 1.0)
                     * decay
@@ -341,24 +365,24 @@ pub fn graph_spreading_activation(
                 if propagated <= 0.0 {
                     continue;
                 }
-                let current_active = activation.get(target).copied().unwrap_or(0.0);
-                if propagated <= current_active {
-                    continue;
-                }
-                let slot = next.entry(target.clone()).or_insert(0.0);
-                if propagated > *slot {
-                    *slot = propagated;
-                }
+                *propagated_by_target.entry(target.clone()).or_insert(0.0) += propagated;
             }
         }
 
-        frontier = next;
-        for (id, score) in &frontier {
-            if seeds.contains(id) {
+        frontier = HashMap::new();
+        for (id, propagated) in propagated_by_target {
+            let propagated = propagated.clamp(0.0, 1.0);
+            if propagated <= 0.0 {
                 continue;
             }
-            let slot = activation.entry(id.clone()).or_insert(0.0);
-            *slot = (*slot).max(*score);
+            let current = activation.get(&id).copied().unwrap_or(0.0);
+            // Converging graph paths should reinforce each other without letting
+            // dense local clusters exceed a normalized activation ceiling.
+            let combined = 1.0 - (1.0 - current) * (1.0 - propagated);
+            if combined > current {
+                activation.insert(id.clone(), combined);
+                frontier.insert(id, propagated);
+            }
         }
     }
 
@@ -661,5 +685,53 @@ mod tests {
         assert!(activation["b"] > activation["c"]);
         assert!(activation["b"] > activation["d"]);
         assert!(activation["c"] > 0.0);
+    }
+
+    #[test]
+    fn graph_spreading_activation_uses_weighted_seeds_and_converging_paths() {
+        use crate::types::MemoryEdge;
+
+        let mut seed_weights = HashMap::new();
+        seed_weights.insert("strong".to_string(), 1.0);
+        seed_weights.insert("weak".to_string(), 0.25);
+        let edges = vec![
+            MemoryEdge {
+                source_id: "strong".to_string(),
+                target_id: "shared".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "weak".to_string(),
+                target_id: "shared".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "weak".to_string(),
+                target_id: "weak-only".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        ];
+
+        let activation =
+            graph_spreading_activation_with_seed_weights(&seed_weights, &edges, 1, 0.5);
+        assert!(!activation.contains_key("strong"));
+        assert!(!activation.contains_key("weak"));
+        assert!(activation["shared"] > activation["weak-only"]);
+        assert!(activation["shared"] > 0.45);
     }
 }
