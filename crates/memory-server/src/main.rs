@@ -184,11 +184,6 @@ struct RateLimiter {
     burst: u64,
 }
 
-struct ToolRuntime {
-    cache: HashMap<String, CachedResult>,
-    dead_letters: VecDeque<DeadLetter>,
-}
-
 // ─── Server State ─────────────────────────────────────────────────────────────
 
 /// TTL for cached tool results (Phantom Tools)
@@ -316,7 +311,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_shell",
 ];
 
-struct CachedResult {
+pub(crate) struct CachedResult {
     result: rmcp::model::CallToolResult,
     created_at: Instant,
 }
@@ -328,6 +323,16 @@ impl Clone for CachedResult {
             created_at: self.created_at,
         }
     }
+}
+
+pub(crate) struct ToolDiscovery {
+    pub(crate) proxy_tools: StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>,
+    pub(crate) skill_tools: StdMutex<HashMap<String, String>>,
+    pub(crate) skill_tool_defs: StdMutex<HashMap<String, rmcp::model::Tool>>,
+    pub(crate) tool_cache: StdMutex<HashMap<String, CachedResult>>,
+    pub(crate) dead_letters: StdMutex<VecDeque<DeadLetter>>,
+    pub(crate) mcp_discovery_timeout: Duration,
+    pub(crate) mcp_tool_exposure_mode: McpToolExposureMode,
 }
 
 #[derive(Clone)]
@@ -399,17 +404,12 @@ struct MemoryServer {
     pub(crate) claude_pool: Arc<claude_pool::ClaudePool>,
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
-    proxy_tools: Arc<StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>>,
-    skill_tools: Arc<StdMutex<HashMap<String, String>>>,
-    skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
+    tool_discovery: Arc<ToolDiscovery>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
-    // ─── Tool Runtime (cache + DLQ) ──────────────────────────────────────────
-    tool_runtime: Arc<StdMutex<ToolRuntime>>,
+    // ─── Phantom Tools (result caching — lock-free counters) ──────────────
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    mcp_discovery_timeout: Duration,
-    mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrichment: EnrichmentRuntime,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
@@ -542,19 +542,19 @@ impl MemoryServer {
             llm: llm.clone(),
             claude_pool,
             pipeline_enabled,
-            proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
+            tool_discovery: Arc::new(ToolDiscovery {
+                proxy_tools: StdMutex::new(HashMap::new()),
+                skill_tools: StdMutex::new(HashMap::new()),
+                skill_tool_defs: StdMutex::new(HashMap::new()),
+                tool_cache: StdMutex::new(HashMap::new()),
+                dead_letters: StdMutex::new(VecDeque::new()),
+                mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
+                mcp_tool_exposure_mode,
+            }),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
-            tool_runtime: Arc::new(StdMutex::new(ToolRuntime {
-                cache: HashMap::new(),
-                dead_letters: VecDeque::new(),
-            })),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
-            mcp_tool_exposure_mode,
             enrichment: EnrichmentRuntime { enrich_tx },
             foundry: FoundryRuntime { foundry_tx, foundry_stats },
             vault: Arc::new(StdRwLock::new(VaultState {
@@ -646,6 +646,16 @@ impl MemoryServer {
         Ok(server)
     }
 
+    pub(crate) fn tool_cache_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, CachedResult>> {
+        lock_or_recover(&self.tool_discovery.tool_cache, "tool_cache")
+    }
+
+    pub(crate) fn dead_letters_lock(&self) -> std::sync::MutexGuard<'_, VecDeque<DeadLetter>> {
+        lock_or_recover(&self.tool_discovery.dead_letters, "dead_letters")
+    }
+
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
         self.llm.clear_provider_secrets();
         let secrets = load_unlocked_api_key_secrets(self)?;
@@ -687,10 +697,6 @@ impl MemoryServer {
 
     pub(crate) fn rate_limiter_lock(&self) -> std::sync::MutexGuard<'_, RateLimiter> {
         self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub(crate) fn tool_runtime_lock(&self) -> std::sync::MutexGuard<'_, ToolRuntime> {
-        self.tool_runtime.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Path to this server's global memory DB (canonicalized at boot).

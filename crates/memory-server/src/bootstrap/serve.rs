@@ -917,7 +917,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         Ok(tools) => {
                             let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
                             let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-                            lock_or_recover(&server.proxy_tools, "proxy_tools")
+                            lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools")
                                 .insert(server_name.to_string(), filtered_tools);
                         }
                         Err(e) => {

@@ -211,10 +211,10 @@ fn enqueue_dead_letter(
         max_retries: 3,
         status: "pending".to_string(),
     };
-    let mut rt = server.tool_runtime_lock();
-    rt.dead_letters.push_back(dl);
-    while rt.dead_letters.len() > DLQ_MAX_ENTRIES {
-        rt.dead_letters.pop_front();
+    let mut dlq = server.dead_letters_lock();
+    dlq.push_back(dl);
+    while dlq.len() > DLQ_MAX_ENTRIES {
+        dlq.pop_front();
     }
 }
 
@@ -1197,20 +1197,20 @@ pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         }
     }
 
-    let cache_size = server.tool_runtime_lock().cache.len();
+    let cache_size = server.tool_cache_lock().len();
+
+    let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
+        let dlq = server.dead_letters_lock();
+        let total = dlq.len();
+        let pending = dlq.iter().filter(|d| d.status == "pending").count();
+        let resolved = dlq.iter().filter(|d| d.status == "resolved").count();
+        let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
+        (total, pending, resolved, abandoned)
+    };
     let hits = server.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
     let misses = server
         .cache_misses
         .load(std::sync::atomic::Ordering::Relaxed);
-
-    let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
-        let rt = server.tool_runtime_lock();
-        let total = rt.dead_letters.len();
-        let pending = rt.dead_letters.iter().filter(|d| d.status == "pending").count();
-        let resolved = rt.dead_letters.iter().filter(|d| d.status == "resolved").count();
-        let abandoned = rt.dead_letters.iter().filter(|d| d.status == "abandoned").count();
-        (total, pending, resolved, abandoned)
-    };
     let foundry = json!({
         "queued": server.foundry_lock().foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
         "running": server.foundry_lock().foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),

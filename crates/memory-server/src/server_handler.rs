@@ -28,15 +28,18 @@ impl ServerHandler for MemoryServer {
             let mut tools: Vec<rmcp::model::Tool> = all_native;
 
             // Add proxy tools from registered MCP servers
-            let proxy_snapshot = match self.proxy_tools.lock() {
-                Ok(proxy) => proxy.clone(),
-                Err(poisoned) => {
-                    eprintln!(
-                        "[list_tools] WARNING: proxy_tools mutex poisoned; recovering with inner state"
-                    );
-                    poisoned.into_inner().clone()
-                }
-            };
+            let proxy_snapshot = lock_or_recover(
+                &self.tool_discovery.proxy_tools,
+                "proxy_tools",
+            )
+            .clone();
+            let mcp_tool_exposure_mode = self.tool_discovery.mcp_tool_exposure_mode;
+            let skill_tool_defs_snapshot = lock_or_recover(
+                &self.tool_discovery.skill_tool_defs,
+                "skill_tool_defs",
+            )
+            .clone();
+
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
                 let cap = match self.get_capability(&cap_id) {
@@ -58,7 +61,7 @@ impl ServerHandler for MemoryServer {
                     }
                 };
                 let exposure_mode =
-                    resolve_mcp_tool_exposure(&cap_def, self.mcp_tool_exposure_mode);
+                    resolve_mcp_tool_exposure(&cap_def, mcp_tool_exposure_mode);
                 if exposure_mode == McpToolExposureMode::Gateway {
                     continue;
                 }
@@ -74,16 +77,8 @@ impl ServerHandler for MemoryServer {
                 }
             }
             // Add skill tools
-            if self.mcp_tool_exposure_mode != McpToolExposureMode::Gateway {
-                match self.skill_tool_defs.lock() {
-                    Ok(skill_defs) => tools.extend(skill_defs.values().cloned()),
-                    Err(poisoned) => {
-                        eprintln!(
-                            "[list_tools] WARNING: skill_tool_defs mutex poisoned; recovering with inner state"
-                        );
-                        tools.extend(poisoned.into_inner().values().cloned());
-                    }
-                }
+            if mcp_tool_exposure_mode != McpToolExposureMode::Gateway {
+                tools.extend(skill_tool_defs_snapshot.values().cloned());
             }
 
             let env_patterns = current_exposed_tool_patterns();
@@ -135,7 +130,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
-                self.tool_runtime_lock().cache.clear();
+                self.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
@@ -157,20 +152,25 @@ impl ServerHandler for MemoryServer {
                 let key = stable_hash(&format!("{}{}", name, args_str));
 
                 // Check cache
-                {
-                    let rt = self.tool_runtime_lock();
-                    if let Some(cached) = rt.cache.get(&key) {
+                let cached_hit = {
+                    let cache = self.tool_cache_lock();
+                    if let Some(cached) = cache.get(&key) {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
-                            let hit = cached.result.clone();
-                            drop(rt);
-                            self.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let mut hit = hit;
-                            if let Some(warn) = stuck_warning.clone() {
-                                hit.content.push(rmcp::model::Content::text(warn));
-                            }
-                            return Ok(hit);
+                            Some(cached.result.clone())
+                        } else {
+                            None
                         }
+                    } else {
+                        None
                     }
+                };
+                if let Some(mut hit) = cached_hit {
+                    self.cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(warn) = stuck_warning.clone() {
+                        hit.content.push(rmcp::model::Content::text(warn));
+                    }
+                    return Ok(hit);
                 }
                 self.cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -192,18 +192,11 @@ impl ServerHandler for MemoryServer {
                     self.tool_router.call(context).await
                 }
                 // 2. Skill tools (tachi_skill_*)
-                else if self
-                    .skill_tools
-                    .lock()
-                    .unwrap_or_else(|e| {
-                        eprintln!(
-                            "[call_tool] WARNING: skill_tools mutex poisoned; recovering with inner state"
-                        );
-                        e.into_inner()
-                    })
+                else if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
                     .contains_key(name)
                 {
-                    if self.mcp_tool_exposure_mode == McpToolExposureMode::Gateway {
+                    let exposure = self.tool_discovery.mcp_tool_exposure_mode;
+                    if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             "Direct skill tools are disabled for gateway mode; use run_skill".to_string(),
                             None,
@@ -258,10 +251,11 @@ impl ServerHandler for MemoryServer {
 
                     let dl_id = dl.id.clone();
                     {
-                        let mut rt = self.tool_runtime_lock();
-                        rt.dead_letters.push_back(dl);
-                        while rt.dead_letters.len() > DLQ_MAX_ENTRIES {
-                            rt.dead_letters.pop_front();
+                        let mut dlq = self.dead_letters_lock();
+                        dlq.push_back(dl);
+                        // Enforce ring buffer max
+                        while dlq.len() > DLQ_MAX_ENTRIES {
+                            dlq.pop_front();
                         }
                     }
 
@@ -276,8 +270,8 @@ impl ServerHandler for MemoryServer {
                             .await;
 
                         {
-                            let mut rt = self.tool_runtime_lock();
-                            if let Some(dl) = rt.dead_letters.iter_mut().find(|dl| dl.id == dl_id) {
+                            let mut dlq = self.dead_letters_lock();
+                            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == dl_id) {
                                 dl.retry_count = 1;
                                 if retry_result.is_ok() {
                                     dl.status = "resolved".to_string();
@@ -292,17 +286,15 @@ impl ServerHandler for MemoryServer {
 
                         if retry_result.is_ok() {
                             // Cache the retry result if applicable
-                            if let Some(key) = &cache_key {
-                                if let Ok(ref res) = retry_result {
-                                    let mut rt = self.tool_runtime_lock();
-                                    rt.cache.insert(
-                                        key.clone(),
-                                        CachedResult {
-                                            result: res.clone(),
-                                            created_at: Instant::now(),
-                                        },
-                                    );
-                                }
+                            if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
+                                let mut cache = self.tool_cache_lock();
+                                cache.insert(
+                                    key.clone(),
+                                    CachedResult {
+                                        result: res.clone(),
+                                        created_at: Instant::now(),
+                                    },
+                                );
                             }
                             return match (retry_result, stuck_warning.clone()) {
                                 (Ok(mut tool_result), Some(warn)) => {
@@ -318,13 +310,15 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
-                let mut rt = self.tool_runtime_lock();
-                if rt.cache.len() >= TOOL_CACHE_MAX_ENTRIES {
-                    rt.cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
-                    if rt.cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                let mut cache = self.tool_cache_lock();
+                // Evict expired entries when cache exceeds cap
+                if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                    cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
+                    // If still over cap after TTL eviction, remove oldest entries
+                    if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
                         let mut oldest_key = None;
                         let mut oldest_age = Duration::ZERO;
-                        for (k, v) in rt.cache.iter() {
+                        for (k, v) in cache.iter() {
                             let age = v.created_at.elapsed();
                             if age > oldest_age {
                                 oldest_age = age;
@@ -332,11 +326,11 @@ impl ServerHandler for MemoryServer {
                             }
                         }
                         if let Some(k) = oldest_key {
-                            rt.cache.remove(&k);
+                            cache.remove(&k);
                         }
                     }
                 }
-                rt.cache.insert(
+                cache.insert(
                     key.clone(),
                     CachedResult {
                         result: res.clone(),
