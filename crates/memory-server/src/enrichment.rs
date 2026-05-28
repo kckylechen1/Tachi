@@ -210,6 +210,22 @@ impl MemoryServer {
                 match res {
                     Ok(true) => {
                         if new_vec.is_some() {
+                            if let Err(err) =
+                                crate::memory_search_ops::apply_auto_contradiction_detection(
+                                    self,
+                                    &item.id,
+                                    item.target_db,
+                                    item.named_project.as_deref(),
+                                    item.db_path.as_ref(),
+                                )
+                                .await
+                            {
+                                eprintln!(
+                                    "[enrichment-batcher] auto contradiction detection failed for {}: {err}",
+                                    item.id
+                                );
+                            }
+
                             // PR-4: always-on save_memory enrichment.
                             //
                             // Previously the foundry maintenance enqueue only
