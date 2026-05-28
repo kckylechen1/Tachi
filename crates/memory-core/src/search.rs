@@ -13,9 +13,13 @@ use crate::{
         search_fts, search_vec,
     },
     error::MemoryError,
-    scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
+    scorer::{cosine_similarity, hybrid_score, symbolic_score, tokenize, HybridWeights},
     types::{MemoryEntry, SearchResult},
 };
+
+const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
+const MAX_EXPANDED_FTS_QUERIES: usize = 6;
+const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -113,6 +117,168 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     } else {
         HybridWeights::default()
     }
+}
+
+fn push_unique(out: &mut Vec<String>, term: &str) {
+    let term = term.trim().to_ascii_lowercase();
+    if term.is_empty() || out.iter().any(|existing| existing == &term) {
+        return;
+    }
+    out.push(term);
+}
+
+fn token_expansion_variants(token: &str) -> &'static [&'static [&'static str]] {
+    match token {
+        "mcp" => &[&["model", "context", "protocol"]],
+        "llm" => &[&["language", "model"]],
+        "rag" => &[&["retrieval", "augmented", "generation"]],
+        "fts" => &[&["full", "text", "search"]],
+        "rrf" => &[&["reciprocal", "rank", "fusion"]],
+        "mmr" => &[&["maximal", "marginal", "relevance"], &["diversity"]],
+        "ci" => &[&["workflow"], &["checks"], &["github", "actions"]],
+        "pr" => &[&["pull", "request"]],
+        "db" => &[&["database"], &["sqlite"]],
+        "auth" => &[&["authentication"], &["authorization"]],
+        "api" => &[&["endpoint"], &["interface"]],
+        "cli" => &[&["command"], &["terminal"]],
+        "repo" => &[&["repository"]],
+        "vec" | "vector" => &[&["embedding"], &["semantic"]],
+        "embedding" | "embeddings" => &[&["vector"], &["semantic"]],
+        "semantic" => &[&["embedding"], &["vector"]],
+        "recall" => &[&["retrieval"], &["search"]],
+        "retrieval" => &[&["recall"], &["search"]],
+        "bug" => &[&["error"], &["failure"], &["crash"]],
+        "error" => &[&["bug"], &["failure"]],
+        "failure" => &[&["error"], &["bug"]],
+        "crash" => &[&["failure"], &["panic"]],
+        "panic" => &[&["crash"], &["failure"]],
+        _ => &[],
+    }
+}
+
+fn phrase_expansion_variants(tokens: &[String]) -> Vec<String> {
+    const PHRASES: &[(&[&str], &[&str])] = &[
+        (&["model", "context", "protocol"], &["mcp"]),
+        (&["language", "model"], &["llm"]),
+        (&["retrieval", "augmented", "generation"], &["rag"]),
+        (&["full", "text", "search"], &["fts"]),
+        (&["reciprocal", "rank", "fusion"], &["rrf"]),
+        (&["pull", "request"], &["pr"]),
+        (&["github", "actions"], &["ci"]),
+    ];
+
+    let mut variants = Vec::new();
+    for (phrase, replacement) in PHRASES {
+        if phrase.len() > tokens.len() {
+            continue;
+        }
+        for start in 0..=tokens.len() - phrase.len() {
+            if phrase
+                .iter()
+                .enumerate()
+                .all(|(idx, part)| tokens[start + idx] == *part)
+            {
+                let mut expanded =
+                    Vec::with_capacity(tokens.len() - phrase.len() + replacement.len());
+                expanded.extend(tokens[..start].iter().cloned());
+                expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+                expanded.extend(tokens[start + phrase.len()..].iter().cloned());
+                variants.push(expanded.join(" "));
+            }
+        }
+    }
+    variants
+}
+
+fn expanded_fts_queries(query: &str) -> Vec<String> {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queries = vec![query.trim().to_string()];
+    for (idx, token) in tokens.iter().enumerate() {
+        for replacement in token_expansion_variants(token) {
+            let mut expanded = Vec::with_capacity(tokens.len() + replacement.len());
+            expanded.extend(tokens[..idx].iter().cloned());
+            expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+            expanded.extend(tokens[idx + 1..].iter().cloned());
+            push_unique(&mut queries, &expanded.join(" "));
+            if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+                return queries;
+            }
+        }
+    }
+
+    for variant in phrase_expansion_variants(&tokens) {
+        push_unique(&mut queries, &variant);
+        if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+            break;
+        }
+    }
+
+    queries
+}
+
+fn symbolic_query_with_expansion(query: &str) -> String {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return query.to_string();
+    }
+
+    let mut terms = tokens.clone();
+    for token in &tokens {
+        for replacement in token_expansion_variants(token) {
+            for part in *replacement {
+                push_unique(&mut terms, part);
+                if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                    return terms.join(" ");
+                }
+            }
+        }
+    }
+    for variant in phrase_expansion_variants(&tokens) {
+        for part in tokenize(&variant) {
+            push_unique(&mut terms, &part);
+            if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                return terms.join(" ");
+            }
+        }
+    }
+    terms.join(" ")
+}
+
+fn search_fts_with_expansion(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let mut merged = HashMap::new();
+    for (idx, fts_query) in expanded_fts_queries(query).into_iter().enumerate() {
+        let factor = if idx == 0 {
+            1.0
+        } else {
+            EXPANDED_FTS_SCORE_FACTOR
+        };
+        for (id, score) in search_fts(
+            conn,
+            &fts_query,
+            limit,
+            include_archived,
+            include_superseded,
+            path_prefix,
+        )? {
+            let adjusted = score * factor;
+            merged
+                .entry(id)
+                .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
+                .or_insert(adjusted);
+        }
+    }
+    Ok(merged)
 }
 
 /// MMR-inspired diversity filter: greedily select results that are both
@@ -279,7 +445,7 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(
+    let fts_scores = search_fts_with_expansion(
         conn,
         query,
         n,
@@ -305,10 +471,11 @@ pub fn hybrid_search(
     let entries_map = fetch_by_ids(conn, &candidate_ids, opts.include_archived)?;
 
     // ── Channel 3: Symbolic ───────────────────────────────────────────────────
+    let symbolic_query = symbolic_query_with_expansion(query);
     let symbolic_scores: HashMap<String, f64> = entries_map
         .iter()
         .map(|(id, entry)| {
-            let score = symbolic_score(query, &entry.text, &entry.keywords);
+            let score = symbolic_score(&symbolic_query, &entry.text, &entry.keywords);
             (id.clone(), score)
         })
         .collect();
@@ -594,6 +761,69 @@ mod tests {
         assert!(!results.is_empty());
         assert_eq!(results[0].entry.id, "a");
         assert!(results[0].score.fts > 0.0);
+    }
+
+    #[test]
+    fn hybrid_expands_acronym_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "expanded"));
+    }
+
+    #[test]
+    fn hybrid_expands_phrase_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "acronym",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "model context protocol handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "acronym"));
+    }
+
+    #[test]
+    fn hybrid_keeps_exact_fts_match_above_expanded_match() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "exact",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "exact");
     }
 
     #[test]
