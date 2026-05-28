@@ -45,11 +45,13 @@ impl MemoryServer {
             eprintln!("[foundry] failed to persist job {}: {err}", item.job.id);
         }
 
-        self.foundry_stats
+        self.foundry_lock()
+            .foundry_stats
             .queued
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.foundry_tx.try_send(item).is_err() {
-            self.foundry_stats
+        if self.foundry_lock().foundry_tx.try_send(item).is_err() {
+            self.foundry_lock()
+                .foundry_stats
                 .queued
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             return Err("foundry maintenance worker unavailable".to_string());

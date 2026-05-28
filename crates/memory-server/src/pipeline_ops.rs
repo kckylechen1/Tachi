@@ -610,7 +610,7 @@ async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+        let _ = server.enrichment_lock().enrich_tx.try_send(super::EnrichmentItem {
             id: entry_id.clone(),
             text: entry.text.clone(),
             summary: entry.summary.clone(),
@@ -1115,7 +1115,7 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+            let _ = server.enrichment_lock().enrich_tx.try_send(super::EnrichmentItem {
                 id: entry.id.clone(),
                 text: entry.text.clone(),
                 summary: entry.summary.clone(),
@@ -1212,11 +1212,11 @@ pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         (total, pending, resolved, abandoned)
     };
     let foundry = json!({
-        "queued": server.foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
-        "running": server.foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),
-        "completed": server.foundry_stats.completed.load(std::sync::atomic::Ordering::Relaxed),
-        "failed": server.foundry_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
-        "skipped": server.foundry_stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
+        "queued": server.foundry_lock().foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
+        "running": server.foundry_lock().foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),
+        "completed": server.foundry_lock().foundry_stats.completed.load(std::sync::atomic::Ordering::Relaxed),
+        "failed": server.foundry_lock().foundry_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+        "skipped": server.foundry_lock().foundry_stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
     });
 
     serde_json::to_string(&json!({
