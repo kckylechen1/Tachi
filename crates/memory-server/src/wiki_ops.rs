@@ -1141,21 +1141,20 @@ pub(crate) async fn handle_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     if params.query.trim().is_empty() {
-        return serde_json::to_string(&json!({
-            "status": "skipped",
-            "reason": "empty_query",
-            "count": 0,
-            "results": [],
-        }))
-        .map_err(|e| format!("serialize wiki_search: {e}"));
+        return Ok("## Wiki search\n\n_Skipped: empty query._".to_string());
     }
 
     let path_prefix = params
         .category
         .as_deref()
         .map(resolve_wiki_category)
+        .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let project_name = params.project.unwrap_or_else(|| "wiki".to_string());
+    let ctx = crate::db_context::describe_db_context(
+        server,
+        params.project.as_deref(),
+        params.domain.as_deref(),
+    );
 
     let rows = search_memory_rows(
         server,
@@ -1164,7 +1163,7 @@ pub(crate) async fn handle_wiki_search(
             query_vec: None,
             top_k: params.top_k.max(1).min(50),
             path_prefix,
-            include_archived: false,
+            include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
@@ -1178,9 +1177,9 @@ pub(crate) async fn handle_wiki_search(
                     use_rrf: true,
                 })
             }),
-            agent_role: None,
-            project: Some(project_name.clone()),
-            domain: None,
+            agent_role: params.agent_role,
+            project: params.project,
+            domain: params.domain,
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
@@ -1194,12 +1193,12 @@ pub(crate) async fn handle_wiki_search(
         &format!("{} | {} result(s)", params.query, rows.len()),
     );
 
-    serde_json::to_string(&json!({
-        "status": "completed",
-        "count": rows.len(),
-        "results": rows,
-    }))
-    .map_err(|e| format!("serialize wiki_search: {e}"))
+    Ok(crate::agent_markdown::format_wiki_search(
+        &ctx,
+        &params.query,
+        rows.len(),
+        &serde_json::Value::Array(rows),
+    ))
 }
 
 pub(crate) fn handle_wiki_browse(
@@ -1312,6 +1311,34 @@ pub(crate) fn handle_wiki_browse(
 }
 
 // ─── Wiki Lint ──────────────────────────────────────────────────────────────
+
+/// Count-only wiki hygiene for agent alerts/briefing — never runs skill-quality guards.
+pub(crate) async fn wiki_hygiene_counts(server: &MemoryServer) -> Result<serde_json::Value, String> {
+    let lint = handle_wiki_lint(
+        server,
+        WikiLintParams {
+            path_prefix: Some("/wiki".to_string()),
+            checks: vec![
+                "orphans".to_string(),
+                "stale".to_string(),
+                "duplicates".to_string(),
+            ],
+            limit: 25,
+            stale_days: 90,
+            missing_edge_threshold: 0.72,
+            contradiction_threshold: 0.75,
+            include_skill_quality: false,
+        },
+    )
+    .await?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&lint).unwrap_or_else(|_| json!({}));
+    Ok(json!({
+        "orphans": parsed.get("orphans").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
+        "stale_nodes": parsed.get("stale_nodes").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
+        "duplicates": parsed.get("duplicates").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
+    }))
+}
 
 pub(crate) async fn handle_wiki_lint(
     server: &MemoryServer,
@@ -1464,7 +1491,11 @@ pub(crate) async fn handle_wiki_lint(
         }
     }
 
-    let skill_quality = refresh_skill_quality_guards(server)?;
+    let skill_quality = if params.include_skill_quality {
+        refresh_skill_quality_guards(server)?
+    } else {
+        json!({ "skipped": true })
+    };
     append_wiki_log(
         server,
         "lint",

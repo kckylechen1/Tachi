@@ -293,7 +293,7 @@ async fn run_truth_maintenance_for_target(
             rusqlite::params![entry.id],
         )
         .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
-        let _ = server.enrich_tx.try_send(EnrichmentItem {
+        let _ = server.enrichment_lock().enrich_tx.try_send(EnrichmentItem {
             id: entry.id.clone(),
             text: entry.text.clone(),
             summary: entry.summary.clone(),

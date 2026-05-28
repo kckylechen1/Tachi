@@ -35,7 +35,7 @@ def classify(path: str, text: str) -> str:
         return "openclaw"
     if p.startswith("/tachi"):
         return "tachi"
-    if p.startswith("/project/sigil") or p.startswith("/Users/kckylechen/Desktop/Sigil"):
+    if p.startswith("/project/sigil"):
         return "sigil"
     if (
         p.startswith("/project/quant")

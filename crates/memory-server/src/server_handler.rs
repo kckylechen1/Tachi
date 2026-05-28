@@ -14,7 +14,7 @@ fn tool_not_found_error() -> rmcp::ErrorData {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') to recall wiki lessons, prior memories, and useful skills. When stuck after repeated attempts, search wiki with tachi_wiki(action='search') and inspect tachi_status. Store durable debugging lessons with tachi_wiki(action='write').")
+            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') or tachi_memory(action='briefing'). Memory/wiki tools return Markdown recall data only — pass `project` to target ~/.tachi/projects/<name>/memory.db explicitly. System diagnostics: tachi_status or tachi_doctor. Store durable lessons with tachi_wiki(action='write').")
     }
 
     fn list_tools(
@@ -28,11 +28,17 @@ impl ServerHandler for MemoryServer {
             let mut tools: Vec<rmcp::model::Tool> = all_native;
 
             // Add proxy tools from registered MCP servers
-            let td = self.tool_discovery_lock();
-            let proxy_snapshot = td.proxy_tools.clone();
-            let mcp_tool_exposure_mode = td.mcp_tool_exposure_mode;
-            let skill_tool_defs_snapshot = td.skill_tool_defs.clone();
-            drop(td);
+            let proxy_snapshot = lock_or_recover(
+                &self.tool_discovery.proxy_tools,
+                "proxy_tools",
+            )
+            .clone();
+            let mcp_tool_exposure_mode = self.tool_discovery.mcp_tool_exposure_mode;
+            let skill_tool_defs_snapshot = lock_or_recover(
+                &self.tool_discovery.skill_tool_defs,
+                "skill_tool_defs",
+            )
+            .clone();
 
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
@@ -124,7 +130,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
-                self.tool_discovery_lock().tool_cache.clear();
+                self.tool_cache_lock().clear();
             }
 
             // ─── Phantom Tools: check cache for read-only tools ──────────
@@ -147,8 +153,8 @@ impl ServerHandler for MemoryServer {
 
                 // Check cache
                 let cached_hit = {
-                    let td = self.tool_discovery_lock();
-                    if let Some(cached) = td.tool_cache.get(&key) {
+                    let cache = self.tool_cache_lock();
+                    if let Some(cached) = cache.get(&key) {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
                             Some(cached.result.clone())
                         } else {
@@ -186,12 +192,10 @@ impl ServerHandler for MemoryServer {
                     self.tool_router.call(context).await
                 }
                 // 2. Skill tools (tachi_skill_*)
-                else if self
-                    .tool_discovery_lock()
-                    .skill_tools
+                else if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
                     .contains_key(name)
                 {
-                    let exposure = self.tool_discovery_lock().mcp_tool_exposure_mode;
+                    let exposure = self.tool_discovery.mcp_tool_exposure_mode;
                     if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             "Direct skill tools are disabled for gateway mode; use run_skill".to_string(),
@@ -247,8 +251,7 @@ impl ServerHandler for MemoryServer {
 
                     let dl_id = dl.id.clone();
                     {
-                        let mut td = self.tool_discovery_lock();
-                        let dlq = &mut td.dead_letters;
+                        let mut dlq = self.dead_letters_lock();
                         dlq.push_back(dl);
                         // Enforce ring buffer max
                         while dlq.len() > DLQ_MAX_ENTRIES {
@@ -267,8 +270,8 @@ impl ServerHandler for MemoryServer {
                             .await;
 
                         {
-                            let mut td = self.tool_discovery_lock();
-                            if let Some(dl) = td.dead_letters.iter_mut().find(|dl| dl.id == dl_id) {
+                            let mut dlq = self.dead_letters_lock();
+                            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == dl_id) {
                                 dl.retry_count = 1;
                                 if retry_result.is_ok() {
                                     dl.status = "resolved".to_string();
@@ -284,8 +287,8 @@ impl ServerHandler for MemoryServer {
                         if retry_result.is_ok() {
                             // Cache the retry result if applicable
                             if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
-                                let mut td = self.tool_discovery_lock();
-                                td.tool_cache.insert(
+                                let mut cache = self.tool_cache_lock();
+                                cache.insert(
                                     key.clone(),
                                     CachedResult {
                                         result: res.clone(),
@@ -307,8 +310,7 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
-                let mut td = self.tool_discovery_lock();
-                let cache = &mut td.tool_cache;
+                let mut cache = self.tool_cache_lock();
                 // Evict expired entries when cache exceeds cap
                 if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
                     cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);

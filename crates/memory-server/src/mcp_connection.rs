@@ -1023,11 +1023,12 @@ impl MemoryServer {
     }
 
     pub(super) fn clear_proxy_tools(&self, server_name: &str) {
-        self.tool_discovery_lock().proxy_tools.remove(server_name);
+        lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools").remove(server_name);
     }
 
     pub(super) fn cache_proxy_tools(&self, server_name: &str, tools: Vec<rmcp::model::Tool>) {
-        self.tool_discovery_lock().proxy_tools.insert(server_name.to_string(), tools);
+        lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools")
+            .insert(server_name.to_string(), tools);
     }
 
     pub(super) async fn connect_mcp_service(
@@ -1465,7 +1466,7 @@ impl MemoryServer {
                 .await;
         }
 
-        let discovery_timeout = self.tool_discovery_lock().mcp_discovery_timeout;
+        let discovery_timeout = self.tool_discovery.mcp_discovery_timeout;
         let client = self
             .connect_mcp_service(capability_id, None, def, discovery_timeout)
             .await?;

@@ -482,7 +482,7 @@ pub(crate) async fn handle_hub_disconnect(
 
     // Also clear discovered tools cache
     {
-        server.tool_discovery_lock().proxy_tools.remove(server_name);
+        lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").remove(server_name);
     }
 
     serde_json::to_string(&json!({
