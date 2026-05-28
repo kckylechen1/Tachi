@@ -160,7 +160,11 @@ async fn handle_memory_briefing(
         .unwrap_or_else(|| "current task recent decisions blockers next steps".to_string());
     let top_k = params.top_k.max(1).min(12);
     let include_wiki = !matches!(
-        params.scope.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        params
+            .scope
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("memory")
     );
 
@@ -398,11 +402,7 @@ async fn handle_memory_alerts(
     );
     let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
     let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    Ok(agent_markdown::format_alerts(
-        &ctx,
-        &warnings,
-        &wiki_counts,
-    ))
+    Ok(agent_markdown::format_alerts(&ctx, &warnings, &wiki_counts))
 }
 
 async fn handle_memory_ask(
@@ -428,6 +428,7 @@ async fn handle_memory_ask(
         enable_rerank: true,
     };
     let evidence = parse_evidence_array(handle_tachi_search(server, search_params).await?);
+    let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
         Some(synthesize_answer(server, &query, &evidence, params.model.as_deref()).await)
     } else {
@@ -438,6 +439,7 @@ async fn handle_memory_ask(
         "mode": "ask",
         "query": query,
         "answer_policy": "Use the evidence array below; if evidence is insufficient, say so instead of inventing details.",
+        "thinking": thinking,
         "synthesis": synthesis,
         "evidence": evidence,
     }))
@@ -467,6 +469,11 @@ async fn handle_memory_consolidate(
         enable_rerank: params.enable_rerank,
     };
     let candidates = parse_json_or_empty(handle_tachi_search(server, search_params).await?);
+    let thinking = build_thinking_scaffold(
+        "consolidate",
+        "Identify duplicate, stale, superseded, or merge-worthy memory consolidation candidates.",
+        &candidates,
+    );
     let synthesis = if params.synthesize {
         Some(
             synthesize_answer(
@@ -484,6 +491,7 @@ async fn handle_memory_consolidate(
         "status": "dry_run",
         "mode": "consolidate",
         "candidates": candidates,
+        "thinking": thinking,
         "synthesis": synthesis,
         "next_steps": [
             "Review candidates and decide canonical entries before mutating memory.",
@@ -501,7 +509,10 @@ async fn handle_memory_progress(
         .flow_id
         .clone()
         .unwrap_or_else(|| format!("memory_{}", Utc::now().format("%Y%m%d")));
-    let event = params.event.clone().unwrap_or_else(|| "progress".to_string());
+    let event = params
+        .event
+        .clone()
+        .unwrap_or_else(|| "progress".to_string());
     let raw_text = params
         .text
         .clone()
@@ -629,6 +640,106 @@ fn slim_kanban(value: Value) -> Value {
     })
 }
 
+fn evidence_rows(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(rows) => rows.iter().collect(),
+        Value::Object(map) => map
+            .values()
+            .flat_map(|value| match value {
+                Value::Array(rows) => rows.iter().collect::<Vec<_>>(),
+                _ => vec![value],
+            })
+            .collect(),
+        other => vec![other],
+    }
+}
+
+fn evidence_score(row: &Value) -> f64 {
+    row.get("relevance")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            row.get("score")
+                .and_then(|score| score.get("final"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| row.get("score").and_then(Value::as_f64))
+        .unwrap_or(0.0)
+}
+
+fn evidence_ref(row: &Value) -> Value {
+    json!({
+        "id": row.get("id"),
+        "path": row.get("path"),
+        "summary": row.get("summary"),
+        "topic": row.get("topic"),
+        "relevance": row.get("relevance"),
+    })
+}
+
+fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value) -> Value {
+    let mut rows = evidence_rows(evidence);
+    rows.sort_by(|a, b| {
+        evidence_score(b)
+            .partial_cmp(&evidence_score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let evidence_count = rows.len();
+    let top_score = rows.first().map(|row| evidence_score(row)).unwrap_or(0.0);
+    let confidence = if evidence_count == 0 {
+        "none"
+    } else if top_score >= 0.75 || evidence_count >= 5 {
+        "high"
+    } else if top_score >= 0.35 || evidence_count >= 2 {
+        "medium"
+    } else {
+        "low"
+    };
+    let key_evidence = rows
+        .iter()
+        .take(3)
+        .map(|row| evidence_ref(row))
+        .collect::<Vec<_>>();
+
+    let mut gaps = Vec::new();
+    if evidence_count == 0 {
+        gaps.push("No evidence rows were retrieved.".to_string());
+    }
+    if top_score < 0.35 && evidence_count > 0 {
+        gaps.push("Top evidence relevance is weak; treat conclusions as tentative.".to_string());
+    }
+    if query.trim().len() < 8 {
+        gaps.push("Query is short; refine it with topic, path, or error context.".to_string());
+    }
+
+    let next_steps = if mode == "consolidate" {
+        vec![
+            "Group candidates by topic/path before deciding canonical memories.",
+            "Prefer archive/supersede actions over deletion unless data is clearly junk.",
+        ]
+    } else if evidence_count == 0 {
+        vec![
+            "Search again with a more specific query or path_prefix.",
+            "If this should be known, save a checkpoint before relying on recall.",
+        ]
+    } else {
+        vec![
+            "Answer only from key_evidence unless LLM synthesis is explicitly enabled.",
+            "Call out uncertainty when gaps is non-empty.",
+        ]
+    };
+
+    json!({
+        "mode": mode,
+        "query": query,
+        "confidence": confidence,
+        "evidence_count": evidence_count,
+        "top_relevance": top_score,
+        "key_evidence": key_evidence,
+        "gaps": gaps,
+        "next_steps": next_steps,
+    })
+}
+
 async fn synthesize_answer(
     server: &MemoryServer,
     query: &str,
@@ -640,9 +751,7 @@ async fn synthesize_answer(
     let user = format!("Question:\n{query}\n\nEvidence JSON:\n{evidence_text}");
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        server
-            .llm
-            .call_extract_llm(system, &user, model, 0.2, 700),
+        server.llm.call_extract_llm(system, &user, model, 0.2, 700),
     )
     .await
     {
@@ -684,7 +793,8 @@ fn progress_run_dir(flow_id: &str) -> Result<PathBuf, String> {
 }
 
 fn append_jsonl(path: &Path, value: &Value) -> Result<(), String> {
-    let line = serde_json::to_string(value).map_err(|e| format!("serialize progress event: {e}"))?;
+    let line =
+        serde_json::to_string(value).map_err(|e| format!("serialize progress event: {e}"))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -723,7 +833,10 @@ fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_progress_status_lock<T>(
+    status_path: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     use std::fs::OpenOptions;
     use std::os::unix::io::AsRawFd;
 
@@ -755,7 +868,10 @@ fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T
 }
 
 #[cfg(not(unix))]
-fn with_progress_status_lock<T>(_status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_progress_status_lock<T>(
+    _status_path: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     f()
 }
 
@@ -856,8 +972,16 @@ fn extract_jsonl_text(value: &Value) -> Option<String> {
         .pointer("/message/content")
         .and_then(text_from_jsonl_content)
         .or_else(|| value.get("content").and_then(text_from_jsonl_content))
-        .or_else(|| value.pointer("/message/text").and_then(|v| v.as_str().map(str::to_string)))
-        .or_else(|| value.get("text").and_then(|v| v.as_str().map(str::to_string)))
+        .or_else(|| {
+            value
+                .pointer("/message/text")
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
 }
 
 fn text_from_jsonl_content(value: &Value) -> Option<String> {
@@ -893,4 +1017,49 @@ fn merge_keywords(mut keywords: Vec<String>, defaults: &[&str]) -> Vec<String> {
         }
     }
     keywords
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_scaffold_summarizes_key_evidence() {
+        let evidence = json!([
+            {
+                "id": "low",
+                "path": "/project/low",
+                "summary": "Low relevance",
+                "topic": "memory",
+                "relevance": 0.2
+            },
+            {
+                "id": "high",
+                "path": "/project/high",
+                "summary": "High relevance",
+                "topic": "memory",
+                "relevance": 0.82
+            }
+        ]);
+
+        let thinking = build_thinking_scaffold("ask", "what happened", &evidence);
+
+        assert_eq!(thinking["confidence"], json!("high"));
+        assert_eq!(thinking["evidence_count"], json!(2));
+        assert_eq!(thinking["key_evidence"][0]["id"], json!("high"));
+        assert!(thinking["gaps"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn thinking_scaffold_marks_missing_evidence() {
+        let thinking = build_thinking_scaffold("ask", "why", &json!([]));
+
+        assert_eq!(thinking["confidence"], json!("none"));
+        assert_eq!(thinking["evidence_count"], json!(0));
+        assert!(thinking["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap == "No evidence rows were retrieved."));
+    }
 }
