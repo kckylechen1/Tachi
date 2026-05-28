@@ -455,16 +455,6 @@ pub(super) async fn search_memory_rows(
 
     let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
 
-    let global_opts = params.to_search_options(server.global_vec_available);
-
-    let global_results = server.with_global_store_read(|store| {
-        store
-            .search(&params.query, Some(global_opts))
-            .map_err(|e| format!("Search failed in global DB: {}", e))
-    })?;
-    combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
-
-    // Search project DB — either named project or default
     if let Some(ref project_name) = params.project {
         let project_results = server.with_named_project_store_read(project_name, |store| {
             let vec_avail = store.vec_available;
@@ -474,15 +464,24 @@ pub(super) async fn search_memory_rows(
                 .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
         })?;
         combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-    } else if server.has_project_db() {
-        let project_opts = params.to_search_options(server.project_vec_available);
-
-        let project_results = server.with_project_store_read(|store| {
+    } else {
+        let global_opts = params.to_search_options(server.global_vec_available);
+        let global_results = server.with_global_store_read(|store| {
             store
-                .search(&params.query, Some(project_opts))
-                .map_err(|e| format!("Search failed in project DB: {}", e))
+                .search(&params.query, Some(global_opts))
+                .map_err(|e| format!("Search failed in global DB: {}", e))
         })?;
-        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+        if server.has_project_db() {
+            let project_opts = params.to_search_options(server.project_vec_available);
+            let project_results = server.with_project_store_read(|store| {
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| format!("Search failed in project DB: {}", e))
+            })?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        }
     }
 
     apply_guide_context_boosts(

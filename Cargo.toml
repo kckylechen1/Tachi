@@ -13,14 +13,13 @@ strip = true
 
 [workspace.dependencies]
 rusqlite = { version = "0.32", features = ["backup", "bundled", "vtab"] }
-libsimple = { version = "0.3.0", features = ["rusqlite"] }
+libsimple = { version = "0.7", features = ["rusqlite"] }
 sqlite-vec = "0.1.7-alpha.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "v5"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
-lazy_static = "1.4.0"
 regex = "1.10.0"
 aes-gcm = "0.10"
 argon2 = "0.5"

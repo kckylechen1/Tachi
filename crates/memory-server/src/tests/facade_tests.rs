@@ -327,11 +327,12 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     .await
     .expect("briefing should succeed");
 
-    let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
-    assert_eq!(parsed["mode"], json!("briefing"));
-    assert!(parsed.get("health_summary").is_some());
-    assert!(parsed.get("wiki_lint").is_some());
-    assert!(parsed.get("kanban").is_some());
+    assert!(body.starts_with("## Tachi briefing"));
+    assert!(body.contains("### Database context"));
+    assert!(body.contains("### Memories"));
+    assert!(body.contains("tachi_status"));
+    assert!(!body.contains("merge_hints"));
+    assert!(!body.contains("skill_quality"));
 }
 
 #[tokio::test]
@@ -390,7 +391,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
     };
     manifest.save(&manifest_path).expect("save manifest");
 
-    let body = crate::status_ops::handle_tachi_status(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server)
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -424,7 +425,7 @@ async fn tachi_status_marks_config_env_only_key_as_configured() {
     let original_voyage = std::env::var_os("VOYAGE_API_KEY");
     std::env::remove_var("VOYAGE_API_KEY");
 
-    let body = crate::status_ops::handle_tachi_status(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server)
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
@@ -460,7 +461,7 @@ async fn tachi_status_marks_config_env_alias_key_as_configured() {
     std::env::remove_var("ZAI_API_KEY");
     std::env::remove_var("BIGMODEL_API_KEY");
 
-    let body = crate::status_ops::handle_tachi_status(&server)
+    let body = crate::status_ops::handle_tachi_status_full(&server)
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");

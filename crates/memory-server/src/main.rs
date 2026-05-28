@@ -31,6 +31,7 @@
     clippy::useless_format
 )]
 
+mod agent_markdown;
 mod bootstrap;
 mod builtins;
 mod capability_ops;
@@ -43,6 +44,7 @@ mod complete_ops;
 mod copilot_ops;
 mod daemon_lock;
 mod daily_pipeline;
+mod db_context;
 mod dispatch_ops;
 mod dlq_ops;
 mod doctor;
