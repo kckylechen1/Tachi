@@ -248,7 +248,8 @@ pub(crate) fn collect_snapshot(
     let distill_marker = read_distill_marker(app_home);
     let mut api_keys = status_health::collect_api_key_status(global_db_path);
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
-    let health_score = status_health::calculate_health_score(&daemon, &dbs, distill_marker.as_ref(), &api_keys);
+    let health_score =
+        status_health::calculate_health_score(&daemon, &dbs, distill_marker.as_ref(), &api_keys);
 
     StatusSnapshot {
         daemon,
@@ -391,7 +392,13 @@ fn list_recent_entries_by_path(
 ) -> Vec<serde_json::Value> {
     let limit = limit.max(1).min(50);
     let mut rows = Vec::new();
-    collect_entries_for_status(server.global_db_path_buf().as_path(), path_prefix, limit, "global", &mut rows);
+    collect_entries_for_status(
+        server.global_db_path_buf().as_path(),
+        path_prefix,
+        limit,
+        "global",
+        &mut rows,
+    );
     if let Some(path) = server.project_db_path_buf() {
         collect_entries_for_status(path.as_path(), path_prefix, limit, "project", &mut rows);
     }
@@ -997,7 +1004,10 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
     .unwrap_or_default()
 }
 
-fn build_status_warnings(snapshot: &StatusSnapshot, daemon_state: &serde_json::Value) -> Vec<String> {
+fn build_status_warnings(
+    snapshot: &StatusSnapshot,
+    daemon_state: &serde_json::Value,
+) -> Vec<String> {
     let total_dbs = snapshot.dbs.len();
     let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
@@ -1159,10 +1169,17 @@ mod tests {
             Some("VOYAGE".to_string())
         );
         assert_eq!(
-            status_health::infer_provider_from_failed_job("memory_distill", Some("distill"), "403 Forbidden"),
+            status_health::infer_provider_from_failed_job(
+                "memory_distill",
+                Some("distill"),
+                "403 Forbidden"
+            ),
             Some("SILICONFLOW".to_string())
         );
-        assert_eq!(status_health::infer_provider_from_auth_error("network timeout"), None);
+        assert_eq!(
+            status_health::infer_provider_from_auth_error("network timeout"),
+            None
+        );
     }
 
     #[test]

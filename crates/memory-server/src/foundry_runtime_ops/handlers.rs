@@ -3,8 +3,8 @@ use super::helpers::*;
 use super::maintenance::enqueue_capture_maintenance_jobs;
 use super::recall::*;
 use super::*;
-use regex::Regex;
 use crate::utils::stable_hash;
+use regex::Regex;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -335,6 +335,8 @@ pub(crate) async fn handle_compact_session_memory(
             text: compacted_text.clone(),
             importance: params.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "experience".to_string(),
             topic,
             keywords: salient_topics.clone(),
@@ -405,6 +407,8 @@ pub(crate) async fn handle_compact_session_memory(
             text: signal_text.to_string(),
             importance: params.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".to_string(),
             topic,
             keywords: salient_topics.clone(),
@@ -651,6 +655,7 @@ pub(crate) async fn handle_recall_context(
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await?;
@@ -730,6 +735,7 @@ pub(crate) async fn handle_recall_context(
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await
@@ -778,7 +784,10 @@ pub(super) struct BracketSelfEvolutionNote {
 
 fn bracket_note_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)").expect("bracket_note_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)")
+            .expect("bracket_note_regex is a valid compile-time regex")
+    })
 }
 
 fn bracket_strategy_regexes() -> &'static [Regex] {
@@ -796,7 +805,9 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
                 r"策略失败|无效",
             ]
             .into_iter()
-            .map(|pattern| Regex::new(pattern).expect("bracket_strategy regex is a valid compile-time pattern"))
+            .map(|pattern| {
+                Regex::new(pattern).expect("bracket_strategy regex is a valid compile-time pattern")
+            })
             .collect()
         })
         .as_slice()
@@ -804,12 +815,18 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
 
 fn bracket_decision_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"记住了|下次我要|下次我会|以后").expect("bracket_decision_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"记住了|下次我要|下次我会|以后")
+            .expect("bracket_decision_regex is a valid compile-time regex")
+    })
 }
 
 fn bracket_preference_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃").expect("bracket_preference_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃")
+            .expect("bracket_preference_regex is a valid compile-time regex")
+    })
 }
 
 pub(super) fn build_bracket_self_evolution_id(agent_id: &str, note_text: &str) -> String {
@@ -961,6 +978,8 @@ pub(crate) async fn handle_capture_session(
             text: note.text,
             importance: 0.88,
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: note.category,
             topic: "self_evolution".to_string(),
             keywords: dedup_strings(vec![
@@ -1091,6 +1110,8 @@ pub(crate) async fn handle_capture_session(
             text: draft.text.trim().to_string(),
             importance: draft.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: normalize_category(&draft.category),
             topic,
             keywords: dedup_strings(draft.keywords),

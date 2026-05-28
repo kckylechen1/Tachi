@@ -730,9 +730,10 @@ fn migrate_single_db(
     let target_path = cfg.target_db.clone();
 
     let source_store = open_cli_store_read_only(&source_path)?;
-    let source_count: usize = source_store
-        .connection()
-        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+    let source_count: usize =
+        source_store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
 
     if cfg.dry_run {
         return Ok(TidyMigrationOutcome {

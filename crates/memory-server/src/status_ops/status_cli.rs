@@ -77,7 +77,10 @@ async fn render_one(
     if json_out {
         let mut v = serde_json::to_value(&snapshot)?;
         if let Some(obj) = v.as_object_mut() {
-            obj.insert("provider_probes".to_string(), serde_json::to_value(&provider_probes)?);
+            obj.insert(
+                "provider_probes".to_string(),
+                serde_json::to_value(&provider_probes)?,
+            );
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -145,11 +148,12 @@ async fn render_one(
         );
         if db.memory_total > 0 {
             let pct = db.vector_coverage * 100.0;
-            let marker = if db.vector_missing > 0 || crate::status_ops::vector_dimension_mismatch(db) {
-                "[!]"
-            } else {
-                "[OK]"
-            };
+            let marker =
+                if db.vector_missing > 0 || crate::status_ops::vector_dimension_mismatch(db) {
+                    "[!]"
+                } else {
+                    "[OK]"
+                };
             let failures = if db.enrichment_failed_recent > 0 {
                 format!(" enrichment_failed={}", db.enrichment_failed_recent)
             } else {
@@ -418,6 +422,7 @@ pub(crate) async fn run_watcher(
                 category: None,
                 include_archived: false,
                 enable_rerank: false,
+                as_of: None,
                 synthesize: false,
                 model: None,
                 text: None,
@@ -433,6 +438,8 @@ pub(crate) async fn run_watcher(
                 id: None,
                 force: false,
                 source: None,
+                valid_from: None,
+                valid_until: None,
                 flow_id: None,
                 event: None,
                 state: None,
@@ -448,7 +455,10 @@ pub(crate) async fn run_watcher(
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&watcher)?);
             } else {
-                println!("passive watcher: {}", watcher["status"].as_str().unwrap_or("unknown"));
+                println!(
+                    "passive watcher: {}",
+                    watcher["status"].as_str().unwrap_or("unknown")
+                );
                 if let Some(path) = watcher.get("latest_jsonl").and_then(|v| v.as_str()) {
                     println!("  latest_jsonl: {path}");
                 }
@@ -459,9 +469,10 @@ pub(crate) async fn run_watcher(
             Ok(())
         }
         WatcherAction::CaptureLatest { json: json_out } => {
-            let captured = crate::facade_memory_ops::capture_latest_claude_jsonl_checkpoint(&server)
-                .await?
-                .unwrap_or_else(|| json!({"status":"not_detected"}));
+            let captured =
+                crate::facade_memory_ops::capture_latest_claude_jsonl_checkpoint(&server)
+                    .await?
+                    .unwrap_or_else(|| json!({"status":"not_detected"}));
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&captured)?);
             } else {

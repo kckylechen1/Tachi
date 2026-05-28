@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tachi_memory` actions**: `briefing`, `checkpoint`, `alerts`, `ask`, `consolidate`, `progress`, `readiness`.
 - **`tachi watcher`**: passive Claude JSONL transcript discovery and capture helpers.
 - **Status diagnostics**: health score, API key drift detection, provider probes, distill marker staleness.
+- **Vector-weighted RRF scoring** (PR #120): cosine similarity is blended into the final RRF score via a configurable weight, reducing rank inversions on highly semantic queries.
+- **Confidence reinforcement** (PR #121): memories that pass the similarity threshold but fall short of supersession now have their confidence score incremented, extending the useful lifetime of soft-corroborated facts without triggering a supersession write.
+- **Automatic contradiction detection** (PR #122): `apply_auto_contradiction_detection` identifies semantically conflicting memories via entity overlap, numeric mismatch, and vector similarity, verifies candidates with an LLM, and persists typed contradiction edges.
+- **Bitemporal memory validity** (PR #123): each `MemoryEntry` carries `valid_from` / `valid_until` fields; `search_memory` accepts an `as_of` parameter for point-in-time retrieval; a startup migration normalises existing rows automatically.
+- **Query expansion for FTS** (PR #124): `search_fts_with_expansion` generates synonym, acronym, and phrase variants for every FTS query, raising recall on sparse corpora without touching vector search.
+- **Spreading activation with seed weights** (PR #125): graph search propagates activation from per-seed initial weights rather than a uniform floor; within-hop accumulation uses noisy-OR to prevent cluster over-activation.
+- **Memory insight inference** (PR #126): `infer_memory_insight` scores memories against a surprise composite (importance delta, rarity, contradiction count) and emits structured `memory_insight` signals consumed by the neighbourhood job.
+- **Synthesis thinking scaffold** (PR #127): `build_thinking_scaffold` composes a layered evidence brief for synthesis queries, ranking sources by relevance score with gap-analysis annotations.
 
 ### Changed
 
@@ -22,12 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - API batches split and retry on JSON parse failure before per-group fallback.
 - Manifest/doctor skip archival and backup DB paths to reduce noisy status/backfill hints.
 - Secret scrubbing on save/progress; `scrub_secrets` regexes compiled once via `OnceLock`.
+- **MemoryServer decomposition** (PRs #114–#119): `VaultState`, `RateLimiter`, `ToolDiscovery`, `AgentRuntime`, `EnrichmentRuntime`, and `FoundryRuntime` each extracted into dedicated sub-modules. `shell_ops.rs` (1,826 lines) and `status_ops.rs` (2,376 lines) split into focused files. `MemoryServer` is now a thin coordinator; no public tool-surface changes.
 
 ### Fixed
 
 - `batches_dispatched` metric counts split API distill retries accurately.
 - Progress `status.json` updates use file locking; JSONL watcher scan runs off the async executor.
 - Config.env discovery uses `dirs::home_dir()`; macOS keychain probe skipped on other platforms.
+- **P0/P1/P2 tech debt** (PR #113): 19 new regression and integration tests; silent error paths in enrichment, contradiction, and graph operations hardened.
+- **Gemini review rollup** (PR #128): `tokio::spawn` hot-path in enrichment replaced with spawn-blocking; thousands-separator regex corrected; `WHERE` clause and transaction wrapper added to `normalize_memory_validity_columns`; `push_unique` prevents duplicate FTS expansion terms; noisy-OR accumulation corrected in graph spreading activation; `avg_importance` hoisted above topic guard in insight inference; null filter and `evidence_ref` fallback added to synthesis scaffolding.
 
 ## [1.2.0] - 2026-05-25
 

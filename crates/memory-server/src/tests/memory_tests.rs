@@ -105,6 +105,8 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             force: true,
             topic: Some("notes-test".to_string()),
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await
         .expect("tachi_save note should succeed");
@@ -157,6 +159,8 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 force: true,
                 topic: None,
                 source: None,
+                valid_from: None,
+                valid_until: None,
             }))
             .await
             .expect_err("invalid note path should be rejected");
@@ -183,6 +187,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             category: Some("fact".to_string()),
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: Some("A one-line memory fact with a title should not become wiki.".to_string()),
@@ -198,6 +203,8 @@ async fn tachi_memory_save_with_title_stays_memory() {
             id: None,
             force: true,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: None,
             event: None,
             state: None,
@@ -257,6 +264,7 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
         }))
         .await
         .expect("memory scoped search");
@@ -309,6 +317,7 @@ async fn search_memory_boosts_guide_rows_by_context() {
             file_context: Some("crates/memory-server/src/tools.rs".to_string()),
             error_context: Some("linker error: could not find native static library".to_string()),
             enable_rerank: false,
+            as_of: None,
         }))
         .await
         .expect("search memory with guide context");
@@ -370,6 +379,8 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             force: true,
             topic: None,
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await
         .expect_err("symlink note leaf should be rejected");
@@ -420,6 +431,8 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -756,6 +769,8 @@ async fn save_memory_clamps_importance_into_valid_range() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -802,6 +817,8 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -920,6 +937,8 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await

@@ -431,6 +431,14 @@ pub struct MemoryEntry {
     #[serde(alias = "created_at", alias = "event_time")]
     pub timestamp: String,
 
+    /// When this memory became true or effective. Defaults to `timestamp` on write.
+    #[serde(default)]
+    pub valid_from: String,
+
+    /// When this memory stopped being true or effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
+
     /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
     #[serde(default = "default_category")]
     pub category: String,
@@ -787,6 +795,8 @@ mod tests {
             text: "fix rust build".to_string(),
             importance: 0.7,
             timestamp: "2026-01-01T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "guide".to_string(),
             topic: "".to_string(),
             keywords: vec![],

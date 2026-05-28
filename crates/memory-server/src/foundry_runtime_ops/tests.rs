@@ -4,8 +4,8 @@ use super::handlers::{
 };
 use super::maintenance::{
     build_distill_edges, classify_distill_guide_type, coherence_bucket_key,
-    coherent_distill_buckets, memory_claim_signature, scheduled_distill_group_key,
-    scheduled_distill_path_prefix,
+    coherent_distill_buckets, infer_memory_insight, memory_claim_signature,
+    scheduled_distill_group_key, scheduled_distill_path_prefix,
 };
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
 use super::*;
@@ -143,6 +143,8 @@ fn memory_claim_signature_changes_on_revision() {
         text: "test".to_string(),
         importance: 0.5,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: "".to_string(),
         keywords: vec![],
@@ -177,6 +179,8 @@ fn memory_claim_signature_changes_on_vector() {
         text: "test".to_string(),
         importance: 0.5,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: "".to_string(),
         keywords: vec![],
@@ -201,6 +205,71 @@ fn memory_claim_signature_changes_on_vector() {
     assert_ne!(before, after);
 }
 
+fn test_memory_entry(id: &str, topic: &str, importance: f64, access_count: i64) -> MemoryEntry {
+    MemoryEntry {
+        id: id.to_string(),
+        path: "/test".to_string(),
+        summary: "test".to_string(),
+        text: "test".to_string(),
+        importance,
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        category: "fact".to_string(),
+        topic: topic.to_string(),
+        keywords: vec![],
+        persons: vec![],
+        entities: vec![],
+        location: "".to_string(),
+        source: "test".to_string(),
+        scope: "project".to_string(),
+        archived: false,
+        access_count,
+        last_access: None,
+        revision: 1,
+        metadata: json!({}),
+        vector: None,
+        retention_policy: None,
+        domain: None,
+        valid_from: String::new(),
+        valid_until: None,
+    }
+}
+
+#[test]
+fn infer_memory_insight_marks_surprising_memory_high_priority() {
+    let entry = test_memory_entry("insight-high", "rare-topic", 0.95, 0);
+    let insight = infer_memory_insight(&entry, 0.35, 2, 1, FOUNDRY_RELATED_LIMIT);
+
+    assert_eq!(insight["kind"], json!("memory_insight"));
+    assert_eq!(insight["priority"], json!("high"));
+    assert!(insight["surprise"].as_f64().unwrap() >= 0.4);
+    assert!(insight["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("contradiction")));
+    assert!(insight["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("novel_topic")));
+    assert!(insight["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("overlooked_high_importance")));
+    assert!(insight["reasons"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("dense_neighborhood")));
+}
+
+#[test]
+fn infer_memory_insight_keeps_routine_memory_low_priority() {
+    let entry = test_memory_entry("insight-low", "common-topic", 0.5, 3);
+    let insight = infer_memory_insight(&entry, 0.5, 0, 8, 1);
+
+    assert_eq!(insight["priority"], json!("low"));
+    assert!(insight["surprise"].as_f64().unwrap() < 0.2);
+    assert!(insight["reasons"].as_array().unwrap().is_empty());
+}
+
 #[test]
 fn forget_sweep_keeps_newest_distill_entries() {
     let mut entries = vec![
@@ -211,6 +280,8 @@ fn forget_sweep_keeps_newest_distill_entries() {
             text: "old".to_string(),
             importance: 0.7,
             timestamp: "2026-04-02T00:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "other".to_string(),
             topic: "foundry_distill".to_string(),
             keywords: vec![],
@@ -235,6 +306,8 @@ fn forget_sweep_keeps_newest_distill_entries() {
             text: "new".to_string(),
             importance: 0.7,
             timestamp: "2026-04-02T01:00:00Z".to_string(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "other".to_string(),
             topic: "foundry_distill".to_string(),
             keywords: vec![],
@@ -338,6 +411,8 @@ fn coherent_distill_buckets_keep_unrelated_topics_apart() {
             text: topic.to_string(),
             importance: 0.5,
             timestamp: format!("2026-04-23T00:00:0{idx}Z"),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".to_string(),
             topic: topic.to_string(),
             keywords: vec![],
@@ -383,6 +458,8 @@ fn coherent_distill_buckets_drop_generic_topics_without_shared_entity() {
         text: text.to_string(),
         importance: 0.5,
         timestamp: format!("2026-04-23T00:01:0{idx}Z"),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: topic.to_string(),
         keywords: vec![],
@@ -413,6 +490,8 @@ fn distill_source_entry(id: &str, text: &str, category: &str) -> MemoryEntry {
         text: text.to_string(),
         importance: 0.7,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
+        valid_from: String::new(),
+        valid_until: None,
         category: category.to_string(),
         topic: "guide-layer".to_string(),
         keywords: vec!["tachi".to_string()],
@@ -472,6 +551,8 @@ fn distill_edges_include_causal_guide_relations() {
         text: "Fix linker error by rebuilding sqlite vec; avoid deleting migrations.".to_string(),
         importance: 0.75,
         timestamp: "2026-01-01T00:00:00Z".to_string(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "guide".to_string(),
         topic: "fix_pattern".to_string(),
         keywords: vec!["guide".to_string(), "fix_pattern".to_string()],

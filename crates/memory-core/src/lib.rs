@@ -17,12 +17,12 @@ pub mod types;
 pub mod vault;
 
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
-pub use db::row_to_entry;
 pub use db::foundry_jobs::{
     find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
     load_pending_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobSummary,
     JobStatusHistogram, PersistedFoundryJob,
 };
+pub use db::row_to_entry;
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -34,7 +34,7 @@ pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{
     AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackManifestMeta, PackOverlay,
 };
-pub use scorer::HybridWeights;
+pub use scorer::{surprise_score, HybridWeights};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,
@@ -500,6 +500,21 @@ impl MemoryStore {
         db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
     }
 
+    /// Count active contradiction edges connected to a memory entry.
+    pub fn get_contradiction_count(&self, memory_id: &str) -> Result<u32, MemoryError> {
+        db::get_contradiction_count(&self.conn, memory_id)
+    }
+
+    /// Count memories with the same topic.
+    pub fn count_same_topic(&self, topic: &str) -> Result<u32, MemoryError> {
+        db::count_same_topic(&self.conn, topic)
+    }
+
+    /// Average importance across non-archived memories.
+    pub fn avg_importance(&self) -> Result<f64, MemoryError> {
+        db::avg_importance(&self.conn)
+    }
+
     // ─── Derived Items Operations ──────────────────────────────────────────────
 
     /// Save a derived item (causal extraction, distilled rule, etc.)
@@ -620,6 +635,8 @@ mod tests {
             text: "Hermes rate limit was caused by routing to the ZAI global endpoint".to_string(),
             importance: 0.8,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".to_string(),
             topic: "hermes-rate-limit".to_string(),
             keywords: vec!["hermes".to_string(), "rate-limit".to_string()],

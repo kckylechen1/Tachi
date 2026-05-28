@@ -794,8 +794,7 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
 
-        if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
-            .contains_key(tool_name)
+        if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools").contains_key(tool_name)
         {
             return self.call_skill_tool(tool_name, args_obj).await;
         }

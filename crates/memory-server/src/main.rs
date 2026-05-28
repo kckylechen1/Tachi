@@ -558,7 +558,10 @@ impl MemoryServer {
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             enrichment: EnrichmentRuntime { enrich_tx },
-            foundry: FoundryRuntime { foundry_tx, foundry_stats },
+            foundry: FoundryRuntime {
+                foundry_tx,
+                foundry_stats,
+            },
             vault: Arc::new(StdRwLock::new(VaultState {
                 key: None,
                 unlock_time: None,
@@ -613,7 +616,12 @@ impl MemoryServer {
                             path_prefix: job.path_prefix,
                             memory_ids: job.memory_ids,
                         };
-                        if replay_server.foundry_lock().foundry_tx.try_send(item).is_ok() {
+                        if replay_server
+                            .foundry_lock()
+                            .foundry_tx
+                            .try_send(item)
+                            .is_ok()
+                        {
                             count += 1;
                         }
                     }
@@ -685,15 +693,11 @@ impl MemoryServer {
         self.foundry_lock().foundry_tx.clone()
     }
 
-    pub(crate) fn vault_read(
-        &self,
-    ) -> std::sync::RwLockReadGuard<'_, VaultState> {
+    pub(crate) fn vault_read(&self) -> std::sync::RwLockReadGuard<'_, VaultState> {
         self.vault.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub(crate) fn vault_write(
-        &self,
-    ) -> std::sync::RwLockWriteGuard<'_, VaultState> {
+    pub(crate) fn vault_write(&self) -> std::sync::RwLockWriteGuard<'_, VaultState> {
         self.vault.write().unwrap_or_else(|e| e.into_inner())
     }
 

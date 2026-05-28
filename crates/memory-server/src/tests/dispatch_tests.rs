@@ -104,6 +104,8 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
                     text: "Debug MCP argument serialization bug checklist:\n- Verify schema -> client serialization -> server deserialization before editing transport.\n- Add a failing boundary test at the API boundary before retrying the same layer.\n- Stop after two failed patches in the same layer and ask another agent.\n\nThis note exists specifically for an MCP argument serialization bug that looks tempting to misdiagnose as a transport issue.".to_string(),
                     importance: 0.9,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "experience".to_string(),
                     topic: "mcp_args".to_string(),
                     keywords: vec!["mcp".to_string(), "debugging".to_string()],
@@ -290,10 +292,7 @@ async fn v2_two_stage_smoke() {
     .expect("status.json valid");
     assert_eq!(status["v2"], serde_json::json!(true));
     assert!(status["duration_ms_plan"].as_u64().is_some());
-    assert_eq!(
-        status["plan_review_status"],
-        serde_json::json!("approved")
-    );
+    assert_eq!(status["plan_review_status"], serde_json::json!("approved"));
 
     // Cleanup.
     std::env::remove_var("CLAUDE_BIN");

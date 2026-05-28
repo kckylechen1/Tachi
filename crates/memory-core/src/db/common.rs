@@ -53,6 +53,10 @@ pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         text: row.get("text")?,
         importance: row.get("importance")?,
         timestamp: row.get("timestamp")?,
+        valid_from: row
+            .get("valid_from")
+            .unwrap_or_else(|_| row.get("timestamp").unwrap_or_default()),
+        valid_until: row.get("valid_until").unwrap_or(None),
         category: row.get("category")?,
         topic: row.get("topic")?,
         keywords: serde_json::from_str(&row.get::<_, String>("keywords")?).unwrap_or_default(),

@@ -127,6 +127,8 @@ pub(crate) async fn handle_tachi_save(
                     .retention_policy
                     .clone()
                     .or_else(|| Some("durable".to_string())),
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
                 force: params.force,
             };
             let mut result_str = handle_remember(server, remember_params).await?;
@@ -173,6 +175,8 @@ pub(crate) async fn handle_tachi_save(
                 retention_policy: params.retention_policy.clone(),
                 domain: params.domain.clone(),
                 timestamp: None,
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
                 metadata: None,
             };
             handle_save_memory(server, mem_params).await

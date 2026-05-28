@@ -13,9 +13,13 @@ use crate::{
         search_fts, search_vec,
     },
     error::MemoryError,
-    scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
+    scorer::{cosine_similarity, hybrid_score, symbolic_score, tokenize, HybridWeights},
     types::{MemoryEntry, SearchResult},
 };
+
+const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
+const MAX_EXPANDED_FTS_QUERIES: usize = 6;
+const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -48,6 +52,9 @@ pub struct SearchOptions {
     /// Optional filter for graph edges: "causes", "follows", "related_to", etc.
     /// None = traverse all relation types.
     pub graph_relation_filter: Option<String>,
+    /// Point-in-time validity filter. When set, only memories valid at this ISO
+    /// timestamp are returned.
+    pub as_of: Option<String>,
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -73,8 +80,25 @@ impl Default for SearchOptions {
             mmr_threshold: Some(0.85),
             graph_expand_hops: 0,
             graph_relation_filter: None,
+            as_of: None,
         }
     }
+}
+
+fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
+    let Some(as_of) = as_of else {
+        return true;
+    };
+    let valid_from = if entry.valid_from.trim().is_empty() {
+        entry.timestamp.as_str()
+    } else {
+        entry.valid_from.as_str()
+    };
+    valid_from <= as_of
+        && entry
+            .valid_until
+            .as_deref()
+            .map_or(true, |until| until > as_of)
 }
 
 fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
@@ -113,6 +137,171 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     } else {
         HybridWeights::default()
     }
+}
+
+fn push_unique(out: &mut Vec<String>, term: &str) {
+    let term = term.trim().to_ascii_lowercase();
+    if term.is_empty() || out.iter().any(|existing| existing == &term) {
+        return;
+    }
+    out.push(term);
+}
+
+fn token_expansion_variants(token: &str) -> &'static [&'static [&'static str]] {
+    match token {
+        "mcp" => &[&["model", "context", "protocol"]],
+        "llm" => &[&["language", "model"]],
+        "rag" => &[&["retrieval", "augmented", "generation"]],
+        "fts" => &[&["full", "text", "search"]],
+        "rrf" => &[&["reciprocal", "rank", "fusion"]],
+        "mmr" => &[&["maximal", "marginal", "relevance"], &["diversity"]],
+        "ci" => &[&["workflow"], &["checks"], &["github", "actions"]],
+        "pr" => &[&["pull", "request"]],
+        "db" => &[&["database"], &["sqlite"]],
+        "auth" => &[&["authentication"], &["authorization"]],
+        "api" => &[&["endpoint"], &["interface"]],
+        "cli" => &[&["command"], &["terminal"]],
+        "repo" => &[&["repository"]],
+        "vec" | "vector" => &[&["embedding"], &["semantic"]],
+        "embedding" | "embeddings" => &[&["vector"], &["semantic"]],
+        "semantic" => &[&["embedding"], &["vector"]],
+        "recall" => &[&["retrieval"], &["search"]],
+        "retrieval" => &[&["recall"], &["search"]],
+        "bug" => &[&["error"], &["failure"], &["crash"]],
+        "error" => &[&["bug"], &["failure"]],
+        "failure" => &[&["error"], &["bug"]],
+        "crash" => &[&["failure"], &["panic"]],
+        "panic" => &[&["crash"], &["failure"]],
+        _ => &[],
+    }
+}
+
+fn phrase_expansion_variants(tokens: &[String]) -> Vec<String> {
+    const PHRASES: &[(&[&str], &[&str])] = &[
+        (&["model", "context", "protocol"], &["mcp"]),
+        (&["language", "model"], &["llm"]),
+        (&["retrieval", "augmented", "generation"], &["rag"]),
+        (&["full", "text", "search"], &["fts"]),
+        (&["reciprocal", "rank", "fusion"], &["rrf"]),
+        (&["pull", "request"], &["pr"]),
+        (&["github", "actions"], &["ci"]),
+    ];
+
+    let mut variants = Vec::new();
+    for (phrase, replacement) in PHRASES {
+        if phrase.len() > tokens.len() {
+            continue;
+        }
+        for start in 0..=tokens.len() - phrase.len() {
+            if phrase
+                .iter()
+                .enumerate()
+                .all(|(idx, part)| tokens[start + idx] == *part)
+            {
+                let mut expanded =
+                    Vec::with_capacity(tokens.len() - phrase.len() + replacement.len());
+                expanded.extend(tokens[..start].iter().cloned());
+                expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+                expanded.extend(tokens[start + phrase.len()..].iter().cloned());
+                variants.push(expanded.join(" "));
+            }
+        }
+    }
+    variants
+}
+
+fn expanded_fts_queries(query: &str) -> Vec<String> {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queries = Vec::new();
+    push_unique(&mut queries, query.trim());
+    for (idx, token) in tokens.iter().enumerate() {
+        for replacement in token_expansion_variants(token) {
+            let mut expanded = Vec::with_capacity(tokens.len() + replacement.len());
+            expanded.extend(tokens[..idx].iter().cloned());
+            expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+            expanded.extend(tokens[idx + 1..].iter().cloned());
+            push_unique(&mut queries, &expanded.join(" "));
+            if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+                return queries;
+            }
+        }
+    }
+
+    for variant in phrase_expansion_variants(&tokens) {
+        push_unique(&mut queries, &variant);
+        if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+            break;
+        }
+    }
+
+    queries
+}
+
+fn symbolic_query_with_expansion(query: &str) -> String {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return query.to_string();
+    }
+
+    let mut terms = tokens.clone();
+    for token in &tokens {
+        for replacement in token_expansion_variants(token) {
+            for part in *replacement {
+                push_unique(&mut terms, part);
+                if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                    return terms.join(" ");
+                }
+            }
+        }
+    }
+    for variant in phrase_expansion_variants(&tokens) {
+        for part in tokenize(&variant) {
+            push_unique(&mut terms, &part);
+            if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                return terms.join(" ");
+            }
+        }
+    }
+    terms.join(" ")
+}
+
+fn search_fts_with_expansion(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let mut merged = HashMap::new();
+    for (idx, fts_query) in expanded_fts_queries(query).into_iter().enumerate() {
+        let factor = if idx == 0 {
+            1.0
+        } else {
+            EXPANDED_FTS_SCORE_FACTOR
+        };
+        for (id, score) in search_fts(
+            conn,
+            &fts_query,
+            limit,
+            include_archived,
+            include_superseded,
+            path_prefix,
+            as_of,
+        )? {
+            let adjusted = score * factor;
+            merged
+                .entry(id)
+                .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
+                .or_insert(adjusted);
+        }
+    }
+    Ok(merged)
 }
 
 /// MMR-inspired diversity filter: greedily select results that are both
@@ -243,6 +432,26 @@ fn quality_multiplier(entry: &MemoryEntry) -> f64 {
     1.0
 }
 
+fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<String, f64> {
+    let max_score = results
+        .iter()
+        .map(|result| result.score.final_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    results
+        .iter()
+        .map(|result| {
+            let weight = if max_score > 0.0 {
+                result.score.final_score / max_score
+            } else {
+                1.0
+            };
+            (result.entry.id.clone(), weight.clamp(0.05, 1.0))
+        })
+        .collect()
+}
+
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
 ///
 /// Execution plan:
@@ -257,6 +466,11 @@ pub fn hybrid_search(
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
     let n = opts.candidates_per_channel;
+    let as_of_utc = opts
+        .as_of
+        .as_deref()
+        .map(crate::db::normalize_utc_iso)
+        .transpose()?;
     let include_superseded =
         opts.include_superseded || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED");
 
@@ -270,6 +484,7 @@ pub fn hybrid_search(
                 opts.include_archived,
                 include_superseded,
                 opts.path_prefix.as_deref(),
+                as_of_utc.as_deref(),
             )?
         } else {
             HashMap::new()
@@ -279,13 +494,14 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(
+    let fts_scores = search_fts_with_expansion(
         conn,
         query,
         n,
         opts.include_archived,
         include_superseded,
         opts.path_prefix.as_deref(),
+        as_of_utc.as_deref(),
     )?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
@@ -305,10 +521,11 @@ pub fn hybrid_search(
     let entries_map = fetch_by_ids(conn, &candidate_ids, opts.include_archived)?;
 
     // ── Channel 3: Symbolic ───────────────────────────────────────────────────
+    let symbolic_query = symbolic_query_with_expansion(query);
     let symbolic_scores: HashMap<String, f64> = entries_map
         .iter()
         .map(|(id, entry)| {
-            let score = symbolic_score(query, &entry.text, &entry.keywords);
+            let score = symbolic_score(&symbolic_query, &entry.text, &entry.keywords);
             (id.clone(), score)
         })
         .collect();
@@ -320,6 +537,9 @@ pub fn hybrid_search(
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
         .filter(|(id, e)| {
+            if !valid_at(e, as_of_utc.as_deref()) {
+                return false;
+            }
             if !include_superseded && superseded_ids.contains(*id) {
                 return false;
             }
@@ -441,17 +661,19 @@ pub fn hybrid_search(
                 .map(|r| r.score.final_score * 0.5)
                 .unwrap_or(0.1);
 
-            let activations = crate::scorer::graph_spreading_activation(
-                &seed_ids,
+            let seed_weights = normalized_seed_weights(&results);
+            let activations = crate::scorer::graph_spreading_activation_with_seed_weights(
+                &seed_weights,
                 &expand_result.edges,
                 opts.graph_expand_hops,
                 0.5,
             );
 
-            let new_entries: Vec<SearchResult> = expand_result
+            let mut new_entries: Vec<SearchResult> = expand_result
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
+                .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
                 .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
                 .filter(|entry| {
                     if include_superseded {
@@ -478,6 +700,13 @@ pub fn hybrid_search(
                     }
                 })
                 .collect();
+            new_entries.sort_by(|a, b| {
+                b.score
+                    .final_score
+                    .partial_cmp(&a.score.final_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.entry.id.cmp(&b.entry.id))
+            });
 
             results.extend(new_entries);
         }
@@ -498,8 +727,8 @@ pub fn hybrid_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
-    use crate::types::MemoryEntry;
+    use crate::db::{add_edge, init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
+    use crate::types::{MemoryEdge, MemoryEntry};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -526,6 +755,8 @@ mod tests {
             text: text.into(),
             importance: 0.7,
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
@@ -597,6 +828,69 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_expands_acronym_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "expanded"));
+    }
+
+    #[test]
+    fn hybrid_expands_phrase_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "acronym",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "model context protocol handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "acronym"));
+    }
+
+    #[test]
+    fn hybrid_keeps_exact_fts_match_above_expanded_match() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "exact",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "exact");
+    }
+
+    #[test]
     fn empty_query_returns_empty() {
         let mut conn = setup();
         insert(&mut conn, "x", "some text", &[]);
@@ -654,6 +948,53 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_search_respects_as_of_validity_window() {
+        let mut conn = setup();
+        let mut old = memory_entry("temporal-old", "TemporalHybridNeedle old memory", &[]);
+        old.valid_from = "2026-01-01T00:00:00Z".to_string();
+        old.valid_until = Some("2026-02-01T00:00:00Z".to_string());
+        upsert(&mut conn, &old, false).unwrap();
+
+        let mut new = memory_entry("temporal-new", "TemporalHybridNeedle new memory", &[]);
+        new.valid_from = "2026-02-01T00:00:00Z".to_string();
+        upsert(&mut conn, &new, false).unwrap();
+
+        let january = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-01-15T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(january.contains(&"temporal-old".to_string()));
+        assert!(!january.contains(&"temporal-new".to_string()));
+
+        let march = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-03-01T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(!march.contains(&"temporal-old".to_string()));
+        assert!(march.contains(&"temporal-new".to_string()));
+    }
+
+    #[test]
     fn hybrid_hides_operation_logs() {
         let mut conn = setup();
         insert(
@@ -682,5 +1023,70 @@ mod tests {
         assert!(!results
             .iter()
             .any(|result| result.entry.id == "wiki-operation-log"));
+    }
+
+    #[test]
+    fn graph_expansion_orders_neighbors_by_spreading_activation() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "seed",
+            "TrendLock durable decision rule",
+            &["trendlock"],
+        );
+        insert(
+            &mut conn,
+            "support",
+            "Support note only reachable by graph",
+            &["support"],
+        );
+        insert(
+            &mut conn,
+            "related",
+            "Related note only reachable by graph",
+            &["related"],
+        );
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "related".to_string(),
+                relation: "related_to".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "support".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+
+        let opts = SearchOptions {
+            top_k: 1,
+            record_access: false,
+            graph_expand_hops: 1,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["seed", "support", "related"]);
+        assert!(results[1].score.final_score > results[2].score.final_score);
     }
 }

@@ -210,6 +210,28 @@ impl MemoryServer {
                 match res {
                     Ok(true) => {
                         if new_vec.is_some() {
+                            let contradiction_server = self.clone();
+                            let contradiction_id = item.id.clone();
+                            let contradiction_db = item.target_db;
+                            let contradiction_project = item.named_project.clone();
+                            let contradiction_path = item.db_path.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) =
+                                    crate::memory_search_ops::apply_auto_contradiction_detection(
+                                        &contradiction_server,
+                                        &contradiction_id,
+                                        contradiction_db,
+                                        contradiction_project.as_deref(),
+                                        contradiction_path.as_ref(),
+                                    )
+                                    .await
+                                {
+                                    eprintln!(
+                                        "[enrichment-batcher] auto contradiction detection failed for {contradiction_id}: {err}"
+                                    );
+                                }
+                            });
+
                             // PR-4: always-on save_memory enrichment.
                             //
                             // Previously the foundry maintenance enqueue only

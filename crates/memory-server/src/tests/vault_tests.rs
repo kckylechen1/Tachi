@@ -241,8 +241,7 @@ async fn vault_auto_lock_expires_cached_key() {
         .await
         .expect("vault_set should succeed");
 
-    server.vault_write().unlock_time =
-        Some(Instant::now() - Duration::from_secs(60));
+    server.vault_write().unlock_time = Some(Instant::now() - Duration::from_secs(60));
 
     let err = server
         .vault_get(Parameters(VaultGetParams {
@@ -316,8 +315,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         "expected temporary lockout error, got: {blocked_err}"
     );
 
-    server.vault_write().failed_attempts =
-        (5, Some(Instant::now() - Duration::from_secs(1)));
+    server.vault_write().failed_attempts = (5, Some(Instant::now() - Duration::from_secs(1)));
 
     server
         .vault_unlock(Parameters(VaultUnlockParams {

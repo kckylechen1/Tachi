@@ -268,7 +268,9 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
         .await
         .expect("wiki search should succeed");
     assert!(response.starts_with("## Wiki search:"));
-    assert!(response.contains("MCP schema debugging") || response.contains("MCP transport debugging"));
+    assert!(
+        response.contains("MCP schema debugging") || response.contains("MCP transport debugging")
+    );
     assert!(!response.contains("merge_hints"));
 }
 
@@ -295,6 +297,7 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
         }))
         .await
         .expect("tachi_search wiki scope should succeed");
@@ -328,6 +331,8 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             force: true,
             topic: Some("routing-boundary".to_string()),
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await
         .expect("tachi_save wiki route should succeed");
@@ -443,6 +448,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Standalone old note".to_string(),
                     importance: 0.4,
                     timestamp: old_ts.clone(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "orphan".to_string(),
                     keywords: vec![],
@@ -470,6 +477,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Always use a feature flag for rollout safety.".to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "policy".to_string(),
                     keywords: vec![],
@@ -494,6 +503,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "Do not use a feature flag for rollout safety.".to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "policy".to_string(),
                     keywords: vec![],
@@ -518,6 +529,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     text: "A leaked <think） tag should be reported.".to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "dirty".to_string(),
                     keywords: vec![],
@@ -543,6 +556,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                         .to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "duplicate".to_string(),
                     keywords: vec![],
@@ -568,6 +583,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                         .to_string(),
                     importance: 0.7,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "fact".to_string(),
                     topic: "duplicate".to_string(),
                     keywords: vec![],
@@ -593,6 +610,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                         .to_string(),
                     importance: 0.9,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "decision".to_string(),
                     topic: "merge_a".to_string(),
                     keywords: vec![],
@@ -618,6 +637,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                         .to_string(),
                     importance: 0.9,
                     timestamp: Utc::now().to_rfc3339(),
+                    valid_from: String::new(),
+                    valid_until: None,
                     category: "decision".to_string(),
                     topic: "merge_b".to_string(),
                     keywords: vec![],

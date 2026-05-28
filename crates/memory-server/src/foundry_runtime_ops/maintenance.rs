@@ -28,7 +28,8 @@ const GUIDE_TYPE_DECISION: &str = "decision";
 const GUIDE_TYPE_RUNBOOK: &str = "runbook";
 
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
-    server.agent_runtime_read()
+    server
+        .agent_runtime_read()
         .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone())
@@ -593,6 +594,48 @@ pub(super) fn update_entry_metadata(
         .map_err(|e| format!("Failed to update foundry metadata for {}: {e}", entry.id))
 }
 
+pub(super) fn infer_memory_insight(
+    entry: &MemoryEntry,
+    avg_importance: f64,
+    contradiction_count: u32,
+    same_topic_count: u32,
+    related_count: usize,
+) -> serde_json::Value {
+    let surprise =
+        memory_core::surprise_score(entry, avg_importance, contradiction_count, same_topic_count);
+    let mut reasons = Vec::new();
+
+    if contradiction_count > 0 {
+        reasons.push("contradiction".to_string());
+    }
+    if same_topic_count <= 1 {
+        reasons.push("novel_topic".to_string());
+    }
+    if entry.access_count == 0 && entry.importance > 0.7 {
+        reasons.push("overlooked_high_importance".to_string());
+    }
+    if (entry.importance - avg_importance).abs() >= 0.25 {
+        reasons.push("importance_outlier".to_string());
+    }
+    if related_count >= FOUNDRY_RELATED_LIMIT {
+        reasons.push("dense_neighborhood".to_string());
+    }
+
+    json!({
+        "kind": "memory_insight",
+        "surprise": round3(surprise),
+        "priority": if surprise >= 0.4 { "high" } else if surprise >= 0.2 { "medium" } else { "low" },
+        "reasons": reasons,
+        "signals": {
+            "avg_importance": round3(avg_importance),
+            "importance_delta": round3(entry.importance - avg_importance),
+            "contradiction_count": contradiction_count,
+            "same_topic_count": same_topic_count,
+            "related_count": related_count,
+        }
+    })
+}
+
 pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
@@ -978,6 +1021,12 @@ async fn process_memory_neighborhood_job(
 ) -> Result<usize, String> {
     let mut updated = 0usize;
 
+    let avg_importance = with_foundry_store_read(server, item, |store| {
+        store
+            .avg_importance()
+            .map_err(|e| format!("Failed to compute average importance: {e}"))
+    })?;
+
     for memory_id in &item.memory_ids {
         let Some(entry) = with_foundry_store_read(server, item, |store| {
             store
@@ -1071,12 +1120,36 @@ async fn process_memory_neighborhood_job(
             continue;
         }
 
+        let (contradiction_count, same_topic_count) =
+            with_foundry_store_read(server, item, |store| {
+                let contradiction_count = store
+                    .get_contradiction_count(&entry.id)
+                    .map_err(|e| format!("Failed to count contradictions for {}: {e}", entry.id))?;
+                let topic = entry.topic.trim();
+                let same_topic_count = if topic.is_empty() {
+                    0u32
+                } else {
+                    store.count_same_topic(topic).map_err(|e| {
+                        format!("Failed to count same-topic memories for {}: {e}", entry.id)
+                    })?
+                };
+                Ok((contradiction_count, same_topic_count))
+            })?;
+        let insight = infer_memory_insight(
+            &entry,
+            avg_importance,
+            contradiction_count,
+            same_topic_count,
+            related.len(),
+        );
+
         let metadata = merge_foundry_metadata(
             &entry.metadata,
             json!({
                 "last_neighborhood_at": Utc::now().to_rfc3339(),
                 "neighborhood_job_id": item.job.id,
                 "related_entries": related,
+                "insight": insight,
             }),
         );
 
@@ -1308,6 +1381,8 @@ async fn process_memory_distill_job(
         text: distill_text,
         importance: 0.75,
         timestamp,
+        valid_from: String::new(),
+        valid_until: None,
         category: "guide".to_string(),
         topic: guide_type.to_string(),
         keywords: dedup_strings({
@@ -1490,12 +1565,24 @@ pub(crate) async fn run_foundry_maintenance_worker(
     mut rx: mpsc::Receiver<FoundryMaintenanceItem>,
 ) {
     while let Some(item) = rx.recv().await {
-        server.foundry_lock().foundry_stats.queued.fetch_sub(1, Ordering::Relaxed);
-        server.foundry_lock().foundry_stats.running.fetch_add(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .queued
+            .fetch_sub(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .running
+            .fetch_add(1, Ordering::Relaxed);
 
         let result = handle_foundry_maintenance_item(&server, &item).await;
 
-        server.foundry_lock().foundry_stats.running.fetch_sub(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .running
+            .fetch_sub(1, Ordering::Relaxed);
 
         // Branch #5 + PR-C: capture a structured reason for non-completed
         // terminal transitions so `tachi doctor --jobs` and post-mortems
@@ -1525,7 +1612,11 @@ pub(crate) async fn run_foundry_maintenance_worker(
 
         match result {
             Ok((memory_core::FoundryJobStatus::Skipped, _)) => {
-                server.foundry_lock().foundry_stats.skipped.fetch_add(1, Ordering::Relaxed);
+                server
+                    .foundry_lock()
+                    .foundry_stats
+                    .skipped
+                    .fetch_add(1, Ordering::Relaxed);
             }
             Ok(_) => {
                 server
@@ -1536,7 +1627,11 @@ pub(crate) async fn run_foundry_maintenance_worker(
             }
             Err(err) => {
                 eprintln!("[foundry-worker] job {} failed: {err}", item.job.id);
-                server.foundry_lock().foundry_stats.failed.fetch_add(1, Ordering::Relaxed);
+                server
+                    .foundry_lock()
+                    .foundry_stats
+                    .failed
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }

@@ -116,6 +116,15 @@ pub(super) fn merge_capture_entries(
         text: merged_text,
         importance: existing.importance.max(incoming.importance),
         timestamp,
+        valid_from: if existing.valid_from.trim().is_empty() {
+            incoming.valid_from.clone()
+        } else {
+            existing.valid_from.clone()
+        },
+        valid_until: existing
+            .valid_until
+            .clone()
+            .or_else(|| incoming.valid_until.clone()),
         category: merge_category(&existing.category, &incoming.category),
         topic: if existing.topic.trim().is_empty() {
             incoming.topic.clone()
@@ -189,6 +198,7 @@ pub(super) fn capture_search_options(
         mmr_threshold: None,
         graph_expand_hops: 0,
         graph_relation_filter: None,
+        as_of: None,
         vec_available,
         weights: HybridWeights {
             semantic: 1.0,
