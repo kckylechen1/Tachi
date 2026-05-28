@@ -844,11 +844,8 @@ impl MemoryServer {
         }))
         .map_err(|e| format!("serialize: {e}"))?;
 
-        let mut guard = self
-            .agent_profile
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(profile);
+        let mut guard = self.agent_runtime_write();
+        guard.agent_profile = Some(profile);
 
         Ok(response)
     }
@@ -860,8 +857,8 @@ impl MemoryServer {
         &self,
         Parameters(_params): Parameters<AgentWhoamiParams>,
     ) -> Result<String, String> {
-        let guard = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
+        let guard = self.agent_runtime_read();
+        match guard.agent_profile.as_ref() {
             Some(profile) => serde_json::to_string(&profile).map_err(|e| format!("serialize: {e}")),
             None => Ok(r#"{"status":"unregistered","message":"No agent profile set. Call agent_register to identify this session."}"#.to_string()),
         }

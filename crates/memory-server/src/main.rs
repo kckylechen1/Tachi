@@ -184,6 +184,13 @@ struct RateLimiter {
     burst: u64,
 }
 
+#[derive(Debug)]
+pub(crate) struct AgentRuntime {
+    pub(crate) agent_profile: Option<AgentProfile>,
+    pub(crate) tool_profile: Option<ToolProfile>,
+    pub(crate) handoff_memos: Vec<HandoffMemo>,
+}
+
 // ─── Server State ─────────────────────────────────────────────────────────────
 
 /// TTL for cached tool results (Phantom Tools)
@@ -418,14 +425,9 @@ struct MemoryServer {
     vault: Arc<StdRwLock<VaultState>>,
     // ─── Rate Limiter ────────────────────────────────────────────────────────
     rate_limiter: Arc<StdMutex<RateLimiter>>,
-    // ─── Agent Profile ───────────────────────────────────────────────────────
-    /// Per-session agent profile (set via agent_register tool).
-    agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
-    /// Default host-facing tool surface bundle selection for this server instance.
-    tool_profile: Arc<StdRwLock<Option<ToolProfile>>>,
-    // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
-    /// Pending handoff memos from previous agent sessions.
-    handoff_memos: Arc<StdMutex<Vec<HandoffMemo>>>,
+    // ─── Agent Runtime ───────────────────────────────────────────────────────
+    /// Agent profile, tool profile, and handoff memos grouped together.
+    agent_runtime: Arc<StdRwLock<AgentRuntime>>,
 }
 
 // MCP client pool types are in mcp_pool.rs
@@ -569,11 +571,11 @@ impl MemoryServer {
                 rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
                 burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             })),
-            agent_profile: Arc::new(StdRwLock::new(None)),
-            tool_profile: Arc::new(StdRwLock::new(
-                Some(crate::profiles::default_tool_profile()),
-            )),
-            handoff_memos: Arc::new(StdMutex::new(Vec::new())),
+            agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
+                agent_profile: None,
+                tool_profile: Some(crate::profiles::default_tool_profile()),
+                handoff_memos: Vec::new(),
+            })),
         };
 
         // Spawn the enrichment batcher worker
@@ -707,6 +709,14 @@ impl MemoryServer {
     /// Path to this server's project memory DB, when one is bound.
     pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
         self.project_db_path.as_ref().map(|p| (**p).clone())
+    }
+
+    pub(crate) fn agent_runtime_read(&self) -> std::sync::RwLockReadGuard<'_, AgentRuntime> {
+        read_or_recover(&self.agent_runtime, "agent_runtime")
+    }
+
+    pub(crate) fn agent_runtime_write(&self) -> std::sync::RwLockWriteGuard<'_, AgentRuntime> {
+        write_or_recover(&self.agent_runtime, "agent_runtime")
     }
 }
 

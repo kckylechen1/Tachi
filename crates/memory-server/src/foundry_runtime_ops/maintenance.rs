@@ -28,7 +28,8 @@ const GUIDE_TYPE_DECISION: &str = "decision";
 const GUIDE_TYPE_RUNBOOK: &str = "runbook";
 
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
-    read_or_recover(&server.agent_profile, "agent_profile")
+    server.agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone())
 }

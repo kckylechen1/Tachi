@@ -752,7 +752,8 @@ fn persist_distill_memory(
     backend: &str,
     fallback_used: bool,
 ) -> Result<String, String> {
-    let agent_id = read_or_recover(&server.agent_profile, "agent_profile")
+    let agent_id = server.agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|p| p.agent_id.clone())
         .unwrap_or_else(|| "tachi_scheduler".to_string());

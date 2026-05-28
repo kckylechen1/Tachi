@@ -215,11 +215,8 @@ impl MemoryServer {
                                 .foundry_agent_id
                                 .clone()
                                 .or_else(|| {
-                                    let guard = self
-                                        .agent_profile
-                                        .read()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    guard.as_ref().map(|p| p.agent_id.clone())
+                                    let guard = self.agent_runtime_read();
+                                    guard.agent_profile.as_ref().map(|p| p.agent_id.clone())
                                 })
                                 .unwrap_or_else(|| "system".to_string());
 

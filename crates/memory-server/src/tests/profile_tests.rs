@@ -99,8 +99,8 @@ async fn rate_limit_rpm_blocks_when_exceeded() {
     // Override RPM to a very low value for testing.
     // Since rate_limit_rpm is not pub, we use agent profile override instead.
     {
-        let mut guard = server.agent_profile.write().unwrap();
-        *guard = Some(AgentProfile {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "rpm-test".to_string(),
             display_name: "RPM Test".to_string(),
             capabilities: vec![],
@@ -133,8 +133,8 @@ async fn rate_limit_agent_profile_overrides_server_defaults() {
 
     // Register an agent with a tight burst limit
     {
-        let mut guard = server.agent_profile.write().unwrap();
-        *guard = Some(AgentProfile {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
             agent_id: "tight-agent".to_string(),
             display_name: "Tight Agent".to_string(),
             capabilities: vec![],
