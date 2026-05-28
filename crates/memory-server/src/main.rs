@@ -168,6 +168,27 @@ impl DbScope {
     }
 }
 
+// ─── Subsystems ────────────────────────────────────────────────────────────────
+
+struct VaultState {
+    key: Option<[u8; 32]>,
+    unlock_time: Option<Instant>,
+    failed_attempts: (u32, Option<Instant>),
+    auto_lock_after_secs: u64,
+}
+
+struct RateLimiter {
+    windows: HashMap<String, VecDeque<Instant>>,
+    bursts: HashMap<String, VecDeque<Instant>>,
+    rpm: u64,
+    burst: u64,
+}
+
+struct ToolRuntime {
+    cache: HashMap<String, CachedResult>,
+    dead_letters: VecDeque<DeadLetter>,
+}
+
 // ─── Server State ─────────────────────────────────────────────────────────────
 
 /// TTL for cached tool results (Phantom Tools)
@@ -372,12 +393,10 @@ struct MemoryServer {
     skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
-    // ─── Phantom Tools (result caching) ──────────────────────────────────────
-    tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
+    // ─── Tool Runtime (cache + DLQ) ──────────────────────────────────────────
+    tool_runtime: Arc<StdMutex<ToolRuntime>>,
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
-    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
@@ -386,19 +405,9 @@ struct MemoryServer {
     foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
     foundry_stats: Arc<FoundryWorkerStats>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
-    vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
-    vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
-    vault_failed_attempts: Arc<StdMutex<(u32, Option<Instant>)>>,
-    vault_auto_lock_after_secs: u64,
+    vault: Arc<StdRwLock<VaultState>>,
     // ─── Rate Limiter ────────────────────────────────────────────────────────
-    /// Sliding window: tool call timestamps per session. Key = session_id (or "default").
-    rate_limit_windows: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
-    /// Burst detection: (tool_name + args_hash) → timestamps
-    rate_limit_bursts: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
-    /// Configured RPM limit (0 = unlimited)
-    rate_limit_rpm: u64,
-    /// Configured burst limit (0 = unlimited)
-    rate_limit_burst: u64,
+    rate_limiter: Arc<StdMutex<RateLimiter>>,
     // ─── Agent Profile ───────────────────────────────────────────────────────
     /// Per-session agent profile (set via agent_register tool).
     agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
@@ -528,23 +537,29 @@ impl MemoryServer {
             skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
-            tool_cache: Arc::new(StdMutex::new(HashMap::new())),
+            tool_runtime: Arc::new(StdMutex::new(ToolRuntime {
+                cache: HashMap::new(),
+                dead_letters: VecDeque::new(),
+            })),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
             foundry_tx,
             foundry_stats,
-            vault_key: Arc::new(StdRwLock::new(None)),
-            vault_unlock_time: Arc::new(StdRwLock::new(None)),
-            vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
-            vault_auto_lock_after_secs: 1800,
-            rate_limit_windows: Arc::new(StdMutex::new(HashMap::new())),
-            rate_limit_bursts: Arc::new(StdMutex::new(HashMap::new())),
-            rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
-            rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
+            vault: Arc::new(StdRwLock::new(VaultState {
+                key: None,
+                unlock_time: None,
+                failed_attempts: (0, None),
+                auto_lock_after_secs: 1800,
+            })),
+            rate_limiter: Arc::new(StdMutex::new(RateLimiter {
+                windows: HashMap::new(),
+                bursts: HashMap::new(),
+                rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
+                burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
+            })),
             agent_profile: Arc::new(StdRwLock::new(None)),
             tool_profile: Arc::new(StdRwLock::new(
                 Some(crate::profiles::default_tool_profile()),
@@ -639,6 +654,26 @@ impl MemoryServer {
     /// same in-process worker that handles enrichment-driven enqueues.
     pub(crate) fn foundry_tx_clone(&self) -> mpsc::Sender<FoundryMaintenanceItem> {
         self.foundry_tx.clone()
+    }
+
+    pub(crate) fn vault_read(
+        &self,
+    ) -> std::sync::RwLockReadGuard<'_, VaultState> {
+        self.vault.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn vault_write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, VaultState> {
+        self.vault.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn rate_limiter_lock(&self) -> std::sync::MutexGuard<'_, RateLimiter> {
+        self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn tool_runtime_lock(&self) -> std::sync::MutexGuard<'_, ToolRuntime> {
+        self.tool_runtime.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Path to this server's global memory DB (canonicalized at boot).
