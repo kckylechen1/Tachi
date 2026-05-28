@@ -327,7 +327,10 @@ pub fn graph_spreading_activation(
         }
         let mut next = HashMap::<String, f64>::new();
         for edge in edges {
-            for (source, target) in [(&edge.source_id, &edge.target_id), (&edge.target_id, &edge.source_id)] {
+            for (source, target) in [
+                (&edge.source_id, &edge.target_id),
+                (&edge.target_id, &edge.source_id),
+            ] {
                 let Some(parent_activation) = frontier.get(source).copied() else {
                     continue;
                 };
@@ -529,6 +532,8 @@ mod tests {
             text: "".into(),
             importance: 0.7,
             timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],
@@ -566,6 +571,8 @@ mod tests {
             text: "".into(),
             importance: 0.7,
             timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],
@@ -602,10 +609,12 @@ mod tests {
         let ranks = rank_map(&vec_scores);
         let base = 0.02;
 
-        let blended = blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, Some(&ranks));
+        let blended =
+            blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, Some(&ranks));
         assert!(blended > base, "blended={blended}, base={base}");
 
-        let missing = blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, Some(&ranks));
+        let missing =
+            blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, Some(&ranks));
         assert_eq!(missing, base);
     }
 

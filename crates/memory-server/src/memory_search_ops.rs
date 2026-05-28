@@ -62,8 +62,7 @@ fn should_reinforce(
         && matches!(new_entry.category.as_str(), "fact" | "preference")
         && matches!(old_entry.category.as_str(), "fact" | "preference")
         && path_root(&new_entry.path) == path_root(&old_entry.path)
-        && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY)
-            .contains(&similarity)
+        && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY).contains(&similarity)
 }
 
 fn confidence_increment(similarity: f64) -> f64 {
@@ -137,7 +136,8 @@ pub(crate) fn apply_confidence_reinforcement_links(
                 continue;
             }
 
-            let supersedes = should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
+            let supersedes =
+                should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
             let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
                 continue;
             };
@@ -263,6 +263,11 @@ pub(crate) async fn handle_save_memory(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let valid_from = params
+        .valid_from
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| timestamp.clone());
     let requested_scope = params.scope.clone();
     let named_project = params.project.clone();
     let (target_db, warning) = if named_project.is_some() {
@@ -317,6 +322,8 @@ pub(crate) async fn handle_save_memory(
         text: safe_text,
         importance,
         timestamp: timestamp.clone(),
+        valid_from,
+        valid_until: params.valid_until,
         category,
         topic,
         keywords,
@@ -571,6 +578,8 @@ pub(crate) async fn handle_remember(
         retention_policy: params.retention_policy,
         domain: params.domain,
         timestamp: None,
+        valid_from: params.valid_from,
+        valid_until: params.valid_until,
         metadata: Some(json!({ "shortcut": "remember" })),
     };
 
@@ -945,7 +954,8 @@ pub(crate) async fn handle_search_memory(
             if outcome == crate::foundry_runtime_ops::RerankOutcome::Fallback {
                 eprintln!(
                     "[search_memory] rerank fail-open: query_hash={} top_k={}",
-                    stable_hash(&params.query), top_k
+                    stable_hash(&params.query),
+                    top_k
                 );
             }
             rows = reranked;
@@ -994,6 +1004,7 @@ pub(crate) async fn handle_find_similar_memory(
         graph_expand_hops: 0,
         graph_relation_filter: None,
         domain: None,
+        as_of: None,
     };
 
     let global_results = server.with_global_store_read(|store| {
@@ -1018,6 +1029,7 @@ pub(crate) async fn handle_find_similar_memory(
             graph_expand_hops: 0,
             graph_relation_filter: None,
             domain: None,
+            as_of: None,
         };
 
         let project_results = server.with_project_store_read(|store| {
@@ -1130,6 +1142,8 @@ mod tests {
             text: text.into(),
             importance: 0.7,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],
@@ -1247,8 +1261,7 @@ mod tests {
         old_entry.metadata = json!({ "confidence": 0.70 });
         store.upsert(&old_entry).unwrap();
 
-        apply_confidence_reinforcement(&mut store, "old", 0.08, "2026-01-01T00:00:00Z")
-            .unwrap();
+        apply_confidence_reinforcement(&mut store, "old", 0.08, "2026-01-01T00:00:00Z").unwrap();
 
         let updated = store.get("old").unwrap().unwrap();
         let confidence = updated
@@ -1274,8 +1287,7 @@ mod tests {
         old_entry.metadata = json!({});
         store.upsert(&old_entry).unwrap();
 
-        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z")
-            .unwrap();
+        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z").unwrap();
 
         let updated = store.get("old").unwrap().unwrap();
         let confidence = updated
@@ -1318,7 +1330,9 @@ mod tests {
         let count = apply_confidence_reinforcement_links(&mut store, &new_entry).unwrap();
         assert_eq!(count, 1);
 
-        let edges = store.get_edges("new", "outgoing", Some("reinforces")).unwrap();
+        let edges = store
+            .get_edges("new", "outgoing", Some("reinforces"))
+            .unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].target_id, "old");
 

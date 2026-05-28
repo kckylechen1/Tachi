@@ -27,6 +27,7 @@ pub(crate) async fn handle_tachi_board(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;

@@ -175,6 +175,8 @@ fn build_ingest_entry(
         text,
         importance,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: topic_from_path(&path),
         keywords: Vec::new(),
@@ -610,20 +612,23 @@ async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ = server.enrichment_lock().enrich_tx.try_send(super::EnrichmentItem {
-            id: entry_id.clone(),
-            text: entry.text.clone(),
-            summary: entry.summary.clone(),
-            keywords: entry.keywords.clone(),
-            needs_embedding: true,
-            needs_summary: true,
-            target_db,
-            named_project: named_project.clone(),
-            db_path: None,
-            foundry_agent_id: None,
-            foundry_path_prefix: None,
-            revision: 1,
-        });
+        let _ = server
+            .enrichment_lock()
+            .enrich_tx
+            .try_send(super::EnrichmentItem {
+                id: entry_id.clone(),
+                text: entry.text.clone(),
+                summary: entry.summary.clone(),
+                keywords: entry.keywords.clone(),
+                needs_embedding: true,
+                needs_summary: true,
+                target_db,
+                named_project: named_project.clone(),
+                db_path: None,
+                foundry_agent_id: None,
+                foundry_path_prefix: None,
+                revision: 1,
+            });
     }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);
@@ -1115,20 +1120,23 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server.enrichment_lock().enrich_tx.try_send(super::EnrichmentItem {
-                id: entry.id.clone(),
-                text: entry.text.clone(),
-                summary: entry.summary.clone(),
-                keywords: entry.keywords.clone(),
-                needs_embedding: true,
-                needs_summary: params.auto_summarize,
-                target_db,
-                named_project: named_project.clone(),
-                db_path: None,
-                foundry_agent_id: None,
-                foundry_path_prefix: None,
-                revision: 1,
-            });
+            let _ = server
+                .enrichment_lock()
+                .enrich_tx
+                .try_send(super::EnrichmentItem {
+                    id: entry.id.clone(),
+                    text: entry.text.clone(),
+                    summary: entry.summary.clone(),
+                    keywords: entry.keywords.clone(),
+                    needs_embedding: true,
+                    needs_summary: params.auto_summarize,
+                    target_db,
+                    named_project: named_project.clone(),
+                    db_path: None,
+                    foundry_agent_id: None,
+                    foundry_path_prefix: None,
+                    revision: 1,
+                });
         }
     }
 

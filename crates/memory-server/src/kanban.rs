@@ -487,6 +487,8 @@ pub(crate) async fn handle_post_card(
         text: body.clone(),
         importance: kanban_priority_importance(metadata["priority"].as_str().unwrap_or("medium")),
         timestamp: now,
+        valid_from: String::new(),
+        valid_until: None,
         category: KANBAN_CATEGORY.to_string(),
         topic: String::new(),
         keywords: vec![],

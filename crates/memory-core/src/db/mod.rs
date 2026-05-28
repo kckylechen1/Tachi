@@ -19,6 +19,7 @@ mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
+pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use graph::{

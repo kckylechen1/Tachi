@@ -39,6 +39,7 @@ pub(crate) async fn handle_tachi_memory(
                 category: params.category.clone(),
                 include_archived: params.include_archived,
                 enable_rerank: params.enable_rerank,
+                as_of: params.as_of.clone(),
             };
             handle_tachi_search(server, search_params).await
         }
@@ -95,6 +96,8 @@ pub(crate) async fn handle_tachi_memory(
                 force: params.force,
                 topic: params.topic.clone(),
                 source: params.source.clone(),
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
             };
             handle_tachi_save(server, save_params).await
         }
@@ -131,6 +134,8 @@ pub(crate) async fn handle_tachi_memory(
                 force: params.force,
                 topic: params.topic.clone(),
                 source: params.source.clone(),
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
             };
             handle_tachi_save(server, save_params).await
         }
@@ -160,7 +165,11 @@ async fn handle_memory_briefing(
         .unwrap_or_else(|| "current task recent decisions blockers next steps".to_string());
     let top_k = params.top_k.max(1).min(12);
     let include_wiki = !matches!(
-        params.scope.as_deref().map(str::to_ascii_lowercase).as_deref(),
+        params
+            .scope
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
         Some("memory")
     );
 
@@ -188,6 +197,7 @@ async fn handle_memory_briefing(
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),
         enable_rerank: params.enable_rerank,
+        as_of: params.as_of.clone(),
     };
     let memories = slim_memory_rows(parse_evidence_array(
         handle_search_memory(server, mem_params).await?,
@@ -220,6 +230,7 @@ async fn handle_memory_briefing(
                         file_context: params.file_context.clone(),
                         error_context: params.error_context.clone(),
                         enable_rerank: false,
+                        as_of: params.as_of.clone(),
                     },
                 )
                 .await?,
@@ -327,6 +338,8 @@ async fn handle_memory_checkpoint(
             .source
             .take()
             .or_else(|| Some("tachi_checkpoint".to_string())),
+        valid_from: params.valid_from.take(),
+        valid_until: params.valid_until.take(),
     };
     handle_tachi_save(server, save_params).await
 }
@@ -373,6 +386,9 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         id: None,
         force: true,
         source: Some("claude_jsonl_passive_watcher".to_string()),
+        as_of: None,
+        valid_from: None,
+        valid_until: None,
         flow_id: None,
         event: None,
         state: None,
@@ -398,11 +414,7 @@ async fn handle_memory_alerts(
     );
     let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
     let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    Ok(agent_markdown::format_alerts(
-        &ctx,
-        &warnings,
-        &wiki_counts,
-    ))
+    Ok(agent_markdown::format_alerts(&ctx, &warnings, &wiki_counts))
 }
 
 async fn handle_memory_ask(
@@ -426,6 +438,7 @@ async fn handle_memory_ask(
         category: params.category.clone(),
         include_archived: params.include_archived,
         enable_rerank: true,
+        as_of: params.as_of.clone(),
     };
     let evidence = parse_evidence_array(handle_tachi_search(server, search_params).await?);
     let synthesis = if params.synthesize {
@@ -465,6 +478,7 @@ async fn handle_memory_consolidate(
         category: params.category.clone(),
         include_archived: params.include_archived,
         enable_rerank: params.enable_rerank,
+        as_of: params.as_of.clone(),
     };
     let candidates = parse_json_or_empty(handle_tachi_search(server, search_params).await?);
     let synthesis = if params.synthesize {
@@ -501,7 +515,10 @@ async fn handle_memory_progress(
         .flow_id
         .clone()
         .unwrap_or_else(|| format!("memory_{}", Utc::now().format("%Y%m%d")));
-    let event = params.event.clone().unwrap_or_else(|| "progress".to_string());
+    let event = params
+        .event
+        .clone()
+        .unwrap_or_else(|| "progress".to_string());
     let raw_text = params
         .text
         .clone()
@@ -640,9 +657,7 @@ async fn synthesize_answer(
     let user = format!("Question:\n{query}\n\nEvidence JSON:\n{evidence_text}");
     match tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        server
-            .llm
-            .call_extract_llm(system, &user, model, 0.2, 700),
+        server.llm.call_extract_llm(system, &user, model, 0.2, 700),
     )
     .await
     {
@@ -684,7 +699,8 @@ fn progress_run_dir(flow_id: &str) -> Result<PathBuf, String> {
 }
 
 fn append_jsonl(path: &Path, value: &Value) -> Result<(), String> {
-    let line = serde_json::to_string(value).map_err(|e| format!("serialize progress event: {e}"))?;
+    let line =
+        serde_json::to_string(value).map_err(|e| format!("serialize progress event: {e}"))?;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -723,7 +739,10 @@ fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_progress_status_lock<T>(
+    status_path: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     use std::fs::OpenOptions;
     use std::os::unix::io::AsRawFd;
 
@@ -755,7 +774,10 @@ fn with_progress_status_lock<T>(status_path: &Path, f: impl FnOnce() -> Result<T
 }
 
 #[cfg(not(unix))]
-fn with_progress_status_lock<T>(_status_path: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+fn with_progress_status_lock<T>(
+    _status_path: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
     f()
 }
 
@@ -856,8 +878,16 @@ fn extract_jsonl_text(value: &Value) -> Option<String> {
         .pointer("/message/content")
         .and_then(text_from_jsonl_content)
         .or_else(|| value.get("content").and_then(text_from_jsonl_content))
-        .or_else(|| value.pointer("/message/text").and_then(|v| v.as_str().map(str::to_string)))
-        .or_else(|| value.get("text").and_then(|v| v.as_str().map(str::to_string)))
+        .or_else(|| {
+            value
+                .pointer("/message/text")
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
+        .or_else(|| {
+            value
+                .get("text")
+                .and_then(|v| v.as_str().map(str::to_string))
+        })
 }
 
 fn text_from_jsonl_content(value: &Value) -> Option<String> {

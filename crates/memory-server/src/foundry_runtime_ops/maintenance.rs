@@ -28,7 +28,8 @@ const GUIDE_TYPE_DECISION: &str = "decision";
 const GUIDE_TYPE_RUNBOOK: &str = "runbook";
 
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
-    server.agent_runtime_read()
+    server
+        .agent_runtime_read()
         .agent_profile
         .as_ref()
         .map(|profile| profile.agent_id.clone())
@@ -1308,6 +1309,8 @@ async fn process_memory_distill_job(
         text: distill_text,
         importance: 0.75,
         timestamp,
+        valid_from: String::new(),
+        valid_until: None,
         category: "guide".to_string(),
         topic: guide_type.to_string(),
         keywords: dedup_strings({
@@ -1490,12 +1493,24 @@ pub(crate) async fn run_foundry_maintenance_worker(
     mut rx: mpsc::Receiver<FoundryMaintenanceItem>,
 ) {
     while let Some(item) = rx.recv().await {
-        server.foundry_lock().foundry_stats.queued.fetch_sub(1, Ordering::Relaxed);
-        server.foundry_lock().foundry_stats.running.fetch_add(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .queued
+            .fetch_sub(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .running
+            .fetch_add(1, Ordering::Relaxed);
 
         let result = handle_foundry_maintenance_item(&server, &item).await;
 
-        server.foundry_lock().foundry_stats.running.fetch_sub(1, Ordering::Relaxed);
+        server
+            .foundry_lock()
+            .foundry_stats
+            .running
+            .fetch_sub(1, Ordering::Relaxed);
 
         // Branch #5 + PR-C: capture a structured reason for non-completed
         // terminal transitions so `tachi doctor --jobs` and post-mortems
@@ -1525,7 +1540,11 @@ pub(crate) async fn run_foundry_maintenance_worker(
 
         match result {
             Ok((memory_core::FoundryJobStatus::Skipped, _)) => {
-                server.foundry_lock().foundry_stats.skipped.fetch_add(1, Ordering::Relaxed);
+                server
+                    .foundry_lock()
+                    .foundry_stats
+                    .skipped
+                    .fetch_add(1, Ordering::Relaxed);
             }
             Ok(_) => {
                 server
@@ -1536,7 +1555,11 @@ pub(crate) async fn run_foundry_maintenance_worker(
             }
             Err(err) => {
                 eprintln!("[foundry-worker] job {} failed: {err}", item.job.id);
-                server.foundry_lock().foundry_stats.failed.fetch_add(1, Ordering::Relaxed);
+                server
+                    .foundry_lock()
+                    .foundry_stats
+                    .failed
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }

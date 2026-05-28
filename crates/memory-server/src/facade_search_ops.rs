@@ -71,12 +71,10 @@ pub(crate) async fn handle_tachi_search(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
+            as_of: params.as_of.clone(),
         };
         match handle_search_memory(server, mem_params).await {
-            Ok(raw) => sections.push((
-                "Memory".to_string(),
-                parse_memory_rows(raw, params.top_k),
-            )),
+            Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, params.top_k))),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
@@ -104,6 +102,7 @@ pub(crate) async fn handle_tachi_search(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: false,
+            as_of: params.as_of.clone(),
         };
         match search_memory_rows(server, wiki_params).await {
             Ok(rows) => sections.push(("Wiki".to_string(), Value::Array(rows))),

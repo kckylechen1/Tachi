@@ -17,12 +17,12 @@ pub mod types;
 pub mod vault;
 
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
-pub use db::row_to_entry;
 pub use db::foundry_jobs::{
     find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job, job_status_histogram,
     load_pending_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobSummary,
     JobStatusHistogram, PersistedFoundryJob,
 };
+pub use db::row_to_entry;
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -620,6 +620,8 @@ mod tests {
             text: "Hermes rate limit was caused by routing to the ZAI global endpoint".to_string(),
             importance: 0.8,
             timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".to_string(),
             topic: "hermes-rate-limit".to_string(),
             keywords: vec!["hermes".to_string(), "rate-limit".to_string()],

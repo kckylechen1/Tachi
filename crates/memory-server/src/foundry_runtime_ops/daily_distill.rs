@@ -317,9 +317,7 @@ async fn process_api_batch(
                 pending.push(&batch[..mid]);
             }
             Err(err) => {
-                report
-                    .errors
-                    .push(format!("api batch {chunk_idx}: {err}"));
+                report.errors.push(format!("api batch {chunk_idx}: {err}"));
                 for group in batch {
                     fallback_one_group(server, group, batch_run_id, report, manifest).await;
                 }
@@ -405,14 +403,8 @@ async fn call_api_batch_distill(
 ) -> Result<String, String> {
     let user = build_batch_user_payload(groups);
     let max_tokens = batch_max_tokens(groups.len());
-    llm.call_distill_llm(
-        DISTILL_DAILY_SYSTEM_PROMPT,
-        &user,
-        None,
-        0.3,
-        max_tokens,
-    )
-    .await
+    llm.call_distill_llm(DISTILL_DAILY_SYSTEM_PROMPT, &user, None, 0.3, max_tokens)
+        .await
 }
 
 fn batch_max_tokens(group_count: usize) -> u32 {
@@ -752,7 +744,8 @@ fn persist_distill_memory(
     backend: &str,
     fallback_used: bool,
 ) -> Result<String, String> {
-    let agent_id = server.agent_runtime_read()
+    let agent_id = server
+        .agent_runtime_read()
         .agent_profile
         .as_ref()
         .map(|p| p.agent_id.clone())
@@ -815,6 +808,8 @@ fn persist_distill_memory(
         text: payload.text.clone(),
         importance: 0.75,
         timestamp,
+        valid_from: String::new(),
+        valid_until: None,
         category: "other".to_string(),
         topic: "foundry_distill".to_string(),
         keywords,
