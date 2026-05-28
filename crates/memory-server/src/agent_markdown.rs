@@ -236,6 +236,8 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
         let id = row.get("id").and_then(Value::as_str);
         let relevance = row
             .get("relevance")
+            .or_else(|| row.get("score"))
+            .filter(|v| !v.is_null())
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();

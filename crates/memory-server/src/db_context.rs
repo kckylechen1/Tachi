@@ -25,7 +25,10 @@ pub(crate) fn describe_db_context(
         Some(name) => {
             let named = MemoryServer::resolve_named_project_db_path(name)
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| format!("~/.tachi/projects/{name}/memory.db (missing)"));
+                .unwrap_or_else(|_| {
+                    let home = std::env::var("TACHI_HOME").unwrap_or_else(|_| "~/.tachi".to_string());
+                    format!("{home}/projects/{name}/memory.db (missing)")
+                });
             (
                 vec![format!("named project `{name}` → {named}")],
                 Some(format!(

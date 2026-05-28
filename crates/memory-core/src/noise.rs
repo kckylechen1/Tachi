@@ -179,7 +179,9 @@ pub fn should_skip_query(query: &str) -> bool {
     // Even for long text, check full-string-anchored patterns (affirmations, pings)
     if char_count > SKIP_MAX_CHARS {
         let patterns = skip_patterns();
-        if patterns[3].is_match(trimmed) || patterns[4].is_match(trimmed) {
+        if patterns.get(3).is_some_and(|p| p.is_match(trimmed))
+            || patterns.get(4).is_some_and(|p| p.is_match(trimmed))
+        {
             return true;
         }
         if patterns

@@ -306,8 +306,11 @@ async fn handle_memory_checkpoint(
             .category
             .take()
             .or_else(|| Some("experience".to_string())),
-        keywords: merge_keywords(params.keywords.clone(), &["checkpoint", "agent-session"]),
-        entities: params.entities.clone(),
+        keywords: merge_keywords(
+            std::mem::take(&mut params.keywords),
+            &["checkpoint", "agent-session"],
+        ),
+        entities: std::mem::take(&mut params.entities),
         scope: params.scope.take().or_else(|| Some("project".to_string())),
         project: params.project.take(),
         domain: params.domain.take(),

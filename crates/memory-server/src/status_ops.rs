@@ -615,25 +615,27 @@ async fn handle_tachi_status_detail(
 
 /// Lightweight warning lines for `tachi_memory action=alerts` — no provider keys, models, or skill matrices.
 pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) -> Vec<String> {
-    let app_home: PathBuf = std::env::var("TACHI_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".tachi")
-        });
-    let snapshot = collect_snapshot(
-        &app_home,
-        &server.global_db_path_buf(),
-        server.project_db_path_buf().as_deref(),
-    );
-    let daemon_state = match &snapshot.daemon {
-        DaemonStatus::Running { .. } => json!({ "running": true }),
-        DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
-        DaemonStatus::None => json!({ "running": false }),
-    };
-    build_status_warnings(&snapshot, &daemon_state)
+    let global_db = server.global_db_path_buf();
+    let project_db = server.project_db_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let app_home: PathBuf = std::env::var("TACHI_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".tachi")
+            });
+        let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
+        let daemon_state = match &snapshot.daemon {
+            DaemonStatus::Running { .. } => json!({ "running": true }),
+            DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
+            DaemonStatus::None => json!({ "running": false }),
+        };
+        build_status_warnings(&snapshot, &daemon_state)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn build_status_warnings(snapshot: &StatusSnapshot, daemon_state: &serde_json::Value) -> Vec<String> {
