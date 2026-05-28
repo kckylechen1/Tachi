@@ -3,49 +3,59 @@
 // Ported from memory-lancedb-pro's noise-filter.ts + adaptive-retrieval.ts.
 // Runs entirely in Rust — zero I/O, zero LLM calls.
 
-use lazy_static::lazy_static;
 use regex::Regex;
+use std::sync::OnceLock;
 
 // ─── Noise Detection (for storing) ──────────────────────────────────────────
 
-lazy_static! {
-    /// Agent-side denial patterns (English)
-    static ref DENIAL_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)i don'?t have (any )?(information|data|memory|record)").unwrap(),
-        Regex::new(r"(?i)i'?m not sure about").unwrap(),
-        Regex::new(r"(?i)i don'?t recall").unwrap(),
-        Regex::new(r"(?i)i don'?t remember").unwrap(),
-        Regex::new(r"(?i)it looks like i don'?t").unwrap(),
-        Regex::new(r"(?i)i wasn'?t able to find").unwrap(),
-        Regex::new(r"(?i)no (relevant )?memories found").unwrap(),
-        Regex::new(r"(?i)i don'?t have access to").unwrap(),
-        Regex::new(r"(?i)^i apologize\b").unwrap(),
-        Regex::new(r"(?i)^as an ai\b").unwrap(),
-        Regex::new(r"(?i)^i cannot\b").unwrap(),
-        Regex::new(r"(?i)^i can'?t\b").unwrap(),
-        Regex::new(r"(?i)^i am unable to\b").unwrap(),
-        Regex::new(r"(?i)^i'?m unable to\b").unwrap(),
-        Regex::new(r"(?i)^let me know if\b").unwrap(),
-        Regex::new(r"(?i)^feel free to\b").unwrap(),
-        Regex::new(r"(?i)^is there anything else\b").unwrap(),
-    ];
+fn denial_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)i don'?t have (any )?(information|data|memory|record)").unwrap(),
+            Regex::new(r"(?i)i'?m not sure about").unwrap(),
+            Regex::new(r"(?i)i don'?t recall").unwrap(),
+            Regex::new(r"(?i)i don'?t remember").unwrap(),
+            Regex::new(r"(?i)it looks like i don'?t").unwrap(),
+            Regex::new(r"(?i)i wasn'?t able to find").unwrap(),
+            Regex::new(r"(?i)no (relevant )?memories found").unwrap(),
+            Regex::new(r"(?i)i don'?t have access to").unwrap(),
+            Regex::new(r"(?i)^i apologize\b").unwrap(),
+            Regex::new(r"(?i)^as an ai\b").unwrap(),
+            Regex::new(r"(?i)^i cannot\b").unwrap(),
+            Regex::new(r"(?i)^i can'?t\b").unwrap(),
+            Regex::new(r"(?i)^i am unable to\b").unwrap(),
+            Regex::new(r"(?i)^i'?m unable to\b").unwrap(),
+            Regex::new(r"(?i)^let me know if\b").unwrap(),
+            Regex::new(r"(?i)^feel free to\b").unwrap(),
+            Regex::new(r"(?i)^is there anything else\b").unwrap(),
+        ]
+    })
+}
 
-    /// User-side meta-question patterns
-    static ref META_QUESTION_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\bdo you (remember|recall|know about)\b").unwrap(),
-        Regex::new(r"(?i)\bcan you (remember|recall)\b").unwrap(),
-        Regex::new(r"(?i)\bdid i (tell|mention|say|share)\b").unwrap(),
-        Regex::new(r"(?i)\bhave i (told|mentioned|said)\b").unwrap(),
-        Regex::new(r"(?i)\bwhat did i (tell|say|mention)\b").unwrap(),
-    ];
+fn meta_question_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)\bdo you (remember|recall|know about)\b").unwrap(),
+            Regex::new(r"(?i)\bcan you (remember|recall)\b").unwrap(),
+            Regex::new(r"(?i)\bdid i (tell|mention|say|share)\b").unwrap(),
+            Regex::new(r"(?i)\bhave i (told|mentioned|said)\b").unwrap(),
+            Regex::new(r"(?i)\bwhat did i (tell|say|mention)\b").unwrap(),
+        ]
+    })
+}
 
-    /// Session boilerplate patterns (only matched on short text, see is_noise_text)
-    static ref BOILERPLATE_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)^(hi|hello|hey|good morning|good evening|greetings)\b").unwrap(),
-        Regex::new(r"(?i)^fresh session").unwrap(),
-        Regex::new(r"(?i)^new session").unwrap(),
-        Regex::new(r"(?i)^HEARTBEAT").unwrap(),
-    ];
+fn boilerplate_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)^(hi|hello|hey|good morning|good evening|greetings)\b").unwrap(),
+            Regex::new(r"(?i)^fresh session").unwrap(),
+            Regex::new(r"(?i)^new session").unwrap(),
+            Regex::new(r"(?i)^HEARTBEAT").unwrap(),
+        ]
+    })
 }
 
 /// Maximum char count for boilerplate matching.
@@ -64,19 +74,18 @@ pub fn is_noise_text(text: &str) -> bool {
     }
 
     // Denial patterns match at any length (entire response is a denial)
-    if DENIAL_PATTERNS.iter().any(|p| p.is_match(trimmed)) {
+    if denial_patterns().iter().any(|p| p.is_match(trimmed)) {
         return true;
     }
 
     // Meta-question patterns match at any length
-    if META_QUESTION_PATTERNS.iter().any(|p| p.is_match(trimmed)) {
+    if meta_question_patterns().iter().any(|p| p.is_match(trimmed)) {
         return true;
     }
 
     // Boilerplate only applies to short texts to avoid false-positives
-    // e.g. "Hey, production broke after the migration" should NOT be noise
     if char_count <= BOILERPLATE_MAX_CHARS
-        && BOILERPLATE_PATTERNS.iter().any(|p| p.is_match(trimmed))
+        && boilerplate_patterns().iter().any(|p| p.is_match(trimmed))
     {
         return true;
     }
@@ -86,34 +95,33 @@ pub fn is_noise_text(text: &str) -> bool {
 
 // ─── Adaptive Retrieval (for querying) ──────────────────────────────────────
 
-lazy_static! {
-    /// Queries that should skip memory retrieval (only matched on short text)
-    static ref SKIP_PATTERNS: Vec<Regex> = vec![
-        // Greetings & pleasantries
-        Regex::new(r"(?i)^(hi|hello|hey|good\s*(morning|afternoon|evening|night)|greetings|yo|sup|howdy)\b").unwrap(),
-        // Slash commands
-        Regex::new(r"^/").unwrap(),
-        // Shell/dev commands (only at start, require end-of-string or space+args)
-        Regex::new(r"(?i)^(run|build|test|ls|cd|git|npm|pip|docker|curl|cat|grep|find|make|sudo)\s").unwrap(),
-        // Simple affirmations/negations (full-string match)
-        Regex::new(r"(?i)^(yes|no|yep|nope|ok|okay|sure|fine|thanks|thank you|thx|ty|got it|understood|cool|nice|great|good|perfect|awesome)\s*[.!]?$").unwrap(),
-        // Continuation prompts (EN + CN, full-string match)
-        Regex::new(r"(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|開始|开始|继续|繼續|好的|可以|行)\s*[.!]?$").unwrap(),
-        // HEARTBEAT / system
-        Regex::new(r"(?i)HEARTBEAT").unwrap(),
-        Regex::new(r"(?i)^\[System").unwrap(),
-        // Single-word utility pings (full-string match)
-        Regex::new(r"(?i)^(ping|pong|test|debug)\s*[.!?]?$").unwrap(),
-    ];
+fn skip_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)^(hi|hello|hey|good\s*(morning|afternoon|evening|night)|greetings|yo|sup|howdy)\b").unwrap(),
+            Regex::new(r"^/").unwrap(),
+            Regex::new(r"(?i)^(run|build|test|ls|cd|git|npm|pip|docker|curl|cat|grep|find|make|sudo)\s").unwrap(),
+            Regex::new(r"(?i)^(yes|no|yep|nope|ok|okay|sure|fine|thanks|thank you|thx|ty|got it|understood|cool|nice|great|good|perfect|awesome)\s*[.!]?$").unwrap(),
+            Regex::new(r"(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|開始|开始|继续|繼續|好的|可以|行)\s*[.!]?$").unwrap(),
+            Regex::new(r"(?i)HEARTBEAT").unwrap(),
+            Regex::new(r"(?i)^\[System").unwrap(),
+            Regex::new(r"(?i)^(ping|pong|test|debug)\s*[.!?]?$").unwrap(),
+        ]
+    })
+}
 
-    /// Queries that FORCE memory retrieval even if short
-    static ref FORCE_RETRIEVE_PATTERNS: Vec<Regex> = vec![
-        Regex::new(r"(?i)\b(remember|recall|forgot|memory|memories)\b").unwrap(),
-        Regex::new(r"(?i)\b(last time|before|previously|earlier|yesterday|ago)\b").unwrap(),
-        Regex::new(r"(?i)\b(my (name|email|phone|address|birthday|preference))\b").unwrap(),
-        Regex::new(r"(?i)\b(what did (i|we)|did i (tell|say|mention))\b").unwrap(),
-        Regex::new(r"(你记得|之前|上次|以前|还记得|還記得|提到过|提到過|说过|說過)").unwrap(),
-    ];
+fn force_retrieve_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        vec![
+            Regex::new(r"(?i)\b(remember|recall|forgot|memory|memories)\b").unwrap(),
+            Regex::new(r"(?i)\b(last time|before|previously|earlier|yesterday|ago)\b").unwrap(),
+            Regex::new(r"(?i)\b(my (name|email|phone|address|birthday|preference))\b").unwrap(),
+            Regex::new(r"(?i)\b(what did (i|we)|did i (tell|say|mention))\b").unwrap(),
+            Regex::new(r"(你记得|之前|上次|以前|还记得|還記得|提到过|提到過|说过|說過)").unwrap(),
+        ]
+    })
 }
 
 /// Maximum char count for skip-pattern-based skipping.
@@ -149,7 +157,7 @@ pub fn should_skip_query(query: &str) -> bool {
     let char_count = trimmed.chars().count();
 
     // Force retrieve if query has memory-related intent (checked FIRST)
-    if FORCE_RETRIEVE_PATTERNS.iter().any(|p| p.is_match(trimmed)) {
+    if force_retrieve_patterns().iter().any(|p| p.is_match(trimmed)) {
         return false;
     }
 
@@ -165,17 +173,18 @@ pub fn should_skip_query(query: &str) -> bool {
 
     // Skip patterns: greeting/command patterns only on short text,
     // full-string patterns (affirmations) always apply
-    if char_count <= SKIP_MAX_CHARS && SKIP_PATTERNS.iter().any(|p| p.is_match(trimmed)) {
+    if char_count <= SKIP_MAX_CHARS && skip_patterns().iter().any(|p| p.is_match(trimmed)) {
         return true;
     }
     // Even for long text, check full-string-anchored patterns (affirmations, pings)
     if char_count > SKIP_MAX_CHARS {
-        let affirmation: &Regex = &SKIP_PATTERNS[3];
-        let continuation: &Regex = &SKIP_PATTERNS[4];
-        if affirmation.is_match(trimmed) || continuation.is_match(trimmed) {
+        let patterns = skip_patterns();
+        if patterns.get(3).is_some_and(|p| p.is_match(trimmed))
+            || patterns.get(4).is_some_and(|p| p.is_match(trimmed))
+        {
             return true;
         }
-        if SKIP_PATTERNS
+        if patterns
             .iter()
             .any(|p| p.as_str().contains("HEARTBEAT") && p.is_match(trimmed))
         {

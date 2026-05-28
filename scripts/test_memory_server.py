@@ -65,8 +65,10 @@ def extract_text(response):
 
 def test_memory_server():
     print("Starting Memory Server...")
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+    binary_path = os.path.join(SCRIPT_DIR, "..", "target", "release", "memory-server")
     proc = subprocess.Popen(
-        ["/Users/kckylechen/Desktop/Sigil/target/release/memory-server"],
+        [os.path.abspath(binary_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

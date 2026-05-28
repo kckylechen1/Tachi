@@ -455,16 +455,6 @@ pub(super) async fn search_memory_rows(
 
     let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
 
-    let global_opts = params.to_search_options(server.global_vec_available);
-
-    let global_results = server.with_global_store_read(|store| {
-        store
-            .search(&params.query, Some(global_opts))
-            .map_err(|e| format!("Search failed in global DB: {}", e))
-    })?;
-    combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
-
-    // Search project DB — either named project or default
     if let Some(ref project_name) = params.project {
         let project_results = server.with_named_project_store_read(project_name, |store| {
             let vec_avail = store.vec_available;
@@ -474,15 +464,24 @@ pub(super) async fn search_memory_rows(
                 .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
         })?;
         combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-    } else if server.has_project_db() {
-        let project_opts = params.to_search_options(server.project_vec_available);
-
-        let project_results = server.with_project_store_read(|store| {
+    } else {
+        let global_opts = params.to_search_options(server.global_vec_available);
+        let global_results = server.with_global_store_read(|store| {
             store
-                .search(&params.query, Some(project_opts))
-                .map_err(|e| format!("Search failed in project DB: {}", e))
+                .search(&params.query, Some(global_opts))
+                .map_err(|e| format!("Search failed in global DB: {}", e))
         })?;
-        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+        if server.has_project_db() {
+            let project_opts = params.to_search_options(server.project_vec_available);
+            let project_results = server.with_project_store_read(|store| {
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| format!("Search failed in project DB: {}", e))
+            })?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        }
     }
 
     apply_guide_context_boosts(
@@ -949,4 +948,113 @@ fn format_save_error(
          underlying: {err_str}",
         scope = target_db.as_str(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memory_core::types::MemoryEntry;
+    use serde_json::json;
+
+    fn test_entry(id: &str, text: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.into(),
+            path: "/test".into(),
+            summary: text[..text.len().min(30)].into(),
+            text: text.into(),
+            importance: 0.7,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "fact".into(),
+            topic: "".into(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: "".into(),
+            source: "test".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+        }
+    }
+
+    #[test]
+    fn scrub_secrets_masks_bearer_tokens() {
+        let input = "Authorization: Bearer sk-abc123def456ghi789jkl012mno345";
+        let (output, count) = scrub_secrets(input);
+        assert!(count > 0, "should detect bearer token");
+        assert!(output.contains(REDACTED_SECRET));
+        assert!(!output.contains("sk-abc123"));
+    }
+
+    #[test]
+    fn scrub_secrets_masks_api_keys() {
+        let input = r#"api_key: "sk-proj-abcdefghijklmnopqrstuvwxyz""#;
+        let (output, count) = scrub_secrets(input);
+        assert!(count > 0);
+        assert!(output.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn scrub_secrets_masks_aws_keys() {
+        let input = "AWS key: AKIAIOSFODNN7EXAMPLE";
+        let (output, count) = scrub_secrets(input);
+        assert!(count > 0);
+        assert!(output.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn scrub_secrets_preserves_safe_text() {
+        let input = "This is a normal text with no secrets at all.";
+        let (output, count) = scrub_secrets(input);
+        assert_eq!(count, 0);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn scrub_secrets_masks_github_tokens() {
+        let input = "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij";
+        let (output, count) = scrub_secrets(input);
+        assert!(count > 0);
+        assert!(output.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn path_root_extracts_first_segment() {
+        assert_eq!(path_root("/project/alpha"), "project");
+        assert_eq!(path_root("/wiki/entry"), "wiki");
+        assert_eq!(path_root("no-slash"), "no-slash");
+        assert_eq!(path_root("/"), "");
+    }
+
+    #[test]
+    fn is_newer_than_compares_timestamps() {
+        assert!(is_newer_than(
+            "2025-01-02T00:00:00Z",
+            "2025-01-01T00:00:00Z"
+        ));
+        assert!(!is_newer_than(
+            "2025-01-01T00:00:00Z",
+            "2025-01-02T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn should_enqueue_enrichment_high_importance() {
+        let mut e = test_entry("enr-1", "test");
+        e.importance = 0.5;
+        assert!(should_enqueue_enrichment(&e));
+
+        e.importance = 0.3;
+        e.vector = None;
+        assert!(!should_enqueue_enrichment(&e));
+
+        e.vector = Some(vec![0.1; 64]);
+        assert!(should_enqueue_enrichment(&e));
+    }
 }

@@ -556,7 +556,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         probe_keys,
     } = &command
     {
-        return crate::status_ops::run_status(
+        return crate::status_ops::status_cli::run_status(
             *watch,
             *json,
             *hide_orphans,
@@ -569,15 +569,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Daemon { action } = &command {
-        return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+        return crate::status_ops::status_cli::run_daemon(action.clone(), &app_home).await;
     }
 
     if let Commands::Watcher { action } = &command {
-        return crate::status_ops::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
+        return crate::status_ops::status_cli::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
     }
 
     if let Commands::Foundry { action } = &command {
-        return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
+        return crate::status_ops::status_cli::run_foundry(action.clone(), &app_home, &global_db_path).await;
     }
 
     if let Commands::Repair {
@@ -699,9 +699,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 return Err("keychain password doesn't match vault".into());
             }
 
-            *crate::write_or_recover(&server.vault_key, "vault_key") = Some(key);
-            *crate::write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
-                Some(std::time::Instant::now());
+            {
+                let mut v = server.vault_write();
+                v.key = Some(key);
+                v.unlock_time = Some(std::time::Instant::now());
+            }
             let loaded = server.refresh_llm_provider_secrets_from_vault()?;
             eprintln!("[vault] loaded {loaded} provider key(s) from unlocked vault");
             Ok(true)

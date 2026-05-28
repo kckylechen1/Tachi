@@ -211,13 +211,10 @@ fn enqueue_dead_letter(
         max_retries: 3,
         status: "pending".to_string(),
     };
-    let mut dlq = server
-        .dead_letters
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    dlq.push_back(dl);
-    while dlq.len() > DLQ_MAX_ENTRIES {
-        dlq.pop_front();
+    let mut rt = server.tool_runtime_lock();
+    rt.dead_letters.push_back(dl);
+    while rt.dead_letters.len() > DLQ_MAX_ENTRIES {
+        rt.dead_letters.pop_front();
     }
 }
 
@@ -1200,25 +1197,18 @@ pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         }
     }
 
-    let cache_size = server
-        .tool_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .len();
+    let cache_size = server.tool_runtime_lock().cache.len();
     let hits = server.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
     let misses = server
         .cache_misses
         .load(std::sync::atomic::Ordering::Relaxed);
 
     let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
-        let dlq = server
-            .dead_letters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let total = dlq.len();
-        let pending = dlq.iter().filter(|d| d.status == "pending").count();
-        let resolved = dlq.iter().filter(|d| d.status == "resolved").count();
-        let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
+        let rt = server.tool_runtime_lock();
+        let total = rt.dead_letters.len();
+        let pending = rt.dead_letters.iter().filter(|d| d.status == "pending").count();
+        let resolved = rt.dead_letters.iter().filter(|d| d.status == "resolved").count();
+        let abandoned = rt.dead_letters.iter().filter(|d| d.status == "abandoned").count();
         (total, pending, resolved, abandoned)
     };
     let foundry = json!({
