@@ -229,6 +229,9 @@ async fn tachi_memory_ask_returns_evidence_contract() {
     let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
     assert_eq!(parsed["mode"], json!("ask"));
     assert!(parsed["evidence"].is_array());
+    assert_eq!(parsed["thinking"]["mode"], json!("ask"));
+    assert!(parsed["thinking"]["evidence_count"].as_u64().is_some());
+    assert!(parsed["thinking"]["key_evidence"].is_array());
 }
 
 #[tokio::test]

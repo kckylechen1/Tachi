@@ -441,6 +441,7 @@ async fn handle_memory_ask(
         as_of: params.as_of.clone(),
     };
     let evidence = parse_evidence_array(handle_tachi_search(server, search_params).await?);
+    let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
         Some(synthesize_answer(server, &query, &evidence, params.model.as_deref()).await)
     } else {
@@ -451,6 +452,7 @@ async fn handle_memory_ask(
         "mode": "ask",
         "query": query,
         "answer_policy": "Use the evidence array below; if evidence is insufficient, say so instead of inventing details.",
+        "thinking": thinking,
         "synthesis": synthesis,
         "evidence": evidence,
     }))
@@ -481,6 +483,11 @@ async fn handle_memory_consolidate(
         as_of: params.as_of.clone(),
     };
     let candidates = parse_json_or_empty(handle_tachi_search(server, search_params).await?);
+    let thinking = build_thinking_scaffold(
+        "consolidate",
+        "Identify duplicate, stale, superseded, or merge-worthy memory consolidation candidates.",
+        &candidates,
+    );
     let synthesis = if params.synthesize {
         Some(
             synthesize_answer(
@@ -498,6 +505,7 @@ async fn handle_memory_consolidate(
         "status": "dry_run",
         "mode": "consolidate",
         "candidates": candidates,
+        "thinking": thinking,
         "synthesis": synthesis,
         "next_steps": [
             "Review candidates and decide canonical entries before mutating memory.",
@@ -643,6 +651,106 @@ fn slim_kanban(value: Value) -> Value {
                 })
             })
             .collect::<Vec<_>>(),
+    })
+}
+
+fn evidence_rows(value: &Value) -> Vec<&Value> {
+    match value {
+        Value::Array(rows) => rows.iter().collect(),
+        Value::Object(map) => map
+            .values()
+            .flat_map(|value| match value {
+                Value::Array(rows) => rows.iter().collect::<Vec<_>>(),
+                _ => vec![value],
+            })
+            .collect(),
+        other => vec![other],
+    }
+}
+
+fn evidence_score(row: &Value) -> f64 {
+    row.get("relevance")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            row.get("score")
+                .and_then(|score| score.get("final"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| row.get("score").and_then(Value::as_f64))
+        .unwrap_or(0.0)
+}
+
+fn evidence_ref(row: &Value) -> Value {
+    json!({
+        "id": row.get("id"),
+        "path": row.get("path"),
+        "summary": row.get("summary"),
+        "topic": row.get("topic"),
+        "relevance": row.get("relevance"),
+    })
+}
+
+fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value) -> Value {
+    let mut rows = evidence_rows(evidence);
+    rows.sort_by(|a, b| {
+        evidence_score(b)
+            .partial_cmp(&evidence_score(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let evidence_count = rows.len();
+    let top_score = rows.first().map(|row| evidence_score(row)).unwrap_or(0.0);
+    let confidence = if evidence_count == 0 {
+        "none"
+    } else if top_score >= 0.75 || evidence_count >= 5 {
+        "high"
+    } else if top_score >= 0.35 || evidence_count >= 2 {
+        "medium"
+    } else {
+        "low"
+    };
+    let key_evidence = rows
+        .iter()
+        .take(3)
+        .map(|row| evidence_ref(row))
+        .collect::<Vec<_>>();
+
+    let mut gaps = Vec::new();
+    if evidence_count == 0 {
+        gaps.push("No evidence rows were retrieved.".to_string());
+    }
+    if top_score < 0.35 && evidence_count > 0 {
+        gaps.push("Top evidence relevance is weak; treat conclusions as tentative.".to_string());
+    }
+    if query.trim().len() < 8 {
+        gaps.push("Query is short; refine it with topic, path, or error context.".to_string());
+    }
+
+    let next_steps = if mode == "consolidate" {
+        vec![
+            "Group candidates by topic/path before deciding canonical memories.",
+            "Prefer archive/supersede actions over deletion unless data is clearly junk.",
+        ]
+    } else if evidence_count == 0 {
+        vec![
+            "Search again with a more specific query or path_prefix.",
+            "If this should be known, save a checkpoint before relying on recall.",
+        ]
+    } else {
+        vec![
+            "Answer only from key_evidence unless LLM synthesis is explicitly enabled.",
+            "Call out uncertainty when gaps is non-empty.",
+        ]
+    };
+
+    json!({
+        "mode": mode,
+        "query": query,
+        "confidence": confidence,
+        "evidence_count": evidence_count,
+        "top_relevance": top_score,
+        "key_evidence": key_evidence,
+        "gaps": gaps,
+        "next_steps": next_steps,
     })
 }
 
@@ -923,4 +1031,49 @@ fn merge_keywords(mut keywords: Vec<String>, defaults: &[&str]) -> Vec<String> {
         }
     }
     keywords
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_scaffold_summarizes_key_evidence() {
+        let evidence = json!([
+            {
+                "id": "low",
+                "path": "/project/low",
+                "summary": "Low relevance",
+                "topic": "memory",
+                "relevance": 0.2
+            },
+            {
+                "id": "high",
+                "path": "/project/high",
+                "summary": "High relevance",
+                "topic": "memory",
+                "relevance": 0.82
+            }
+        ]);
+
+        let thinking = build_thinking_scaffold("ask", "what happened", &evidence);
+
+        assert_eq!(thinking["confidence"], json!("high"));
+        assert_eq!(thinking["evidence_count"], json!(2));
+        assert_eq!(thinking["key_evidence"][0]["id"], json!("high"));
+        assert!(thinking["gaps"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn thinking_scaffold_marks_missing_evidence() {
+        let thinking = build_thinking_scaffold("ask", "why", &json!([]));
+
+        assert_eq!(thinking["confidence"], json!("none"));
+        assert_eq!(thinking["evidence_count"], json!(0));
+        assert!(thinking["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap == "No evidence rows were retrieved."));
+    }
 }
