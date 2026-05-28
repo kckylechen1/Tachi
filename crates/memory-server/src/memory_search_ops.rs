@@ -1,6 +1,6 @@
 use super::*;
 use crate::utils::stable_hash;
-use std::collections::hash_map::Entry;
+use std::collections::{hash_map::Entry, HashSet};
 
 const REDACTED_SECRET: &str = "[REDACTED]";
 const REINFORCEMENT_MIN_SIMILARITY: f64 = 0.75;
@@ -43,7 +43,11 @@ fn vector_similarity_between(new_entry: &MemoryEntry, old_entry: &MemoryEntry) -
     if new_vec.is_empty() || new_vec.len() != old_vec.len() {
         return None;
     }
-    Some(memory_core::scorer::cosine_similarity(new_vec, old_vec).clamp(0.0, 1.0))
+    let similarity = memory_core::scorer::cosine_similarity(new_vec, old_vec);
+    if !similarity.is_finite() {
+        return None;
+    }
+    Some(similarity.clamp(0.0, 1.0))
 }
 
 fn should_reinforce(
@@ -94,6 +98,77 @@ fn apply_confidence_reinforcement(
         )
         .map_err(|e| format!("update confidence reinforcement: {e}"))?;
     Ok(())
+}
+
+pub(crate) fn apply_confidence_reinforcement_links(
+    store: &mut MemoryStore,
+    entry: &MemoryEntry,
+) -> Result<usize, String> {
+    if entry.entities.is_empty() || entry.vector.is_none() {
+        return Ok(0);
+    }
+
+    let mut reinforced = 0usize;
+    let mut seen_targets = HashSet::<String>::new();
+    for entity in &entry.entities {
+        let results = store
+            .search(
+                entity,
+                Some(memory_core::SearchOptions {
+                    top_k: 5,
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|e| format!("confidence reinforcement search: {e}"))?;
+
+        for result in results {
+            if result.entry.id == entry.id || !seen_targets.insert(result.entry.id.clone()) {
+                continue;
+            }
+            let shared: Vec<String> = result
+                .entry
+                .entities
+                .iter()
+                .filter(|candidate| entry.entities.contains(candidate))
+                .cloned()
+                .collect();
+            if shared.is_empty() {
+                continue;
+            }
+
+            let supersedes = should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
+            let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
+                continue;
+            };
+            if !should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes) {
+                continue;
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let increment = confidence_increment(similarity);
+            let edge = memory_core::MemoryEdge {
+                source_id: entry.id.clone(),
+                target_id: result.entry.id.clone(),
+                relation: "reinforces".to_string(),
+                weight: similarity,
+                metadata: json!({
+                    "auto_link": true,
+                    "shared_entities": shared,
+                    "similarity": similarity,
+                    "confidence_increment": increment,
+                }),
+                created_at: now.clone(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            store.add_edge(&edge).map_err(|e| format!("{e}"))?;
+            apply_confidence_reinforcement(store, &result.entry.id, increment, &now)?;
+            reinforced += 1;
+        }
+    }
+
+    Ok(reinforced)
 }
 
 pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
@@ -1189,5 +1264,70 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("2026-01-01T00:00:00Z")
         );
+    }
+
+    #[test]
+    fn confidence_reinforcement_falls_back_to_importance() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = test_entry("old", "durable supported fact");
+        old_entry.importance = 0.60;
+        old_entry.metadata = json!({});
+        store.upsert(&old_entry).unwrap();
+
+        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        let updated = store.get("old").unwrap().unwrap();
+        let confidence = updated
+            .metadata
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!((confidence - 0.70).abs() < 1e-9, "confidence={confidence}");
+    }
+
+    #[test]
+    fn vector_similarity_ignores_non_finite_vectors() {
+        let mut new_entry = test_entry("new", "new vector");
+        let mut old_entry = test_entry("old", "old vector");
+        new_entry.vector = Some(vec![f32::NAN, 1.0]);
+        old_entry.vector = Some(vec![1.0, 0.0]);
+
+        assert!(vector_similarity_between(&new_entry, &old_entry).is_none());
+    }
+
+    #[test]
+    fn apply_confidence_reinforcement_links_creates_reinforces_edge() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = test_entry("old", "Acme deployment policy remains stable");
+        old_entry.entities = vec!["Acme".to_string()];
+        let mut old_vec = vec![0.0; 1024];
+        old_vec[0] = 1.0;
+        old_entry.vector = Some(old_vec);
+        old_entry.metadata = json!({ "confidence": 0.50 });
+        store.upsert(&old_entry).unwrap();
+
+        let mut new_entry = test_entry("new", "Acme deployment policy has another supporting note");
+        new_entry.entities = vec!["Acme".to_string()];
+        let mut new_vec = vec![0.0; 1024];
+        new_vec[0] = 0.8;
+        new_vec[1] = 0.6;
+        new_entry.vector = Some(new_vec);
+        store.upsert(&new_entry).unwrap();
+
+        let count = apply_confidence_reinforcement_links(&mut store, &new_entry).unwrap();
+        assert_eq!(count, 1);
+
+        let edges = store.get_edges("new", "outgoing", Some("reinforces")).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_id, "old");
+
+        let updated = store.get("old").unwrap().unwrap();
+        let confidence = updated
+            .metadata
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!(confidence > 0.50, "confidence={confidence}");
     }
 }
