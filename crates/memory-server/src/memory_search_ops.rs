@@ -1,8 +1,10 @@
 use super::*;
 use crate::utils::stable_hash;
-use std::collections::hash_map::Entry;
+use std::collections::{hash_map::Entry, HashSet};
 
 const REDACTED_SECRET: &str = "[REDACTED]";
+const REINFORCEMENT_MIN_SIMILARITY: f64 = 0.75;
+const REINFORCEMENT_DUPLICATE_SIMILARITY: f64 = 0.95;
 
 fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
     entry.importance >= 0.5 || entry.vector.is_some()
@@ -33,6 +35,140 @@ fn should_supersede(
         && shared_count >= 2
         && (new_entry.topic == old_entry.topic || symbolic_score > 0.3)
         && path_root(&new_entry.path) == path_root(&old_entry.path)
+}
+
+fn vector_similarity_between(new_entry: &MemoryEntry, old_entry: &MemoryEntry) -> Option<f64> {
+    let new_vec = new_entry.vector.as_deref()?;
+    let old_vec = old_entry.vector.as_deref()?;
+    if new_vec.is_empty() || new_vec.len() != old_vec.len() {
+        return None;
+    }
+    let similarity = memory_core::scorer::cosine_similarity(new_vec, old_vec);
+    if !similarity.is_finite() {
+        return None;
+    }
+    Some(similarity.clamp(0.0, 1.0))
+}
+
+fn should_reinforce(
+    new_entry: &MemoryEntry,
+    old_entry: &MemoryEntry,
+    shared_count: usize,
+    similarity: f64,
+    supersedes: bool,
+) -> bool {
+    !supersedes
+        && shared_count > 0
+        && matches!(new_entry.category.as_str(), "fact" | "preference")
+        && matches!(old_entry.category.as_str(), "fact" | "preference")
+        && path_root(&new_entry.path) == path_root(&old_entry.path)
+        && (REINFORCEMENT_MIN_SIMILARITY..REINFORCEMENT_DUPLICATE_SIMILARITY)
+            .contains(&similarity)
+}
+
+fn confidence_increment(similarity: f64) -> f64 {
+    (0.1 * similarity).clamp(0.0, 0.1)
+}
+
+fn apply_confidence_reinforcement(
+    store: &mut MemoryStore,
+    reinforced_id: &str,
+    increment: f64,
+    reinforced_at: &str,
+) -> Result<(), String> {
+    store
+        .connection()
+        .execute(
+            r#"UPDATE memories
+               SET metadata = json_set(
+                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                   '$.confidence',
+                   min(
+                       1.0,
+                       coalesce(
+                           CAST(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.confidence') AS REAL),
+                           importance
+                       ) + ?1
+                   ),
+                   '$.confidence_reinforced_at', ?2
+               ),
+               updated_at = ?2
+               WHERE id = ?3"#,
+            rusqlite::params![increment, reinforced_at, reinforced_id],
+        )
+        .map_err(|e| format!("update confidence reinforcement: {e}"))?;
+    Ok(())
+}
+
+pub(crate) fn apply_confidence_reinforcement_links(
+    store: &mut MemoryStore,
+    entry: &MemoryEntry,
+) -> Result<usize, String> {
+    if entry.entities.is_empty() || entry.vector.is_none() {
+        return Ok(0);
+    }
+
+    let mut reinforced = 0usize;
+    let mut seen_targets = HashSet::<String>::new();
+    for entity in &entry.entities {
+        let results = store
+            .search(
+                entity,
+                Some(memory_core::SearchOptions {
+                    top_k: 5,
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .map_err(|e| format!("confidence reinforcement search: {e}"))?;
+
+        for result in results {
+            if result.entry.id == entry.id || !seen_targets.insert(result.entry.id.clone()) {
+                continue;
+            }
+            let shared: Vec<String> = result
+                .entry
+                .entities
+                .iter()
+                .filter(|candidate| entry.entities.contains(candidate))
+                .cloned()
+                .collect();
+            if shared.is_empty() {
+                continue;
+            }
+
+            let supersedes = should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
+            let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
+                continue;
+            };
+            if !should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes) {
+                continue;
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let increment = confidence_increment(similarity);
+            let edge = memory_core::MemoryEdge {
+                source_id: entry.id.clone(),
+                target_id: result.entry.id.clone(),
+                relation: "reinforces".to_string(),
+                weight: similarity,
+                metadata: json!({
+                    "auto_link": true,
+                    "shared_entities": shared,
+                    "similarity": similarity,
+                    "confidence_increment": increment,
+                }),
+                created_at: now.clone(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            store.add_edge(&edge).map_err(|e| format!("{e}"))?;
+            apply_confidence_reinforcement(store, &result.entry.id, increment, &now)?;
+            reinforced += 1;
+        }
+    }
+
+    Ok(reinforced)
 }
 
 pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
@@ -299,33 +435,56 @@ pub(crate) async fn handle_save_memory(
                         if result.entry.id == auto_link_id {
                             continue;
                         }
-                        let shared: Vec<&String> = result
+                        let shared: Vec<String> = result
                             .entry
                             .entities
                             .iter()
                             .filter(|e| auto_link_entities.contains(e))
+                            .cloned()
                             .collect();
                         if !shared.is_empty() {
                             let now = chrono::Utc::now().to_rfc3339();
+                            let vector_similarity =
+                                vector_similarity_between(&auto_link_entry, &result.entry);
                             let supersedes = should_supersede(
                                 &auto_link_entry,
                                 &result.entry,
                                 shared.len(),
                                 result.score.symbolic,
                             );
+                            let reinforces = vector_similarity.is_some_and(|similarity| {
+                                should_reinforce(
+                                    &auto_link_entry,
+                                    &result.entry,
+                                    shared.len(),
+                                    similarity,
+                                    supersedes,
+                                )
+                            });
+                            let relation = if supersedes {
+                                "supersedes"
+                            } else if reinforces {
+                                "reinforces"
+                            } else {
+                                "related_to"
+                            };
+                            let weight = if supersedes {
+                                0.9
+                            } else if reinforces {
+                                vector_similarity.unwrap_or(0.0)
+                            } else {
+                                0.5
+                            };
                             let edge = memory_core::MemoryEdge {
                                 source_id: auto_link_id.clone(),
                                 target_id: result.entry.id.clone(),
-                                relation: if supersedes {
-                                    "supersedes"
-                                } else {
-                                    "related_to"
-                                }
-                                .to_string(),
-                                weight: if supersedes { 0.9 } else { 0.5 },
+                                relation: relation.to_string(),
+                                weight,
                                 metadata: json!({
                                     "auto_link": true,
                                     "shared_entities": shared,
+                                    "similarity": vector_similarity,
+                                    "confidence_increment": reinforces.then(|| confidence_increment(weight)),
                                 }),
                                 created_at: now.clone(),
                                 valid_from: String::new(),
@@ -348,6 +507,13 @@ pub(crate) async fn handle_save_memory(
                                             rusqlite::params![auto_link_id, now, result.entry.id],
                                         )
                                         .map_err(|e| format!("{e}"))?;
+                                } else if reinforces {
+                                    apply_confidence_reinforcement(
+                                        store,
+                                        &result.entry.id,
+                                        confidence_increment(weight),
+                                        &now,
+                                    )?;
                                 }
                                 Ok(())
                             };
@@ -1056,5 +1222,112 @@ mod tests {
 
         e.vector = Some(vec![0.1; 64]);
         assert!(should_enqueue_enrichment(&e));
+    }
+
+    #[test]
+    fn should_reinforce_requires_vector_similarity_gray_zone() {
+        let mut new_entry = test_entry("new", "canonical preference");
+        let mut old_entry = test_entry("old", "nearby preference");
+        new_entry.path = "/project/a".to_string();
+        old_entry.path = "/project/b".to_string();
+        new_entry.category = "preference".to_string();
+        old_entry.category = "preference".to_string();
+
+        assert!(should_reinforce(&new_entry, &old_entry, 1, 0.82, false));
+        assert!(!should_reinforce(&new_entry, &old_entry, 0, 0.82, false));
+        assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.60, false));
+        assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.97, false));
+        assert!(!should_reinforce(&new_entry, &old_entry, 1, 0.82, true));
+    }
+
+    #[test]
+    fn confidence_reinforcement_updates_metadata_confidence() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = test_entry("old", "durable supported fact");
+        old_entry.metadata = json!({ "confidence": 0.70 });
+        store.upsert(&old_entry).unwrap();
+
+        apply_confidence_reinforcement(&mut store, "old", 0.08, "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        let updated = store.get("old").unwrap().unwrap();
+        let confidence = updated
+            .metadata
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!((confidence - 0.78).abs() < 1e-9, "confidence={confidence}");
+        assert_eq!(
+            updated
+                .metadata
+                .get("confidence_reinforced_at")
+                .and_then(|value| value.as_str()),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn confidence_reinforcement_falls_back_to_importance() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = test_entry("old", "durable supported fact");
+        old_entry.importance = 0.60;
+        old_entry.metadata = json!({});
+        store.upsert(&old_entry).unwrap();
+
+        apply_confidence_reinforcement(&mut store, "old", 0.10, "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        let updated = store.get("old").unwrap().unwrap();
+        let confidence = updated
+            .metadata
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!((confidence - 0.70).abs() < 1e-9, "confidence={confidence}");
+    }
+
+    #[test]
+    fn vector_similarity_ignores_non_finite_vectors() {
+        let mut new_entry = test_entry("new", "new vector");
+        let mut old_entry = test_entry("old", "old vector");
+        new_entry.vector = Some(vec![f32::NAN, 1.0]);
+        old_entry.vector = Some(vec![1.0, 0.0]);
+
+        assert!(vector_similarity_between(&new_entry, &old_entry).is_none());
+    }
+
+    #[test]
+    fn apply_confidence_reinforcement_links_creates_reinforces_edge() {
+        let mut store = memory_core::MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = test_entry("old", "Acme deployment policy remains stable");
+        old_entry.entities = vec!["Acme".to_string()];
+        let mut old_vec = vec![0.0; 1024];
+        old_vec[0] = 1.0;
+        old_entry.vector = Some(old_vec);
+        old_entry.metadata = json!({ "confidence": 0.50 });
+        store.upsert(&old_entry).unwrap();
+
+        let mut new_entry = test_entry("new", "Acme deployment policy has another supporting note");
+        new_entry.entities = vec!["Acme".to_string()];
+        let mut new_vec = vec![0.0; 1024];
+        new_vec[0] = 0.8;
+        new_vec[1] = 0.6;
+        new_entry.vector = Some(new_vec);
+        store.upsert(&new_entry).unwrap();
+
+        let count = apply_confidence_reinforcement_links(&mut store, &new_entry).unwrap();
+        assert_eq!(count, 1);
+
+        let edges = store.get_edges("new", "outgoing", Some("reinforces")).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].target_id, "old");
+
+        let updated = store.get("old").unwrap().unwrap();
+        let confidence = updated
+            .metadata
+            .get("confidence")
+            .and_then(|value| value.as_f64())
+            .unwrap();
+        assert!(confidence > 0.50, "confidence={confidence}");
     }
 }

@@ -176,9 +176,27 @@ impl MemoryServer {
 
             if new_vec.is_some() || new_summary.is_some() {
                 let update_action = |store: &mut MemoryStore| {
-                    store
+                    let updated = store
                         .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
-                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
+                        .map_err(|e| format!("Failed to update enriched entry: {e}"))?;
+                    if updated && new_vec.is_some() {
+                        if let Some(entry) = store
+                            .get(&item.id)
+                            .map_err(|e| format!("load enriched entry: {e}"))?
+                        {
+                            if let Err(err) =
+                                crate::memory_search_ops::apply_confidence_reinforcement_links(
+                                    store, &entry,
+                                )
+                            {
+                                eprintln!(
+                                    "[enrichment-batcher] confidence reinforcement failed for {}: {err}",
+                                    item.id
+                                );
+                            }
+                        }
+                    }
+                    Ok(updated)
                 };
 
                 let res = if let Some(ref project_name) = item.named_project {

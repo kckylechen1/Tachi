@@ -297,6 +297,7 @@ pub fn graph_relation_activation_weight(relation: &str) -> f64 {
         "supports" => 0.90,
         "elaborates" => 0.85,
         "causes" | "fixed_by" => 0.80,
+        "reinforces" => 0.75,
         "follows" | "references" | "distilled_from" | "derived_from" => 0.70,
         "similar_to" | "related_to" | "merge_hint" => 0.55,
         "supersedes" => 0.40,
