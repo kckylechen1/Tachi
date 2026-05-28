@@ -430,7 +430,23 @@ async fn render_one(
 }
 
 /// MCP tool handler: returns a concise JSON health summary for agents.
-pub(crate) async fn handle_tachi_status(server: &crate::MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_tachi_status_agent(
+    server: &crate::MemoryServer,
+) -> Result<String, String> {
+    handle_tachi_status_detail(server, false).await
+}
+
+/// Full diagnostic JSON for tests, doctor flows, and readiness checks.
+pub(crate) async fn handle_tachi_status_full(
+    server: &crate::MemoryServer,
+) -> Result<String, String> {
+    handle_tachi_status_detail(server, true).await
+}
+
+async fn handle_tachi_status_detail(
+    server: &crate::MemoryServer,
+    full: bool,
+) -> Result<String, String> {
     let app_home: PathBuf = std::env::var("TACHI_HOME")
         .ok()
         .map(PathBuf::from)
@@ -531,23 +547,136 @@ pub(crate) async fn handle_tachi_status(server: &crate::MemoryServer) -> Result<
         .collect();
     let readiness = agent_readiness_json(&app_home, &snapshot);
 
+    let warnings = build_status_warnings(&snapshot, &daemon_state);
+
+    if full {
+        serde_json::to_string(&json!({
+            "daemon": daemon_state,
+            "version": env!("CARGO_PKG_VERSION"),
+            "health_score": snapshot.health_score,
+            "databases": {
+                "total": total_dbs,
+                "pending_jobs": total_pending,
+                "failed_jobs": total_failed,
+                "stuck_jobs": total_stuck,
+                "low_vector_coverage": low_coverage,
+                "vector_dimension_mismatches": vector_dimension_mismatches,
+                "provider_auth_failures": auth_failures,
+                "latest_failed_jobs": failed_jobs,
+            },
+            "warnings": warnings,
+            "daily_pipeline": snapshot.last_daily_report,
+            "distill": snapshot.distill_marker,
+            "api_keys": snapshot.api_keys,
+            "models": model_lanes_json(),
+            "agent_readiness": readiness,
+        }))
+        .map_err(|e| e.to_string())
+    } else {
+        let api_key_drift = snapshot
+            .api_keys
+            .iter()
+            .filter(|key| key.status == "drift")
+            .count();
+        let api_key_missing = snapshot
+            .api_keys
+            .iter()
+            .filter(|key| key.required && key.status == "missing")
+            .count();
+        let distill = snapshot.distill_marker.as_ref().map(|marker| {
+            json!({
+                "is_stale": marker.is_stale,
+                "age": marker.age,
+            })
+        });
+        serde_json::to_string(&json!({
+            "detail": "agent",
+            "daemon": daemon_state,
+            "version": env!("CARGO_PKG_VERSION"),
+            "health_score": snapshot.health_score,
+            "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
+            "jobs": {
+                "failed": total_failed,
+                "pending": total_pending,
+                "stuck": total_stuck,
+            },
+            "distill": distill,
+            "vector_coverage_issues": low_coverage.len(),
+            "provider_auth_failures": auth_failures.len(),
+            "api_keys": {
+                "drift": api_key_drift,
+                "missing_required": api_key_missing,
+            },
+            "doctor_hint": readiness.get("doctor_hint"),
+        }))
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Lightweight warning lines for `tachi_memory action=alerts` — no provider keys, models, or skill matrices.
+pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) -> Vec<String> {
+    let global_db = server.global_db_path_buf();
+    let project_db = server.project_db_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let app_home: PathBuf = std::env::var("TACHI_HOME")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".tachi")
+            });
+        let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
+        let daemon_state = match &snapshot.daemon {
+            DaemonStatus::Running { .. } => json!({ "running": true }),
+            DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
+            DaemonStatus::None => json!({ "running": false }),
+        };
+        build_status_warnings(&snapshot, &daemon_state)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn build_status_warnings(snapshot: &StatusSnapshot, daemon_state: &serde_json::Value) -> Vec<String> {
+    let total_dbs = snapshot.dbs.len();
+    let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
+    let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
+    let low_coverage_count = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.memory_total > 0 && d.vector_coverage < 0.9)
+        .count();
+    let vector_dimension_mismatch_count = snapshot
+        .dbs
+        .iter()
+        .filter(|d| vector_dimension_mismatch(d))
+        .count();
+    let auth_failures = snapshot
+        .dbs
+        .iter()
+        .filter(|d| {
+            d.latest_failed_job
+                .as_ref()
+                .and_then(|job| job.inferred_invalid_provider.as_ref())
+                .is_some()
+        })
+        .count();
+
     let mut warnings: Vec<String> = Vec::new();
     if !daemon_state["running"].as_bool().unwrap_or(false) {
         warnings.push(
-            "daemon not running — background tasks (enrichment, distill, GC) are paused"
-                .to_string(),
+            "daemon not running — background tasks (enrichment, distill, GC) are paused".to_string(),
         );
     }
-    if !low_coverage.is_empty() {
+    if low_coverage_count > 0 {
         warnings.push(format!(
-            "{} db(s) have vector coverage below 90%",
-            low_coverage.len()
+            "{low_coverage_count} db(s) have vector coverage below 90%"
         ));
     }
-    if !vector_dimension_mismatches.is_empty() {
+    if vector_dimension_mismatch_count > 0 {
         warnings.push(format!(
-            "{} db(s) have vector dimension metadata that differs from expected {EXPECTED_EMBEDDING_DIM}",
-            vector_dimension_mismatches.len()
+            "{vector_dimension_mismatch_count} db(s) have vector dimension metadata that differs from expected {EXPECTED_EMBEDDING_DIM}"
         ));
     }
     if total_failed > 0 {
@@ -555,7 +684,7 @@ pub(crate) async fn handle_tachi_status(server: &crate::MemoryServer) -> Result<
             "{total_failed} foundry job(s) failed across {total_dbs} dbs"
         ));
     }
-    if !auth_failures.is_empty() {
+    if auth_failures > 0 {
         warnings.push("latest foundry failures include provider auth/API-key errors".to_string());
     }
     if total_stuck > 0 {
@@ -591,29 +720,7 @@ pub(crate) async fn handle_tachi_status(server: &crate::MemoryServer) -> Result<
             ));
         }
     }
-
-    serde_json::to_string(&json!({
-        "daemon": daemon_state,
-        "version": env!("CARGO_PKG_VERSION"),
-        "health_score": snapshot.health_score,
-        "databases": {
-            "total": total_dbs,
-            "pending_jobs": total_pending,
-            "failed_jobs": total_failed,
-            "stuck_jobs": total_stuck,
-            "low_vector_coverage": low_coverage,
-            "vector_dimension_mismatches": vector_dimension_mismatches,
-            "provider_auth_failures": auth_failures,
-            "latest_failed_jobs": failed_jobs,
-        },
-        "warnings": warnings,
-        "daily_pipeline": snapshot.last_daily_report,
-        "distill": snapshot.distill_marker,
-        "api_keys": snapshot.api_keys,
-        "models": model_lanes_json(),
-        "agent_readiness": readiness,
-    }))
-    .map_err(|e| e.to_string())
+    warnings
 }
 
 pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Value {
@@ -1671,7 +1778,7 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
             "keys": ["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "distill": {
-            "provider": "claude-cli-first, extract fallback",
+            "provider": "raw_api default (FOUNDRY_DISTILL_BACKEND), claude_cli optional",
             "keys": ["DISTILL_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "reasoning": {
@@ -1975,6 +2082,9 @@ pub(crate) async fn run_daemon(
             // unlinks the lock file.
             #[cfg(unix)]
             {
+                // SAFETY: `pid` was validated above via `read_pid()` and
+                // `file.read_to_string()` that returned a valid i32. SIGTERM is a defined
+                // constant; no user-controlled data flows into this call.
                 let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
                 if r == 0 {
                     println!("[OK] sent SIGTERM to daemon pid={pid}");

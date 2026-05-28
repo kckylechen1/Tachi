@@ -1,5 +1,3 @@
-// error.rs — unified error type for memory-core
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -10,6 +8,9 @@ pub enum MemoryError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("Invalid argument: {0}")]
     InvalidArg(String),
 
@@ -18,4 +19,18 @@ pub enum MemoryError {
 
     #[error("Vault error: {0}")]
     Vault(String),
+
+    #[error("Vault locked")]
+    VaultLocked,
+
+    #[error("Vault not initialized")]
+    VaultNotInitialized,
+
+    #[error("Duplicate entry: {0}")]
+    Duplicate(String),
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
+
+pub type MemoryResult<T> = Result<T, MemoryError>;
