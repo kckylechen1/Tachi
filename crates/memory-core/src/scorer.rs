@@ -5,7 +5,7 @@
 
 use crate::types::{HybridScore, MemoryEntry};
 use chrono::{NaiveDate, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
 const HALF_LIFE_DAYS: f64 = 30.0;
@@ -265,6 +265,103 @@ fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
         .collect()
 }
 
+fn normalized_rank_score(rank: usize, total: usize) -> f64 {
+    if total <= 1 {
+        return 1.0;
+    }
+    1.0 - ((rank.saturating_sub(1)) as f64 / (total.saturating_sub(1)) as f64)
+}
+
+fn blend_rrf_with_vector_signal(
+    id: &str,
+    rrf_score: f64,
+    vec_scores: &HashMap<String, f64>,
+    vec_ranks: Option<&HashMap<String, usize>>,
+) -> f64 {
+    let Some(cosine) = vec_scores.get(id).copied().map(normalize) else {
+        return rrf_score;
+    };
+    let Some(rank_score) = vec_ranks
+        .and_then(|ranks| ranks.get(id))
+        .map(|rank| normalized_rank_score(*rank, vec_scores.len()))
+    else {
+        return rrf_score;
+    };
+
+    let improvement = (cosine - rank_score).max(0.0);
+    rrf_score * (1.0 + 0.3 * improvement)
+}
+
+pub fn graph_relation_activation_weight(relation: &str) -> f64 {
+    match relation {
+        "supports" => 0.90,
+        "elaborates" => 0.85,
+        "causes" | "fixed_by" => 0.80,
+        "follows" | "references" | "distilled_from" | "derived_from" => 0.70,
+        "similar_to" | "related_to" | "merge_hint" => 0.55,
+        "supersedes" => 0.40,
+        "contradicts" | "rejected_because" => 0.30,
+        _ => 0.50,
+    }
+}
+
+pub fn graph_spreading_activation(
+    seed_ids: &[String],
+    edges: &[crate::types::MemoryEdge],
+    max_hops: u32,
+    decay: f64,
+) -> HashMap<String, f64> {
+    if seed_ids.is_empty() || max_hops == 0 {
+        return HashMap::new();
+    }
+
+    let seeds: HashSet<&String> = seed_ids.iter().collect();
+    let mut activation: HashMap<String, f64> =
+        seed_ids.iter().map(|id| (id.clone(), 1.0)).collect();
+    let mut frontier = activation.clone();
+
+    for _ in 0..max_hops {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next = HashMap::<String, f64>::new();
+        for edge in edges {
+            for (source, target) in [(&edge.source_id, &edge.target_id), (&edge.target_id, &edge.source_id)] {
+                let Some(parent_activation) = frontier.get(source).copied() else {
+                    continue;
+                };
+                let propagated = parent_activation
+                    * edge.weight.clamp(0.0, 1.0)
+                    * decay
+                    * graph_relation_activation_weight(&edge.relation);
+                if propagated <= 0.0 {
+                    continue;
+                }
+                let current_active = activation.get(target).copied().unwrap_or(0.0);
+                if propagated <= current_active {
+                    continue;
+                }
+                let slot = next.entry(target.clone()).or_insert(0.0);
+                if propagated > *slot {
+                    *slot = propagated;
+                }
+            }
+        }
+
+        frontier = next;
+        for (id, score) in &frontier {
+            if seeds.contains(id) {
+                continue;
+            }
+            let slot = activation.entry(id.clone()).or_insert(0.0);
+            *slot = (*slot).max(*score);
+        }
+    }
+
+    activation.retain(|id, _| !seeds.contains(id));
+    activation
+}
+
 /// Merge several scored lists into a single HybridScore per doc-id.
 ///
 /// `vec_scores`, `fts_scores`, `symbolic_scores` are maps from doc-id → normalised score [0,1].
@@ -321,7 +418,8 @@ pub fn hybrid_score(
                 .and_then(|ranks| ranks.get(id))
                 .map(|rank| 0.5 / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
-            vec_part + fts_part + symbolic_part
+            let rrf_score = vec_part + fts_part + symbolic_part;
+            blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_ranks.as_ref())
         } else {
             weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds
         };
@@ -491,5 +589,67 @@ mod tests {
 
         assert!(old >= never, "old={old}, never={never}");
         assert!(recent > old, "recent={recent}, old={old}");
+    }
+
+    #[test]
+    fn rrf_blend_rewards_absolute_vector_similarity_without_penalizing_missing_vector() {
+        let vec_scores = HashMap::from([
+            ("a".to_string(), 0.99),
+            ("b".to_string(), 0.98),
+            ("c".to_string(), 0.97),
+        ]);
+        let ranks = rank_map(&vec_scores);
+        let base = 0.02;
+
+        let blended = blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, Some(&ranks));
+        assert!(blended > base, "blended={blended}, base={base}");
+
+        let missing = blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, Some(&ranks));
+        assert_eq!(missing, base);
+    }
+
+    #[test]
+    fn graph_spreading_activation_decays_by_hop_and_relation_type() {
+        use crate::types::MemoryEdge;
+
+        let seeds = vec!["a".to_string()];
+        let edges = vec![
+            MemoryEdge {
+                source_id: "a".to_string(),
+                target_id: "b".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "b".to_string(),
+                target_id: "c".to_string(),
+                relation: "causes".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "a".to_string(),
+                target_id: "d".to_string(),
+                relation: "contradicts".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        ];
+
+        let activation = graph_spreading_activation(&seeds, &edges, 2, 0.5);
+        assert!(!activation.contains_key("a"));
+        assert!(activation["b"] > activation["c"]);
+        assert!(activation["b"] > activation["d"]);
+        assert!(activation["c"] > 0.0);
     }
 }

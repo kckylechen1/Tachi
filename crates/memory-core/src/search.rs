@@ -441,8 +441,12 @@ pub fn hybrid_search(
                 .map(|r| r.score.final_score * 0.5)
                 .unwrap_or(0.1);
 
-            // Compute local PageRank on the expanded subgraph
-            let pr_scores = crate::scorer::local_pagerank(&expand_result.edges, 0.85);
+            let activations = crate::scorer::graph_spreading_activation(
+                &seed_ids,
+                &expand_result.edges,
+                opts.graph_expand_hops,
+                0.5,
+            );
 
             let new_entries: Vec<SearchResult> = expand_result
                 .entries
@@ -459,9 +463,9 @@ pub fn hybrid_search(
                 })
                 .map(|entry| {
                     let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
-                    let pr = pr_scores.get(&entry.id).copied().unwrap_or(0.0);
-                    // Combine distance decay with PageRank: important hub nodes score higher
-                    let graph_boost = min_score * (0.5 / (distance as f64 + 1.0) + 0.5 * pr);
+                    let activation = activations.get(&entry.id).copied().unwrap_or(0.0);
+                    let graph_boost = min_score
+                        * (0.4 / (distance as f64 + 1.0) + 0.6 * activation).clamp(0.0, 1.0);
                     SearchResult {
                         entry,
                         score: crate::types::HybridScore {
