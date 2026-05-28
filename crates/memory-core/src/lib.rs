@@ -34,7 +34,7 @@ pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{
     AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackManifestMeta, PackOverlay,
 };
-pub use scorer::HybridWeights;
+pub use scorer::{surprise_score, HybridWeights};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,
@@ -498,6 +498,21 @@ impl MemoryStore {
         relation_filter: Option<&str>,
     ) -> Result<GraphExpandResult, MemoryError> {
         db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
+    }
+
+    /// Count active contradiction edges connected to a memory entry.
+    pub fn get_contradiction_count(&self, memory_id: &str) -> Result<u32, MemoryError> {
+        db::get_contradiction_count(&self.conn, memory_id)
+    }
+
+    /// Count memories with the same topic.
+    pub fn count_same_topic(&self, topic: &str) -> Result<u32, MemoryError> {
+        db::count_same_topic(&self.conn, topic)
+    }
+
+    /// Average importance across non-archived memories.
+    pub fn avg_importance(&self) -> Result<f64, MemoryError> {
+        db::avg_importance(&self.conn)
     }
 
     // ─── Derived Items Operations ──────────────────────────────────────────────

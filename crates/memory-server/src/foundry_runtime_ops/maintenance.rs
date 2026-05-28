@@ -594,6 +594,48 @@ pub(super) fn update_entry_metadata(
         .map_err(|e| format!("Failed to update foundry metadata for {}: {e}", entry.id))
 }
 
+pub(super) fn infer_memory_insight(
+    entry: &MemoryEntry,
+    avg_importance: f64,
+    contradiction_count: u32,
+    same_topic_count: u32,
+    related_count: usize,
+) -> serde_json::Value {
+    let surprise =
+        memory_core::surprise_score(entry, avg_importance, contradiction_count, same_topic_count);
+    let mut reasons = Vec::new();
+
+    if contradiction_count > 0 {
+        reasons.push("contradiction".to_string());
+    }
+    if same_topic_count <= 1 {
+        reasons.push("novel_topic".to_string());
+    }
+    if entry.access_count == 0 && entry.importance > 0.7 {
+        reasons.push("overlooked_high_importance".to_string());
+    }
+    if (entry.importance - avg_importance).abs() >= 0.25 {
+        reasons.push("importance_outlier".to_string());
+    }
+    if related_count >= FOUNDRY_RELATED_LIMIT {
+        reasons.push("dense_neighborhood".to_string());
+    }
+
+    json!({
+        "kind": "memory_insight",
+        "surprise": round3(surprise),
+        "priority": if surprise >= 0.4 { "high" } else if surprise >= 0.2 { "medium" } else { "low" },
+        "reasons": reasons,
+        "signals": {
+            "avg_importance": round3(avg_importance),
+            "importance_delta": round3(entry.importance - avg_importance),
+            "contradiction_count": contradiction_count,
+            "same_topic_count": same_topic_count,
+            "related_count": related_count,
+        }
+    })
+}
+
 pub(super) fn build_foundry_distill_root(agent_id: &str) -> String {
     format!("{}/distilled", build_foundry_agent_root(agent_id))
 }
@@ -1072,12 +1114,34 @@ async fn process_memory_neighborhood_job(
             continue;
         }
 
+        let (avg_importance, contradiction_count, same_topic_count) =
+            with_foundry_store_read(server, item, |store| {
+                let avg_importance = store
+                    .avg_importance()
+                    .map_err(|e| format!("Failed to compute average importance: {e}"))?;
+                let contradiction_count = store
+                    .get_contradiction_count(&entry.id)
+                    .map_err(|e| format!("Failed to count contradictions for {}: {e}", entry.id))?;
+                let same_topic_count = store.count_same_topic(&entry.topic).map_err(|e| {
+                    format!("Failed to count same-topic memories for {}: {e}", entry.id)
+                })?;
+                Ok((avg_importance, contradiction_count, same_topic_count))
+            })?;
+        let insight = infer_memory_insight(
+            &entry,
+            avg_importance,
+            contradiction_count,
+            same_topic_count,
+            related.len(),
+        );
+
         let metadata = merge_foundry_metadata(
             &entry.metadata,
             json!({
                 "last_neighborhood_at": Utc::now().to_rfc3339(),
                 "neighborhood_job_id": item.job.id,
                 "related_entries": related,
+                "insight": insight,
             }),
         );
 
