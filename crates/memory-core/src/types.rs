@@ -959,8 +959,14 @@ mod tests {
             default_retention_for("/handoff/foo", "manual"),
             Some("ephemeral")
         );
-        assert_eq!(default_retention_for("/handoff", "manual"), Some("ephemeral"));
-        assert_eq!(default_retention_for("/kanban/x", "manual"), Some("ephemeral"));
+        assert_eq!(
+            default_retention_for("/handoff", "manual"),
+            Some("ephemeral")
+        );
+        assert_eq!(
+            default_retention_for("/kanban/x", "manual"),
+            Some("ephemeral")
+        );
         assert_eq!(
             default_retention_for("/wiki/lessons", "manual"),
             Some("permanent")

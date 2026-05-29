@@ -254,6 +254,27 @@ impl LlmClient {
     }
 
     fn should_disable_thinking(base_url: &str, model: &str) -> bool {
+        // Check environment variable for explicit override
+        if let Ok(env_val) = std::env::var("TACHI_DISABLE_THINKING_MODELS") {
+            let env_lower = env_val.to_ascii_lowercase();
+            if env_lower == "all" || env_lower == "1" || env_lower == "true" {
+                return true;
+            }
+            if env_lower == "none" || env_lower == "0" || env_lower == "false" {
+                return false;
+            }
+            // Treat as comma-separated model name patterns
+            let model_lower = model.to_ascii_lowercase();
+            for pattern in env_lower.split(',') {
+                if model_lower.contains(pattern.trim()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Legacy heuristic: disable for specific provider/model combinations
+        // This is kept as a fallback for backwards compatibility
         if !base_url.to_ascii_lowercase().contains("siliconflow") {
             return false;
         }
@@ -506,16 +527,21 @@ impl LlmClient {
 
         let prompt = format!("<system>\n{system}\n</system>\n\n{user}");
 
-        let output = Command::new("claude")
-            .arg("-p")
-            .arg("--output-format")
-            .arg("text")
-            .arg("--max-turns")
-            .arg("1")
-            .arg(&prompt)
-            .output()
-            .await
-            .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+        // Add timeout protection (5 minutes) to prevent indefinite blocking
+        let output = tokio::time::timeout(
+            Duration::from_secs(300),
+            Command::new("claude")
+                .arg("-p")
+                .arg("--output-format")
+                .arg("text")
+                .arg("--max-turns")
+                .arg("1")
+                .arg(&prompt)
+                .output(),
+        )
+        .await
+        .map_err(|_| "claude cli timeout after 5 minutes".to_string())?
+        .map_err(|e| format!("claude cli spawn failed: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

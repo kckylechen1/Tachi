@@ -220,7 +220,8 @@ pub(super) async fn run_backfill_metadata(
     for (id, text, _summary, revision) in &entries {
         let input: String = text.chars().take(8000).collect();
         let (keywords, entities) = llm.extract_metadata(&input).await?;
-        let (heur_keywords, heur_entities) = memory_core::scorer::heuristic_metadata_from_text(&input);
+        let (heur_keywords, heur_entities) =
+            memory_core::scorer::heuristic_metadata_from_text(&input);
         let mut keywords = keywords;
         let mut entities = entities;
         for kw in heur_keywords {

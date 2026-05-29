@@ -624,7 +624,12 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
     // If payload exceeds token budget, drop groups from the tail to stay within limits.
     let groups_json = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
         let mut trimmed = payload;
-        while trimmed.len() > 1 && serde_json::to_string_pretty(&trimmed).unwrap_or_default().len() > MAX_BATCH_PAYLOAD_CHARS {
+        while trimmed.len() > 1
+            && serde_json::to_string_pretty(&trimmed)
+                .unwrap_or_default()
+                .len()
+                > MAX_BATCH_PAYLOAD_CHARS
+        {
             trimmed.pop();
         }
         serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string())

@@ -1239,11 +1239,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                             .stderr(std::process::Stdio::null())
                             .spawn()
                         {
-                            Ok(child) => {
+                            Ok(mut child) => {
                                 eprintln!(
                                     "[auto-daemon] spawned tachi daemon (pid={})",
                                     child.id()
                                 );
+                                // Reap child in background to avoid zombie processes on Unix
+                                tokio::spawn(async move {
+                                    let _ = child.wait();
+                                });
                                 // Give daemon time to acquire lock and bind port
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                             }

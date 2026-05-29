@@ -702,7 +702,9 @@ mod tests {
         assert!(ents.iter().any(|e| e == "Sigil"));
 
         let duplicate_persons: String = conn
-            .query_row("SELECT persons FROM memories WHERE id='m3'", [], |r| r.get(0))
+            .query_row("SELECT persons FROM memories WHERE id='m3'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(duplicate_persons, "[]");
     }

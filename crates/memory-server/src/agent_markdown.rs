@@ -88,8 +88,14 @@ pub(crate) fn format_briefing(
             out.push(format!(
                 "- Wiki hygiene: {} orphan(s), {} stale, {} duplicate(s)",
                 wiki_h.get("orphans").and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.get("stale_nodes").and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.get("duplicates").and_then(Value::as_u64).unwrap_or(0),
+                wiki_h
+                    .get("stale_nodes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                wiki_h
+                    .get("duplicates")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
             ));
         }
     }

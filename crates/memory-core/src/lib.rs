@@ -316,7 +316,9 @@ impl MemoryStore {
 
     /// List entries missing keywords and/or entities metadata.
     /// Returns (id, text, summary, revision) tuples.
-    pub fn entries_missing_metadata(&self) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
+    pub fn entries_missing_metadata(
+        &self,
+    ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, summary, revision FROM memories
              WHERE trim(keywords) IN ('', '[]')

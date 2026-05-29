@@ -298,7 +298,8 @@ fn sync_tasks_in_content(server: &MemoryServer, content: &str) -> (String, bool)
     static RE_TODO: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     static RE_CARD: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let re_todo = RE_TODO.get_or_init(|| Regex::new(r"^(\s*[\-\*\+]\s+\[\s*\]\s+)(.+)$").unwrap());
-    let re_card = RE_CARD.get_or_init(|| Regex::new(r"<!--\s*tachi:([a-zA-Z0-9_\-]+)\s*-->").unwrap());
+    let re_card =
+        RE_CARD.get_or_init(|| Regex::new(r"<!--\s*tachi:([a-zA-Z0-9_\-]+)\s*-->").unwrap());
 
     let mut modified = false;
     let mut new_lines = Vec::new();
@@ -472,7 +473,12 @@ fn unique_archive_target(archive_dir: &Path, stem: &str) -> (PathBuf, String) {
             return (path, filename);
         }
     }
-    let filename = format!("{}.{}.{}.md", stem, timestamp, uuid::Uuid::new_v4().as_simple());
+    let filename = format!(
+        "{}.{}.{}.md",
+        stem,
+        timestamp,
+        uuid::Uuid::new_v4().as_simple()
+    );
     (archive_dir.join(&filename), filename)
 }
 
@@ -722,7 +728,9 @@ pub(crate) async fn handle_wiki_organize(
                         new_body
                     };
                     let tmp = path.with_extension("md.tmp");
-                    if let Err(e) = fs::write(&tmp, &new_content).and_then(|_| fs::rename(&tmp, &path)) {
+                    if let Err(e) =
+                        fs::write(&tmp, &new_content).and_then(|_| fs::rename(&tmp, &path))
+                    {
                         log_messages.push(format!(
                             "WARN: task sync write failed for '{}': {e}",
                             relative_str
@@ -855,10 +863,7 @@ pub(crate) async fn handle_wiki_organize(
                     // Atomic write: write to temp file then rename to avoid corruption on crash
                     let tmp_dest = dest_path.with_extension("md.tmp");
                     fs::write(&tmp_dest, &final_content).map_err(|e| {
-                        format!(
-                            "Failed to write temp file {}: {e}",
-                            tmp_dest.display()
-                        )
+                        format!("Failed to write temp file {}: {e}", tmp_dest.display())
                     })?;
                     fs::rename(&tmp_dest, &dest_path).map_err(|e| {
                         format!(

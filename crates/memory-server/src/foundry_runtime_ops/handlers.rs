@@ -435,7 +435,9 @@ pub(crate) async fn handle_compact_session_memory(
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
-            tracing::warn!("[compact_session_memory] embedding failed, deferring enrichment: {err}");
+            tracing::warn!(
+                "[compact_session_memory] embedding failed, deferring enrichment: {err}"
+            );
             None
         }
     };

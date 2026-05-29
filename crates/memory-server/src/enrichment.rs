@@ -410,7 +410,10 @@ impl MemoryServer {
                         item.id
                     ),
                     Err(e) => {
-                        tracing::warn!("[enrichment-batcher] DB update failed for {}: {e}", item.id);
+                        tracing::warn!(
+                            "[enrichment-batcher] DB update failed for {}: {e}",
+                            item.id
+                        );
                         record_enrichment_failure(self, item, "db_update", &e);
                     }
                 }

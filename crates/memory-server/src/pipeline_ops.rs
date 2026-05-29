@@ -612,20 +612,21 @@ async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ = server
-            .enrichment_lock()
-            .enrich_tx
-            .try_send(crate::enrichment::build_enrichment_item(
-                &entry,
-                true,
-                true,
-                target_db,
-                named_project.clone(),
-                None,
-                None,
-                None,
-                1,
-            ));
+        let _ =
+            server
+                .enrichment_lock()
+                .enrich_tx
+                .try_send(crate::enrichment::build_enrichment_item(
+                    &entry,
+                    true,
+                    true,
+                    target_db,
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    1,
+                ));
     }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);
@@ -1120,10 +1121,8 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server
-                .enrichment_lock()
-                .enrich_tx
-                .try_send(crate::enrichment::build_enrichment_item(
+            let _ = server.enrichment_lock().enrich_tx.try_send(
+                crate::enrichment::build_enrichment_item(
                     entry,
                     true,
                     params.auto_summarize,
@@ -1133,7 +1132,8 @@ pub(crate) async fn handle_ingest_source(
                     None,
                     None,
                     1,
-                ));
+                ),
+            );
         }
     }
 

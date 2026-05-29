@@ -248,8 +248,13 @@ pub(crate) fn collect_snapshot(
     let distill_marker = read_distill_marker(app_home);
     let mut api_keys = status_health::collect_api_key_status(global_db_path);
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
-    let health_score =
-        status_health::calculate_health_score(&daemon, &dbs, distill_marker.as_ref(), &api_keys, None);
+    let health_score = status_health::calculate_health_score(
+        &daemon,
+        &dbs,
+        distill_marker.as_ref(),
+        &api_keys,
+        None,
+    );
 
     StatusSnapshot {
         daemon,

@@ -229,16 +229,14 @@ async fn handle_memory_briefing(
         None
     };
 
-    let (memories_result, wiki_result) = tokio::join!(
-        handle_search_memory(server, mem_params),
-        async {
+    let (memories_result, wiki_result) =
+        tokio::join!(handle_search_memory(server, mem_params), async {
             if let Some(wp) = wiki_params {
                 search_memory_rows(server, wp).await
             } else {
                 Ok(vec![])
             }
-        }
-    );
+        });
 
     let memories = slim_memory_rows(parse_evidence_array(memories_result?));
     let wiki = if include_wiki {
@@ -862,8 +860,13 @@ fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
         let tmp_path = status_path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &body)
             .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &status_path)
-            .map_err(|e| format!("rename {} -> {}: {e}", tmp_path.display(), status_path.display()))
+        std::fs::rename(&tmp_path, &status_path).map_err(|e| {
+            format!(
+                "rename {} -> {}: {e}",
+                tmp_path.display(),
+                status_path.display()
+            )
+        })
     })
 }
 

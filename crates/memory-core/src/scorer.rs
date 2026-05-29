@@ -603,23 +603,21 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
     );
 
     let mut mult: f64 = 1.0;
-    if (q.contains("iron") && q.contains("rule")) || q.contains("iron_rules") {
-        if path.contains("iron_rule")
+    if ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
+        && (path.contains("iron_rule")
             || bundle.contains("iron rule")
             || bundle.contains("iron_rules")
-            || bundle.contains("iron rules")
-        {
-            mult = mult.max(5.0);
-        }
+            || bundle.contains("iron rules"))
+    {
+        mult = mult.max(5.0);
     }
-    if q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损") {
-        if bundle.contains("stop loss")
+    if (q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损"))
+        && (bundle.contains("stop loss")
             || bundle.contains("止损")
             || path.contains("iron_rule")
-            || path.contains("principles")
-        {
-            mult = mult.max(4.0);
-        }
+            || path.contains("principles"))
+    {
+        mult = mult.max(4.0);
     }
     mult
 }

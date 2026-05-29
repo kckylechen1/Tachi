@@ -30,7 +30,11 @@ fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
     true
 }
 
-fn enrichment_work_pending(entry: &MemoryEntry, needs_embedding: bool, needs_summary: bool) -> bool {
+fn enrichment_work_pending(
+    entry: &MemoryEntry,
+    needs_embedding: bool,
+    needs_summary: bool,
+) -> bool {
     needs_embedding
         || needs_summary
         || crate::enrichment::needs_metadata_enrichment(&entry.keywords, &entry.entities)
@@ -1171,7 +1175,10 @@ pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<
                 "daemon",
             ],
         ),
-        ("sigil", &["sigil", "memory-server", "tachi", "mcp", "foundry"]),
+        (
+            "sigil",
+            &["sigil", "memory-server", "tachi", "mcp", "foundry"],
+        ),
     ];
     for (project, terms) in ROUTES {
         if named_project_db_exists(project) && terms.iter().any(|term| q_lower.contains(term)) {
@@ -1255,8 +1262,8 @@ pub(super) async fn search_memory_rows(
             .as_deref()
             .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
         let workspace_db_path = server.project_db_path_buf();
-        let skip_workspace = inferred_db_path.is_some()
-            && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+        let skip_workspace =
+            inferred_db_path.is_some() && workspace_db_path.as_ref() == inferred_db_path.as_ref();
 
         let global_opts = params.to_search_options(server.global_vec_available);
         let global_results = server.with_global_store_read(|store| {
@@ -1267,15 +1274,17 @@ pub(super) async fn search_memory_rows(
         combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
         if let Some(ref project_name) = inferred_project {
-            if let Ok(project_results) = server.with_named_project_store_read(project_name, |store| {
-                let vec_avail = store.vec_available;
-                let project_opts = params.to_search_options(vec_avail);
-                store
-                    .search(&params.query, Some(project_opts))
-                    .map_err(|e| {
-                        format!("Search failed in inferred project DB '{project_name}': {e}")
-                    })
-            }) {
+            if let Ok(project_results) =
+                server.with_named_project_store_read(project_name, |store| {
+                    let vec_avail = store.vec_available;
+                    let project_opts = params.to_search_options(vec_avail);
+                    store
+                        .search(&params.query, Some(project_opts))
+                        .map_err(|e| {
+                            format!("Search failed in inferred project DB '{project_name}': {e}")
+                        })
+                })
+            {
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         } else if server.has_project_db() && !skip_workspace {
@@ -1577,7 +1586,10 @@ fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
         if let Some(rel) = obj.get("relevance").and_then(serde_json::Value::as_f64) {
             let normalized = (rel / max_score).clamp(0.0, 1.0);
             obj.insert("relevance".into(), json!(round_score(normalized)));
-            if let Some(score) = obj.get_mut("score").and_then(serde_json::Value::as_object_mut) {
+            if let Some(score) = obj
+                .get_mut("score")
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 score.insert("final".into(), json!(round_score(normalized)));
             }
         }

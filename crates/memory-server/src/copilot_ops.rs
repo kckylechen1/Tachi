@@ -139,7 +139,8 @@ fn supersede_wiki_duplicates(
                 && (token.len() > 1
                     || candidate.path.rsplit_once('/').map(|(_, dir)| dir) == path.rsplit_once('/').map(|(_, dir)| dir))
         });
-        let similar_text = wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+        let similar_text =
+            wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
                 >= WIKI_DUP_JACCARD_THRESHOLD;
         let same_subject = same_path || same_topic || similar_text;
         if !same_subject {
