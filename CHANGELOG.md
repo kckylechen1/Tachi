@@ -7,8 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-30
+
+Twenty commits since v1.2.0. Major themes: search quality improvements, memory lifecycle hardening, MCP numeric coercion fixes, wiki read/browse refactor, docs organizer, and comprehensive audit fixes.
+
 ### Added
 
+- **`tachi_wiki(action="read")`** (PR #131): new action to retrieve full wiki entry text by path, returning Markdown with metadata.
+- **`tachi_wiki(action="browse")`** (PR #131): now returns Markdown instead of JSON for consistency with other read operations.
 - **`tachi distill run --db PATH`**: manual one-shot daily batch distill against any project DB.
 - **`FOUNDRY_DISTILL_BACKEND`**: choose `raw_api` (default) or `claude_cli` for daily batch distill.
 - **`FOUNDRY_DISTILL_BATCH_SIZE`**: tune groups per LLM call (default 6).
@@ -34,6 +40,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP numeric parameter coercion** (PR #132): all `Option<u32>`, `Option<u64>`, and `Option<f64>` MCP parameters now accept both JSON numbers and numeric strings, preventing deserialization failures when clients serialize numbers as strings.
+- **P1/P2/P3 audit + Gemini review fixes** (PR #133): ~40 fixes across 19 files including:
+  - `register_bucket()` changed from `OnceLock` to `Mutex<Vec>` for thread-safe dynamic registration
+  - Dispatch plan review gate returns `Ok` instead of `Err` for successful plan-review pauses
+  - `build_batch_user_payload` tracks actual group count after trimming to fit token budget
+  - `quality_multiplier` importance≥0.9 floor now excludes `foundry_distill` entries
+  - Setup wizard inline comment detection uses `find(' #')` instead of `find('#')` to avoid matching `#` inside values
+  - `symbolic_score` Jaccard denominator now uses union of query and text tokens
+  - Wiki dedup single-token topic guard requires parent directory overlap
+  - Wiki path root guard rejects empty path (root `/`) with clear error message
+  - `secure_join` canonicalizes parent directory instead of cursor for non-existent files
+  - Removed redundant `root.is_symlink()` check that broke dotfiles manager symlinks
+  - Binary split on error now has `max_depth=8` to prevent unbounded recursion
+  - Search error propagation logs warnings instead of silently swallowing errors
+  - Health score dimension mismatch penalty increased from 5×min(15) to 15×min(30)
+  - Added `is_wiki()`, `is_kanban()`, `is_handoff()`, `is_foundry_distill()` methods to `MemoryEntry`
+  - `precision_query_multiplier` fast path skips expensive bundle construction for non-precision queries
 - `batches_dispatched` metric counts split API distill retries accurately.
 - Progress `status.json` updates use file locking; JSONL watcher scan runs off the async executor.
 - Config.env discovery uses `dirs::home_dir()`; macOS keychain probe skipped on other platforms.
