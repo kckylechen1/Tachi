@@ -117,11 +117,8 @@ fn migrate_v6_fold_persons_into_entities(conn: &Connection) -> Result<usize, Mem
             continue;
         }
         let mut entities: Vec<String> = serde_json::from_str(&entities_raw).unwrap_or_default();
-        let before = entities.len();
         crate::types::fold_person_names_into_entities(&mut entities, persons);
-        if entities.len() != before {
-            updates.push((id, serde_json::to_string(&entities).unwrap_or_default()));
-        }
+        updates.push((id, serde_json::to_string(&entities).unwrap_or_default()));
     }
 
     if updates.is_empty() {
@@ -682,9 +679,14 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, persons, entities) VALUES (?1, ?2, ?3)",
+            params!["m3", r#"["sigil"]"#, r#"["Sigil"]"#],
+        )
+        .unwrap();
 
         let folded = migrate_v6_fold_persons_into_entities(&conn).unwrap();
-        assert_eq!(folded, 1);
+        assert_eq!(folded, 2);
 
         let (persons, entities): (String, String) = conn
             .query_row(
@@ -698,6 +700,11 @@ mod tests {
         assert!(ents.iter().any(|e| e == "Kyle"));
         assert!(ents.iter().any(|e| e == "user"));
         assert!(ents.iter().any(|e| e == "Sigil"));
+
+        let duplicate_persons: String = conn
+            .query_row("SELECT persons FROM memories WHERE id='m3'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(duplicate_persons, "[]");
     }
 
     #[test]

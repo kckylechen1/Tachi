@@ -55,6 +55,9 @@ venv.bak/
 # IDEs
 .idea/
 .vscode/
+.cursor/
+.qwen/
+*.orig
 
 # Build artifacts
 *.js.map
