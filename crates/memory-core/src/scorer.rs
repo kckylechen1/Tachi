@@ -163,6 +163,9 @@ pub fn local_pagerank(edges: &[crate::types::MemoryEdge], damping: f64) -> HashM
             nodes.iter().map(|id| (id.clone(), base)).collect();
 
         for (source, targets) in &outgoing {
+            if targets.is_empty() {
+                continue;
+            }
             let source_score = scores.get(*source).copied().unwrap_or(0.0);
             let share = source_score / targets.len() as f64;
             for target in targets {
@@ -312,11 +315,12 @@ pub fn graph_spreading_activation(
     max_hops: u32,
     decay: f64,
 ) -> HashMap<String, f64> {
+    let capped_hops = max_hops.min(4);
     let seed_weights = seed_ids
         .iter()
         .map(|id| (id.clone(), 1.0))
         .collect::<HashMap<_, _>>();
-    graph_spreading_activation_with_seed_weights(&seed_weights, edges, max_hops, decay)
+    graph_spreading_activation_with_seed_weights(&seed_weights, edges, capped_hops, decay)
 }
 
 pub fn graph_spreading_activation_with_seed_weights(
@@ -515,7 +519,14 @@ use crate::noise::is_cjk;
 use regex::Regex;
 use std::sync::OnceLock;
 
-/// Compute a normalised token-overlap (Jaccard-like) score [0, 1].
+/// Shared compiled regex for A-share 6-digit stock codes.
+static STOCK_CODE_RE: OnceLock<Regex> = OnceLock::new();
+fn stock_code_re() -> &'static Regex {
+    STOCK_CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap())
+}
+
+/// Compute a normalised token-recall score [0, 1].
+/// Measures what fraction of query tokens appear in the entry's text/keywords/entities.
 pub fn symbolic_score(
     query: &str,
     entry_text: &str,
@@ -546,8 +557,7 @@ pub fn symbolic_score(
 
 /// Extract A-share style 6-digit stock codes from a query.
 pub fn extract_stock_codes(query: &str) -> Vec<String> {
-    static CODE_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap());
+    let re = stock_code_re();
     re.find_iter(query)
         .map(|m| m.as_str().to_string())
         .collect()
@@ -566,6 +576,14 @@ pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
 }
 
 /// Strong multiplier for exact ticker / trading-term precision matches.
+///
+/// Rationale: A-share 6-digit codes (e.g. "688981") are extremely common
+/// numeric strings. Without boosting, FTS/symbolic channels dilute exact
+/// matches across thousands of unrelated entries. The 12.0x factor ensures
+/// an exact ticker match dominates hybrid ranking.
+///
+/// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
+/// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
 pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
     for code in extract_stock_codes(query) {
         if entry_has_stock_code(entry, &code) {
@@ -608,8 +626,7 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
 
 /// Deterministic ticker/entity hints from memory text (no LLM).
 pub fn heuristic_metadata_from_text(text: &str) -> (Vec<String>, Vec<String>) {
-    static CODE_RE: OnceLock<Regex> = OnceLock::new();
-    let re = CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap());
+    let re = stock_code_re();
     let mut entities = Vec::new();
     let mut keywords = Vec::new();
     for m in re.find_iter(text) {

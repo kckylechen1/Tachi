@@ -206,7 +206,7 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
     out
 }
 
-fn load_keychain_vault_api_key_values(
+pub(crate) fn load_keychain_vault_api_key_values(
     vault_db_path: &Path,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     if !cfg!(target_os = "macos") {
@@ -391,6 +391,7 @@ pub(crate) fn calculate_health_score(
     dbs: &[DbStatus],
     distill_marker: Option<&crate::status_ops::DistillMarkerStatus>,
     api_keys: &[ApiKeyStatus],
+    probe_results: Option<&[ProviderProbeResult]>,
 ) -> u8 {
     let mut score = 100i32;
     if !matches!(daemon, crate::status_ops::DaemonStatus::Running { .. }) {
@@ -409,7 +410,7 @@ pub(crate) fn calculate_health_score(
         .iter()
         .filter(|db| crate::status_ops::vector_dimension_mismatch(db))
         .count();
-    score -= ((dim_mismatch_dbs as i32) * 10).min(20);
+    score -= ((dim_mismatch_dbs as i32) * 5).min(15);
     if distill_marker.map(|m| m.is_stale).unwrap_or(true) {
         score -= 10;
     }
@@ -424,6 +425,11 @@ pub(crate) fn calculate_health_score(
         .filter(|key| key.inferred_invalid_provider.is_some())
         .count();
     score -= ((inferred_invalid_keys as i32) * 10).min(20);
+    // Provider probe failures indicate misconfigured or expired API keys.
+    if let Some(probes) = probe_results {
+        let failed_probes = probes.iter().filter(|p| p.status != "ok").count();
+        score -= ((failed_probes as i32) * 8).min(24);
+    }
     score.clamp(0, 100) as u8
 }
 

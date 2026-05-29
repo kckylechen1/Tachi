@@ -179,7 +179,7 @@ async fn handle_memory_briefing(
         params.domain.as_deref(),
     );
 
-    // Memory first — structured rows agents can scan immediately.
+    // Memory + wiki searches run concurrently to reduce briefing latency.
     let mem_params = SearchMemoryParams {
         query: query.clone(),
         query_vec: None,
@@ -199,40 +199,50 @@ async fn handle_memory_briefing(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
     };
-    let memories = slim_memory_rows(parse_evidence_array(
-        handle_search_memory(server, mem_params).await?,
-    ));
 
+    let wiki_params = if include_wiki {
+        Some(SearchMemoryParams {
+            query: query.clone(),
+            query_vec: None,
+            top_k: top_k.min(5),
+            path_prefix: Some(
+                params
+                    .path_prefix
+                    .clone()
+                    .unwrap_or_else(|| "/wiki".to_string()),
+            ),
+            include_archived: params.include_archived,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
+            enable_rerank: false,
+            as_of: params.as_of.clone(),
+        })
+    } else {
+        None
+    };
+
+    let (memories_result, wiki_result) = tokio::join!(
+        handle_search_memory(server, mem_params),
+        async {
+            if let Some(wp) = wiki_params {
+                search_memory_rows(server, wp).await
+            } else {
+                Ok(vec![])
+            }
+        }
+    );
+
+    let memories = slim_memory_rows(parse_evidence_array(memories_result?));
     let wiki = if include_wiki {
-        let wiki_rows = search_memory_rows(
-            server,
-            SearchMemoryParams {
-                query: query.clone(),
-                query_vec: None,
-                top_k: top_k.min(5),
-                path_prefix: Some(
-                    params
-                        .path_prefix
-                        .clone()
-                        .unwrap_or_else(|| "/wiki".to_string()),
-                ),
-                include_archived: params.include_archived,
-                candidates_per_channel: 20,
-                mmr_threshold: Some(0.85),
-                graph_expand_hops: 1,
-                graph_relation_filter: None,
-                weights: None,
-                agent_role: None,
-                project: params.project.clone(),
-                domain: params.domain.clone(),
-                file_context: params.file_context.clone(),
-                error_context: params.error_context.clone(),
-                enable_rerank: false,
-                as_of: params.as_of.clone(),
-            },
-        )
-        .await?;
-        slim_memory_rows(serde_json::Value::Array(wiki_rows))
+        slim_memory_rows(serde_json::Value::Array(wiki_result?))
     } else {
         json!([])
     };
@@ -607,7 +617,10 @@ async fn handle_memory_readiness(
 }
 
 fn parse_json_or_empty(raw: String) -> Value {
-    serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }))
+    serde_json::from_str(&raw).unwrap_or_else(|_| {
+        let preview: String = raw.chars().take(500).collect();
+        json!({ "raw_preview": preview, "parse_error": true })
+    })
 }
 
 fn slim_memory_rows(value: Value) -> Value {

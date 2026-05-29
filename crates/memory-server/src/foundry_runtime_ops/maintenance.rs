@@ -1276,7 +1276,7 @@ async fn process_memory_distill_job(
         } else {
             // Preferred key was requested but no bucket matched. Log so this
             // doesn't silently diverge from the scheduler's intent.
-            eprintln!(
+            tracing::debug!(
                 "[foundry/distill] preferred_coherence_key={preferred_key:?} not found in buckets ({} buckets); falling back to largest",
                 buckets.len()
             );
@@ -1626,7 +1626,7 @@ pub(crate) async fn run_foundry_maintenance_worker(
                     .fetch_add(1, Ordering::Relaxed);
             }
             Err(err) => {
-                eprintln!("[foundry-worker] job {} failed: {err}", item.job.id);
+                tracing::warn!("[foundry-worker] job {} failed: {err}", item.job.id);
                 server
                     .foundry_lock()
                     .foundry_stats
@@ -1636,7 +1636,7 @@ pub(crate) async fn run_foundry_maintenance_worker(
         }
     }
 
-    eprintln!("[foundry-worker] channel closed, worker exiting");
+    tracing::debug!("[foundry-worker] channel closed, worker exiting");
 }
 
 fn build_distill_input(entries: &[MemoryEntry]) -> String {

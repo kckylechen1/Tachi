@@ -134,6 +134,18 @@ impl LlmClient {
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
+        // Warn when foundry lanes collapse to the same model/endpoint as extract.
+        // This is expected when dedicated DISTILL_*/REASONING_* env vars are unset,
+        // but the user should know so they can configure separation if needed.
+        if distill.base_url == extract.base_url && distill.model == extract.model {
+            tracing::info!(
+                "LLM distill lane collapsed to extract endpoint ({}/{}). \
+                 Set DISTILL_API_KEY / DISTILL_BASE_URL to separate.",
+                extract.base_url,
+                extract.model,
+            );
+        }
+
         Ok(Self {
             http,
             extract,

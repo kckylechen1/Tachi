@@ -625,9 +625,13 @@ pub fn hybrid_search(
     }
 
     // Precision boosts for exact tickers and high-signal trading terms.
+    // In non-RRF mode, cap the multiplier so it amplifies but doesn't overwhelm.
     for (id, entry) in &entries_ref {
-        let multiplier = precision_query_multiplier(query, entry);
+        let mut multiplier = precision_query_multiplier(query, entry);
         if multiplier > 1.0 {
+            if !weights.use_rrf {
+                multiplier = multiplier.clamp(1.0, 3.0);
+            }
             if let Some(score) = scores.get_mut(id) {
                 score.final_score *= multiplier;
                 if multiplier >= 10.0 {
@@ -642,6 +646,9 @@ pub fn hybrid_search(
         .map(|score| score.final_score)
         .filter(|score| score.is_finite())
         .fold(0.0_f64, f64::max);
+    // Quality boosts are only applied to entries already scoring above the 85th
+    // percentile floor. This prevents low-relevance wiki/guide entries from being
+    // boosted into the top results purely on type. Penalties apply unconditionally.
     let quality_boost_floor = top_pre_quality_score * 0.85;
     for (id, entry) in &entries_ref {
         let multiplier = quality_multiplier(entry);
@@ -707,76 +714,76 @@ pub fn hybrid_search(
         let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         let rel_filter = opts.graph_relation_filter.as_deref();
 
-        if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
-        {
-            let existing_ids: std::collections::HashSet<String> =
-                results.iter().map(|r| r.entry.id.clone()).collect();
+        // Graph expansion is a best-effort enrichment; failures are non-fatal.
+        if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter) {
+                let existing_ids: std::collections::HashSet<String> =
+                    results.iter().map(|r| r.entry.id.clone()).collect();
 
-            let min_score = results
-                .last()
-                .map(|r| r.score.final_score * 0.5)
-                .unwrap_or(0.1);
+                let min_score = results
+                    .last()
+                    .map(|r| r.score.final_score * 0.5)
+                    .unwrap_or(0.1);
 
-            let seed_weights = normalized_seed_weights(&results);
-            let activations = crate::scorer::graph_spreading_activation_with_seed_weights(
-                &seed_weights,
-                &expand_result.edges,
-                opts.graph_expand_hops,
-                0.5,
-            );
+                let seed_weights = normalized_seed_weights(&results);
+                let activations = crate::scorer::graph_spreading_activation_with_seed_weights(
+                    &seed_weights,
+                    &expand_result.edges,
+                    opts.graph_expand_hops,
+                    0.5,
+                );
 
-            let expanded_entries: Vec<MemoryEntry> = expand_result
-                .entries
-                .into_iter()
-                .filter(|entry| !existing_ids.contains(&entry.id))
-                .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
-                .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
-                .collect();
-            let expanded_ids: Vec<String> = expanded_entries
-                .iter()
-                .map(|entry| entry.id.clone())
-                .collect();
-            let expanded_superseded_ids = if include_superseded {
-                HashSet::new()
-            } else {
-                get_superseded_ids(conn, &expanded_ids).unwrap_or_default()
-            };
+                let expanded_entries: Vec<MemoryEntry> = expand_result
+                    .entries
+                    .into_iter()
+                    .filter(|entry| !existing_ids.contains(&entry.id))
+                    .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
+                    .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
+                    .collect();
+                let expanded_ids: Vec<String> = expanded_entries
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect();
+                let expanded_superseded_ids = if include_superseded {
+                    HashSet::new()
+                } else {
+                    get_superseded_ids(conn, &expanded_ids).unwrap_or_default()
+                };
 
-            let mut new_entries: Vec<SearchResult> = expanded_entries
-                .into_iter()
-                .filter(|entry| {
-                    if include_superseded {
-                        return true;
-                    }
-                    !expanded_superseded_ids.contains(&entry.id)
-                })
-                .map(|entry| {
-                    let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
-                    let activation = activations.get(&entry.id).copied().unwrap_or(0.0);
-                    let graph_boost = min_score
-                        * (0.4 / (distance as f64 + 1.0) + 0.6 * activation).clamp(0.0, 1.0);
-                    SearchResult {
-                        entry,
-                        score: crate::types::HybridScore {
-                            vector: 0.0,
-                            fts: 0.0,
-                            symbolic: 0.0,
-                            decay: 0.0,
-                            final_score: graph_boost,
-                        },
-                    }
-                })
-                .collect();
-            new_entries.sort_by(|a, b| {
-                b.score
-                    .final_score
-                    .total_cmp(&a.score.final_score)
-                    .then_with(|| a.entry.id.cmp(&b.entry.id))
-            });
+                let mut new_entries: Vec<SearchResult> = expanded_entries
+                    .into_iter()
+                    .filter(|entry| {
+                        if include_superseded {
+                            return true;
+                        }
+                        !expanded_superseded_ids.contains(&entry.id)
+                    })
+                    .map(|entry| {
+                        let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
+                        let activation = activations.get(&entry.id).copied().unwrap_or(0.0);
+                        let graph_boost = min_score
+                            * (0.4 / (distance as f64 + 1.0) + 0.6 * activation).clamp(0.0, 1.0);
+                        SearchResult {
+                            entry,
+                            score: crate::types::HybridScore {
+                                vector: 0.0,
+                                fts: 0.0,
+                                symbolic: 0.0,
+                                decay: 0.0,
+                                final_score: graph_boost,
+                            },
+                        }
+                    })
+                    .collect();
+                new_entries.sort_by(|a, b| {
+                    b.score
+                        .final_score
+                        .total_cmp(&a.score.final_score)
+                        .then_with(|| a.entry.id.cmp(&b.entry.id))
+                });
 
-            results.extend(new_entries);
+                results.extend(new_entries);
+            }
         }
-    }
 
     // ── Record access (bump counters) ─────────────────────────────────────────
     if opts.record_access {

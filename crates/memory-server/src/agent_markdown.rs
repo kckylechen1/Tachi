@@ -3,6 +3,14 @@
 use crate::db_context::{diagnostics_footer, format_db_context_markdown, DbContext};
 use serde_json::Value;
 
+/// Escape characters that have special meaning in Markdown bold/code contexts.
+fn md_escape(s: &str) -> String {
+    s.replace('*', "\\*")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('_', "\\_")
+}
+
 pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> String {
     let mut out = vec![format!("## {title}\n"), format_db_context_markdown(ctx)];
     let Some(items) = rows.as_array() else {
@@ -31,8 +39,10 @@ pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> 
             .unwrap_or("(no summary)");
         let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         out.push(format!(
-            "\n{}. **{topic}** ({db}, relevance {relevance})\n   - {summary}\n   - Path: `{path}`",
-            idx + 1
+            "\n{}. **{}** ({db}, relevance {relevance})\n   - {}\n   - Path: `{path}`",
+            idx + 1,
+            md_escape(topic),
+            md_escape(summary),
         ));
     }
     out.join("\n")
@@ -247,8 +257,9 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
         out.push(format!(
-            "{}. **`{entry_path}`** (importance {importance})\n   {summary}",
-            idx + 1
+            "{}. **`{entry_path}`** (importance {importance})\n   {}",
+            idx + 1,
+            md_escape(summary),
         ));
     }
     out.join("\n")
@@ -333,8 +344,10 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             .unwrap_or_else(|| "?".to_string());
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{topic}**{id_suffix} (relevance {relevance})\n   - {summary}\n   - `{path}`",
-            idx + 1
+            "{}. **{}**{id_suffix} (relevance {relevance})\n   - {}\n   - `{path}`",
+            idx + 1,
+            md_escape(topic),
+            md_escape(summary),
         ));
     }
     out.join("\n")

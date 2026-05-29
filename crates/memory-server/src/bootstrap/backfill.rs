@@ -36,7 +36,7 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    match load_keychain_vault_api_key_values(vault_db_path) {
+    match crate::status_ops::status_health::load_keychain_vault_api_key_values(vault_db_path) {
         Ok(secrets) => {
             let loaded = llm.set_provider_secrets(secrets);
             if loaded > 0 {
@@ -110,67 +110,6 @@ pub(super) async fn run_backfill_vectors(
     let (total, final_vec) = store.vector_stats()?;
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
-}
-
-fn load_keychain_vault_api_key_values(
-    vault_db_path: &PathBuf,
-) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "tachi-vault",
-            "-a",
-            "default",
-            "-w",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let password = String::from_utf8(output.stdout)?.trim().to_string();
-    if password.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Vault DB path contains invalid UTF-8: {}",
-                vault_db_path.display()
-            ),
-        )
-    })?;
-    let store = MemoryStore::open_read_only(vault_db_str)?;
-    let Some(config) = store.vault_get_config()? else {
-        return Ok(Vec::new());
-    };
-
-    let salt = B64.decode(&config.salt)?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
-        return Ok(Vec::new());
-    }
-
-    let mut out = Vec::new();
-    for entry in store.vault_list_entries()? {
-        if entry.secret_type != "api_key"
-            || !entry.name.ends_with("_API_KEY")
-            || entry.allowed_agents.is_some()
-        {
-            continue;
-        }
-        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)?;
-        if !value.trim().is_empty() {
-            out.push((entry.name, value));
-        }
-    }
-    Ok(out)
 }
 
 /// Backfill missing summaries for a given DB.

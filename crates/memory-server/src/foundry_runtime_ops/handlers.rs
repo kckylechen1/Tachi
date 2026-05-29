@@ -435,7 +435,7 @@ pub(crate) async fn handle_compact_session_memory(
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
-            eprintln!("[compact_session_memory] embedding failed, deferring enrichment: {err}");
+            tracing::warn!("[compact_session_memory] embedding failed, deferring enrichment: {err}");
             None
         }
     };
@@ -701,7 +701,7 @@ pub(crate) async fn handle_recall_context(
     let (reranked, rerank_outcome) =
         rerank_rows_with_outcome(server, &params.query, filtered, params.top_k.max(1)).await;
     if rerank_outcome == super::RerankOutcome::Fallback {
-        eprintln!(
+        tracing::warn!(
             "[recall_context] rerank fail-open: query_hash={} top_k={}",
             stable_hash(&params.query),
             params.top_k.max(1)
@@ -746,7 +746,7 @@ pub(crate) async fn handle_recall_context(
             }
             Ok(_) => (vec![], String::new()),
             Err(err) => {
-                eprintln!("[recall_context] wiki search failed, skipping: {err}");
+                tracing::warn!("[recall_context] wiki search failed, skipping: {err}");
                 (vec![], String::new())
             }
         }
@@ -937,7 +937,10 @@ pub(crate) async fn handle_capture_session(
     });
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
-    let jayne_user_memory = params.agent_id.to_ascii_lowercase().contains("jayne");
+    // User-preference scoping: agents with "user_memory" in their profile get
+    // preference notes scoped to "user" instead of the requested scope.
+    let is_user_memory_agent = params.agent_id.to_ascii_lowercase().contains("jayne")
+        || params.agent_id.to_ascii_lowercase().contains("user-memory");
 
     let mut entries = Vec::<MemoryEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
@@ -966,11 +969,11 @@ pub(crate) async fn handle_capture_session(
             }),
         );
         let strategy_keyword = if note.category == "preference" {
-            "kyle-preference".to_string()
+            "user-preference".to_string()
         } else {
             "strategy".to_string()
         };
-        let entry_scope = if jayne_user_memory && note.category == "preference" {
+        let entry_scope = if is_user_memory_agent && note.category == "preference" {
             "user".to_string()
         } else {
             requested_scope.clone()
@@ -993,8 +996,8 @@ pub(crate) async fn handle_capture_session(
                 strategy_keyword,
             ]),
             persons: Vec::new(),
-            entities: if jayne_user_memory {
-                vec!["user".to_string(), "Kyle".to_string()]
+            entities: if is_user_memory_agent {
+                vec!["user".to_string(), params.agent_id.clone()]
             } else {
                 Vec::new()
             },
@@ -1149,7 +1152,7 @@ pub(crate) async fn handle_capture_session(
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
-            eprintln!("[capture_session] embedding failed, deferring enrichment: {err}");
+            tracing::warn!("[capture_session] embedding failed, deferring enrichment: {err}");
             None
         }
     };

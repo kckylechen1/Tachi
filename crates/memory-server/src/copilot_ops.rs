@@ -107,6 +107,12 @@ fn default_named_project_available(server: &MemoryServer, project_name: &str) ->
     server.global_db_path.starts_with(app_home)
 }
 
+/// Identify and supersede wiki entries that duplicate the newly written entry.
+///
+/// Candidates are loaded via `list_by_path("/wiki")` and filtered in-memory.
+/// A future optimization could push the path-prefix or topic filter into SQL
+/// (`WHERE path LIKE '/wiki/%' AND (path = ? OR topic = ?)`) to avoid loading
+/// the full wiki set when it grows large.
 fn supersede_wiki_duplicates(
     store: &mut MemoryStore,
     canonical_id: &str,

@@ -403,6 +403,27 @@ fn is_archive_dir(path: &Path) -> bool {
     path.file_name().is_some_and(|name| name == "archive")
 }
 
+fn is_hidden_or_config_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with('.')
+                || matches!(
+                    name,
+                    "node_modules"
+                        | "__pycache__"
+                        | ".git"
+                        | ".github"
+                        | ".claude"
+                        | ".cursor"
+                        | ".gemini"
+                        | ".codex"
+                        | ".vscode"
+                        | ".idea"
+                )
+        })
+}
+
 fn is_markdown_file(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -424,7 +445,7 @@ fn scan_md_files_recursive(dir: &Path) -> Vec<PathBuf> {
                     continue;
                 }
                 if meta.is_dir() {
-                    if is_archive_dir(&path) {
+                    if is_archive_dir(&path) || is_hidden_or_config_dir(&path) {
                         continue;
                     }
                     queue.push(path);
@@ -451,7 +472,7 @@ fn unique_archive_target(archive_dir: &Path, stem: &str) -> (PathBuf, String) {
             return (path, filename);
         }
     }
-    let filename = format!("{}.{}.overflow.md", stem, timestamp);
+    let filename = format!("{}.{}.{}.md", stem, timestamp, uuid::Uuid::new_v4().as_simple());
     (archive_dir.join(&filename), filename)
 }
 
@@ -521,7 +542,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
                 get_test_fallback_metadata(source_path, content)
             }
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "[wiki_organize] LLM classification error: {}; falling back",
                     e
                 );
@@ -691,7 +712,8 @@ pub(crate) async fn handle_wiki_organize(
                     relative_str
                 ));
 
-                // 虽然不移动，但我们依然就地进行任务状态更新
+                // Task sync on organize:false files is best-effort — errors are
+                // logged but must not abort the remaining file scan.
                 let (new_body, task_modified) = sync_tasks_in_content(server, body);
                 if task_modified {
                     let new_content = if let Some(ref fm) = fm_opt {
@@ -700,13 +722,14 @@ pub(crate) async fn handle_wiki_organize(
                         new_body
                     };
                     let tmp = path.with_extension("md.tmp");
-                    fs::write(&tmp, new_content).map_err(|e| {
-                        format!("Failed to write task sync temp to {}: {e}", tmp.display())
-                    })?;
-                    fs::rename(&tmp, &path).map_err(|e| {
-                        format!("Failed to rename task sync {} -> {}: {e}", tmp.display(), path.display())
-                    })?;
-                    synced_count += 1;
+                    if let Err(e) = fs::write(&tmp, &new_content).and_then(|_| fs::rename(&tmp, &path)) {
+                        log_messages.push(format!(
+                            "WARN: task sync write failed for '{}': {e}",
+                            relative_str
+                        ));
+                    } else {
+                        synced_count += 1;
+                    }
                 }
                 continue;
             }
@@ -959,7 +982,9 @@ pub(crate) async fn handle_wiki_organize(
 
     let index_content = index_lines.join("\n");
     let index_path = canonical_root.join("_index.md");
-    fs::write(&index_path, index_content).map_err(|e| format!("Failed to write _index.md: {e}"))?;
+    if let Err(e) = fs::write(&index_path, &index_content) {
+        log_messages.push(format!("WARN: failed to write _index.md: {e}"));
+    }
 
     let result = json!({
         "status": "success",

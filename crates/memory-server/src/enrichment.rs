@@ -82,7 +82,7 @@ pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 impl MemoryServer {
     pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
         if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
-            eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
+            tracing::warn!("[enrichment-batcher] failed to queue enrichment item: {err}");
         }
     }
 
@@ -131,14 +131,14 @@ impl MemoryServer {
             }
         }
 
-        eprintln!("[enrichment-batcher] channel closed, worker exiting");
+        tracing::debug!("[enrichment-batcher] channel closed, worker exiting");
     }
 
     /// Flush a batch: batch-embed all texts needing embedding, then update DB.
     pub(super) async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
         let items: Vec<EnrichmentItem> = std::mem::take(batch);
         let batch_size = items.len();
-        eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
+        tracing::info!("[enrichment-batcher] flushing batch of {batch_size} items");
 
         // 1. Generate summaries first so long-memory embeddings use condensed
         // semantic text instead of noisy full sessions.
@@ -161,7 +161,7 @@ impl MemoryServer {
             match result {
                 Ok(s) => summaries[idx] = Some(s),
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[enrichment-batcher] summary failed for {}: {e}",
                         items[idx].id
                     );
@@ -198,7 +198,7 @@ impl MemoryServer {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[enrichment-batcher] metadata failed for {}: {e}",
                         items[idx].id
                     );
@@ -284,13 +284,13 @@ impl MemoryServer {
                             embed_results[item_idx] = Some(vecs[vec_idx].clone());
                         }
                     }
-                    eprintln!(
+                    tracing::info!(
                         "[enrichment-batcher] batch embedded {} texts in 1 API call",
                         embed_texts.len()
                     );
                 }
                 Err(e) => {
-                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
+                    tracing::warn!("[enrichment-batcher] batch embedding failed: {e}");
                     for &item_idx in &embed_indices {
                         record_enrichment_failure(self, &items[item_idx], "embedding", &e);
                     }
@@ -331,7 +331,7 @@ impl MemoryServer {
                                     store, &entry,
                                 )
                             {
-                                eprintln!(
+                                tracing::warn!(
                                     "[enrichment-batcher] confidence reinforcement failed for {}: {err}",
                                     item.id
                                 );
@@ -368,7 +368,7 @@ impl MemoryServer {
                                     )
                                     .await
                                 {
-                                    eprintln!(
+                                    tracing::warn!(
                                         "[enrichment-batcher] auto contradiction detection failed for {contradiction_id}: {err}"
                                     );
                                 }
@@ -398,26 +398,26 @@ impl MemoryServer {
                                 &path_prefix_owned,
                                 &[item.id.clone()],
                             ) {
-                                eprintln!(
+                                tracing::warn!(
                                     "[enrichment-batcher] failed to enqueue foundry maintenance for {}: {err}",
                                     item.id
                                 );
                             }
                         }
                     }
-                    Ok(false) => eprintln!(
+                    Ok(false) => tracing::debug!(
                         "[enrichment-batcher] discarded {} (revision changed)",
                         item.id
                     ),
                     Err(e) => {
-                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id);
+                        tracing::warn!("[enrichment-batcher] DB update failed for {}: {e}", item.id);
                         record_enrichment_failure(self, item, "db_update", &e);
                     }
                 }
             }
         }
 
-        eprintln!("[enrichment-batcher] batch of {batch_size} complete");
+        tracing::info!("[enrichment-batcher] batch of {batch_size} complete");
     }
 }
 
@@ -440,7 +440,7 @@ fn record_enrichment_failure(
         server.with_store_for_scope(item.target_db, action)
     };
     if let Err(err) = res {
-        eprintln!(
+        tracing::warn!(
             "[enrichment-batcher] failed to record enrichment failure for {}: {err}",
             item.id
         );

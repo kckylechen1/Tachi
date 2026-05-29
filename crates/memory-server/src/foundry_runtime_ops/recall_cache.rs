@@ -51,7 +51,7 @@ async fn search_rows_for_recall_cache(
             match server.llm.embed_voyage(&params.query, "query").await {
                 Ok(query_vec) => params.query_vec = Some(query_vec),
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[recall-rerank-cache] path-db query embedding failed, falling back to lexical-only search: {e}"
                     );
                 }
@@ -309,7 +309,7 @@ async fn resolve_recall_cache_queries(
             Err(err) => {
                 // LLM unavailable / errored — log once and fall back. We
                 // do NOT propagate the error: the cache is best-effort.
-                eprintln!(
+                tracing::warn!(
                     "[recall_rerank_cache] LLM query generation failed (job {}); using heuristic fallback: {err}",
                     item.job.id
                 );

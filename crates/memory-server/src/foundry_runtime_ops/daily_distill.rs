@@ -80,6 +80,11 @@ pub fn resolve_batch_size() -> usize {
 /// scheduler's threshold so we don't stitch tiny noisy groups.
 const MIN_BUCKET_SIZE: usize = 3;
 
+/// Max characters of the batch user payload before dispatching. If the
+/// serialized JSON exceeds this, groups are dropped from the tail to stay
+/// within the limit and avoid token overflow on the model side.
+const MAX_BATCH_PAYLOAD_CHARS: usize = 60_000;
+
 /// System prompt for the batch distill mega-call. Mirrors the design doc
 /// (Phase 1 mega-prompt) — instructs the model to return a JSON array
 /// with one object per input group.
@@ -616,6 +621,16 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
         }));
     }
     let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
+    // If payload exceeds token budget, drop groups from the tail to stay within limits.
+    let groups_json = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
+        let mut trimmed = payload;
+        while trimmed.len() > 1 && serde_json::to_string_pretty(&trimmed).unwrap_or_default().len() > MAX_BATCH_PAYLOAD_CHARS {
+            trimmed.pop();
+        }
+        serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string())
+    } else {
+        groups_json
+    };
     format!(
         "Here are {} groups to distill:\n\n{}",
         groups.len(),
