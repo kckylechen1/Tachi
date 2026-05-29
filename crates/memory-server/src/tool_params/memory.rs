@@ -269,7 +269,10 @@ pub(crate) struct RememberParams {
 
     /// Importance score 0.0–1.0. Defaults to 0.6 (slightly below save_memory's
     /// 0.7) since `remember` is intended for casual notes.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Scope: "user" | "project" | "general". Defaults to "project".
@@ -358,7 +361,10 @@ pub(crate) struct SearchMemoryParams {
     pub candidates_per_channel: usize,
 
     /// MMR diversity threshold (0.0-1.0), set to null to disable
-    #[serde(default = "default_mmr_threshold")]
+    #[serde(
+        default = "default_mmr_threshold",
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub mmr_threshold: Option<f64>,
 
     /// Graph expand hops (0 = disabled, default = 1)
@@ -662,7 +668,10 @@ pub(crate) struct IngestEventParams {
     pub path_prefix: Option<String>,
 
     /// Optional write importance for structured event writes
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Target scope for writes
