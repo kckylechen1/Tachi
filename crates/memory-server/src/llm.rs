@@ -636,7 +636,8 @@ impl LlmClient {
             };
 
             let status = resp.status();
-            let retry_after = resp.headers()
+            let retry_after = resp
+                .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());

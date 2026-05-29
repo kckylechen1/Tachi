@@ -532,11 +532,6 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
-    let ctx = crate::db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
     let rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -576,7 +571,6 @@ pub(crate) async fn handle_tachi_wiki_search(
     );
 
     Ok(crate::agent_markdown::format_wiki_search(
-        &ctx,
         &params.query,
         rows.len(),
         &serde_json::Value::Array(rows),

@@ -1182,12 +1182,6 @@ pub(crate) async fn handle_wiki_search(
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let ctx = crate::db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
-
     let rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -1227,7 +1221,6 @@ pub(crate) async fn handle_wiki_search(
     );
 
     Ok(crate::agent_markdown::format_wiki_search(
-        &ctx,
         &params.query,
         rows.len(),
         &serde_json::Value::Array(rows),
@@ -1315,7 +1308,10 @@ pub(crate) fn handle_wiki_read(
     let resolved = if path.trim().starts_with('/') {
         let trimmed = path.trim().trim_end_matches('/');
         if trimmed.is_empty() {
-            return Err("Wiki path cannot be root '/' — specify a concrete path like /wiki/my-topic".to_string());
+            return Err(
+                "Wiki path cannot be root '/' — specify a concrete path like /wiki/my-topic"
+                    .to_string(),
+            );
         }
         trimmed.to_string()
     } else {

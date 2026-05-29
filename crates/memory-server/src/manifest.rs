@@ -92,6 +92,7 @@ pub fn is_archival_db_path(p: &Path) -> bool {
     let path_str = p.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
     let markers = [
         "/backups/",
+        "/.tachi/cleanup-backups/",
         "/.openclaw/backups/",
         "/claude-code-runs/",
         "/tidy/manual-cleanup-",
@@ -539,6 +540,56 @@ impl Manifest {
         self.dbs.iter().find(|e| e.role == DbRole::Global)
     }
 
+    /// Resolve the preferred writable agent DB for an OpenClaw agent id.
+    ///
+    /// This prefers the canonical extension path:
+    /// `~/.openclaw/extensions/tachi/data/agents/<agent_id>/memory.db`
+    /// then local agent paths under `~/.openclaw/agents/`, and only then
+    /// other writable agent DBs whose owner/scope matches the id.
+    pub fn resolve_agent_db_path(&self, agent_id: &str) -> Option<PathBuf> {
+        let agent_id = agent_id.trim();
+        if agent_id.is_empty() {
+            return None;
+        }
+        let owner_ext = format!("openclaw-agent:{agent_id}");
+        let owner_local = format!("openclaw-agent-local:{agent_id}");
+        let ext_suffix = format!("/.openclaw/extensions/tachi/data/agents/{agent_id}/memory.db");
+        let local_mem_suffix = format!("/.openclaw/agents/{agent_id}/memory/memory.db");
+        let local_tachi_suffix = format!("/.openclaw/agents/{agent_id}/.tachi/memory.db");
+
+        self.dbs
+            .iter()
+            .filter(|e| {
+                e.allow_write
+                    && e.schema_kind == "tachi"
+                    && e.role == DbRole::Agent
+                    && (e.owner == owner_ext
+                        || e.owner == owner_local
+                        || e.scope_hint.ends_with(&format!(":{agent_id}")))
+            })
+            .max_by_key(|e| {
+                let path = e.path.replace('\\', "/");
+                let mut score = 0i32;
+                if path.ends_with(&ext_suffix) {
+                    score += 400;
+                }
+                if path.ends_with(&local_mem_suffix) {
+                    score += 300;
+                }
+                if path.ends_with(&local_tachi_suffix) {
+                    score += 250;
+                }
+                if e.owner == owner_ext {
+                    score += 100;
+                }
+                if e.owner == owner_local {
+                    score += 50;
+                }
+                score
+            })
+            .map(|e| PathBuf::from(&e.path))
+    }
+
     /// All entries with a given role. Currently only used by tests; gated
     /// with cfg(test) to keep the build warning-free.
     #[cfg(test)]
@@ -933,6 +984,43 @@ mod tests {
     }
 
     #[test]
+    fn resolve_agent_db_path_prefers_extension_agent_db() {
+        let mut m = Manifest::empty();
+        m.dbs = vec![
+            DbEntry {
+                path: "/u/.openclaw/agents/main/memory/memory.db".to_string(),
+                role: DbRole::Agent,
+                owner: "openclaw-agent-local:main".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: String::new(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "openclaw-agent-local:main".to_string(),
+                notes: String::new(),
+            },
+            DbEntry {
+                path: "/u/.openclaw/extensions/tachi/data/agents/main/memory.db".to_string(),
+                role: DbRole::Agent,
+                owner: "openclaw-agent:main".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: true,
+                allow_write: true,
+                last_doctor_at: String::new(),
+                last_classification: "healthy".to_string(),
+                scope_hint: "openclaw-agent:main".to_string(),
+                notes: String::new(),
+            },
+        ];
+        assert_eq!(
+            m.resolve_agent_db_path("main").as_deref(),
+            Some(Path::new(
+                "/u/.openclaw/extensions/tachi/data/agents/main/memory.db"
+            ))
+        );
+    }
+
+    #[test]
     fn allow_write_for_healthy_and_wal_orphan() {
         // PR-A: WalOrphan is now write-allowed because a non-empty -wal file
         // is the expected state for any DB held open by the live daemon, and
@@ -1171,6 +1259,10 @@ mod tests {
         .is_some());
         assert!(should_skip_path(Path::new(
             "/Users/me/.tachi/tidy/manual-cleanup-20260503101336/global__memory.db"
+        ))
+        .is_some());
+        assert!(should_skip_path(Path::new(
+            "/Users/me/.tachi/cleanup-backups/20260529T144750/main_memory.db"
         ))
         .is_some());
         // node_modules + tmp

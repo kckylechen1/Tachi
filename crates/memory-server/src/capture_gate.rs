@@ -21,13 +21,14 @@
 //! the save response, write proceeds).
 
 use serde::Serialize;
+use std::sync::{Mutex, OnceLock};
 
 /// Default minimum character count for a non-scratch capture.
 pub const DEFAULT_CAPTURE_MIN_CHARS: usize = 200;
 
 /// Allowed top-level path buckets. Saves to anything else are rejected.
 /// Use `register_bucket()` to extend at runtime (e.g. from plugins).
-static BUCKET_REGISTRY: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+static BUCKET_REGISTRY: OnceLock<Mutex<Vec<&'static str>>> = OnceLock::new();
 
 const BASE_BUCKETS: &[&str] = &[
     "wiki",
@@ -56,11 +57,10 @@ const BASE_BUCKETS: &[&str] = &[
 ];
 
 /// Register additional buckets at runtime. Thread-safe via Mutex.
+#[allow(dead_code)]
 pub fn register_bucket(bucket: &'static str) {
-    use std::sync::OnceLock;
-    static REGISTRY_LOCK: OnceLock<std::sync::Mutex<Vec<&'static str>>> = OnceLock::new();
-    let lock = REGISTRY_LOCK.get_or_init(|| std::sync::Mutex::new(BASE_BUCKETS.to_vec()));
-    if let Ok(mut buckets) = lock.lock() {
+    let registry = BUCKET_REGISTRY.get_or_init(|| Mutex::new(BASE_BUCKETS.to_vec()));
+    if let Ok(mut buckets) = registry.lock() {
         if !buckets.contains(&bucket) {
             buckets.push(bucket);
         }
@@ -68,10 +68,9 @@ pub fn register_bucket(bucket: &'static str) {
 }
 
 pub fn allowed_buckets() -> Vec<&'static str> {
-    use std::sync::OnceLock;
-    static REGISTRY_LOCK: OnceLock<std::sync::Mutex<Vec<&'static str>>> = OnceLock::new();
-    let lock = REGISTRY_LOCK.get_or_init(|| std::sync::Mutex::new(BASE_BUCKETS.to_vec()));
-    lock.lock()
+    let registry = BUCKET_REGISTRY.get_or_init(|| Mutex::new(BASE_BUCKETS.to_vec()));
+    registry
+        .lock()
         .map(|b| b.clone())
         .unwrap_or_else(|_| BASE_BUCKETS.to_vec())
 }
@@ -302,6 +301,17 @@ mod tests {
         let d = evaluate_warn(&"x".repeat(300), "/random/path", Some("equity_trading"));
         assert!(!d.accept);
         assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::PathBucketDisallowed));
+    }
+
+    #[test]
+    fn registered_bucket_is_allowed() {
+        register_bucket("plugin-test-bucket");
+        let d = evaluate_warn(&"x".repeat(300), "/plugin-test-bucket/path", Some("plugin"));
+        assert!(d.accept, "registered bucket should be accepted: {d:?}");
+        assert!(!d
             .violations
             .iter()
             .any(|v| v.code == GateViolationCode::PathBucketDisallowed));

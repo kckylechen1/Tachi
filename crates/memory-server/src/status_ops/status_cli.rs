@@ -162,13 +162,18 @@ async fn render_one(
             } else {
                 String::new()
             };
+            let orphans = if db.vector_orphans > 0 {
+                format!(" orphans={}", db.vector_orphans)
+            } else {
+                String::new()
+            };
             let dim = db
                 .vector_dimension
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             println!(
-                "       {marker} vectors={}/{} missing={} coverage={pct:.1}% dim={}{}",
-                db.vector_count, db.memory_total, db.vector_missing, dim, failures
+                "       {marker} vectors={}/{} missing={} coverage={pct:.1}% dim={}{}{}",
+                db.vector_count, db.memory_total, db.vector_missing, dim, failures, orphans
             );
         }
         if let Some(job) = &db.latest_job {

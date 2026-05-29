@@ -176,9 +176,9 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
     .await
     .expect("checkpoint should save");
 
-    let parsed: Value = serde_json::from_str(&body).expect("checkpoint JSON");
-    assert!(parsed["id"].as_str().is_some());
-    assert_eq!(parsed["status"], json!("saved (enrichment pending)"));
+    assert!(body.starts_with("Saved ->"));
+    assert!(body.contains("/agent/checkpoints/"));
+    assert!(body.contains("enrichment"));
 }
 
 #[tokio::test]
@@ -227,8 +227,15 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
     .await
     .expect("save should succeed");
 
-    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
-    assert!(parsed.get("error").is_none(), "save error: {body}");
+    assert!(body.starts_with("Saved ->"), "save output: {body}");
+    assert!(
+        body.contains(mem_id),
+        "save output should include id: {body}"
+    );
+    assert!(
+        body.contains("/project/sigil/mcp"),
+        "save output should include path: {body}"
+    );
 
     let db_path = server.global_db_path_buf();
     let conn = rusqlite::Connection::open(db_path).expect("open test db");
@@ -297,12 +304,10 @@ async fn tachi_memory_ask_returns_evidence_contract() {
     .await
     .expect("ask should succeed");
 
-    let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
-    assert_eq!(parsed["mode"], json!("ask"));
-    assert!(parsed["evidence"].is_array());
-    assert_eq!(parsed["thinking"]["mode"], json!("ask"));
-    assert!(parsed["thinking"]["evidence_count"].as_u64().is_some());
-    assert!(parsed["thinking"]["key_evidence"].is_array());
+    assert!(body.starts_with("## Tachi ask"));
+    assert!(body.contains("status: completed"));
+    assert!(body.contains("evidence:"));
+    assert!(!body.contains("\"raw\":"));
 }
 
 #[tokio::test]
@@ -356,9 +361,9 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
     .await
     .expect("progress should record");
 
-    let parsed: Value = serde_json::from_str(&body).expect("progress JSON");
-    assert_eq!(parsed["status"], json!("recorded"));
-    assert_eq!(parsed["secret_redactions"], json!(1));
+    assert!(body.starts_with("## Tachi progress"));
+    assert!(body.contains("status: recorded"));
+    assert!(body.contains("secret_redactions: 1"));
     let log = std::fs::read_to_string(run_root.join("flow_progress_test/progress.jsonl"))
         .expect("progress jsonl");
     assert!(log.contains("validation"));
@@ -416,9 +421,9 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     .expect("briefing should succeed");
 
     assert!(body.starts_with("## Tachi briefing"));
-    assert!(body.contains("### Database context"));
     assert!(body.contains("### Memories"));
-    assert!(body.contains("tachi_status"));
+    assert!(!body.contains("### Database context"));
+    assert!(!body.contains("tachi_status"));
     assert!(!body.contains("merge_hints"));
     assert!(!body.contains("skill_quality"));
 }

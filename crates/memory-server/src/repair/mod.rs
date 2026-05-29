@@ -21,6 +21,7 @@
 //!   processed_events, access_history).
 //! - **R8** Deterministic junk cleanup (exact duplicate old versions,
 //!   foundry rerank cache records, empty JSON turn records).
+//! - **R9** Domain normalization/backfill for missing and legacy path-like values.
 //!
 //! Exit codes: 0 clean (or successful dry-run with no findings), 1 if
 //! repairs were found and not applied, 2 if any rule errored.
@@ -32,6 +33,7 @@ use rusqlite::{Connection, OpenFlags};
 use crate::cli::{QuarantineAction, RepairAction};
 use crate::manifest::{DbEntry, Manifest};
 
+pub mod domain;
 pub mod edges;
 pub mod fts;
 pub mod integrity;
@@ -53,7 +55,7 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 /// R8 (junk cleanup) is intentionally **excluded** from the default sweep:
 /// even with conservative duplicate matching, it is a destructive cleanup rule
 /// and must be opted in explicitly via `--rule R8`.
-const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7"];
+const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R9"];
 
 #[derive(Debug)]
 pub struct RepairExit {
@@ -241,6 +243,7 @@ pub async fn run_repair(
                 "R5" => Box::new(integrity::IntegrityCheck),
                 "R7" => Box::new(edges::OrphanRefs),
                 "R8" => Box::new(junk::JunkCleanup),
+                "R9" => Box::new(domain::DomainRepair),
                 // R6 deliberately not part of bulk sweep — too aggressive.
                 _ => continue,
             };

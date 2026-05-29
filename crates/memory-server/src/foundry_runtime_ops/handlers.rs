@@ -3,6 +3,53 @@ use super::helpers::*;
 use super::maintenance::enqueue_capture_maintenance_jobs;
 use super::recall::*;
 use super::*;
+use std::path::PathBuf;
+
+fn tachi_home_root() -> PathBuf {
+    if let Ok(raw) = std::env::var("TACHI_HOME") {
+        if raw == "~" {
+            return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        }
+        if let Some(rest) = raw.strip_prefix("~/") {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(rest);
+        }
+        if !raw.trim().is_empty() {
+            return PathBuf::from(raw);
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tachi")
+}
+
+pub(super) fn resolve_capture_target(
+    server: &MemoryServer,
+    requested_scope: &str,
+    explicit_project: Option<&str>,
+    agent_id: &str,
+) -> (DbScope, Option<String>, Option<PathBuf>, Option<String>) {
+    if let Some(project) = explicit_project {
+        return (DbScope::Project, Some(project.to_string()), None, None);
+    }
+
+    let manifest_path = tachi_home_root().join("manifest.json");
+    let manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    if let Some(db_path) = manifest.resolve_agent_db_path(agent_id) {
+        return (
+            DbScope::Project,
+            None,
+            Some(db_path),
+            Some(format!(
+                "agent capture pinned to manifest DB for {agent_id}"
+            )),
+        );
+    }
+
+    let (target_db, warning) = server.resolve_write_scope(requested_scope);
+    (target_db, None, None, warning)
+}
 use crate::utils::stable_hash;
 use regex::Regex;
 use std::collections::HashSet;
@@ -237,6 +284,7 @@ fn persist_compact_session_import_edges(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
+    db_path: Option<&PathBuf>,
     entries: &[MemoryEntry],
 ) -> Result<usize, String> {
     let created_at = Utc::now().to_rfc3339();
@@ -254,6 +302,8 @@ fn persist_compact_session_import_edges(
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, save_edges)
+    } else if let Some(db_path) = db_path {
+        server.with_path_store(db_path, save_edges)
     } else {
         server.with_store_for_scope(target_db, save_edges)
     }
@@ -276,12 +326,12 @@ pub(crate) async fn handle_compact_session_memory(
     }
 
     let requested_scope = normalize_scope(&params.scope, "project");
-    let named_project = params.project.clone();
-    let (target_db, warning) = if named_project.is_some() {
-        (DbScope::Project, None)
-    } else {
-        server.resolve_write_scope(&requested_scope)
-    };
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        server,
+        &requested_scope,
+        params.project.as_deref(),
+        &params.agent_id,
+    );
     let base_path = params
         .path_prefix
         .clone()
@@ -449,13 +499,19 @@ pub(crate) async fn handle_compact_session_memory(
 
     let mut saved_ids = Vec::new();
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
+        persist_capture_entry(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            entry,
+        )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
-                None,
+                db_path.clone(),
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -469,6 +525,7 @@ pub(crate) async fn handle_compact_session_memory(
         server,
         target_db,
         named_project.as_deref(),
+        db_path.as_ref(),
         &entries,
     )?;
     let saved_ids = dedup_strings(saved_ids);
@@ -477,7 +534,7 @@ pub(crate) async fn handle_compact_session_memory(
             server,
             target_db,
             named_project.clone(),
-            None,
+            db_path.clone(),
             &params.agent_id,
             &base_path,
             &saved_ids,
@@ -924,16 +981,17 @@ pub(crate) async fn handle_capture_session(
     }
 
     let requested_scope = normalize_scope(&params.scope, "project");
-    let named_project = params.project.clone();
-    let (target_db, warning) = if named_project.is_some() {
-        (DbScope::Project, None)
-    } else {
-        server.resolve_write_scope(&requested_scope)
-    };
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        server,
+        &requested_scope,
+        params.project.as_deref(),
+        &params.agent_id,
+    );
 
-    let base_path = params.path_prefix.clone().unwrap_or_else(|| {
-        super::helpers::build_openclaw_agent_root(&params.agent_id)
-    });
+    let base_path = params
+        .path_prefix
+        .clone()
+        .unwrap_or_else(|| super::helpers::build_openclaw_agent_root(&params.agent_id));
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
@@ -1164,13 +1222,19 @@ pub(crate) async fn handle_capture_session(
     let mut saved_ids = Vec::new();
 
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
+        persist_capture_entry(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            entry,
+        )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
-                None,
+                db_path.clone(),
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -1185,7 +1249,7 @@ pub(crate) async fn handle_capture_session(
         server,
         target_db,
         named_project.clone(),
-        None,
+        db_path.clone(),
         &params.agent_id,
         &base_path,
         &saved_ids,

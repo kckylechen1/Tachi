@@ -5,9 +5,8 @@
 //! delegates to [`handle_tachi_memory`].
 
 use crate::agent_markdown;
-use crate::db_context;
 use crate::facade_save_ops::handle_tachi_save;
-use crate::facade_search_ops::handle_tachi_search;
+use crate::facade_search_ops::{collect_tachi_search_sections, handle_tachi_search};
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -99,7 +98,8 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
             };
-            handle_tachi_save(server, save_params).await
+            let body = handle_tachi_save(server, save_params).await?;
+            Ok(format_save_result(&body, params.path.as_deref()))
         }
         "extract_facts" => {
             if let Some(body) = crate::cli_client::maybe_forward_write(
@@ -137,7 +137,8 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
             };
-            handle_tachi_save(server, save_params).await
+            let body = handle_tachi_save(server, save_params).await?;
+            Ok(format_extract_result(&body))
         }
         "briefing" => handle_memory_briefing(server, &params).await,
         "checkpoint" => handle_memory_checkpoint(server, params).await,
@@ -171,12 +172,6 @@ async fn handle_memory_briefing(
             .map(str::to_ascii_lowercase)
             .as_deref(),
         Some("memory")
-    );
-
-    let ctx = db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
     );
 
     // Memory + wiki searches run concurrently to reduce briefing latency.
@@ -269,7 +264,6 @@ async fn handle_memory_briefing(
     });
 
     Ok(agent_markdown::format_briefing(
-        &ctx,
         &query,
         &memories,
         &wiki,
@@ -312,6 +306,7 @@ async fn handle_memory_checkpoint(
             Utc::now().format("%Y-%m-%d")
         ))
     });
+    let display_path = path.clone();
     let save_params = TachiSaveParams {
         text: checkpoint_text,
         id: params.id.take(),
@@ -348,7 +343,8 @@ async fn handle_memory_checkpoint(
         valid_from: params.valid_from.take(),
         valid_until: params.valid_until.take(),
     };
-    handle_tachi_save(server, save_params).await
+    let body = handle_tachi_save(server, save_params).await?;
+    Ok(format_save_result(&body, display_path.as_deref()))
 }
 
 pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
@@ -414,16 +410,11 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
 
 async fn handle_memory_alerts(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    _params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let ctx = db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
     let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
     let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    Ok(agent_markdown::format_alerts(&ctx, &warnings, &wiki_counts))
+    Ok(agent_markdown::format_alerts(&warnings, &wiki_counts))
 }
 
 async fn handle_memory_ask(
@@ -449,23 +440,36 @@ async fn handle_memory_ask(
         enable_rerank: true,
         as_of: params.as_of.clone(),
     };
-    let evidence = parse_evidence_array(handle_tachi_search(server, search_params).await?);
+    let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
+    let evidence = sections_to_evidence(&sections);
     let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
         Some(synthesize_answer(server, &query, &evidence, params.model.as_deref()).await)
     } else {
         None
     };
-    serde_json::to_string(&json!({
-        "status": "completed",
-        "mode": "ask",
-        "query": query,
-        "answer_policy": "Use the evidence array below; if evidence is insufficient, say so instead of inventing details.",
-        "thinking": thinking,
-        "synthesis": synthesis,
-        "evidence": evidence,
-    }))
-    .map_err(|e| format!("serialize ask: {e}"))
+    let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
+    Ok(format_agent_status(
+        "Tachi ask",
+        &[
+            ("status", "completed".to_string()),
+            ("query", query),
+            (
+                "evidence",
+                format!("{} hit(s)", evidence_rows(&evidence).len()),
+            ),
+            (
+                "confidence",
+                thinking
+                    .get("confidence")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none")
+                    .to_string(),
+            ),
+        ],
+        Some(&evidence),
+        synthesis_text.as_deref(),
+    ))
 }
 
 async fn handle_memory_consolidate(
@@ -491,7 +495,8 @@ async fn handle_memory_consolidate(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
     };
-    let candidates = parse_json_or_empty(handle_tachi_search(server, search_params).await?);
+    let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
+    let candidates = sections_to_evidence(&sections);
     let thinking = build_thinking_scaffold(
         "consolidate",
         "Identify duplicate, stale, superseded, or merge-worthy memory consolidation candidates.",
@@ -510,22 +515,31 @@ async fn handle_memory_consolidate(
     } else {
         None
     };
-    serde_json::to_string(&json!({
-        "status": "dry_run",
-        "mode": "consolidate",
-        "candidates": candidates,
-        "thinking": thinking,
-        "synthesis": synthesis,
-        "next_steps": [
-            "Review candidates and decide canonical entries before mutating memory.",
-            "Use archive_memory/delete_memory or a dedicated repair command only after explicit approval."
-        ]
-    }))
-    .map_err(|e| format!("serialize consolidate: {e}"))
+    let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
+    Ok(format_agent_status(
+        "Tachi consolidate",
+        &[
+            ("status", "dry_run".to_string()),
+            (
+                "candidates",
+                format!("{} hit(s)", evidence_rows(&candidates).len()),
+            ),
+            (
+                "confidence",
+                thinking
+                    .get("confidence")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none")
+                    .to_string(),
+            ),
+        ],
+        Some(&candidates),
+        synthesis_text.as_deref(),
+    ))
 }
 
 async fn handle_memory_progress(
-    server: &MemoryServer,
+    _server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
     let flow_id = params
@@ -558,20 +572,17 @@ async fn handle_memory_progress(
     });
     append_jsonl(&run_dir.join("progress.jsonl"), &line)?;
     update_progress_status(&run_dir, &line)?;
-    Ok(json!({
-        "status": "recorded",
-        "mode": "progress",
-        "flow_id": flow_id,
-        "run_dir": run_dir.display().to_string(),
-        "progress_log": run_dir.join("progress.jsonl").display().to_string(),
-        "secret_redactions": redactions,
-        "next_actions": [
-            "For long-running work, append progress after each validated step.",
-            "Use tachi_memory action='checkpoint' for durable handoff summaries."
+    Ok(format_agent_status(
+        "Tachi progress",
+        &[
+            ("status", "recorded".to_string()),
+            ("flow", flow_id),
+            ("log", run_dir.join("progress.jsonl").display().to_string()),
+            ("secret_redactions", redactions.to_string()),
         ],
-        "vector_health": crate::status_ops::database_vector_health_json(&server.global_db_path_buf()),
-    })
-    .to_string())
+        None,
+        None,
+    ))
 }
 
 async fn handle_memory_readiness(
@@ -605,16 +616,51 @@ async fn handle_memory_readiness(
             })
         })
         .collect::<Vec<_>>();
-    serde_json::to_string(&json!({
-        "status": "completed",
-        "mode": "readiness",
-        "runtime": runtime,
-        "health": status,
-        "required_tools": required_tools,
-        "recent_checkpoints": crate::status_ops::list_recent_checkpoint_entries(server, 5),
-        "recent_kanban": crate::status_ops::list_recent_kanban_entries(server, 5),
-    }))
-    .map_err(|e| format!("serialize readiness: {e}"))
+    let health_score = status
+        .get("summary")
+        .and_then(|summary| summary.get("health_score"))
+        .or_else(|| status.get("health_score"))
+        .map(Value::to_string)
+        .unwrap_or_else(|| "?".to_string());
+    let visible_tools = required_tools
+        .iter()
+        .filter(|tool| {
+            tool.get("visible")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let vector_health =
+        crate::status_ops::database_vector_health_json(&server.global_db_path_buf());
+    let pending_vectors = vector_health
+        .get("pending_vectors")
+        .or_else(|| vector_health.get("missing_vectors"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let kanban_count = crate::status_ops::list_recent_kanban_entries(server, 5).len();
+    Ok(format_agent_status(
+        "Tachi readiness",
+        &[
+            ("status", "completed".to_string()),
+            ("health_score", health_score),
+            (
+                "visible_required_tools",
+                format!("{visible_tools}/{}", tools.len()),
+            ),
+            ("pending_vectors", pending_vectors.to_string()),
+            ("recent_kanban", kanban_count.to_string()),
+            (
+                "runtime",
+                runtime
+                    .get("runtime")
+                    .or_else(|| runtime.get("status"))
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "available".to_string()),
+            ),
+        ],
+        None,
+        None,
+    ))
 }
 
 fn parse_json_or_empty(raw: String) -> Value {
@@ -622,6 +668,150 @@ fn parse_json_or_empty(raw: String) -> Value {
         let preview: String = raw.chars().take(500).collect();
         json!({ "raw_preview": preview, "parse_error": true })
     })
+}
+
+fn sections_to_evidence(sections: &[(String, Value)]) -> Value {
+    let mut rows = Vec::new();
+    for (section, value) in sections {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    let mut row = item.clone();
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.insert("section".to_string(), json!(section));
+                    }
+                    rows.push(row);
+                }
+            }
+            Value::String(text) => rows.push(json!({ "section": section, "summary": text })),
+            other => rows.push(json!({ "section": section, "value": other })),
+        }
+    }
+    Value::Array(rows)
+}
+
+fn compact_line(text: &str, limit: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= limit {
+        one_line
+    } else {
+        format!("{}...", one_line.chars().take(limit).collect::<String>())
+    }
+}
+
+fn format_save_result(raw: &str, requested_path: Option<&str>) -> String {
+    let value = parse_json_or_empty(raw.to_string());
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("saved");
+    let id = value.get("id").and_then(Value::as_str).unwrap_or("?");
+    let path = value
+        .get("path")
+        .and_then(Value::as_str)
+        .or(requested_path)
+        .unwrap_or("/");
+    let enrichment = value
+        .get("enrichment")
+        .map(|v| format!("; enrichment {v}"))
+        .unwrap_or_default();
+    let warning = value
+        .get("warning")
+        .and_then(Value::as_str)
+        .map(|w| format!("\nWarning: {w}"))
+        .unwrap_or_default();
+    format!("Saved -> `{path}` (id: `{id}`, status: {status}{enrichment}){warning}")
+}
+
+fn format_extract_result(raw: &str) -> String {
+    let value = parse_json_or_empty(raw.to_string());
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    let extracted = value
+        .get("facts_extracted")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let saved = value
+        .get("facts_saved")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let mut out = vec![format!(
+        "Extract facts -> {status}; extracted {extracted}, saved {saved}"
+    )];
+    if let Some(facts) = value.get("facts").and_then(Value::as_array) {
+        for (idx, fact) in facts.iter().enumerate() {
+            let path = fact.get("path").and_then(Value::as_str).unwrap_or("/");
+            let text = fact
+                .get("summary")
+                .or_else(|| fact.get("text"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            out.push(format!(
+                "{}. `{path}` - {}",
+                idx + 1,
+                compact_line(text, 100)
+            ));
+        }
+    }
+    out.join("\n")
+}
+
+fn format_agent_status(
+    title: &str,
+    fields: &[(&str, String)],
+    rows: Option<&Value>,
+    synthesis: Option<&str>,
+) -> String {
+    let mut out = vec![format!("## {title}")];
+    for (key, value) in fields {
+        out.push(format!("{key}: {value}"));
+    }
+    if let Some(rows) = rows {
+        let evidence = evidence_rows(rows);
+        if !evidence.is_empty() {
+            out.push("\n### Evidence".to_string());
+            for (idx, row) in evidence.into_iter().take(6).enumerate() {
+                let topic = row.get("topic").and_then(Value::as_str).unwrap_or("entry");
+                let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
+                let summary = row
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(no summary)");
+                let score = evidence_score(row);
+                out.push(format!(
+                    "{}. **{}** {:.3} `{}` - {}",
+                    idx + 1,
+                    topic,
+                    score,
+                    path,
+                    compact_line(summary, 100)
+                ));
+            }
+        }
+    }
+    if let Some(synthesis) = synthesis.filter(|s| !s.trim().is_empty()) {
+        out.push("\n### Synthesis".to_string());
+        out.push(compact_line(synthesis, 600));
+    }
+    out.join("\n")
+}
+
+fn synthesis_markdown_text(value: &Value) -> Option<String> {
+    value
+        .get("answer")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            value.get("error").and_then(Value::as_str).map(|err| {
+                let status = value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed");
+                format!("{status}: {err}")
+            })
+        })
 }
 
 fn slim_memory_rows(value: Value) -> Value {

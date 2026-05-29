@@ -675,6 +675,7 @@ pub(crate) async fn handle_extract_facts(
     }
 
     let count = facts.len();
+    let mut saved_facts = Vec::new();
     let saved = server
         .with_store_for_scope(target_db, |store| {
             let mut saved = 0;
@@ -697,8 +698,16 @@ pub(crate) async fn handle_extract_facts(
                 if is_lazy_source(&entry.source) && entry.importance < 0.5 {
                     entry.retention_policy = Some("ephemeral".to_string());
                 }
+                let fact_summary = serde_json::json!({
+                    "id": entry.id.clone(),
+                    "path": entry.path.clone(),
+                    "topic": entry.topic.clone(),
+                    "summary": entry.summary.clone(),
+                    "importance": entry.importance,
+                });
                 if store.upsert(&entry).is_ok() {
                     saved += 1;
+                    saved_facts.push(fact_summary);
                 }
             }
             Ok(saved)
@@ -709,7 +718,8 @@ pub(crate) async fn handle_extract_facts(
         "status": "completed",
         "source": source,
         "facts_extracted": count,
-        "facts_saved": saved
+        "facts_saved": saved,
+        "facts": saved_facts,
     }))
 }
 

@@ -573,12 +573,21 @@ fn classify_route(
 
 /// Extract a project name from `~/.tachi/projects/<name>/memory.db`.
 fn named_project_from_path(db_path: &Path) -> Option<String> {
-    // Walk up: parent must be ".../projects/<name>", grandparent ".../projects".
+    // Only canonical Tachi project DBs should route as named projects:
+    //   .../.tachi/projects/<name>/memory.db
+    // Similar-looking external paths such as ".../data/tachi/projects/<name>/memory.db"
+    // must stay on explicit path routing so background workers write back to
+    // the original DB instead of inventing ~/.tachi/projects/<name>/memory.db.
     let parent = db_path.parent()?;
     let name = parent.file_name()?.to_str()?;
     let grand = parent.parent()?;
     let grand_name = grand.file_name()?.to_str()?;
-    if grand_name == "projects" && db_path.file_name()?.to_str()? == "memory.db" {
+    let root = grand.parent()?;
+    let root_name = root.file_name()?.to_str()?;
+    if grand_name == "projects"
+        && root_name == ".tachi"
+        && db_path.file_name()?.to_str()? == "memory.db"
+    {
         Some(name.to_string())
     } else {
         None
@@ -715,6 +724,12 @@ mod tests {
     #[test]
     fn named_project_rejects_non_canonical_layout() {
         let p = PathBuf::from("/x/y/notprojects/foo/memory.db");
+        assert!(named_project_from_path(&p).is_none());
+    }
+
+    #[test]
+    fn named_project_rejects_external_projects_dir() {
+        let p = PathBuf::from("/home/u/work/data/tachi/projects/hyperion/memory.db");
         assert!(named_project_from_path(&p).is_none());
     }
 }

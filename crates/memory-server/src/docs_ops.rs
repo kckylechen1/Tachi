@@ -391,7 +391,8 @@ fn secure_join(root: &Path, rel_part: &str) -> Result<PathBuf, String> {
     // For new (non-existent) files, canonicalize the parent directory instead
     if let Some(parent) = cursor.parent() {
         if let Ok(canonical_parent) = parent.canonicalize() {
-            if canonical_parent != canonical_root && !canonical_parent.starts_with(&canonical_root) {
+            if canonical_parent != canonical_root && !canonical_parent.starts_with(&canonical_root)
+            {
                 return Err(format!(
                     "Resolved path '{}' escapes root after canonicalize",
                     cursor.display()

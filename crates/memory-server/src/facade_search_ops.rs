@@ -5,7 +5,6 @@
 //! delegates to [`handle_tachi_search`].
 
 use crate::agent_markdown;
-use crate::db_context;
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -39,13 +38,23 @@ pub(crate) async fn handle_tachi_search(
     server: &MemoryServer,
     params: TachiSearchParams,
 ) -> Result<String, String> {
-    let scope = params.scope.to_ascii_lowercase();
-    let ctx = db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
+    let (sections, scope_remapped, scope) = collect_tachi_search_sections(server, &params).await;
+    let mut output = agent_markdown::format_search_sections(&params.query, &sections);
+    if scope_remapped {
+        output = format!(
+            "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/memory.db`.\n\n{output}",
+            scope
+        );
+    }
 
+    Ok(output)
+}
+
+pub(crate) async fn collect_tachi_search_sections(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+) -> (Vec<(String, Value)>, bool, String) {
+    let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
         "wiki" | "memory" | "all" => scope.as_str(),
         _ => "all",
@@ -110,13 +119,5 @@ pub(crate) async fn handle_tachi_search(
         }
     }
 
-    let mut output = agent_markdown::format_search_sections(&ctx, &params.query, &sections);
-    if scope_remapped {
-        output = format!(
-            "> **Note**: scope='{}' was interpreted as 'all'. Use `project` to target a named library under `~/.tachi/projects/<name>/memory.db`.\n\n{output}",
-            scope
-        );
-    }
-
-    Ok(output)
+    (sections, scope_remapped, scope)
 }

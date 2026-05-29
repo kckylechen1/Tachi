@@ -1,6 +1,7 @@
 use super::*;
 use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DailyPipelineReport {
@@ -241,7 +242,10 @@ async fn run_truth_maintenance_for_target(
         .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
     let conn = store.connection();
     let named_project = match (target_db, server.project_db_path_buf()) {
-        (DbScope::Project, Some(default_path)) if default_path != target.path => {
+        (DbScope::Project, Some(default_path))
+            if default_path != target.path
+                && canonical_named_project_from_path(&target.path).is_some() =>
+        {
             Some(target.label.clone())
         }
         _ => None,
@@ -1089,6 +1093,23 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
     }
     let name = manifest_db_name(entry, path);
     name.split(':').next_back().unwrap_or(&name).to_string()
+}
+
+fn canonical_named_project_from_path(db_path: &Path) -> Option<String> {
+    let parent = db_path.parent()?;
+    let name = parent.file_name()?.to_str()?;
+    let grand = parent.parent()?;
+    let grand_name = grand.file_name()?.to_str()?;
+    let root = grand.parent()?;
+    let root_name = root.file_name()?.to_str()?;
+    if grand_name == "projects"
+        && root_name == ".tachi"
+        && db_path.file_name()?.to_str()? == "memory.db"
+    {
+        Some(name.to_string())
+    } else {
+        None
+    }
 }
 
 fn tachi_app_home() -> PathBuf {
