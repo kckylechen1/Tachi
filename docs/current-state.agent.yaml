@@ -1,5 +1,5 @@
-version: 2026-03-26
-release: v0.11.0
+version: 2026-05-30
+release: v1.2.0
 
 status:
   phase_1_hub_governance: done
@@ -7,6 +7,7 @@ status:
   phase_3_ghost_persistence: done
   phase_4_virtual_capability: done
   phase_5_multi_agent_ops: done
+  phase_6_production_hardening: done
   app_installer_loop: not_done
   electron_shell: not_done
 
@@ -96,6 +97,37 @@ implemented_now:
       - memory persistence (handoff: category)
       - LRU eviction at 50 memos
 
+  dispatch_v2:
+    stages: brainstorm / plan / dispatch / review / ship
+    features:
+      - two-stage plan/execute with plan review gate
+      - tachi_shell orchestration facade
+      - tachi_task dispatch + kanban board
+      - auto-daemon readiness probe
+      - watchdog polling for kanban state
+
+  docs_organizer:
+    tools:
+      - docs_organize (wiki-based document management)
+    features:
+      - hierarchical directory structure
+      - frontmatter-based metadata
+      - category classification with LLM assist
+      - archive management
+      - path traversal protection
+
+  production_hardening:
+    audit_rounds: P0/P1/P2/P3 + Gemini review
+    fixes_applied:
+      - atomic file writes (write-to-tmp + rename + flock)
+      - crypto interceptor anti-debug bypass
+      - tracing migration (eprintln -> tracing)
+      - scoring normalization (Jaccard, surprise_score)
+      - daemon lock TOCTOU fix
+      - Retry-After header compliance
+      - capture gate bucket registry
+      - health score dimension mismatch penalty
+
 desktop:
   base_url_default: http://127.0.0.1:6919/mcp
   dev_proxy: /tachi/mcp
@@ -115,20 +147,5 @@ sandbox:
     - do not claim isolation stronger than runtime can actually enforce
 
 tests:
-  total: 32
-  new_in_v0.11.0: 11
+  total: 44
   all_passing: true
-
-code_review:
-  source: docs/code-review-superpowers.md
-  addressed:
-    - C-1: subsumed by hot-activation
-    - I-1: metadata error propagation
-    - I-2: cross-scope VC shadowing guard
-    - M-1: safe version_pin cast
-    - M-2: auto-approval comment
-    - M-3: hub_discover_inner refactor
-    - M-6: handled by configuredBaseUrls
-  deferred:
-    - M-4: tempfile for test cleanup (minor)
-    - M-5: end-to-end hub_call through VC test
