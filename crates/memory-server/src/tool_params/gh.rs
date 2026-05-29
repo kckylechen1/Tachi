@@ -8,7 +8,10 @@ pub(crate) struct TachiGhParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Issue or PR number (required for issue_read, pr_read, safe_merge)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub number: Option<u64>,
     /// Issue title (required for issue_create)
     #[serde(default)]
@@ -23,7 +26,10 @@ pub(crate) struct TachiGhParams {
     #[serde(default)]
     pub state: Option<String>,
     /// Maximum results (used by issue_list, pr_list, default: 30)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub limit: Option<u32>,
     /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash")
     #[serde(default)]

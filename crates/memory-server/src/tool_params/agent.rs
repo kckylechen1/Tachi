@@ -44,11 +44,17 @@ pub(crate) struct AgentRegisterParams {
     pub tool_filter: Option<Vec<String>>,
 
     /// Optional per-agent rate limit override (requests per minute, 0 = use server default)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub rate_limit_rpm: Option<u64>,
 
     /// Optional per-agent burst limit override (0 = use server default)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub rate_limit_burst: Option<u64>,
 }
 

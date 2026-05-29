@@ -387,7 +387,10 @@ pub(crate) struct TachiDispatchParams {
     pub allowed_tools: Vec<String>,
 
     /// Maximum conversation turns for the dispatched agent (prevents infinite loops).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub max_turns: Option<u32>,
 
     /// Sandbox mode for codex: "workspace-write" | "danger-full-access" | "read-only"
@@ -464,7 +467,10 @@ pub(crate) struct TachiCompleteParams {
     pub outcome: String,
 
     /// Execution duration in milliseconds
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub duration_ms: Option<u64>,
 
     /// Skills used during execution (capability IDs)
@@ -472,7 +478,10 @@ pub(crate) struct TachiCompleteParams {
     pub skills_used: Vec<String>,
 
     /// Cost in tokens (total across all turns)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub cost_tokens: Option<u64>,
 
     /// Cost in USD (if known)
@@ -609,13 +618,19 @@ pub(crate) struct TachiTaskParams {
     pub context_query: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub permission_profile: Option<String>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub sandbox: Option<String>,

@@ -833,7 +833,10 @@ pub(crate) struct RegisterDomainParams {
     pub description: Option<String>,
 
     /// GC stale-days threshold for memories in this domain (default: 90)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub gc_threshold_days: Option<u32>,
 
     /// Default retention policy for memories saved to this domain
@@ -1072,7 +1075,10 @@ pub(crate) fn fact_to_entry(
     if text.is_empty() {
         return None;
     }
-    let force = metadata.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = metadata
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !force {
         let char_count = text.chars().count();
         if char_count < MIN_FACT_CHAR_COUNT {
