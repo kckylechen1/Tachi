@@ -1274,18 +1274,21 @@ pub(super) async fn search_memory_rows(
         combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
         if let Some(ref project_name) = inferred_project {
-            if let Ok(project_results) =
-                server.with_named_project_store_read(project_name, |store| {
-                    let vec_avail = store.vec_available;
-                    let project_opts = params.to_search_options(vec_avail);
-                    store
-                        .search(&params.query, Some(project_opts))
-                        .map_err(|e| {
-                            format!("Search failed in inferred project DB '{project_name}': {e}")
-                        })
-                })
-            {
-                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            match server.with_named_project_store_read(project_name, |store| {
+                let vec_avail = store.vec_available;
+                let project_opts = params.to_search_options(vec_avail);
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| {
+                        format!("Search failed in inferred project DB '{project_name}': {e}")
+                    })
+            }) {
+                Ok(project_results) => {
+                    combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                }
+                Err(e) => {
+                    tracing::warn!("Search failed in inferred project DB '{project_name}': {e}");
+                }
             }
         } else if server.has_project_db() && !skip_workspace {
             let project_opts = params.to_search_options(server.project_vec_available);
@@ -1492,7 +1495,7 @@ fn dedup_subject_key(entry: &MemoryEntry) -> Option<String> {
     if !topic.is_empty()
         && (entry.source.eq_ignore_ascii_case("foundry_distill") || entry.is_guide())
     {
-        return Some(format!("distill:{topic}:{}", entry.entities.join("|")));
+        return Some(format!("distill:{topic}:{}:{}", path, entry.entities.join("|")));
     }
     None
 }

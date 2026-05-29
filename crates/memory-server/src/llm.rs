@@ -636,6 +636,10 @@ impl LlmClient {
             };
 
             let status = resp.status();
+            let retry_after = resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             let resp_text = resp
                 .text()
                 .await
@@ -645,12 +649,18 @@ impl LlmClient {
             if status.as_u16() == 429 || status.is_server_error() {
                 last_err = format!("API error {status}: {resp_text}");
                 if attempt < Self::MAX_ATTEMPTS {
+                    let delay = if let Some(secs) = retry_after {
+                        Duration::from_secs(secs)
+                    } else {
+                        Self::retry_delay(attempt)
+                    };
                     eprintln!(
-                        "[llm] API error {status} (attempt {}/{}); retrying",
+                        "[llm] API error {status} (attempt {}/{}); retrying after {}ms",
                         attempt,
-                        Self::MAX_ATTEMPTS
+                        Self::MAX_ATTEMPTS,
+                        delay.as_millis()
                     );
-                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(last_err);

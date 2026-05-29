@@ -442,25 +442,29 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {
-    if entry.source.eq_ignore_ascii_case("foundry_distill") {
-        return 0.75;
-    }
-    if metadata_bool(entry, "wiki")
+    let base = if entry.source.eq_ignore_ascii_case("foundry_distill") {
+        0.75
+    } else if metadata_bool(entry, "wiki")
         || entry.domain.as_deref() == Some("wiki")
         || entry.category.eq_ignore_ascii_case("wiki")
     {
-        return 1.15;
-    }
-    if entry.is_guide() {
-        return 1.12;
-    }
-    if matches!(entry.category.as_str(), "kanban" | "handoff")
+        1.15
+    } else if entry.is_guide() {
+        1.12
+    } else if matches!(entry.category.as_str(), "kanban" | "handoff")
         || entry.path.starts_with("/kanban/")
         || entry.path.starts_with("/handoff/")
     {
-        return 0.65;
+        0.65
+    } else {
+        1.0
+    };
+    // High-importance entries get a floor of 1.0 so they aren't suppressed
+    if entry.importance >= 0.9 && base < 1.0 {
+        1.0
+    } else {
+        base
     }
-    1.0
 }
 
 fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<String, f64> {

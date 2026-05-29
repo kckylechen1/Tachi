@@ -245,14 +245,8 @@ async fn handle_memory_briefing(
         json!([])
     };
 
-    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
-    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    let health_summary = json!({
-        "health_score": if warnings.is_empty() { 95 } else { 85 },
-        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
-        "wiki": wiki_counts,
-    });
-    let board = slim_kanban(parse_json_or_empty(
+    let (warnings_res, board_res, checkpoints_res) = tokio::join!(
+        crate::status_ops::collect_agent_warning_lines(server),
         crate::dispatch_ops::handle_tachi_board(
             server,
             TachiBoardParams {
@@ -260,10 +254,19 @@ async fn handle_memory_briefing(
                 limit: Some(top_k.min(5)),
                 project: params.project.clone(),
             },
-        )
-        .await?,
-    ));
-    let checkpoints = json!(crate::status_ops::list_recent_checkpoint_entries(server, 3));
+        ),
+        async { crate::status_ops::list_recent_checkpoint_entries(server, 3) },
+    );
+    let warnings = warnings_res;
+    let board = slim_kanban(parse_json_or_empty(board_res?));
+    let checkpoints = json!(checkpoints_res);
+
+    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let health_summary = json!({
+        "health_score": if warnings.is_empty() { 95 } else { 85 },
+        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
+        "wiki": wiki_counts,
+    });
 
     Ok(agent_markdown::format_briefing(
         &ctx,
@@ -949,10 +952,6 @@ fn visit_jsonl_files(
     depth: usize,
 ) {
     if depth > 4 || !root.exists() {
-        return;
-    }
-    // Skip symlink directories to prevent arbitrary file read
-    if root.is_symlink() {
         return;
     }
     let Ok(entries) = std::fs::read_dir(root) else {

@@ -879,7 +879,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
              metadata, retention_policy, domain, superseded_by)
         SELECT
              id, path, summary, text, importance, timestamp,
-             COALESCE(NULLIF(valid_from, ''), timestamp), valid_until,
+             COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
              category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by

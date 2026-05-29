@@ -203,21 +203,21 @@ pub fn surprise_score(
     contradiction_count: u32,
     total_same_topic: u32,
 ) -> f64 {
-    // Component 1: Importance surprise — how much does this entry deviate from average?
-    let importance_surprise = (entry.importance - avg_importance).abs();
+    // Component 1: Importance surprise — normalized to [0, 1] via clamping
+    let importance_surprise = (entry.importance - avg_importance).abs().clamp(0.0, 1.0);
 
-    // Component 2: Contradiction signal — contradictions are inherently surprising
+    // Component 2: Contradiction signal — normalized to [0, 1] via log1p / cap
     let contradiction_surprise = if contradiction_count > 0 {
-        (1.0 + contradiction_count as f64).ln() / 3.0 // logarithmic scale, max ~0.7
+        (1.0 + contradiction_count as f64).ln_1p() / 4.0 // cap at ~1.0 at ~50 contradictions
     } else {
         0.0
     };
 
-    // Component 3: Topic novelty — rare topics are more surprising
+    // Component 3: Topic novelty — already in [0, 1]
     let topic_novelty = if total_same_topic <= 1 {
-        0.5 // New/unique topic
+        0.5
     } else {
-        1.0 / (total_same_topic as f64) // Diminishing novelty
+        1.0 / (total_same_topic as f64)
     };
 
     // Component 4: Low-access high-importance = overlooked valuable memory
@@ -227,7 +227,7 @@ pub fn surprise_score(
         0.0
     };
 
-    // Weighted combination
+    // Weighted combination — each component now independently in [0, 1]
     let raw = 0.25 * importance_surprise
         + 0.30 * contradiction_surprise
         + 0.25 * topic_novelty
@@ -552,7 +552,8 @@ pub fn symbolic_score(
     }
 
     let overlap = query_tokens.intersection(&text_tokens).count();
-    (overlap as f64) / (query_tokens.len() as f64)
+    let union_size = query_tokens.union(&text_tokens).count().max(1);
+    (overlap as f64) / (union_size as f64)
 }
 
 /// Extract A-share style 6-digit stock codes from a query.
@@ -582,12 +583,20 @@ pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
 /// matches across thousands of unrelated entries. The 12.0x factor ensures
 /// an exact ticker match dominates hybrid ranking.
 ///
+/// Rationale: A-share 6-digit codes (e.g. "688981") are extremely common
+/// numeric strings. Without boosting, FTS/symbolic channels dilute exact
+/// matches across thousands of unrelated entries. The 12.0x factor ensures
+/// an exact ticker match dominates hybrid ranking.
+///
 /// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
 /// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
+const TICKER_EXACT_MATCH_BOOST: f64 = 12.0;
+const IRON_RULE_BOOST: f64 = 5.0;
+const STOP_LOSS_BOOST: f64 = 4.0;
 pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
     for code in extract_stock_codes(query) {
         if entry_has_stock_code(entry, &code) {
-            return 12.0;
+            return TICKER_EXACT_MATCH_BOOST;
         }
     }
 
@@ -609,7 +618,7 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
             || bundle.contains("iron_rules")
             || bundle.contains("iron rules"))
     {
-        mult = mult.max(5.0);
+        mult = mult.max(IRON_RULE_BOOST);
     }
     if (q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损"))
         && (bundle.contains("stop loss")
@@ -617,7 +626,7 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
             || path.contains("iron_rule")
             || path.contains("principles"))
     {
-        mult = mult.max(4.0);
+        mult = mult.max(STOP_LOSS_BOOST);
     }
     mult
 }

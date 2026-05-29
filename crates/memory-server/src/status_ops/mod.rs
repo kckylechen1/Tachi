@@ -538,8 +538,10 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
     )
     .or_else(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Ok(0),
-        rusqlite::Error::SqliteFailure(_, _) => Ok(0),
-        other => Err(other),
+        other => {
+            tracing::warn!("count_stuck_in_progress query failed: {other}");
+            Err(other)
+        }
     })
 }
 

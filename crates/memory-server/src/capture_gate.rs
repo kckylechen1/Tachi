@@ -26,7 +26,10 @@ use serde::Serialize;
 pub const DEFAULT_CAPTURE_MIN_CHARS: usize = 200;
 
 /// Allowed top-level path buckets. Saves to anything else are rejected.
-pub const ALLOWED_BUCKETS: &[&str] = &[
+/// Use `register_bucket()` to extend at runtime (e.g. from plugins).
+static BUCKET_REGISTRY: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+const BASE_BUCKETS: &[&str] = &[
     "wiki",
     "scratch",
     "decisions",
@@ -51,6 +54,21 @@ pub const ALLOWED_BUCKETS: &[&str] = &[
     "quant",
     "hapi",
 ];
+
+/// Register additional buckets at runtime. Idempotent — duplicates are ignored.
+pub fn register_bucket(bucket: &'static str) {
+    BUCKET_REGISTRY.get_or_init(|| {
+        let mut buckets: Vec<&'static str> = BASE_BUCKETS.to_vec();
+        if !buckets.contains(&bucket) {
+            buckets.push(bucket);
+        }
+        buckets
+    });
+}
+
+pub fn allowed_buckets() -> &'static Vec<&'static str> {
+    BUCKET_REGISTRY.get_or_init(|| BASE_BUCKETS.to_vec())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,15 +163,15 @@ pub fn evaluate(input: &GateInput<'_>, mode: GateMode) -> GateDecision {
             code: GateViolationCode::PathTooShallow,
             message: format!(
                 "path '{path}' has no bucket; expected '/<bucket>/...' (allowed: {})",
-                ALLOWED_BUCKETS.join(", ")
+                allowed_buckets().join(", ")
             ),
         });
-    } else if !ALLOWED_BUCKETS.contains(&bucket.as_str()) {
+    } else if !allowed_buckets().contains(&bucket.as_str()) {
         violations.push(GateViolation {
             code: GateViolationCode::PathBucketDisallowed,
             message: format!(
                 "path bucket '/{bucket}' is not in the allowed set; expected one of: {}",
-                ALLOWED_BUCKETS.join(", ")
+                allowed_buckets().join(", ")
             ),
         });
     }

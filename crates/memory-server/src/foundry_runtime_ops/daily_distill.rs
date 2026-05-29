@@ -273,8 +273,9 @@ async fn process_api_batch(
     manifest: &mut Vec<SourceManifestEntry>,
     batch_run_id: &str,
 ) {
-    let mut pending: Vec<&[CandidateGroup]> = vec![chunk];
-    while let Some(batch) = pending.pop() {
+    let mut pending: Vec<(&[CandidateGroup], usize)> = vec![(chunk, 0)];
+    let max_depth = 8;
+    while let Some((batch, depth)) = pending.pop() {
         if batch.is_empty() {
             continue;
         }
@@ -294,14 +295,14 @@ async fn process_api_batch(
                     )
                     .await;
                 }
-                Err(err) if batch.len() > 1 => {
+                Err(err) if batch.len() > 1 && depth < max_depth => {
                     report.errors.push(format!(
                         "parse api batch {chunk_idx} ({} groups): {err}; splitting",
                         batch.len()
                     ));
                     let mid = batch.len() / 2;
-                    pending.push(&batch[mid..]);
-                    pending.push(&batch[..mid]);
+                    pending.push((&batch[mid..], depth + 1));
+                    pending.push((&batch[..mid], depth + 1));
                 }
                 Err(err) => {
                     report
@@ -312,14 +313,14 @@ async fn process_api_batch(
                     }
                 }
             },
-            Err(err) if batch.len() > 1 => {
+            Err(err) if batch.len() > 1 && depth < max_depth => {
                 report.errors.push(format!(
                     "api batch {chunk_idx} ({} groups): {err}; splitting",
                     batch.len()
                 ));
                 let mid = batch.len() / 2;
-                pending.push(&batch[mid..]);
-                pending.push(&batch[..mid]);
+                pending.push((&batch[mid..], depth + 1));
+                pending.push((&batch[..mid], depth + 1));
             }
             Err(err) => {
                 report.errors.push(format!("api batch {chunk_idx}: {err}"));
@@ -721,10 +722,18 @@ async fn fallback_distill(llm: &LlmClient, group: &CandidateGroup) -> Result<Gro
         return Err("fallback llm returned empty text".to_string());
     }
     let summary: String = trimmed.chars().take(120).collect();
+    // Extract keywords from the distilled text and source group metadata
+    let mut keywords: Vec<String> = Vec::new();
+    for entry in &group.entries {
+        keywords.extend(entry.keywords.iter().filter(|k| !k.trim().is_empty()).cloned());
+    }
+    keywords.sort();
+    keywords.dedup();
+    keywords.truncate(12);
     Ok(GroupPayload {
         summary,
         text: trimmed,
-        keywords: Vec::new(),
+        keywords,
         skip_reason: None,
     })
 }

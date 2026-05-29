@@ -269,6 +269,10 @@ pub(super) async fn run_interactive_wizard(
 
     if let Some(parent) = config_env_path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Pre-flight write check: create and delete a temp file to verify permissions
+        let probe = parent.join(".tachi_write_probe");
+        std::fs::write(&probe, b"")?;
+        let _ = std::fs::remove_file(&probe);
     }
     let existing = std::fs::read_to_string(config_env_path).unwrap_or_default();
     let merged = merge_config_env(&existing, &new_entries);

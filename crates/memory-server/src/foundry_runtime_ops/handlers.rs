@@ -932,10 +932,7 @@ pub(crate) async fn handle_capture_session(
     };
 
     let base_path = params.path_prefix.clone().unwrap_or_else(|| {
-        format!(
-            "/openclaw/agent-{}",
-            sanitize_safe_path_name(&params.agent_id)
-        )
+        super::helpers::build_openclaw_agent_root(&params.agent_id)
     });
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));

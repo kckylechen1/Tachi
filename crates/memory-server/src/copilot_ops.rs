@@ -137,7 +137,7 @@ fn supersede_wiki_duplicates(
             cand_token.as_ref() == Some(token)
                 // Single-token topics require path prefix overlap to avoid over-broad matching
                 && (token.len() > 1
-                    || candidate.path.rsplit_once('/').map(|(_, dir)| dir) == path.rsplit_once('/').map(|(_, dir)| dir))
+                    || candidate.path.rsplit_once('/').map(|(parent, _)| parent) == path.rsplit_once('/').map(|(parent, _)| parent))
         });
         let similar_text =
             wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))

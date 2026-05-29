@@ -388,12 +388,15 @@ fn secure_join(root: &Path, rel_part: &str) -> Result<PathBuf, String> {
     }
 
     // Final safeguard: verify the resolved path doesn't escape via any TOCTOU race
-    if let Some(Ok(canonical)) = cursor.parent().and_then(|_| Some(cursor.canonicalize())) {
-        if canonical != canonical_root && !canonical.starts_with(&canonical_root) {
-            return Err(format!(
-                "Resolved path '{}' escapes root after canonicalize",
-                cursor.display()
-            ));
+    // For new (non-existent) files, canonicalize the parent directory instead
+    if let Some(parent) = cursor.parent() {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            if canonical_parent != canonical_root && !canonical_parent.starts_with(&canonical_root) {
+                return Err(format!(
+                    "Resolved path '{}' escapes root after canonicalize",
+                    cursor.display()
+                ));
+            }
         }
     }
 
@@ -959,7 +962,13 @@ pub(crate) async fn handle_wiki_organize(
                         .to_string_lossy()
                         .replace('\\', "/");
 
-                    let file_content = fs::read_to_string(&path).unwrap_or_default();
+                    let file_content = match fs::read_to_string(&path) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("docs_ops: failed to read {}: {e}", path.display());
+                            continue;
+                        }
+                    };
                     let (fm_opt, _) = parse_frontmatter(&file_content);
 
                     let doc_title = fm_opt
