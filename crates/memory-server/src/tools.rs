@@ -76,7 +76,7 @@ use crate::vault_ops::{
     VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::wiki_ops::{
-    handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_search,
+    handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read, handle_wiki_search,
 };
 use crate::{AgentProfile, MemoryServer};
 
@@ -390,6 +390,16 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiWikiIngestParams>,
     ) -> Result<String, String> {
         handle_wiki_ingest(self, params).await
+    }
+
+    #[tool(
+        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree."
+    )]
+    pub(crate) async fn tachi_wiki_organize(
+        &self,
+        Parameters(params): Parameters<TachiWikiOrganizeParams>,
+    ) -> Result<String, String> {
+        crate::docs_ops::handle_wiki_organize(self, &params.dir_path).await
     }
 
     #[tool(
@@ -1356,7 +1366,7 @@ impl MemoryServer {
     // ─── Facade: wiki (search / browse / write) ─────────────────────────────
 
     #[tool(
-        description = "Unified wiki facade: search, browse, or write wiki entries. Returns readable Markdown. Pass `project` to target a named library explicitly. Diagnostics belong in tachi_status / tachi_doctor."
+        description = "Unified wiki facade: search, browse, read, or write wiki entries. Returns readable Markdown. Pass `project` to target a named library explicitly. Diagnostics belong in tachi_status / tachi_doctor."
     )]
     pub(crate) async fn tachi_wiki(
         &self,
@@ -1391,6 +1401,14 @@ impl MemoryServer {
                     project: params.project.clone().unwrap_or_else(|| "wiki".to_string()),
                 };
                 handle_wiki_browse(self, browse_params)
+            }
+            "read" => {
+                let path = params
+                    .path
+                    .clone()
+                    .ok_or_else(|| "path is required when action='read'".to_string())?;
+                let project = params.project.clone().unwrap_or_else(|| "wiki".to_string());
+                handle_wiki_read(self, &path, &project)
             }
             "write" => {
                 if let Some(body) = crate::cli_client::maybe_forward_write(
@@ -1433,7 +1451,7 @@ impl MemoryServer {
                 handle_tachi_wiki_write(self, wiki_params).await
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'search', 'browse', or 'write'.",
+                "Invalid action '{}'. Use 'search', 'browse', 'read', or 'write'.",
                 params.action
             )),
         }

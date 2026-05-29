@@ -277,6 +277,7 @@ fn make_skill_capability(
 
 mod bootstrap_tests;
 mod dispatch_tests;
+mod docs_tests;
 mod facade_tests;
 mod handoff_tests;
 mod hub_tests;
