@@ -332,9 +332,9 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
                 ("missing", "none")
             };
             let drift_warning = if vault_configured && (env_configured || file_configured) {
-                Some("same key is set in both Vault and env/config; runtime prefers Vault when unlocked but env may be used before unlock".to_string())
+                Some("duplicate: key present in Vault and env/config.env (informational; runtime prefers Vault when unlocked)".to_string())
             } else if vault_configured && config_present {
-                Some("same key name exists in config.env and Vault; remove config.env copy after confirming Vault unlock".to_string())
+                Some("duplicate: key name in config.env and Vault; remove config.env copy after Vault is confirmed".to_string())
             } else {
                 None
             };
@@ -418,8 +418,7 @@ pub(crate) fn calculate_health_score(
         .filter(|key| key.required && key.status == "missing")
         .count();
     score -= ((missing_required_keys as i32) * 10).min(20);
-    let drift_keys = api_keys.iter().filter(|key| key.status == "drift").count();
-    score -= ((drift_keys as i32) * 5).min(10);
+    // Vault+env duplicate keys are informational (see api_keys.drift), not health defects.
     let inferred_invalid_keys = api_keys
         .iter()
         .filter(|key| key.inferred_invalid_provider.is_some())

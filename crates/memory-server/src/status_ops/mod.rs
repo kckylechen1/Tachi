@@ -1077,12 +1077,6 @@ fn build_status_warnings(
                 key.name
             ));
         }
-        if key.status == "drift" {
-            warnings.push(format!(
-                "provider key {} differs between Tachi Vault and env/config; prefer Vault as source of truth",
-                key.name
-            ));
-        }
         if let Some(provider) = &key.inferred_invalid_provider {
             warnings.push(format!(
                 "provider key {} appears invalid for provider {} based on latest failed jobs",

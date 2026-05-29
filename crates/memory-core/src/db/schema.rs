@@ -509,12 +509,58 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     )?;
     normalize_memory_validity_columns(conn)?;
 
+    bridge_hypertachi_memory_columns(conn)?;
+
     ensure_fts_backfilled(conn)?;
 
     migrate_enum_constraints(conn)?;
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
+    Ok(())
+}
+
+/// Align HyperTachi-shaped legacy DBs (`indexed_tags`, `domain_key`) with Sigil's
+/// canonical columns before enum/CHECK migrations run.
+fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError> {
+    ensure_column(conn, "memories", "persons", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(conn, "memories", "location", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "domain", "TEXT")?;
+
+    if has_column(conn, "memories", "indexed_tags")? {
+        conn.execute(
+            "UPDATE memories
+             SET keywords = indexed_tags
+             WHERE (keywords IS NULL OR trim(keywords) IN ('', '[]'))
+               AND indexed_tags IS NOT NULL
+               AND trim(indexed_tags) NOT IN ('', '[]')",
+            [],
+        )?;
+    }
+
+    if has_column(conn, "memories", "domain_key")? {
+        conn.execute(
+            "UPDATE memories
+             SET domain = domain_key
+             WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
+               AND domain_key IS NOT NULL
+               AND trim(domain_key) <> ''",
+            [],
+        )?;
+    }
+
+    // Undo mistaken v1 bridge that copied domain_key into location.
+    conn.execute(
+        "UPDATE memories
+         SET domain = location, location = ''
+         WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
+           AND trim(location) <> ''
+           AND location NOT GLOB '/*'
+           AND location NOT LIKE '%/%'
+           AND location NOT LIKE '% %'",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -1066,6 +1112,137 @@ mod migration_tests {
         )
         .unwrap();
         conn
+    }
+
+    fn open_with_hypertachi_shape() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id           TEXT PRIMARY KEY,
+                path         TEXT NOT NULL DEFAULT '/',
+                summary      TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                importance   REAL NOT NULL DEFAULT 0.7,
+                timestamp    TEXT NOT NULL,
+                valid_from   TEXT NOT NULL DEFAULT '',
+                valid_until  TEXT,
+                category     TEXT NOT NULL DEFAULT 'fact',
+                topic        TEXT NOT NULL DEFAULT '',
+                keywords     TEXT NOT NULL DEFAULT '[]',
+                indexed_tags TEXT NOT NULL DEFAULT '[]',
+                entities     TEXT NOT NULL DEFAULT '[]',
+                domain_key   TEXT NOT NULL DEFAULT '',
+                source       TEXT NOT NULL DEFAULT 'manual',
+                scope        TEXT NOT NULL DEFAULT 'general',
+                archived     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access  TEXT,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                metadata     TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain       TEXT,
+                superseded_by  TEXT
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO memories
+                (id, path, text, importance, timestamp, indexed_tags, domain_key)
+               VALUES ('hypertachi-1', '/wiki/test', 'hypertachi bridge row', 0.7,
+                       '2026-04-30T00:00:00Z', '["alice"]', 'finance')"#,
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn bridge_repairs_mistaken_domain_in_location() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL DEFAULT '/',
+                summary TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                importance REAL NOT NULL DEFAULT 0.7,
+                timestamp TEXT NOT NULL,
+                valid_from TEXT NOT NULL DEFAULT '',
+                valid_until TEXT,
+                category TEXT NOT NULL DEFAULT 'fact',
+                topic TEXT NOT NULL DEFAULT '',
+                keywords TEXT NOT NULL DEFAULT '[]',
+                persons TEXT NOT NULL DEFAULT '[]',
+                entities TEXT NOT NULL DEFAULT '[]',
+                location TEXT NOT NULL DEFAULT 'finance',
+                source TEXT NOT NULL DEFAULT 'manual',
+                scope TEXT NOT NULL DEFAULT 'general',
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain TEXT,
+                superseded_by TEXT,
+                CHECK (source IN ('manual','extraction','migration','auto','foundry_distill',
+                    'foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
+                    OR source LIKE 'external:%'),
+                CHECK (category IN ('fact','decision','experience','preference','entity',
+                    'other','kanban','handoff','ghost','wiki','guide')),
+                CHECK (scope IN ('user','project','general'))
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, text, importance, timestamp)
+             VALUES ('repair-1', '/trading', 'row', 0.7, '2026-04-30T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        init_schema(&conn).expect("bridge should move mistaken domain out of location");
+        let (location, domain): (String, Option<String>) = conn
+            .query_row(
+                "SELECT location, domain FROM memories WHERE id='repair-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(location, "");
+        assert_eq!(domain.as_deref(), Some("finance"));
+    }
+
+    #[test]
+    fn bridge_hypertachi_columns_before_enum_migration() {
+        let conn = open_with_hypertachi_shape();
+        init_schema(&conn).expect("init_schema should bridge hypertachi columns");
+        let (persons, keywords, location, domain): (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT persons, keywords, location, domain FROM memories WHERE id='hypertachi-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(persons, "[]");
+        assert_eq!(keywords, r#"["alice"]"#);
+        assert_eq!(location, "");
+        assert_eq!(domain.as_deref(), Some("finance"));
     }
 
     #[test]

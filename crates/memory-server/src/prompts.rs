@@ -6,13 +6,10 @@ pub const EXTRACTION_PROMPT: &str = r#"你是一个记忆提取代理。从对�
 输出 JSON 数组，每个元素:
 - "text": 极简事实（主谓宾，≤30字，删除"刚才/之前/舰长"等口语词）
 - "topic": 主题标签
-- "keywords": 2-5个关键词
-- "persons": 涉及的人名数组，没有则 []
-- "entities": 涉及的产品、服务、仓库、模块、组织等实体数组，没有则 []
+- "keywords": 2-5个关键词/标签
+- "entities": 人名、产品、仓库、模块、组织等实体，没有则 []
 - "scope": "user" / "project" / "general"
 - "importance": 0.0-1.0
-- "entities": 涉及的实体名称列表（项目名、工具名、产品名等），无则为 []
-- "persons": 涉及的人名列表，无则为 []
 
 核心规则:
 1) 合并同类：同一根因的多个描述合并为一条，但不同根因保留为独立事实
@@ -90,8 +87,7 @@ pub const SESSION_CAPTURE_PROMPT: &str = r#"你是 Neural Foundry 的 session ca
   "scope": "user | project | general",
   "importance": 0.0,
   "keywords": ["kw1", "kw2"],
-  "persons": ["name1"],
-  "entities": ["entity1"],
+  "entities": ["person-or-tool", "repo-or-service"],
   "location": "可选地点或逻辑位置"
 }
 

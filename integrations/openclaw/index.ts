@@ -354,6 +354,7 @@ function buildSelfEvolutionMemory(
 ): MemoryEntry {
   const category = classifySelfEvolution(insight.note);
   const isJayne = agentId === "jayne";
+  const userFacing = isJayne && (category === "preference" || category === "decision");
   return {
     id: buildSelfEvolutionId(agentId, insight.note),
     text: insight.note,
@@ -364,14 +365,14 @@ function buildSelfEvolutionMemory(
       "bracket-note",
       insight.anchored ? "core-rule" : "",
       category === "decision" ? "strategy" : "",
-      category === "preference" && isJayne ? "kyle-preference" : "",
+      userFacing ? "kyle-preference" : "",
     ].filter(Boolean),
     timestamp,
     location: "agent_end",
-    persons: isJayne ? ["Kyle"] : [],
-    entities: category === "preference" && isJayne ? ["Kyle preference"] : [],
+    persons: [],
+    entities: userFacing ? ["user", "Kyle"] : [agentId],
     topic: isJayne ? "jayne_self_evolution" : "agent_self_evolution",
-    scope: "project",
+    scope: userFacing ? "user" : "project",
     path: `/openclaw/agent-${memoryNamespaceAgentId}/self-evolution`,
     category,
     importance: insight.anchored ? 0.92 : 0.88,
@@ -386,6 +387,7 @@ function buildSelfEvolutionMemory(
       ],
       bracket_note: true,
       self_evolution: true,
+      ...(userFacing ? { subject: "user", subject_aliases: ["Kyle"] } : {}),
       extracted_by: insight.anchored ? "agent_end_anchor_capture" : "agent_end_bracket_capture",
       insight_index: insightIndex,
     },

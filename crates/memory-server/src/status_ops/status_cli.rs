@@ -148,12 +148,15 @@ async fn render_one(
         );
         if db.memory_total > 0 {
             let pct = db.vector_coverage * 100.0;
-            let marker =
-                if db.vector_missing > 0 || crate::status_ops::vector_dimension_mismatch(db) {
-                    "[!]"
-                } else {
-                    "[OK]"
-                };
+            let marker = if crate::status_ops::vector_dimension_mismatch(db)
+                || (db.memory_total > 0 && db.vector_coverage < 0.9)
+            {
+                "[!]"
+            } else if db.vector_missing > 0 {
+                "[i]"
+            } else {
+                "[OK]"
+            };
             let failures = if db.enrichment_failed_recent > 0 {
                 format!(" enrichment_failed={}", db.enrichment_failed_recent)
             } else {
@@ -272,7 +275,7 @@ async fn render_one(
     for key in &snapshot.api_keys {
         let marker = match key.status.as_str() {
             "configured" => "[OK]",
-            "drift" => "[!]",
+            "drift" => "[i]",
             "deprecated-unset" => "[i]",
             _ if key.required => "[!]",
             _ => "[i]",
@@ -288,7 +291,7 @@ async fn render_one(
             println!("       [X] inferred invalid provider/key from failed jobs: {provider}");
         }
         if let Some(warning) = &key.drift_warning {
-            println!("       [!] {warning}");
+            println!("       [i] {warning}");
         }
     }
     if probe_keys {

@@ -174,12 +174,12 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub topic: String,
 
-    /// Keyword tags
-    #[serde(default)]
+    /// Tags for recall/FTS (wire alias: `indexed_tags`)
+    #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Person names mentioned
-    #[serde(default)]
+    /// Legacy DB column; programming-agent saves use `entities` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persons: Vec<String>,
 
     /// Entity names mentioned
@@ -220,9 +220,9 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub retention_policy: Option<String>,
 
-    /// Domain this memory belongs to (e.g. "finance", "code-review").
-    /// NULL means no domain scoping.
-    #[serde(default)]
+    /// Domain this memory belongs to (e.g. "code-review", "sigil").
+    /// Legacy wire alias: `domain_key`.
+    #[serde(default, alias = "domain_key")]
     pub domain: Option<String>,
 
     /// Optional timestamp override.
@@ -1070,11 +1070,18 @@ pub(crate) fn fact_to_entry(
     if text.is_empty() {
         return None;
     }
+    let force = metadata.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    if text.chars().count() < 30 && !force {
+        return None;
+    }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords = string_list(&fact["keywords"]);
-    let persons = string_list(&fact["persons"]);
-    let entities = string_list(&fact["entities"]);
+    let mut entities = string_list(&fact["entities"]);
+    memory_core::types::fold_person_names_into_entities(
+        &mut entities,
+        string_list(&fact["persons"]),
+    );
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
         "user" | "project" | "general" => scope_raw.to_string(),
@@ -1093,7 +1100,7 @@ pub(crate) fn fact_to_entry(
         category: "fact".to_string(),
         topic,
         keywords,
-        persons,
+        persons: Vec::new(),
         entities,
         location: String::new(),
         source: source.to_string(),

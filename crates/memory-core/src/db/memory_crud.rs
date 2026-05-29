@@ -30,6 +30,17 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
             entry.retention_policy = Some(d.to_string());
         }
     }
+    entry.fold_persons_into_entities();
+}
+
+/// Serialize `entities` (with legacy `persons` folded in) and always persist `persons` as `[]`.
+fn canonical_persons_entities_json(entry: &MemoryEntry) -> Result<(String, String), MemoryError> {
+    let mut entities = entry.entities.clone();
+    crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
+    Ok((
+        serde_json::to_string(&Vec::<String>::new())?,
+        serde_json::to_string(&entities)?,
+    ))
 }
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
@@ -57,6 +68,11 @@ pub fn upsert(
         .clone()
         .or_else(|| default_retention_for(&path, &source).map(str::to_string));
 
+    let clean_text = crate::noise::scrub_think_tags(&entry.text);
+    let clean_summary = crate::noise::scrub_think_tags(&entry.summary);
+    let force = entry.metadata.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let importance = crate::types::normalize_importance(entry.importance, category, force);
+
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
     let valid_from_utc = if entry.valid_from.trim().is_empty() {
         timestamp_utc.clone()
@@ -78,8 +94,7 @@ pub fn upsert(
 
     let metadata_json = serde_json::to_string(&entry.metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
-    let p_json = serde_json::to_string(&entry.persons)?;
-    let e_json = serde_json::to_string(&entry.entities)?;
+    let (p_json, e_json) = canonical_persons_entities_json(entry)?;
 
     // All writes for one upsert must be atomic across main table + FTS + vec.
     let tx = conn.transaction()?;
@@ -121,9 +136,9 @@ pub fn upsert(
         params![
             entry.id,
             &path,
-            entry.summary,
-            entry.text,
-            entry.importance,
+            &clean_summary,
+            &clean_text,
+            importance,
             timestamp_utc,
             valid_from_utc,
             valid_until_utc,
@@ -154,7 +169,7 @@ pub fn upsert(
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
-        params![entry.id, &path, entry.summary, entry.text, kws, ents],
+        params![entry.id, &path, &clean_summary, &clean_text, kws, ents],
     )?;
 
     if let Some(vec) = &entry.vector {
@@ -254,13 +269,16 @@ pub fn update_with_revision(
     let new_source = MemorySource::parse_or_external(new_source);
     let tx = conn.transaction()?;
 
+    let clean_text = crate::noise::scrub_think_tags(new_text);
+    let clean_summary = crate::noise::scrub_think_tags(new_summary);
+
     tx.execute(
         "UPDATE memories
          SET text = ?1, summary = ?2, source = ?3, metadata = ?4, updated_at = ?5, revision = ?6
          WHERE id = ?7 AND revision = ?8",
         params![
-            new_text,
-            new_summary,
+            &clean_text,
+            &clean_summary,
             new_source,
             new_metadata,
             &now,
@@ -315,10 +333,11 @@ pub fn update_enrichment_fields(
 
     let now = now_utc_iso();
     let tx = conn.transaction()?;
+    let clean_summary = new_summary.map(|s| crate::noise::scrub_think_tags(s));
 
     // Always check revision first, regardless of which fields are being updated.
     // This prevents stale enrichment from overwriting concurrent edits.
-    let rows_affected = if let Some(summary) = new_summary {
+    let rows_affected = if let Some(ref summary) = clean_summary {
         tx.execute(
             "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
             params![summary, &now, id, expected_revision],

@@ -621,7 +621,7 @@ pub(crate) async fn handle_wiki_ingest(
         persons: Vec::new(),
         entities: entities.clone(),
         location: String::new(),
-        source: "mcp".to_string(),
+        source: "wiki".to_string(),
         scope: "general".to_string(),
         archived: false,
         access_count: 0,
@@ -639,9 +639,36 @@ pub(crate) async fn handle_wiki_ingest(
     };
 
     server.with_named_project_store("wiki", |store| {
+        let old_id = {
+            let mut stmt = store
+                .connection()
+                .prepare(
+                    "SELECT id FROM memories 
+                     WHERE (path = ?1 OR (domain = 'wiki' AND topic = ?2)) 
+                       AND archived = 0 
+                       AND superseded_by IS NULL 
+                     LIMIT 1",
+                )
+                .map_err(|e| format!("prepare wiki duplicate query failed: {e}"))?;
+            let mut rows = stmt
+                .query_map((&path, &topic), |row| row.get::<_, String>(0))
+                .map_err(|e| format!("query wiki duplicate failed: {e}"))?;
+            if let Some(row) = rows.next() {
+                Some(row.map_err(|e| format!("read wiki duplicate row failed: {e}"))?)
+            } else {
+                None
+            }
+        };
+
         store
             .upsert(&entry)
-            .map_err(|e| format!("wiki ingest save: {e}"))
+            .map_err(|e| format!("wiki ingest save: {e}"))?;
+
+        if let Some(old_id) = old_id {
+            store.supersede_memory(&old_id, &id).map_err(|e| format!("supersede old wiki failed: {e}"))?;
+            store.archive_memory(&old_id).map_err(|e| format!("archive old wiki failed: {e}"))?;
+        }
+        Ok(())
     })?;
 
     let mut related = Vec::new();

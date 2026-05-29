@@ -937,7 +937,7 @@ pub(crate) async fn handle_capture_session(
     });
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
-    let attach_kyle_person = params.agent_id.to_ascii_lowercase().contains("jayne");
+    let jayne_user_memory = params.agent_id.to_ascii_lowercase().contains("jayne");
 
     let mut entries = Vec::<MemoryEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
@@ -970,13 +970,18 @@ pub(crate) async fn handle_capture_session(
         } else {
             "strategy".to_string()
         };
+        let entry_scope = if jayne_user_memory && note.category == "preference" {
+            "user".to_string()
+        } else {
+            requested_scope.clone()
+        };
 
         entries.push(MemoryEntry {
             id: note.id,
             path: self_evolution_path.clone(),
             summary: note.text.chars().take(100).collect(),
             text: note.text,
-            importance: 0.88,
+            importance: 0.70,
             timestamp: Utc::now().to_rfc3339(),
             valid_from: String::new(),
             valid_until: None,
@@ -987,15 +992,15 @@ pub(crate) async fn handle_capture_session(
                 "bracket-note".to_string(),
                 strategy_keyword,
             ]),
-            persons: if attach_kyle_person {
-                vec!["Kyle".to_string()]
+            persons: Vec::new(),
+            entities: if jayne_user_memory {
+                vec!["user".to_string(), "Kyle".to_string()]
             } else {
                 Vec::new()
             },
-            entities: Vec::new(),
             location: String::new(),
             source: "bracket_self_evolution".to_string(),
-            scope: requested_scope.clone(),
+            scope: entry_scope,
             archived: false,
             access_count: 0,
             last_access: None,
@@ -1115,8 +1120,14 @@ pub(crate) async fn handle_capture_session(
             category: normalize_category(&draft.category),
             topic,
             keywords: dedup_strings(draft.keywords),
-            persons: dedup_strings(draft.persons),
-            entities: dedup_strings(draft.entities),
+            persons: Vec::new(),
+            entities: {
+                let mut entities = dedup_strings(draft.entities);
+                for name in draft.persons {
+                    memory_core::types::push_entity_name(&mut entities, &name);
+                }
+                entities
+            },
             location: draft.location.trim().to_string(),
             source: "capture_session".to_string(),
             scope,

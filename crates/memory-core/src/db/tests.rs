@@ -44,6 +44,28 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
 }
 
 #[test]
+fn upsert_folds_persons_into_entities_and_persists_empty_persons() {
+    let mut conn = make_conn();
+    let mut e = make_entry("pers-1", "Kyle prefers concise handoffs");
+    e.persons = vec!["Kyle".to_string()];
+    e.entities = vec!["Sigil".to_string()];
+    upsert(&mut conn, &e, false).unwrap();
+
+    let (persons, entities): (String, String) = conn
+        .query_row(
+            "SELECT persons, entities FROM memories WHERE id='pers-1'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(persons, "[]");
+    let ents: Vec<String> = serde_json::from_str(&entities).unwrap();
+    assert!(ents.iter().any(|e| e == "Kyle"));
+    assert!(ents.iter().any(|e| e == "user"));
+    assert!(ents.iter().any(|e| e == "Sigil"));
+}
+
+#[test]
 fn upsert_and_fts() {
     let mut conn = make_conn();
     let e = make_entry("abc", "Rust is a systems programming language");

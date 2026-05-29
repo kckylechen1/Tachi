@@ -114,7 +114,7 @@ pub(super) fn merge_capture_entries(
         },
         summary: merged_summary,
         text: merged_text,
-        importance: existing.importance.max(incoming.importance),
+        importance: existing.importance * 0.6 + incoming.importance * 0.4,
         timestamp,
         valid_from: if existing.valid_from.trim().is_empty() {
             incoming.valid_from.clone()
@@ -139,20 +139,15 @@ pub(super) fn merge_capture_entries(
                 .chain(incoming.keywords.iter().cloned())
                 .collect(),
         ),
-        persons: dedup_strings(
-            existing
-                .persons
-                .iter()
-                .cloned()
-                .chain(incoming.persons.iter().cloned())
-                .collect(),
-        ),
+        persons: Vec::new(),
         entities: dedup_strings(
             existing
                 .entities
                 .iter()
                 .cloned()
                 .chain(incoming.entities.iter().cloned())
+                .chain(incoming.persons.iter().cloned())
+                .chain(existing.persons.iter().cloned())
                 .collect(),
         ),
         location: if incoming.location.trim().is_empty() {

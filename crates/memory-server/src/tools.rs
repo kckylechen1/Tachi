@@ -1189,7 +1189,7 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
-        description = "Unified memory facade for recall and session UX. Returns readable Markdown (not raw JSON). Actions: search, save, briefing, checkpoint, alerts, ask, etc. Pass `project` to target ~/.tachi/projects/<name>/memory.db explicitly; omit to use global + daemon-bound workspace DB (shown in response). Diagnostics belong in tachi_status / tachi_doctor — not here."
+        description = "Programming-agent memory. Actions: search, save, extract_facts, briefing, checkpoint, alerts, ask, consolidate, progress, readiness. Policy: call briefing at non-trivial task start. Save at task end only for durable outcomes worth recalling next week: decisions, root causes, commands, files touched, API/schema contracts, release/deploy/test facts. Save concise conclusions, not raw chat; never secrets or chain-of-thought. Use checkpoint only for unfinished handoff/next steps. Use tachi_wiki for stable how-tos/reference docs, and memory paths like /scratch/... or /code-review/... for working/project notes. Include project, path, keywords, entities. Cursor/Windsurf have no auto-capture; OpenClaw agent_end is separate."
     )]
     pub(crate) async fn tachi_memory(
         &self,

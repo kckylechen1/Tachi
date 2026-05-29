@@ -186,6 +186,29 @@ function extractTextBlocks(content: unknown): string[] {
   return out;
 }
 
+function pushEntityName(entities: string[], name: string): string[] {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return entities;
+  }
+  if (entities.some((entry) => entry.toLowerCase() === trimmed.toLowerCase())) {
+    return entities;
+  }
+  const next = [...entities, trimmed];
+  if (trimmed.toLowerCase() === "kyle" && !next.some((entry) => entry.toLowerCase() === "user")) {
+    next.push("user");
+  }
+  return next;
+}
+
+function entitiesForSave(entry: MemoryEntry): string[] {
+  let entities = [...(entry.entities ?? [])];
+  for (const person of entry.persons ?? []) {
+    entities = pushEntityName(entities, person);
+  }
+  return entities;
+}
+
 function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
   if (!isRecord(raw)) {
     return undefined;
@@ -194,6 +217,11 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
   if (!id) {
     return undefined;
   }
+  const legacyPersons = asStringArray(raw.persons);
+  let entities = asStringArray(raw.entities);
+  for (const person of legacyPersons) {
+    entities = pushEntityName(entities, person);
+  }
   return {
     id,
     text: asString(raw.text),
@@ -201,8 +229,8 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
     keywords: asStringArray(raw.keywords),
     timestamp: asString(raw.timestamp),
     location: asString(raw.location),
-    persons: asStringArray(raw.persons),
-    entities: asStringArray(raw.entities),
+    persons: [],
+    entities,
     topic: asString(raw.topic),
     scope: asString(raw.scope) || "general",
     path: asString(raw.path) || "/",
@@ -539,8 +567,8 @@ export class MemoryMcpClient {
       category: entry.category,
       topic: entry.topic,
       keywords: entry.keywords,
-      persons: entry.persons,
-      entities: entry.entities,
+      persons: [],
+      entities: entitiesForSave(entry),
       location: entry.location,
       scope: entry.scope,
       vector: entry.vector,

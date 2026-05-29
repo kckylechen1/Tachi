@@ -14,7 +14,7 @@ fn tool_not_found_error() -> rmcp::ErrorData {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Tachi — memory + Hub copilot for AI agents. Before non-trivial work, call tachi_task(action='plan') or tachi_memory(action='briefing'). Memory/wiki tools return Markdown recall data only — pass `project` to target ~/.tachi/projects/<name>/memory.db explicitly. System diagnostics: tachi_status or tachi_doctor. Store durable lessons with tachi_wiki(action='write').")
+            .with_instructions(crate::bootstrap::mcp_server_instructions())
     }
 
     fn list_tools(

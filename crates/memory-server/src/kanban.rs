@@ -498,7 +498,7 @@ pub(crate) async fn handle_post_card(
             normalize_agent_id(&params.to_agent),
         ],
         location: String::new(),
-        source: "agent".to_string(),
+        source: "kanban".to_string(),
         scope: "global".to_string(),
         archived: false,
         access_count: 0,

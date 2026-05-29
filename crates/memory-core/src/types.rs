@@ -323,18 +323,32 @@ impl std::fmt::Display for MemoryScope {
 /// untouched / NULL → durable).
 ///
 /// Rules:
-///   - path starts with `/handoff` or `/kanban` → `pinned`
+///   - path starts with `/handoff` or `/kanban` → `ephemeral`
 ///   - path starts with `/wiki`                 → `permanent`
 ///   - source == `foundry_distill`              → `permanent`
 ///   - everything else                          → None
 pub fn default_retention_for(path: &str, source: &str) -> Option<&'static str> {
     if path.starts_with("/handoff") || path.starts_with("/kanban") {
-        Some("pinned")
+        Some("ephemeral")
     } else if path.starts_with("/wiki") || path.starts_with("/guide") || source == "foundry_distill"
     {
         Some("permanent")
     } else {
         None
+    }
+}
+
+/// Normalize importance based on category and force flag.
+/// Caps non-critical entry importance below 0.85 unless force is true.
+pub fn normalize_importance(raw: f64, category: &str, force: bool) -> f64 {
+    let raw = raw.clamp(0.0, 1.0);
+    if force {
+        return raw;
+    }
+    if category.eq_ignore_ascii_case("decision") || category.eq_ignore_ascii_case("guide") {
+        raw
+    } else {
+        raw.min(0.85)
     }
 }
 
@@ -401,6 +415,15 @@ pub struct DomainConfig {
 
 /// A single memory entry, unified across all three systems.
 ///
+/// Canonical fields for agents (MCP + new writes): `keywords`, `entities`, `domain`, `path`, …
+///
+/// Legacy SQLite column `persons` remains for old rows; new Tachi paths should not populate it.
+///
+/// Wire-compat aliases (JSON only; DB bridge copies legacy columns on open):
+///   OpenClaw: entry_id → id, lossless_restatement → text
+///   MCP:      created_at / event_time → timestamp
+///   Legacy:   indexed_tags → keywords; domain_key → domain
+///
 /// Field mapping from legacy systems:
 ///   OpenClaw: entry_id → id, lossless_restatement → text, timestamp → timestamp
 ///   MCP:      id → id, text → text, created_at → timestamp
@@ -447,11 +470,12 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub topic: String,
 
-    /// Keyword tags (promoted from metadata for FTS indexing)
-    #[serde(default)]
+    /// Keyword tags (promoted from metadata for FTS indexing).
+    /// Legacy HyperTachi JSON used `indexed_tags` for the same role.
+    #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Person names mentioned
+    /// Legacy SQLite/JSON column. Reads preserve old rows; all writes fold into `entities` and store `[]`.
     #[serde(default)]
     pub persons: Vec<String>,
 
@@ -497,8 +521,8 @@ pub struct MemoryEntry {
     pub retention_policy: Option<String>,
 
     /// Domain this memory belongs to (e.g. "finance", "code-review").
-    /// NULL means no domain scoping.
-    #[serde(default)]
+    /// NULL means no domain scoping. HyperTachi JSON uses `domain_key` for this field.
+    #[serde(default, alias = "domain_key")]
     pub domain: Option<String>,
 
     /// Catch-all JSON blob for low-frequency fields:
@@ -531,6 +555,38 @@ impl MemoryEntry {
 
     pub fn error_patterns(&self) -> Vec<String> {
         metadata_string_array(&self.metadata, "error_patterns")
+    }
+
+    /// Fold legacy `persons` into `entities` and clear `persons` before persisting.
+    /// All new write paths should call this (or rely on `memory_crud` upsert).
+    pub fn fold_persons_into_entities(&mut self) {
+        let persons: Vec<String> = self.persons.drain(..).collect();
+        fold_person_names_into_entities(&mut self.entities, persons);
+    }
+}
+
+/// Push a named entity for recall; `Kyle` also adds canonical `user`.
+pub fn push_entity_name(entities: &mut Vec<String>, name: &str) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if entities.iter().any(|e| e.eq_ignore_ascii_case(trimmed)) {
+        return;
+    }
+    entities.push(trimmed.to_string());
+    if trimmed.eq_ignore_ascii_case("kyle") {
+        push_entity_name(entities, "user");
+    }
+}
+
+/// Merge legacy `persons` JSON names into `entities` (used by migrations and upsert).
+pub fn fold_person_names_into_entities(
+    entities: &mut Vec<String>,
+    persons: impl IntoIterator<Item = String>,
+) {
+    for name in persons {
+        push_entity_name(entities, &name);
     }
 }
 
@@ -652,6 +708,7 @@ pub struct GraphExpandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_deserialize_openclaw_format() {
@@ -691,6 +748,66 @@ mod tests {
         assert_eq!(entry.id, "abc123");
         assert_eq!(entry.timestamp, "2026-02-23T12:00:00Z");
         assert_eq!(entry.category, "fact"); // default
+    }
+
+    #[test]
+    fn fold_persons_into_entities_dedups_case_insensitive() {
+        let mut entry = MemoryEntry {
+            id: "fold-test".into(),
+            path: "/test".into(),
+            summary: String::new(),
+            text: "x".into(),
+            importance: 0.5,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec!["Kyle".to_string(), "kyle".to_string()],
+            entities: vec!["Sigil".to_string()],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+        };
+        entry.fold_persons_into_entities();
+        assert!(entry.persons.is_empty());
+        assert!(entry.entities.iter().any(|e| e == "Sigil"));
+        assert!(entry.entities.iter().any(|e| e == "Kyle"));
+        assert!(entry.entities.iter().any(|e| e == "user"));
+        assert!(!entry.entities.iter().any(|e| e == "kyle"));
+    }
+
+    #[test]
+    fn push_entity_name_maps_kyle_to_user() {
+        let mut entities = Vec::new();
+        push_entity_name(&mut entities, "Kyle");
+        assert_eq!(entities, vec!["Kyle".to_string(), "user".to_string()]);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_indexed_tags_as_keywords() {
+        let json = r#"{
+            "id": "ht_001",
+            "text": "Hypertachi compatibility test",
+            "timestamp": "2026-05-29T12:00:00Z",
+            "indexed_tags": ["Alice", "Bob"],
+            "domain_key": "hyperion"
+        }"#;
+        let entry: MemoryEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.id, "ht_001");
+        assert_eq!(entry.keywords, vec!["Alice".to_string(), "Bob".to_string()]);
+        assert!(entry.persons.is_empty());
+        assert_eq!(entry.domain.as_deref(), Some("hyperion"));
+        assert_eq!(entry.location, "");
     }
 
     #[test]
@@ -840,10 +957,10 @@ mod tests {
     fn test_default_retention_matrix() {
         assert_eq!(
             default_retention_for("/handoff/foo", "manual"),
-            Some("pinned")
+            Some("ephemeral")
         );
-        assert_eq!(default_retention_for("/handoff", "manual"), Some("pinned"));
-        assert_eq!(default_retention_for("/kanban/x", "manual"), Some("pinned"));
+        assert_eq!(default_retention_for("/handoff", "manual"), Some("ephemeral"));
+        assert_eq!(default_retention_for("/kanban/x", "manual"), Some("ephemeral"));
         assert_eq!(
             default_retention_for("/wiki/lessons", "manual"),
             Some("permanent")

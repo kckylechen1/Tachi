@@ -4,6 +4,7 @@
 // Optional graph expansion augments results with memory-graph neighbors.
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
@@ -85,6 +86,17 @@ impl Default for SearchOptions {
     }
 }
 
+fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    let raw = ts.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| raw.parse::<DateTime<Utc>>())
+        .ok()
+}
+
 fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
     let Some(as_of) = as_of else {
         return true;
@@ -94,12 +106,25 @@ fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
     } else {
         entry.valid_from.as_str()
     };
-    valid_from <= as_of
-        && entry
-            .valid_until
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map_or(true, |until| until > as_of)
+    let Some(as_of_dt) = parse_utc_timestamp(as_of) else {
+        return false;
+    };
+
+    let starts_before_as_of = parse_utc_timestamp(valid_from)
+        .map(|valid_from_dt| valid_from_dt <= as_of_dt)
+        .unwrap_or_else(|| valid_from <= as_of);
+    let ends_after_as_of = entry
+        .valid_until
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|until| {
+            parse_utc_timestamp(until)
+                .map(|until_dt| until_dt > as_of_dt)
+                .unwrap_or_else(|| until > as_of)
+        })
+        .unwrap_or(true);
+
+    starts_before_as_of && ends_after_as_of
 }
 
 fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
@@ -670,19 +695,30 @@ pub fn hybrid_search(
                 0.5,
             );
 
-            let mut new_entries: Vec<SearchResult> = expand_result
+            let expanded_entries: Vec<MemoryEntry> = expand_result
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
                 .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
                 .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
+                .collect();
+            let expanded_ids: Vec<String> = expanded_entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            let expanded_superseded_ids = if include_superseded {
+                HashSet::new()
+            } else {
+                get_superseded_ids(conn, &expanded_ids).unwrap_or_default()
+            };
+
+            let mut new_entries: Vec<SearchResult> = expanded_entries
+                .into_iter()
                 .filter(|entry| {
                     if include_superseded {
                         return true;
                     }
-                    !get_superseded_ids(conn, std::slice::from_ref(&entry.id))
-                        .map(|ids| ids.contains(&entry.id))
-                        .unwrap_or(false)
+                    !expanded_superseded_ids.contains(&entry.id)
                 })
                 .map(|entry| {
                     let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
@@ -915,6 +951,16 @@ mod tests {
         assert_eq!(weights.symbolic, 0.28);
         assert_eq!(weights.decay, 0.02);
         assert!(weights.use_rrf);
+    }
+
+    #[test]
+    fn valid_at_compares_offset_timestamps_by_instant() {
+        let mut entry = memory_entry("offset", "Offset timestamp memory", &[]);
+        entry.valid_from = "2026-01-01T08:00:00+08:00".to_string();
+        entry.valid_until = Some("2026-01-02T08:00:00+08:00".to_string());
+
+        assert!(valid_at(&entry, Some("2026-01-01T00:00:00Z")));
+        assert!(!valid_at(&entry, Some("2026-01-02T00:00:00Z")));
     }
 
     #[test]

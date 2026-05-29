@@ -411,6 +411,66 @@ fn apply_confidence_reinforcement(
     Ok(())
 }
 
+fn collect_reinforcement_candidates(
+    store: &MemoryStore,
+    entry: &MemoryEntry,
+) -> Result<Vec<MemoryEntry>, String> {
+    let mut entities = entry
+        .entities
+        .iter()
+        .map(|entity| entity.trim())
+        .filter(|entity| !entity.is_empty())
+        .collect::<Vec<_>>();
+    entities.sort_unstable();
+    entities.dedup();
+    if entities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut candidate_ids = Vec::new();
+    let mut seen = HashSet::<String>::new();
+    for batch in entities.chunks(200) {
+        let placeholders = (2..batch.len() + 2)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            r#"SELECT id
+               FROM memories
+               WHERE archived = 0
+                 AND id != ?1
+                 AND EXISTS (
+                     SELECT 1 FROM json_each(memories.entities)
+                     WHERE json_each.value IN ({placeholders})
+                 )
+               ORDER BY timestamp DESC
+               LIMIT {}"#,
+            (batch.len() * 5).clamp(5, 50)
+        );
+        let params = std::iter::once(entry.id.as_str()).chain(batch.iter().copied());
+        let mut stmt = store
+            .connection()
+            .prepare(&sql)
+            .map_err(|e| format!("prepare confidence reinforcement candidates: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| format!("query confidence reinforcement candidates: {e}"))?;
+        for row in rows {
+            let candidate_id =
+                row.map_err(|e| format!("read confidence reinforcement candidate: {e}"))?;
+            if seen.insert(candidate_id.clone()) {
+                candidate_ids.push(candidate_id);
+            }
+        }
+    }
+
+    memory_core::db::fetch_by_ids(store.connection(), &candidate_ids, false)
+        .map(|entries| entries.into_values().collect())
+        .map_err(|e| format!("load confidence reinforcement candidates: {e}"))
+}
+
 pub(crate) fn apply_confidence_reinforcement_links(
     store: &mut MemoryStore,
     entry: &MemoryEntry,
@@ -421,63 +481,54 @@ pub(crate) fn apply_confidence_reinforcement_links(
 
     let mut reinforced = 0usize;
     let mut seen_targets = HashSet::<String>::new();
-    for entity in &entry.entities {
-        let results = store
-            .search(
-                entity,
-                Some(memory_core::SearchOptions {
-                    top_k: 5,
-                    record_access: false,
-                    ..Default::default()
-                }),
-            )
-            .map_err(|e| format!("confidence reinforcement search: {e}"))?;
-
-        for result in results {
-            if result.entry.id == entry.id || !seen_targets.insert(result.entry.id.clone()) {
-                continue;
-            }
-            let shared: Vec<String> = result
-                .entry
-                .entities
-                .iter()
-                .filter(|candidate| entry.entities.contains(candidate))
-                .cloned()
-                .collect();
-            if shared.is_empty() {
-                continue;
-            }
-
-            let supersedes =
-                should_supersede(entry, &result.entry, shared.len(), result.score.symbolic);
-            let Some(similarity) = vector_similarity_between(entry, &result.entry) else {
-                continue;
-            };
-            if !should_reinforce(entry, &result.entry, shared.len(), similarity, supersedes) {
-                continue;
-            }
-
-            let now = chrono::Utc::now().to_rfc3339();
-            let increment = confidence_increment(similarity);
-            let edge = memory_core::MemoryEdge {
-                source_id: entry.id.clone(),
-                target_id: result.entry.id.clone(),
-                relation: "reinforces".to_string(),
-                weight: similarity,
-                metadata: json!({
-                    "auto_link": true,
-                    "shared_entities": shared,
-                    "similarity": similarity,
-                    "confidence_increment": increment,
-                }),
-                created_at: now.clone(),
-                valid_from: String::new(),
-                valid_to: None,
-            };
-            store.add_edge(&edge).map_err(|e| format!("{e}"))?;
-            apply_confidence_reinforcement(store, &result.entry.id, increment, &now)?;
-            reinforced += 1;
+    for candidate in collect_reinforcement_candidates(store, entry)? {
+        if !seen_targets.insert(candidate.id.clone()) {
+            continue;
         }
+        let shared: Vec<String> = candidate
+            .entities
+            .iter()
+            .filter(|candidate_entity| entry.entities.contains(candidate_entity))
+            .cloned()
+            .collect();
+        if shared.is_empty() {
+            continue;
+        }
+
+        let symbolic_score = shared
+            .iter()
+            .map(|entity| {
+                memory_core::scorer::symbolic_score(entity, &candidate.text, &candidate.keywords)
+            })
+            .fold(0.0_f64, f64::max);
+        let supersedes = should_supersede(entry, &candidate, shared.len(), symbolic_score);
+        let Some(similarity) = vector_similarity_between(entry, &candidate) else {
+            continue;
+        };
+        if !should_reinforce(entry, &candidate, shared.len(), similarity, supersedes) {
+            continue;
+        }
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let increment = confidence_increment(similarity);
+        let edge = memory_core::MemoryEdge {
+            source_id: entry.id.clone(),
+            target_id: candidate.id.clone(),
+            relation: "reinforces".to_string(),
+            weight: similarity,
+            metadata: json!({
+                "auto_link": true,
+                "shared_entities": shared,
+                "similarity": similarity,
+                "confidence_increment": increment,
+            }),
+            created_at: now.clone(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        store.add_edge(&edge).map_err(|e| format!("{e}"))?;
+        apply_confidence_reinforcement(store, &candidate.id, increment, &now)?;
+        reinforced += 1;
     }
 
     Ok(reinforced)
@@ -521,20 +572,34 @@ pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
     (out, redactions)
 }
 
-pub(crate) async fn handle_save_memory(
-    server: &MemoryServer,
-    params: SaveMemoryParams,
-) -> Result<String, String> {
-    let original_text = params.text;
-    let (safe_text, secret_redactions) = scrub_secrets(&original_text);
-    if !params.force && memory_core::is_noise_text(&safe_text) {
-        return serde_json::to_string(&json!({
+pub(crate) fn scrub_think_tags(text: &str) -> String {
+    static THINK_BLOCK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = THINK_BLOCK_RE.get_or_init(|| {
+        regex::Regex::new(r"(?is)<think\b[^>]*>.*?</think>").expect("valid think-tag regex")
+    });
+    re.replace_all(text, "").trim().to_string()
+}
+
+enum SaveTextValidation {
+    Accepted(Option<serde_json::Value>),
+    Rejected(String),
+}
+
+fn json_response(value: serde_json::Value) -> Result<String, String> {
+    serde_json::to_string(&value).map_err(|e| format!("Failed to serialize: {}", e))
+}
+
+fn validate_save_text(
+    params: &SaveMemoryParams,
+    safe_text: &str,
+) -> Result<SaveTextValidation, String> {
+    if !params.force && memory_core::is_noise_text(safe_text) {
+        return Ok(SaveTextValidation::Rejected(json_response(json!({
             "saved": false,
             "noise": true,
             "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
             "hint": "Retry with force=true if this is intentional content.",
-        }))
-        .map_err(|e| format!("Failed to serialize: {}", e));
+        }))?));
     }
 
     // Capture gate (Branch #4): validate domain, path bucket, min-chars, and
@@ -543,7 +608,7 @@ pub(crate) async fn handle_save_memory(
     let gate_mode = crate::capture_gate::GateMode::from_env();
     let gate_decision = crate::capture_gate::evaluate(
         &crate::capture_gate::GateInput::new(
-            &safe_text,
+            safe_text,
             &params.path,
             params.domain.as_deref(),
             params.force,
@@ -551,21 +616,355 @@ pub(crate) async fn handle_save_memory(
         gate_mode,
     );
     if !gate_decision.accept {
-        return serde_json::to_string(&json!({
+        return Ok(SaveTextValidation::Rejected(json_response(json!({
             "saved": false,
             "rejected_by": "capture_gate",
             "mode": gate_decision.mode,
             "violations": gate_decision.violations,
             "hint": "Set TACHI_CAPTURE_GATE=warn to downgrade these to warnings, or pass force=true on save.",
-        }))
-        .map_err(|e| format!("Failed to serialize: {}", e));
+        }))?));
     }
-    let gate_warnings = if gate_decision.violations.is_empty() {
-        None
-    } else {
-        Some(gate_decision.violations.clone())
-    };
 
+    Ok(SaveTextValidation::Accepted(
+        (!gate_decision.violations.is_empty()).then(|| json!(gate_decision.violations)),
+    ))
+}
+
+fn lookup_existing_revision(
+    server: &MemoryServer,
+    id: &str,
+    requested_id: bool,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Result<Option<i64>, String> {
+    if !requested_id {
+        return Ok(None);
+    }
+
+    let lookup = |store: &mut MemoryStore| {
+        store
+            .get(id)
+            .map(|entry| entry.map(|entry| entry.revision))
+            .map_err(|e| format_save_error(server, target_db, named_project, &e))
+    };
+    if let Some(project_name) = named_project {
+        server.with_named_project_store_read(project_name, lookup)
+    } else {
+        server.with_store_for_scope_read(target_db, lookup)
+    }
+}
+
+fn build_save_entry(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+    safe_text: String,
+    id: String,
+    timestamp: String,
+    valid_from: String,
+    target_db: DbScope,
+) -> MemoryEntry {
+    let requested_scope = params.scope;
+    let path = params.path;
+    let category = params.category;
+    let topic = params.topic;
+    let mut metadata = crate::provenance::inject_provenance(
+        server,
+        params.metadata.unwrap_or_else(|| json!({})),
+        "save_memory",
+        "memory_write",
+        Some(requested_scope.as_str()),
+        target_db,
+        json!({
+            "path": path.clone(),
+            "category": category.clone(),
+            "topic": topic.clone(),
+        }),
+    );
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
+    }
+
+    MemoryEntry {
+        id,
+        path,
+        summary: params.summary,
+        text: safe_text,
+        importance: params.importance.clamp(0.0, 1.0),
+        timestamp,
+        valid_from,
+        valid_until: params.valid_until,
+        category,
+        topic,
+        keywords: params.keywords,
+        persons: params.persons,
+        entities: params.entities,
+        location: params.location,
+        source: "mcp".to_string(),
+        scope: requested_scope,
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata,
+        vector: params.vector,
+        retention_policy: params.retention_policy,
+        domain: params.domain,
+    }
+}
+
+fn upsert_save_entry(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Result<(), String> {
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, |store| {
+            store
+                .upsert(entry)
+                .map_err(|e| format_save_error(server, target_db, Some(project_name), &e))
+        })
+    } else {
+        server.with_store_for_scope(target_db, |store| {
+            store
+                .upsert(entry)
+                .map_err(|e| format_save_error(server, target_db, None, &e))
+        })
+    }
+}
+
+fn spawn_save_contradiction_detection(
+    server: &MemoryServer,
+    entry_id: String,
+    target_db: DbScope,
+    named_project: Option<String>,
+) {
+    let contradiction_server = server.clone();
+    tokio::spawn(async move {
+        if let Err(err) = apply_auto_contradiction_detection(
+            &contradiction_server,
+            &entry_id,
+            target_db,
+            named_project.as_deref(),
+            None,
+        )
+        .await
+        {
+            eprintln!("[save_memory] auto contradiction detection failed for {entry_id}: {err}");
+        }
+    });
+}
+
+fn enqueue_save_enrichment(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    needs_embedding: bool,
+    needs_summary: bool,
+    target_db: DbScope,
+    named_project: Option<String>,
+    enrichment_revision: i64,
+) -> bool {
+    if !(needs_embedding || needs_summary) || !should_enqueue_enrichment(entry) {
+        return false;
+    }
+
+    // Queue enrichment (embedding + summary) via the batcher instead of
+    // spawning a per-item task. The batcher accumulates items and calls
+    // the Voyage API in batch (up to 128 per request), dramatically
+    // reducing API calls when the agent saves multiple memories in sequence.
+    server.enqueue_enrichment(super::EnrichmentItem {
+        id: entry.id.clone(),
+        text: entry.text.clone(),
+        summary: entry.summary.clone(),
+        keywords: entry.keywords.clone(),
+        needs_embedding,
+        needs_summary,
+        target_db,
+        named_project,
+        db_path: None,
+        foundry_agent_id: None,
+        foundry_path_prefix: None,
+        revision: enrichment_revision,
+    });
+    true
+}
+
+fn build_save_response(
+    entry_id: &str,
+    timestamp: &str,
+    target_db: DbScope,
+    enrichment_enqueued: bool,
+    warning: Option<String>,
+    gate_warnings: Option<serde_json::Value>,
+    secret_redactions: usize,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut response = serde_json::Map::new();
+    response.insert("id".into(), json!(entry_id));
+    response.insert("timestamp".into(), json!(timestamp));
+    response.insert("db".into(), json!(target_db.as_str()));
+    let status = if enrichment_enqueued {
+        "saved (enrichment pending)"
+    } else {
+        "saved (enrichment skipped by policy)"
+    };
+    response.insert("status".into(), json!(status));
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+    if let Some(violations) = gate_warnings {
+        response.insert("capture_gate_warnings".into(), violations);
+    }
+    if secret_redactions > 0 {
+        response.insert("secret_redactions".into(), json!(secret_redactions));
+        response.insert(
+            "secret_redaction_warning".into(),
+            json!("Potential secrets were redacted before persistence."),
+        );
+    }
+    response
+}
+
+fn spawn_auto_linking(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<String>,
+) {
+    let auto_link_server = server.clone();
+    let auto_link_id = entry.id.clone();
+    let auto_link_entry = entry.clone();
+    let auto_link_entities = entry.entities.clone();
+
+    tokio::spawn(async move {
+        for entity in &auto_link_entities {
+            let query = entity.clone();
+            let search_action = |store: &mut MemoryStore| {
+                store
+                    .search(
+                        &query,
+                        Some(memory_core::SearchOptions {
+                            top_k: 5,
+                            // Auto-link is a write-side side effect that probes related memories.
+                            // It must not bias ACT-R access stats for entries the user never read.
+                            record_access: false,
+                            ..Default::default()
+                        }),
+                    )
+                    .map_err(|e| format!("{}", e))
+            };
+
+            let search_res = if let Some(ref p) = named_project {
+                auto_link_server.with_named_project_store_read(p, search_action)
+            } else {
+                auto_link_server.with_store_for_scope_read(target_db, search_action)
+            };
+
+            if let Ok(results) = search_res {
+                for result in results {
+                    if result.entry.id == auto_link_id {
+                        continue;
+                    }
+                    let shared: Vec<String> = result
+                        .entry
+                        .entities
+                        .iter()
+                        .filter(|e| auto_link_entities.contains(e))
+                        .cloned()
+                        .collect();
+                    if shared.is_empty() {
+                        continue;
+                    }
+
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let vector_similarity =
+                        vector_similarity_between(&auto_link_entry, &result.entry);
+                    let supersedes = should_supersede(
+                        &auto_link_entry,
+                        &result.entry,
+                        shared.len(),
+                        result.score.symbolic,
+                    );
+                    let reinforces = vector_similarity.is_some_and(|similarity| {
+                        should_reinforce(
+                            &auto_link_entry,
+                            &result.entry,
+                            shared.len(),
+                            similarity,
+                            supersedes,
+                        )
+                    });
+                    let relation = if supersedes {
+                        "supersedes"
+                    } else if reinforces {
+                        "reinforces"
+                    } else {
+                        "related_to"
+                    };
+                    let weight = if supersedes {
+                        0.9
+                    } else if reinforces {
+                        vector_similarity.unwrap_or(0.0)
+                    } else {
+                        0.5
+                    };
+                    let edge = memory_core::MemoryEdge {
+                        source_id: auto_link_id.clone(),
+                        target_id: result.entry.id.clone(),
+                        relation: relation.to_string(),
+                        weight,
+                        metadata: json!({
+                            "auto_link": true,
+                            "shared_entities": shared,
+                            "similarity": vector_similarity,
+                            "confidence_increment": reinforces.then(|| confidence_increment(weight)),
+                        }),
+                        created_at: now.clone(),
+                        valid_from: String::new(),
+                        // Edges are only closed/expired when supersession is explicitly reversed.
+                        valid_to: None,
+                    };
+                    let save_edge_action = |store: &mut MemoryStore| {
+                        store.add_edge(&edge).map_err(|e| format!("{}", e))?;
+                        if supersedes {
+                            store
+                                .connection()
+                                .execute(
+                                    "UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND superseded_by IS NULL",
+                                    rusqlite::params![auto_link_id, now, result.entry.id],
+                                )
+                                .map_err(|e| format!("{e}"))?;
+                        } else if reinforces {
+                            apply_confidence_reinforcement(
+                                store,
+                                &result.entry.id,
+                                confidence_increment(weight),
+                                &now,
+                            )?;
+                        }
+                        Ok(())
+                    };
+                    let _ = if let Some(ref p) = named_project {
+                        auto_link_server.with_named_project_store(p, save_edge_action)
+                    } else {
+                        auto_link_server.with_store_for_scope(target_db, save_edge_action)
+                    };
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn handle_save_memory(
+    server: &MemoryServer,
+    mut params: SaveMemoryParams,
+) -> Result<String, String> {
+    params.text = scrub_think_tags(&params.text);
+    params.summary = scrub_think_tags(&params.summary);
+    let (safe_text, secret_redactions) = scrub_secrets(&params.text);
+    let gate_warnings = match validate_save_text(&params, &safe_text)? {
+        SaveTextValidation::Accepted(warnings) => warnings,
+        SaveTextValidation::Rejected(body) => return Ok(body),
+    };
     let requested_id = params.id.clone();
     let id = requested_id
         .clone()
@@ -587,287 +986,55 @@ pub(crate) async fn handle_save_memory(
     } else {
         server.resolve_write_scope(&requested_scope)
     };
-    let existing_revision = if requested_id.is_some() {
-        let lookup = |store: &mut MemoryStore| {
-            store
-                .get(&id)
-                .map(|entry| entry.map(|entry| entry.revision))
-                .map_err(|e| format_save_error(server, target_db, named_project.as_deref(), &e))
-        };
-        if let Some(ref project_name) = named_project {
-            server.with_named_project_store_read(project_name, lookup)?
-        } else {
-            server.with_store_for_scope_read(target_db, lookup)?
-        }
-    } else {
-        None
-    };
+    let existing_revision = lookup_existing_revision(
+        server,
+        &id,
+        requested_id.is_some(),
+        target_db,
+        named_project.as_deref(),
+    )?;
     let enrichment_revision = existing_revision.unwrap_or(0) + 1;
 
-    let summary = params.summary;
-    let needs_summary = summary.is_empty();
+    let needs_summary = params.summary.is_empty();
     let needs_embedding = params.vector.is_none();
-    let path = params.path;
-    let category = params.category;
-    let topic = params.topic;
-    let metadata = crate::provenance::inject_provenance(
+    let auto_link = params.auto_link;
+    let entry = build_save_entry(
         server,
-        params.metadata.unwrap_or_else(|| json!({})),
-        "save_memory",
-        "memory_write",
-        Some(requested_scope.as_str()),
+        params,
+        safe_text,
+        id.clone(),
+        timestamp.clone(),
+        valid_from,
         target_db,
-        json!({
-            "path": path.clone(),
-            "category": category.clone(),
-            "topic": topic.clone(),
-        }),
     );
 
-    let importance = params.importance.clamp(0.0, 1.0);
-    let keywords = params.keywords;
-
-    let entry = MemoryEntry {
-        id: id.clone(),
-        path,
-        summary,
-        text: safe_text,
-        importance,
-        timestamp: timestamp.clone(),
-        valid_from,
-        valid_until: params.valid_until,
-        category,
-        topic,
-        keywords,
-        persons: params.persons,
-        entities: params.entities,
-        location: params.location,
-        source: "mcp".to_string(),
-        scope: requested_scope,
-        archived: false,
-        access_count: 0,
-        last_access: None,
-        revision: 1,
-        metadata,
-        vector: params.vector,
-        retention_policy: params.retention_policy,
-        domain: params.domain,
-    };
-
-    if let Some(ref project_name) = named_project {
-        server.with_named_project_store(project_name, |store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format_save_error(server, target_db, Some(project_name), &e))
-        })?;
-    } else {
-        server.with_store_for_scope(target_db, |store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format_save_error(server, target_db, None, &e))
-        })?;
-    }
+    upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
 
     if !needs_embedding && entry.vector.is_some() {
-        let contradiction_server = server.clone();
-        let contradiction_id = id.clone();
-        let contradiction_project = params.project.clone();
-        tokio::spawn(async move {
-            if let Err(err) = apply_auto_contradiction_detection(
-                &contradiction_server,
-                &contradiction_id,
-                target_db,
-                contradiction_project.as_deref(),
-                None,
-            )
-            .await
-            {
-                eprintln!(
-                    "[save_memory] auto contradiction detection failed for {contradiction_id}: {err}"
-                );
-            }
-        });
+        spawn_save_contradiction_detection(server, id.clone(), target_db, named_project.clone());
     }
 
-    // Queue enrichment (embedding + summary) via the batcher instead of
-    // spawning a per-item task. The batcher accumulates items and calls
-    // the Voyage API in batch (up to 128 per request), dramatically
-    // reducing API calls when the agent saves multiple memories in sequence.
-    if (needs_embedding || needs_summary) && should_enqueue_enrichment(&entry) {
-        server.enqueue_enrichment(super::EnrichmentItem {
-            id: id.clone(),
-            text: entry.text.clone(),
-            summary: entry.summary.clone(),
-            keywords: entry.keywords.clone(),
-            needs_embedding,
-            needs_summary,
-            target_db,
-            named_project: params.project.clone(),
-            db_path: None,
-            foundry_agent_id: None,
-            foundry_path_prefix: None,
-            revision: enrichment_revision,
-        });
-    }
+    let enrichment_enqueued = enqueue_save_enrichment(
+        server,
+        &entry,
+        needs_embedding,
+        needs_summary,
+        target_db,
+        named_project.clone(),
+        enrichment_revision,
+    );
+    let mut response = build_save_response(
+        &id,
+        &timestamp,
+        target_db,
+        enrichment_enqueued,
+        warning,
+        gate_warnings,
+        secret_redactions,
+    );
 
-    let mut response = serde_json::Map::new();
-    response.insert("id".into(), json!(id));
-    response.insert("timestamp".into(), json!(timestamp));
-    response.insert("db".into(), json!(target_db.as_str()));
-    let status = if (needs_embedding || needs_summary) && should_enqueue_enrichment(&entry) {
-        "saved (enrichment pending)"
-    } else {
-        "saved (enrichment skipped by policy)"
-    };
-    response.insert("status".into(), json!(status));
-    if let Some(warning) = warning {
-        response.insert("warning".into(), json!(warning));
-    }
-    if let Some(violations) = gate_warnings {
-        response.insert("capture_gate_warnings".into(), json!(violations));
-    }
-    if secret_redactions > 0 {
-        response.insert("secret_redactions".into(), json!(secret_redactions));
-        response.insert(
-            "secret_redaction_warning".into(),
-            json!("Potential secrets were redacted before persistence."),
-        );
-    }
-
-    if params.auto_link && !entry.entities.is_empty() {
-        let auto_link_server = server.clone();
-        let auto_link_id = id.clone();
-        let auto_link_entry = entry.clone();
-        let auto_link_entities = entry.entities.clone();
-        let auto_link_named_project = params.project.clone();
-        let auto_link_target_db = target_db;
-
-        tokio::spawn(async move {
-            for entity in &auto_link_entities {
-                let query = entity.clone();
-                let search_action = |store: &mut MemoryStore| {
-                    store
-                        .search(
-                            &query,
-                            Some(memory_core::SearchOptions {
-                                top_k: 5,
-                                // Auto-link is a write-side side effect that
-                                // probes related memories by entity. It must
-                                // NOT bump access stats: doing so inflates
-                                // ACT-R frequency / blocks `access_count = 0`
-                                // prune / biases promotion ranking on entries
-                                // the user never read.
-                                record_access: false,
-                                ..Default::default()
-                            }),
-                        )
-                        .map_err(|e| format!("{}", e))
-                };
-
-                let search_res = if let Some(ref p) = auto_link_named_project {
-                    auto_link_server.with_named_project_store_read(p, search_action)
-                } else {
-                    auto_link_server.with_store_for_scope_read(auto_link_target_db, search_action)
-                };
-
-                if let Ok(results) = search_res {
-                    for result in results {
-                        if result.entry.id == auto_link_id {
-                            continue;
-                        }
-                        let shared: Vec<String> = result
-                            .entry
-                            .entities
-                            .iter()
-                            .filter(|e| auto_link_entities.contains(e))
-                            .cloned()
-                            .collect();
-                        if !shared.is_empty() {
-                            let now = chrono::Utc::now().to_rfc3339();
-                            let vector_similarity =
-                                vector_similarity_between(&auto_link_entry, &result.entry);
-                            let supersedes = should_supersede(
-                                &auto_link_entry,
-                                &result.entry,
-                                shared.len(),
-                                result.score.symbolic,
-                            );
-                            let reinforces = vector_similarity.is_some_and(|similarity| {
-                                should_reinforce(
-                                    &auto_link_entry,
-                                    &result.entry,
-                                    shared.len(),
-                                    similarity,
-                                    supersedes,
-                                )
-                            });
-                            let relation = if supersedes {
-                                "supersedes"
-                            } else if reinforces {
-                                "reinforces"
-                            } else {
-                                "related_to"
-                            };
-                            let weight = if supersedes {
-                                0.9
-                            } else if reinforces {
-                                vector_similarity.unwrap_or(0.0)
-                            } else {
-                                0.5
-                            };
-                            let edge = memory_core::MemoryEdge {
-                                source_id: auto_link_id.clone(),
-                                target_id: result.entry.id.clone(),
-                                relation: relation.to_string(),
-                                weight,
-                                metadata: json!({
-                                    "auto_link": true,
-                                    "shared_entities": shared,
-                                    "similarity": vector_similarity,
-                                    "confidence_increment": reinforces.then(|| confidence_increment(weight)),
-                                }),
-                                created_at: now.clone(),
-                                valid_from: String::new(),
-                                // New supersedes/related_to edges are open-ended.
-                                // `get_edges` filters with `valid_to IS NULL OR valid_to > now`,
-                                // so setting valid_to = Some(now) at creation time would
-                                // immediately expire the edge and hide the supersession
-                                // from graph readers, repair, and explainability. Edges
-                                // are only closed/expired when the supersession is
-                                // explicitly reversed.
-                                valid_to: None,
-                            };
-                            let save_edge_action = |store: &mut MemoryStore| {
-                                store.add_edge(&edge).map_err(|e| format!("{}", e))?;
-                                if supersedes {
-                                    store
-                                        .connection()
-                                        .execute(
-                                            "UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3",
-                                            rusqlite::params![auto_link_id, now, result.entry.id],
-                                        )
-                                        .map_err(|e| format!("{e}"))?;
-                                } else if reinforces {
-                                    apply_confidence_reinforcement(
-                                        store,
-                                        &result.entry.id,
-                                        confidence_increment(weight),
-                                        &now,
-                                    )?;
-                                }
-                                Ok(())
-                            };
-                            let _ = if let Some(ref p) = auto_link_named_project {
-                                auto_link_server.with_named_project_store(p, save_edge_action)
-                            } else {
-                                auto_link_server
-                                    .with_store_for_scope(auto_link_target_db, save_edge_action)
-                            };
-                        }
-                    }
-                }
-            }
-        });
+    if auto_link && !entry.entities.is_empty() {
+        spawn_auto_linking(server, &entry, target_db, named_project);
         response.insert("auto_link".into(), json!("pending"));
     }
 

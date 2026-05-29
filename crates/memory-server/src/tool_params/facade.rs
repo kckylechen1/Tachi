@@ -38,7 +38,7 @@ pub(crate) struct TachiSearchParams {
     /// Optional domain filter
     #[serde(default)]
     #[schemars(
-        description = "Optional domain tag filter (e.g. equity_trading, agent). Does not select the DB — combine with project for explicit library targeting."
+        description = "Optional area tag filter (e.g. rust, mcp). Does not select the DB — use project for library targeting."
     )]
     pub domain: Option<String>,
 
@@ -135,12 +135,14 @@ pub(crate) struct TachiSaveParams {
     #[serde(default)]
     pub category: Option<String>,
 
-    /// Keyword tags
-    #[serde(default)]
+    /// Tags for recall and FTS (modules, crates, topics)
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
     pub keywords: Vec<String>,
 
-    /// Entity names mentioned
+    /// People, repos, services, tools (used for auto-link)
     #[serde(default)]
+    #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
 
     /// Scope: "user" | "project" | "general"
@@ -151,7 +153,7 @@ pub(crate) struct TachiSaveParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Optional domain
+    /// Optional codebase area tag (does not select DB)
     #[serde(default)]
     pub domain: Option<String>,
 
@@ -228,9 +230,11 @@ pub(crate) struct TachiMemoryParams {
     pub summary: Option<String>,
     #[serde(default)]
     pub topic: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
     pub keywords: Vec<String>,
     #[serde(default)]
+    #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
     #[serde(default)]
     pub importance: Option<f64>,
@@ -239,6 +243,9 @@ pub(crate) struct TachiMemoryParams {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Hierarchical path, e.g. /notes/2026-05-29 or /project/sigil/search."
+    )]
     pub path: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
@@ -267,7 +274,7 @@ pub(crate) struct TachiMemoryParams {
     pub project: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Optional domain tag filter. Does not select the DB — combine with project for explicit library targeting."
+        description = "Optional area tag (e.g. rust, ci, mcp). Filter on search; stored on save. Does not select the DB — use project for that."
     )]
     pub domain: Option<String>,
 }
@@ -530,9 +537,11 @@ pub(crate) struct TachiWikiParams {
     pub topic: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Wiki tags for recall/FTS.")]
     pub keywords: Vec<String>,
     #[serde(default)]
+    #[schemars(description = "Related repos, tools, or people.")]
     pub entities: Vec<String>,
     #[serde(default)]
     pub importance: Option<f64>,
@@ -544,7 +553,7 @@ pub(crate) struct TachiWikiParams {
     )]
     pub project: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter for wiki entries.")]
+    #[schemars(description = "Optional area tag on the wiki entry.")]
     pub domain: Option<String>,
     #[serde(default)]
     pub force: bool,

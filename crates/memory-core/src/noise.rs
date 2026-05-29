@@ -208,6 +208,15 @@ pub fn should_skip_query(query: &str) -> bool {
     false
 }
 
+/// Remove `<think>...</think>` tags from a text block.
+pub fn scrub_think_tags(text: &str) -> String {
+    static THINK_BLOCK_RE: OnceLock<Regex> = OnceLock::new();
+    let re = THINK_BLOCK_RE.get_or_init(|| {
+        Regex::new(r"(?is)<think\b[^>]*>.*?</think>").expect("valid think-tag regex")
+    });
+    re.replace_all(text, "").trim().to_string()
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

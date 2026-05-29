@@ -89,7 +89,7 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
                 .join("\n")
         ),
         category: "handoff".to_string(),
-        importance: 0.9,
+        importance: 0.75,
         summary: format!("Handoff from {}", memo.from_agent),
         path: routed_path,
         timestamp: memo.created_at.clone(),
@@ -338,7 +338,25 @@ pub(crate) async fn handle_handoff_leave(
     let memo_id = memo.id.clone();
     let memo_json = serde_json::to_string(&memo).map_err(|e| format!("serialize: {e}"))?;
     let entry = memo_to_memory_entry(server, &memo);
-    server.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
+
+    server.with_global_store(|store| {
+        if let Ok(pending) = pending_handoff_entries(store) {
+            for old_entry in pending {
+                let old_memo = memo_from_entry(&old_entry);
+                if old_memo.from_agent == memo.from_agent && old_memo.target_agent == memo.target_agent {
+                    let mut old_entry_mut = old_entry.clone();
+                    old_entry_mut.archived = true;
+                    old_entry_mut.vector = None;
+                    if let Some(obj) = old_entry_mut.metadata.as_object_mut() {
+                        obj.insert("status".to_string(), serde_json::Value::String("superseded".to_string()));
+                    }
+                    let _ = store.upsert(&old_entry_mut);
+                    let _ = store.supersede_memory(&old_entry.id, &entry.id);
+                }
+            }
+        }
+        store.upsert(&entry).map_err(|e| format!("{e}"))
+    })?;
 
     let mut memos = server.agent_runtime_write();
     memos.handoff_memos.push(memo);
@@ -746,6 +764,66 @@ pub(crate) async fn handle_handoff_promote_issue(
 ) -> Result<String, String> {
     let client = CliGhClient { server };
     promote_handoff_issue_with_client(server, &client, params).await
+}
+
+pub(crate) fn gc_expired_handoff_memories(
+    store: &mut MemoryStore,
+    max_age_days: u64,
+) -> Result<usize, String> {
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::days(std::cmp::min(max_age_days, i64::MAX as u64) as i64);
+    
+    let mut stmt = store
+        .connection()
+        .prepare(
+            "SELECT id, timestamp, metadata, archived
+             FROM memories
+             WHERE category = ?1 AND path LIKE ?2",
+        )
+        .map_err(|e| format!("prepare handoff GC query failed: {e}"))?;
+    let rows = stmt
+        .query_map(("handoff", format!("{HANDOFF_PATH}%")), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query expired handoff memories failed: {e}"))?;
+
+    let mut ids_to_delete = Vec::new();
+    for row in rows {
+        let (id, timestamp, metadata_json, archived) =
+            row.map_err(|e| format!("read expired handoff candidate failed: {e}"))?;
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
+            .map_err(|e| format!("parse handoff metadata for '{id}' failed: {e}"))?;
+        
+        let status = metadata.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+        if status != "acknowledged" && status != "promoted" && status != "superseded" && !archived {
+            continue;
+        }
+
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .map_err(|e| format!("parse handoff timestamp for '{id}' failed: {e}"))?
+            .with_timezone(&chrono::Utc);
+        if timestamp < cutoff {
+            ids_to_delete.push(id);
+        }
+    }
+    drop(stmt);
+
+    let mut deleted = 0usize;
+    for id in ids_to_delete {
+        if store
+            .delete(&id)
+            .map_err(|e| format!("delete expired handoff '{id}' failed: {e}"))?
+        {
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -1288,5 +1366,115 @@ mod tests {
             existing_issue_url(&entry).as_deref(),
             Some("https://github.com/o/r/issues/42")
         );
+    }
+
+    #[test]
+    fn test_gc_expired_handoff_memories() {
+        let mut store = test_store();
+        
+        let old_ack = HandoffMemo {
+            id: "old-ack".to_string(),
+            from_agent: "agent-a".to_string(),
+            target_agent: None,
+            summary: "old ack memo".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+            acknowledged: true,
+        };
+        let mut entry_old_ack = test_entry(old_ack);
+        entry_old_ack.metadata["status"] = json!("acknowledged");
+        store.upsert(&entry_old_ack).expect("upsert old ack");
+
+        let new_ack = HandoffMemo {
+            id: "new-ack".to_string(),
+            from_agent: "agent-a".to_string(),
+            target_agent: None,
+            summary: "new ack memo".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            acknowledged: true,
+        };
+        let mut entry_new_ack = test_entry(new_ack);
+        entry_new_ack.metadata["status"] = json!("acknowledged");
+        store.upsert(&entry_new_ack).expect("upsert new ack");
+
+        let old_pending = HandoffMemo {
+            id: "old-pending".to_string(),
+            from_agent: "agent-a".to_string(),
+            target_agent: None,
+            summary: "old pending memo".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+            acknowledged: false,
+        };
+        let entry_old_pending = test_entry(old_pending);
+        store.upsert(&entry_old_pending).expect("upsert old pending");
+
+        let deleted = gc_expired_handoff_memories(&mut store, 30).expect("gc");
+        assert_eq!(deleted, 1);
+
+        assert!(store.get("handoff:old-ack").expect("get").is_none());
+        assert!(store.get("handoff:new-ack").expect("get").is_some());
+        assert!(store.get("handoff:old-pending").expect("get").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_handoff_leave_supersedes_pending_duplicate() {
+        let db_path = std::env::temp_dir().join(format!(
+            "handoff-dup-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = test_server(db_path.clone());
+        server
+            .agent_register(Parameters(AgentRegisterParams {
+                agent_id: "agent-a".to_string(),
+                display_name: None,
+                capabilities: vec![],
+                tool_filter: None,
+                rate_limit_rpm: None,
+                rate_limit_burst: None,
+            }))
+            .await
+            .expect("register agent");
+
+        let first_resp = server
+            .handoff_leave(Parameters(HandoffLeaveParams {
+                summary: "first pending memo".to_string(),
+                next_steps: vec![],
+                target_agent: Some("agent-b".to_string()),
+                context: None,
+            }))
+            .await
+            .expect("leave first");
+        let first_json: serde_json::Value = serde_json::from_str(&first_resp).expect("json");
+        let first_id = first_json["memo_id"].as_str().expect("id").to_string();
+
+        let second_resp = server
+            .handoff_leave(Parameters(HandoffLeaveParams {
+                summary: "second pending memo".to_string(),
+                next_steps: vec![],
+                target_agent: Some("agent-b".to_string()),
+                context: None,
+            }))
+            .await
+            .expect("leave second");
+        let second_json: serde_json::Value = serde_json::from_str(&second_resp).expect("json");
+        let second_id = second_json["memo_id"].as_str().expect("id").to_string();
+
+        server.with_global_store_read(|store| {
+            let entry1 = store.get_with_options(&format!("handoff:{first_id}"), true).unwrap().unwrap();
+            assert!(entry1.archived);
+            assert_eq!(entry1.metadata["status"], "superseded");
+
+            let entry2 = store.get(&format!("handoff:{second_id}")).unwrap().unwrap();
+            assert!(!entry2.archived);
+            assert_eq!(entry2.metadata["status"], "pending");
+            Ok(())
+        }).unwrap();
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

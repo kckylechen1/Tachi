@@ -94,5 +94,5 @@ pub(crate) fn format_db_context_markdown(ctx: &DbContext) -> String {
 }
 
 pub(crate) fn diagnostics_footer() -> &'static str {
-    "\n---\n_Full system diagnostics: `tachi_status` or `tachi_doctor`. Memory/wiki tools return recall data only._"
+    "\n---\n_Full diagnostics: `tachi_status` / `tachi_doctor`. **End-of-task:** durable lessons → `tachi_memory` `action=\"save\"` with `project` when scoped (IDE has no auto-capture; use `checkpoint` for mid-task handoff)._"
 }
