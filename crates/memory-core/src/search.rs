@@ -442,19 +442,13 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {
-    let base = if entry.source.eq_ignore_ascii_case("foundry_distill") {
+    let base = if entry.is_foundry_distill() {
         0.75
-    } else if metadata_bool(entry, "wiki")
-        || entry.domain.as_deref() == Some("wiki")
-        || entry.category.eq_ignore_ascii_case("wiki")
-    {
+    } else if entry.is_wiki() {
         1.15
     } else if entry.is_guide() {
         1.12
-    } else if matches!(entry.category.as_str(), "kanban" | "handoff")
-        || entry.path.starts_with("/kanban/")
-        || entry.path.starts_with("/handoff/")
-    {
+    } else if entry.is_kanban() || entry.is_handoff() {
         0.65
     } else {
         1.0

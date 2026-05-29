@@ -410,7 +410,7 @@ pub(crate) fn calculate_health_score(
         .iter()
         .filter(|db| crate::status_ops::vector_dimension_mismatch(db))
         .count();
-    score -= ((dim_mismatch_dbs as i32) * 5).min(15);
+    score -= ((dim_mismatch_dbs as i32) * 15).min(30);
     if distill_marker.map(|m| m.is_stale).unwrap_or(true) {
         score -= 10;
     }

@@ -938,8 +938,8 @@ pub(crate) async fn handle_capture_session(
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
     // preference notes scoped to "user" instead of the requested scope.
-    let is_user_memory_agent = params.agent_id.to_ascii_lowercase().contains("jayne")
-        || params.agent_id.to_ascii_lowercase().contains("user-memory");
+    let is_user_memory_agent = params.agent_id.to_ascii_lowercase().contains("user-memory")
+        || params.agent_id.to_ascii_lowercase().contains("jayne");
 
     let mut entries = Vec::<MemoryEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {

@@ -532,6 +532,30 @@ pub struct MemoryEntry {
 }
 
 impl MemoryEntry {
+    pub fn is_wiki(&self) -> bool {
+        self.category.eq_ignore_ascii_case("wiki")
+            || self.domain.as_deref() == Some("wiki")
+            || self
+                .metadata
+                .get("wiki")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+    }
+
+    pub fn is_kanban(&self) -> bool {
+        self.category.eq_ignore_ascii_case("kanban")
+            || self.path.starts_with("/kanban/")
+    }
+
+    pub fn is_handoff(&self) -> bool {
+        self.category.eq_ignore_ascii_case("handoff")
+            || self.path.starts_with("/handoff/")
+    }
+
+    pub fn is_foundry_distill(&self) -> bool {
+        self.source.eq_ignore_ascii_case("foundry_distill")
+    }
+
     pub fn is_guide(&self) -> bool {
         self.category.eq_ignore_ascii_case("guide")
             || self.path == "/guide"

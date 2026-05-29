@@ -520,7 +520,19 @@ pub(super) fn merge_config_env(existing: &str, updates: &[(String, String)]) -> 
                     .map(|s| s.trim_start().starts_with(&prefix))
                     .unwrap_or(false);
             if is_match {
-                *line = format!("{key}={value}");
+                // Keep inline comments (text after value) but drop the # prefix if the whole line was commented
+                let inline_comment = if !trimmed.starts_with('#') {
+                    // Active line — check for inline comment after the value
+                    let after_key = trimmed.strip_prefix(&prefix).unwrap_or("");
+                    if let Some(hash_pos) = after_key.find('#') {
+                        format!(" {}", after_key[hash_pos..].trim())
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new() // Commented-out line: just activate it
+                };
+                *line = format!("{key}={value}{inline_comment}");
                 replaced = true;
                 break;
             }

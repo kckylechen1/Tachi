@@ -602,6 +602,16 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
 
     let q = query.to_ascii_lowercase();
     let path = entry.path.to_ascii_lowercase();
+
+    let mut mult: f64 = 1.0;
+    let needs_bundle = ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
+        || q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损");
+
+    if !needs_bundle {
+        // Fast path: query doesn't contain any precision terms, skip expensive bundle construction
+        return mult;
+    }
+
     let bundle = format!(
         "{} {} {} {} {}",
         entry.text.to_ascii_lowercase(),
@@ -611,7 +621,6 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
         entry.topic.to_ascii_lowercase(),
     );
 
-    let mut mult: f64 = 1.0;
     if ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
         && (path.contains("iron_rule")
             || bundle.contains("iron rule")
