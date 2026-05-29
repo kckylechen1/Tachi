@@ -517,7 +517,7 @@ pub(crate) struct TachiCompleteParams {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiWikiParams {
-    /// Action: "search", "browse", or "write"
+    /// Action: "search", "browse", "read", or "write"
     pub action: String,
     #[serde(default)]
     pub query: Option<String>,

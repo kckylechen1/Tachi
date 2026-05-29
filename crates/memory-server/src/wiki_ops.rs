@@ -665,8 +665,12 @@ pub(crate) async fn handle_wiki_ingest(
             .map_err(|e| format!("wiki ingest save: {e}"))?;
 
         if let Some(old_id) = old_id {
-            store.supersede_memory(&old_id, &id).map_err(|e| format!("supersede old wiki failed: {e}"))?;
-            store.archive_memory(&old_id).map_err(|e| format!("archive old wiki failed: {e}"))?;
+            store
+                .supersede_memory(&old_id, &id)
+                .map_err(|e| format!("supersede old wiki failed: {e}"))?;
+            store
+                .archive_memory(&old_id)
+                .map_err(|e| format!("archive old wiki failed: {e}"))?;
         }
         Ok(())
     })?;
@@ -1238,7 +1242,6 @@ pub(crate) fn handle_wiki_browse(
 
     match params.category.as_deref() {
         None | Some("") => {
-            // Return category stats (counts per category)
             let mut categories = Vec::new();
             let mut total = 0usize;
             let all_entries =
@@ -1251,10 +1254,7 @@ pub(crate) fn handle_wiki_browse(
                     .filter(|entry| entry.path == cat_path || entry.path.starts_with(&cat_prefix))
                     .count();
                 if count > 0 {
-                    categories.push(json!({
-                        "path": cat_path,
-                        "count": count,
-                    }));
+                    categories.push((cat_path.to_string(), count));
                     total += count;
                 }
             }
@@ -1265,59 +1265,29 @@ pub(crate) fn handle_wiki_browse(
                 &format!("stats | {} categor(ies), {} total", categories.len(), total),
             );
 
-            serde_json::to_string(&json!({
-                "status": "completed",
-                "mode": "stats",
-                "total_entries": total,
-                "categories": categories,
-            }))
-            .map_err(|e| format!("serialize wiki_browse: {e}"))
+            Ok(crate::agent_markdown::format_wiki_browse_stats(
+                total,
+                &categories,
+            ))
         }
         Some(category) => {
-            // Browse a specific category
             let resolved_path = resolve_wiki_category(category);
             let limit = params.limit.max(1).min(500);
 
             let (entries, _) = list_wiki_entries(server, &project_name, 5000)?;
             let resolved_prefix = format!("{resolved_path}/");
-            let entries = entries
+            let slim_entries: Vec<Value> = entries
                 .into_iter()
                 .filter(|entry| {
                     entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)
                 })
                 .take(limit)
-                .collect::<Vec<_>>();
-
-            let include_related = limit <= 20;
-            let slim_entries: Vec<Value> = entries
-                .iter()
                 .map(|entry| {
-                    let mut value = json!({
-                        "id": entry.id,
+                    json!({
                         "path": entry.path,
                         "summary": entry.summary,
-                        "topic": entry.topic,
                         "importance": entry.importance,
-                        "keywords": entry.keywords,
-                        "entities": entry.entities,
-                        "timestamp": entry.timestamp,
-                        "related_entries": [],
-                    });
-                    if include_related {
-                        if let Some(obj) = value.as_object_mut() {
-                            obj.insert(
-                                "related_entries".to_string(),
-                                json!(find_related_by_entities(
-                                    server,
-                                    &project_name,
-                                    &entry.entities,
-                                    &entry.id,
-                                    5,
-                                )),
-                            );
-                        }
-                    }
-                    value
+                    })
                 })
                 .collect();
 
@@ -1327,15 +1297,50 @@ pub(crate) fn handle_wiki_browse(
                 &format!("{} | {} entry(s)", resolved_path, slim_entries.len()),
             );
 
-            serde_json::to_string(&json!({
-                "status": "completed",
-                "mode": "browse",
-                "path": resolved_path,
-                "count": slim_entries.len(),
-                "entries": slim_entries,
-            }))
-            .map_err(|e| format!("serialize wiki_browse: {e}"))
+            Ok(crate::agent_markdown::format_wiki_browse_category(
+                &resolved_path,
+                &slim_entries,
+            ))
         }
+    }
+}
+
+// ─── Wiki Read ──────────────────────────────────────────────────────────────
+
+pub(crate) fn handle_wiki_read(
+    server: &MemoryServer,
+    path: &str,
+    project: &str,
+) -> Result<String, String> {
+    let resolved = if path.trim().starts_with('/') {
+        path.trim().to_string()
+    } else {
+        resolve_wiki_category(path)
+    };
+
+    let (entries, _) = list_wiki_entries(server, project, 5000)?;
+    let entry = entries.iter().find(|e| e.path == resolved).or_else(|| {
+        let prefix = format!("{resolved}/");
+        entries.iter().find(|e| e.path.starts_with(&prefix))
+    });
+
+    match entry {
+        Some(entry) => {
+            append_wiki_log(server, "read", &resolved);
+            Ok(crate::agent_markdown::format_wiki_read(&json!({
+                "path": entry.path,
+                "text": entry.text,
+                "summary": entry.summary,
+                "importance": entry.importance,
+                "keywords": entry.keywords,
+                "entities": entry.entities,
+                "topic": entry.topic,
+                "timestamp": entry.timestamp,
+            })))
+        }
+        None => Ok(format!(
+            "## Wiki read\n\n_No entry found at `{resolved}`._\n\nUse `tachi_wiki(action=\"search\")` or `tachi_wiki(action=\"browse\")` to find entries."
+        )),
     }
 }
 
