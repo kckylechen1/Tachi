@@ -692,6 +692,7 @@ pub(crate) async fn handle_extract_facts(
                         "extract_source": source.clone(),
                     }),
                 );
+                // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                 let Some(mut entry) = fact_to_entry(fact, "extraction", metadata) else {
                     continue;
                 };
@@ -860,6 +861,7 @@ pub(crate) async fn handle_ingest_event(
                                     "domain": domain.clone(),
                                 }),
                             );
+                            // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                             let Some(mut entry) = fact_to_entry(
                                 fact,
                                 &format!("conversation:{conversation_id}"),
@@ -896,6 +898,7 @@ pub(crate) async fn handle_ingest_event(
                                     "domain": domain.clone(),
                                 }),
                             );
+                            // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                             let Some(mut entry) = fact_to_entry(
                                 fact,
                                 &format!("conversation:{conversation_id}"),

@@ -1046,6 +1046,8 @@ pub(crate) struct TachiWikiIngestParams {
     pub update_related: bool,
 }
 
+pub(crate) const MIN_FACT_CHAR_COUNT: usize = 30;
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
 pub(crate) fn fact_to_entry(
     fact: &serde_json::Value,
@@ -1071,8 +1073,24 @@ pub(crate) fn fact_to_entry(
         return None;
     }
     let force = metadata.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-    if text.chars().count() < 30 && !force {
-        return None;
+    if !force {
+        let char_count = text.chars().count();
+        if char_count < MIN_FACT_CHAR_COUNT {
+            tracing::warn!(
+                "[capture_gate] Fact rejected: text too short ({} < {} chars). Text: {:?}",
+                char_count,
+                MIN_FACT_CHAR_COUNT,
+                text
+            );
+            return None;
+        }
+        if memory_core::is_noise_text(&text) {
+            tracing::warn!(
+                "[capture_gate] Fact rejected: noise assessment failed. Text: {:?}",
+                text
+            );
+            return None;
+        }
     }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
