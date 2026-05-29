@@ -299,7 +299,10 @@ pub(crate) struct VirtualCapabilityBindParams {
     #[serde(default = "default_virtual_binding_priority")]
     pub priority: i32,
     /// Optional version pin. If set, target version must match during resolve.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub version_pin: Option<u32>,
     /// Whether this binding is active.
     #[serde(default = "default_true")]

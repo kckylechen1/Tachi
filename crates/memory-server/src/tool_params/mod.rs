@@ -1,6 +1,7 @@
 use super::*;
 
 mod agent;
+mod coerce;
 mod dlq;
 mod facade;
 mod foundry;
