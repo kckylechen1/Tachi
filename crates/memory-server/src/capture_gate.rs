@@ -55,19 +55,25 @@ const BASE_BUCKETS: &[&str] = &[
     "hapi",
 ];
 
-/// Register additional buckets at runtime. Idempotent — duplicates are ignored.
+/// Register additional buckets at runtime. Thread-safe via Mutex.
 pub fn register_bucket(bucket: &'static str) {
-    BUCKET_REGISTRY.get_or_init(|| {
-        let mut buckets: Vec<&'static str> = BASE_BUCKETS.to_vec();
+    use std::sync::OnceLock;
+    static REGISTRY_LOCK: OnceLock<std::sync::Mutex<Vec<&'static str>>> = OnceLock::new();
+    let lock = REGISTRY_LOCK.get_or_init(|| std::sync::Mutex::new(BASE_BUCKETS.to_vec()));
+    if let Ok(mut buckets) = lock.lock() {
         if !buckets.contains(&bucket) {
             buckets.push(bucket);
         }
-        buckets
-    });
+    }
 }
 
-pub fn allowed_buckets() -> &'static Vec<&'static str> {
-    BUCKET_REGISTRY.get_or_init(|| BASE_BUCKETS.to_vec())
+pub fn allowed_buckets() -> Vec<&'static str> {
+    use std::sync::OnceLock;
+    static REGISTRY_LOCK: OnceLock<std::sync::Mutex<Vec<&'static str>>> = OnceLock::new();
+    let lock = REGISTRY_LOCK.get_or_init(|| std::sync::Mutex::new(BASE_BUCKETS.to_vec()));
+    lock.lock()
+        .map(|b| b.clone())
+        .unwrap_or_else(|_| BASE_BUCKETS.to_vec())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

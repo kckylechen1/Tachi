@@ -524,8 +524,9 @@ pub(super) fn merge_config_env(existing: &str, updates: &[(String, String)]) -> 
                 let inline_comment = if !trimmed.starts_with('#') {
                     // Active line — check for inline comment after the value
                     let after_key = trimmed.strip_prefix(&prefix).unwrap_or("");
-                    if let Some(hash_pos) = after_key.find('#') {
-                        format!(" {}", after_key[hash_pos..].trim())
+                    // Find # that is preceded by whitespace (inline comment marker)
+                    if let Some(pos) = after_key.find(" #") {
+                        format!("{}", &after_key[pos..])
                     } else {
                         String::new()
                     }

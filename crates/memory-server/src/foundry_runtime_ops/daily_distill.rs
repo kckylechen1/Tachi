@@ -623,7 +623,7 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
     }
     let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
     // If payload exceeds token budget, drop groups from the tail to stay within limits.
-    let groups_json = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
+    let (groups_json, actual_count) = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
         let mut trimmed = payload;
         while trimmed.len() > 1
             && serde_json::to_string_pretty(&trimmed)
@@ -633,14 +633,17 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
         {
             trimmed.pop();
         }
-        serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string())
+        let count = trimmed.len();
+        (
+            serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string()),
+            count,
+        )
     } else {
-        groups_json
+        (groups_json, groups.len())
     };
     format!(
         "Here are {} groups to distill:\n\n{}",
-        groups.len(),
-        groups_json
+        actual_count, groups_json
     )
 }
 
@@ -725,7 +728,13 @@ async fn fallback_distill(llm: &LlmClient, group: &CandidateGroup) -> Result<Gro
     // Extract keywords from the distilled text and source group metadata
     let mut keywords: Vec<String> = Vec::new();
     for entry in &group.entries {
-        keywords.extend(entry.keywords.iter().filter(|k| !k.trim().is_empty()).cloned());
+        keywords.extend(
+            entry
+                .keywords
+                .iter()
+                .filter(|k| !k.trim().is_empty())
+                .cloned(),
+        );
     }
     keywords.sort();
     keywords.dedup();

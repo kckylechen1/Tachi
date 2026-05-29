@@ -453,8 +453,9 @@ fn quality_multiplier(entry: &MemoryEntry) -> f64 {
     } else {
         1.0
     };
-    // High-importance entries get a floor of 1.0 so they aren't suppressed
-    if entry.importance >= 0.9 && base < 1.0 {
+    // High-importance entries get a floor of 1.0 so they aren't suppressed,
+    // but foundry_distill entries stay penalized regardless of importance
+    if entry.importance >= 0.9 && base < 1.0 && !entry.is_foundry_distill() {
         1.0
     } else {
         base
