@@ -699,20 +699,17 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
-    server.enqueue_enrichment(super::EnrichmentItem {
-        id: id.clone(),
-        text: entry.text.clone(),
-        summary: entry.summary.clone(),
-        keywords: entry.keywords.clone(),
-        needs_embedding: true,
-        needs_summary: false,
-        target_db: DbScope::Project,
-        named_project: Some("wiki".to_string()),
-        db_path: None,
-        foundry_agent_id: None,
-        foundry_path_prefix: None,
-        revision: 1,
-    });
+    server.enqueue_enrichment(crate::enrichment::build_enrichment_item(
+        &entry,
+        true,
+        false,
+        DbScope::Project,
+        Some("wiki".to_string()),
+        None,
+        None,
+        None,
+        1,
+    ));
 
     append_wiki_log(
         server,

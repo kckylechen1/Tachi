@@ -310,18 +310,17 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
-    let _ = server.enrichment_lock().enrich_tx.try_send(EnrichmentItem {
-        id: entry.id.clone(),
-        text: entry.text.clone(),
-        summary: entry.summary.clone(),
-        keywords: entry.keywords.clone(),
-        needs_embedding: true,
-        needs_summary,
-        target_db,
-        named_project,
-        db_path,
-        foundry_agent_id: agent_id.map(ToString::to_string),
-        foundry_path_prefix: path_prefix.map(ToString::to_string),
-        revision: entry.revision,
-    });
+    let _ = server.enrichment_lock().enrich_tx.try_send(
+        crate::enrichment::build_enrichment_item(
+            entry,
+            true,
+            needs_summary,
+            target_db,
+            named_project,
+            db_path,
+            agent_id.map(ToString::to_string),
+            path_prefix.map(ToString::to_string),
+            entry.revision,
+        ),
+    );
 }

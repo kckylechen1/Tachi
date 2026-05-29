@@ -14,7 +14,7 @@ use crate::{
         search_fts, search_vec,
     },
     error::MemoryError,
-    scorer::{cosine_similarity, hybrid_score, symbolic_score, tokenize, HybridWeights},
+    scorer::{cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize, HybridWeights},
     types::{MemoryEntry, SearchResult},
 };
 
@@ -428,6 +428,8 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
         || entry
             .source
             .eq_ignore_ascii_case("foundry_recall_rerank_cache")
+        || entry.id.starts_with("foundry:recall-cache:")
+        || entry.path.starts_with("/agent/checkpoints/recall-cache/")
         || (!kanban_scoped
             && (entry.path.starts_with("/kanban/")
                 || entry.category.eq_ignore_ascii_case("kanban")))
@@ -551,7 +553,12 @@ pub fn hybrid_search(
     let symbolic_scores: HashMap<String, f64> = entries_map
         .iter()
         .map(|(id, entry)| {
-            let score = symbolic_score(&symbolic_query, &entry.text, &entry.keywords);
+            let score = symbolic_score(
+                &symbolic_query,
+                &entry.text,
+                &entry.keywords,
+                &entry.entities,
+            );
             (id.clone(), score)
         })
         .collect();
@@ -617,6 +624,19 @@ pub fn hybrid_search(
         }
     }
 
+    // Precision boosts for exact tickers and high-signal trading terms.
+    for (id, entry) in &entries_ref {
+        let multiplier = precision_query_multiplier(query, entry);
+        if multiplier > 1.0 {
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= multiplier;
+                if multiplier >= 10.0 {
+                    score.symbolic = 1.0;
+                }
+            }
+        }
+    }
+
     let top_pre_quality_score = scores
         .values()
         .map(|score| score.final_score)
@@ -631,6 +651,16 @@ pub fn hybrid_search(
                     continue;
                 }
                 score.final_score *= multiplier;
+            }
+        }
+    }
+
+    // Frequently recalled memories get a modest relevance boost (access feedback).
+    for (id, entry) in &entries_ref {
+        if entry.access_count >= 2 {
+            let boost = 1.0 + (entry.access_count as f64).ln_1p() * 0.03;
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= boost.min(1.25);
             }
         }
     }

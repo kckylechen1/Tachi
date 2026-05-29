@@ -178,6 +178,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Backfill missing keywords/entities using the configured extract LLM
+    BackfillMetadata {
+        /// Target DB path (defaults to global DB)
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        /// Only count missing entries, don't extract metadata
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Rebuild or backfill FTS5 full-text search index
     BackfillFts {
         /// Target DB path (defaults to global DB)

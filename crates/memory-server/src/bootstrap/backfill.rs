@@ -78,7 +78,14 @@ pub(super) async fn run_backfill_vectors(
             Ok(vecs) => {
                 for (i, (id, _, _, revision)) in chunk.iter().enumerate() {
                     if i < vecs.len() {
-                        match store.update_enrichment_fields(id, None, Some(&vecs[i]), *revision) {
+                        match store.update_enrichment_fields(
+                            id,
+                            None,
+                            Some(&vecs[i]),
+                            None,
+                            None,
+                            *revision,
+                        ) {
                             Ok(true) => {}
                             Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
                             Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
@@ -213,7 +220,7 @@ pub(super) async fn run_backfill_summaries(
         let input: String = text.chars().take(8000).collect();
         let summary = llm.generate_summary(&input).await?;
 
-        match store.update_enrichment_fields(id, Some(&summary), None, *revision) {
+        match store.update_enrichment_fields(id, Some(&summary), None, None, None, *revision) {
             Ok(true) => {
                 processed += 1;
                 println!("  [{processed}/{missing}] ✓ {id}");
@@ -226,6 +233,95 @@ pub(super) async fn run_backfill_summaries(
     let final_missing = store.entries_missing_summaries()?.len();
     let final_with_summary = total.saturating_sub(final_missing as u64);
     println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    Ok(())
+}
+
+/// Backfill missing keywords/entities using the configured extract LLM.
+pub(super) async fn run_backfill_metadata(
+    db_path: &PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::llm::LlmClient;
+
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_metadata) = store.metadata_stats()?;
+    let entries = store.entries_missing_metadata()?;
+    let missing = entries.len();
+
+    println!("DB:       {}", db_path.display());
+    println!("Total:    {total}");
+    println!("Metadata: {with_metadata}");
+    println!("Missing:  {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have keywords and entities!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+
+    println!("\nBackfilling metadata for {missing} entries...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+    let mut processed = 0usize;
+
+    for (id, text, _summary, revision) in &entries {
+        let input: String = text.chars().take(8000).collect();
+        let (keywords, entities) = llm.extract_metadata(&input).await?;
+        let (heur_keywords, heur_entities) = memory_core::scorer::heuristic_metadata_from_text(&input);
+        let mut keywords = keywords;
+        let mut entities = entities;
+        for kw in heur_keywords {
+            if !keywords.iter().any(|k| k == &kw) {
+                keywords.push(kw);
+            }
+        }
+        for ent in heur_entities {
+            if !entities.iter().any(|e| e == &ent) {
+                entities.push(ent);
+            }
+        }
+
+        match store.update_enrichment_fields(
+            id,
+            None,
+            None,
+            if keywords.is_empty() {
+                None
+            } else {
+                Some(&keywords)
+            },
+            if entities.is_empty() {
+                None
+            } else {
+                Some(&entities)
+            },
+            *revision,
+        ) {
+            Ok(true) => {
+                processed += 1;
+                println!("  [{processed}/{missing}] ✓ {id}");
+            }
+            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+        }
+    }
+
+    let (_, final_with_metadata) = store.metadata_stats()?;
+    println!("\n✅ Done! Metadata coverage: {with_metadata} → {final_with_metadata} / {total}");
     Ok(())
 }
 

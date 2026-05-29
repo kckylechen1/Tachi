@@ -79,6 +79,9 @@ pub(super) async fn run_cli_command(
         Commands::BackfillSummaries { .. } => {
             unreachable!("BackfillSummaries is handled in async context before this point")
         }
+        Commands::BackfillMetadata { .. } => {
+            unreachable!("BackfillMetadata is handled in async context before this point")
+        }
         Commands::BackfillFts { .. } => {
             unreachable!("BackfillFts is handled before generic CLI dispatch")
         }

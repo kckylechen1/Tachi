@@ -317,37 +317,67 @@ pub fn update_with_revision(
     Ok(updated)
 }
 
-/// Update only the enrichment fields (summary + embedding) if the revision
-/// hasn't changed since the enrichment was queued. This prevents stale
-/// background enrichment from overwriting concurrent updates.
+/// Update only the enrichment fields (summary, embedding, keywords, entities) if
+/// the revision hasn't changed since the enrichment was queued. This prevents
+/// stale background enrichment from overwriting concurrent updates.
 pub fn update_enrichment_fields(
     conn: &mut Connection,
     id: &str,
     new_summary: Option<&str>,
     new_vec: Option<&[u8]>,
+    new_keywords: Option<&[String]>,
+    new_entities: Option<&[String]>,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
-    if new_summary.is_none() && new_vec.is_none() {
+    if new_summary.is_none()
+        && new_vec.is_none()
+        && new_keywords.is_none()
+        && new_entities.is_none()
+    {
         return Ok(true); // nothing to do
     }
 
     let now = now_utc_iso();
     let tx = conn.transaction()?;
     let clean_summary = new_summary.map(|s| crate::noise::scrub_think_tags(s));
+    let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
+    let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 
     // Always check revision first, regardless of which fields are being updated.
     // This prevents stale enrichment from overwriting concurrent edits.
-    let rows_affected = if let Some(ref summary) = clean_summary {
-        tx.execute(
+    let rows_affected = match (&clean_summary, &keywords_json, &entities_json) {
+        (Some(summary), Some(keywords), Some(entities)) => tx.execute(
+            "UPDATE memories SET summary = ?1, keywords = ?2, entities = ?3, updated_at = ?4 WHERE id = ?5 AND revision = ?6",
+            params![summary, keywords, entities, &now, id, expected_revision],
+        )?,
+        (Some(summary), Some(keywords), None) => tx.execute(
+            "UPDATE memories SET summary = ?1, keywords = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![summary, keywords, &now, id, expected_revision],
+        )?,
+        (Some(summary), None, Some(entities)) => tx.execute(
+            "UPDATE memories SET summary = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![summary, entities, &now, id, expected_revision],
+        )?,
+        (Some(summary), None, None) => tx.execute(
             "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
             params![summary, &now, id, expected_revision],
-        )?
-    } else {
-        // No summary to update — still verify revision by touching updated_at
-        tx.execute(
+        )?,
+        (None, Some(keywords), Some(entities)) => tx.execute(
+            "UPDATE memories SET keywords = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![keywords, entities, &now, id, expected_revision],
+        )?,
+        (None, Some(keywords), None) => tx.execute(
+            "UPDATE memories SET keywords = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
+            params![keywords, &now, id, expected_revision],
+        )?,
+        (None, None, Some(entities)) => tx.execute(
+            "UPDATE memories SET entities = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
+            params![entities, &now, id, expected_revision],
+        )?,
+        (None, None, None) => tx.execute(
             "UPDATE memories SET updated_at = ?1 WHERE id = ?2 AND revision = ?3",
             params![&now, id, expected_revision],
-        )?
+        )?,
     };
 
     if rows_affected == 0 {
@@ -358,8 +388,8 @@ pub fn update_enrichment_fields(
         return Ok(false);
     }
 
-    // Refresh FTS if summary was updated
-    if new_summary.is_some() {
+    // Refresh FTS when any searchable text field changed.
+    if new_summary.is_some() || new_keywords.is_some() || new_entities.is_some() {
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
         tx.execute(
             r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
@@ -383,12 +413,19 @@ pub fn update_enrichment_fields(
         )?;
     }
 
-    let status = if new_vec.is_some() && new_summary.is_some() {
-        "embedded+summarized"
-    } else if new_vec.is_some() {
-        "embedded"
-    } else {
-        "summarized"
+    let status = match (
+        new_vec.is_some(),
+        new_summary.is_some(),
+        new_keywords.is_some() || new_entities.is_some(),
+    ) {
+        (true, true, true) => "embedded+summarized+metadata",
+        (true, true, false) => "embedded+summarized",
+        (true, false, true) => "embedded+metadata",
+        (true, false, false) => "embedded",
+        (false, true, true) => "summarized+metadata",
+        (false, true, false) => "summarized",
+        (false, false, true) => "metadata",
+        (false, false, false) => "touched",
     };
     tx.execute(
         r#"UPDATE memories

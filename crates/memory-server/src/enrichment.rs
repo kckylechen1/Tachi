@@ -9,14 +9,49 @@ pub(super) struct EnrichmentItem {
     pub(super) text: String,
     pub(super) summary: String,
     pub(super) keywords: Vec<String>,
+    pub(super) entities: Vec<String>,
     pub(super) needs_embedding: bool,
     pub(super) needs_summary: bool,
+    pub(super) needs_metadata: bool,
     pub(super) target_db: DbScope,
     pub(super) named_project: Option<String>,
     pub(super) db_path: Option<PathBuf>,
     pub(super) foundry_agent_id: Option<String>,
     pub(super) foundry_path_prefix: Option<String>,
     pub(super) revision: i64,
+}
+
+pub(super) fn needs_metadata_enrichment(keywords: &[String], entities: &[String]) -> bool {
+    keywords.is_empty() || entities.is_empty()
+}
+
+pub(super) fn build_enrichment_item(
+    entry: &MemoryEntry,
+    needs_embedding: bool,
+    needs_summary: bool,
+    target_db: DbScope,
+    named_project: Option<String>,
+    db_path: Option<PathBuf>,
+    foundry_agent_id: Option<String>,
+    foundry_path_prefix: Option<String>,
+    revision: i64,
+) -> EnrichmentItem {
+    EnrichmentItem {
+        id: entry.id.clone(),
+        text: entry.text.clone(),
+        summary: entry.summary.clone(),
+        keywords: entry.keywords.clone(),
+        entities: entry.entities.clone(),
+        needs_embedding,
+        needs_summary,
+        needs_metadata: needs_metadata_enrichment(&entry.keywords, &entry.entities),
+        target_db,
+        named_project,
+        db_path,
+        foundry_agent_id,
+        foundry_path_prefix,
+        revision,
+    }
 }
 
 fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&str>) -> String {
@@ -29,7 +64,10 @@ fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&st
         .unwrap_or(item.summary.as_str())
         .trim();
     let keywords = item.keywords.join(", ");
-    let condensed = format!("{summary}\n{keywords}").trim().to_string();
+    let entities = item.entities.join(", ");
+    let condensed = format!("{summary}\n{keywords}\n{entities}")
+        .trim()
+        .to_string();
     if condensed.is_empty() {
         item.text.clone()
     } else {
@@ -132,7 +170,88 @@ impl MemoryServer {
             }
         }
 
-        // 2. Batch embedding for items that need it
+        // 2. Extract keywords + entities for items missing structured metadata.
+        let metadata_futures: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_metadata)
+            .map(|(i, item)| {
+                let llm = self.llm.clone();
+                let text = item.text.clone();
+                async move { (i, llm.extract_metadata(&text).await) }
+            })
+            .collect();
+
+        let metadata_results: Vec<(usize, Result<(Vec<String>, Vec<String>), String>)> =
+            futures::future::join_all(metadata_futures).await;
+
+        let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        let mut entities_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        for (idx, result) in metadata_results {
+            match result {
+                Ok((keywords, entities)) => {
+                    if items[idx].keywords.is_empty() && !keywords.is_empty() {
+                        keywords_out[idx] = Some(keywords);
+                    }
+                    if items[idx].entities.is_empty() && !entities.is_empty() {
+                        entities_out[idx] = Some(entities);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[enrichment-batcher] metadata failed for {}: {e}",
+                        items[idx].id
+                    );
+                    record_enrichment_failure(self, &items[idx], "metadata", &e);
+                }
+            }
+        }
+
+        for (idx, item) in items.iter().enumerate() {
+            if !item.needs_metadata {
+                continue;
+            }
+            let (heur_keywords, heur_entities) =
+                memory_core::scorer::heuristic_metadata_from_text(&item.text);
+            if heur_entities.is_empty() && heur_keywords.is_empty() {
+                continue;
+            }
+            let mut entities = if item.entities.is_empty() {
+                Vec::new()
+            } else {
+                item.entities.clone()
+            };
+            if let Some(existing) = entities_out[idx].take() {
+                entities = existing;
+            }
+            for entity in heur_entities {
+                if !entities.iter().any(|e| e == &entity) {
+                    entities.push(entity);
+                }
+            }
+            if !entities.is_empty() {
+                entities_out[idx] = Some(entities);
+            }
+
+            let mut keywords = if item.keywords.is_empty() {
+                Vec::new()
+            } else {
+                item.keywords.clone()
+            };
+            if let Some(existing) = keywords_out[idx].take() {
+                keywords = existing;
+            }
+            for keyword in heur_keywords {
+                if !keywords.iter().any(|k| k == &keyword) {
+                    keywords.push(keyword);
+                }
+            }
+            if !keywords.is_empty() {
+                keywords_out[idx] = Some(keywords);
+            }
+        }
+
+        // 3. Batch embedding for items that need it
         let embed_indices: Vec<usize> = items
             .iter()
             .enumerate()
@@ -142,7 +261,17 @@ impl MemoryServer {
 
         let embed_texts: Vec<String> = embed_indices
             .iter()
-            .map(|&i| embedding_input_for_item(&items[i], summaries[i].as_deref()))
+            .map(|&i| {
+                let generated_summary = summaries[i].as_deref();
+                let mut item = items[i].clone();
+                if let Some(kws) = keywords_out[i].as_ref() {
+                    item.keywords = kws.clone();
+                }
+                if let Some(ents) = entities_out[i].as_ref() {
+                    item.entities = ents.clone();
+                }
+                embedding_input_for_item(&item, generated_summary)
+            })
             .collect();
 
         let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
@@ -169,15 +298,28 @@ impl MemoryServer {
             }
         }
 
-        // 3. Write results back to DB
+        // 4. Write results back to DB
         for (i, item) in items.iter().enumerate() {
             let new_vec = embed_results[i].as_deref();
             let new_summary = summaries[i].as_deref();
+            let new_keywords = keywords_out[i].as_deref();
+            let new_entities = entities_out[i].as_deref();
 
-            if new_vec.is_some() || new_summary.is_some() {
+            if new_vec.is_some()
+                || new_summary.is_some()
+                || new_keywords.is_some()
+                || new_entities.is_some()
+            {
                 let update_action = |store: &mut MemoryStore| {
                     let updated = store
-                        .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
+                        .update_enrichment_fields(
+                            &item.id,
+                            new_summary,
+                            new_vec,
+                            new_keywords,
+                            new_entities,
+                            item.revision,
+                        )
                         .map_err(|e| format!("Failed to update enriched entry: {e}"))?;
                     if updated && new_vec.is_some() {
                         if let Some(entry) = store
@@ -232,25 +374,6 @@ impl MemoryServer {
                                 }
                             });
 
-                            // PR-4: always-on save_memory enrichment.
-                            //
-                            // Previously the foundry maintenance enqueue only
-                            // fired when both `foundry_agent_id` and
-                            // `foundry_path_prefix` were set by the caller.
-                            // The `handle_save_memory` path (and several
-                            // pipeline call sites) passed None for both,
-                            // which meant memories saved via save_memory
-                            // never reached the foundry pipeline (no
-                            // distill, no rerank). We now fall back to:
-                            //   - agent_id: the server's current agent
-                            //     profile id, else "system"
-                            //   - path_prefix: derived from the entry's
-                            //     stored path (parent directory), or "/"
-                            //     when the path has no parent
-                            // so every embedded memory becomes a
-                            // foundry candidate. The dedup gate inside
-                            // try_claim_event still suppresses no-op
-                            // double-enqueues.
                             let agent_id_owned = item
                                 .foundry_agent_id
                                 .clone()

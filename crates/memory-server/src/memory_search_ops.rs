@@ -26,8 +26,14 @@ struct ContradictionVerification {
     reason: String,
 }
 
-fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
-    entry.importance >= 0.5 || entry.vector.is_some()
+fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
+    true
+}
+
+fn enrichment_work_pending(entry: &MemoryEntry, needs_embedding: bool, needs_summary: bool) -> bool {
+    needs_embedding
+        || needs_summary
+        || crate::enrichment::needs_metadata_enrichment(&entry.keywords, &entry.entities)
 }
 
 fn path_root(path: &str) -> &str {
@@ -498,7 +504,12 @@ pub(crate) fn apply_confidence_reinforcement_links(
         let symbolic_score = shared
             .iter()
             .map(|entity| {
-                memory_core::scorer::symbolic_score(entity, &candidate.text, &candidate.keywords)
+                memory_core::scorer::symbolic_score(
+                    entity,
+                    &candidate.text,
+                    &candidate.keywords,
+                    &candidate.entities,
+                )
             })
             .fold(0.0_f64, f64::max);
         let supersedes = should_supersede(entry, &candidate, shared.len(), symbolic_score);
@@ -764,28 +775,23 @@ fn enqueue_save_enrichment(
     named_project: Option<String>,
     enrichment_revision: i64,
 ) -> bool {
-    if !(needs_embedding || needs_summary) || !should_enqueue_enrichment(entry) {
+    if !enrichment_work_pending(entry, needs_embedding, needs_summary)
+        || !should_enqueue_enrichment(entry)
+    {
         return false;
     }
 
-    // Queue enrichment (embedding + summary) via the batcher instead of
-    // spawning a per-item task. The batcher accumulates items and calls
-    // the Voyage API in batch (up to 128 per request), dramatically
-    // reducing API calls when the agent saves multiple memories in sequence.
-    server.enqueue_enrichment(super::EnrichmentItem {
-        id: entry.id.clone(),
-        text: entry.text.clone(),
-        summary: entry.summary.clone(),
-        keywords: entry.keywords.clone(),
+    server.enqueue_enrichment(crate::enrichment::build_enrichment_item(
+        entry,
         needs_embedding,
         needs_summary,
         target_db,
         named_project,
-        db_path: None,
-        foundry_agent_id: None,
-        foundry_path_prefix: None,
-        revision: enrichment_revision,
-    });
+        None,
+        None,
+        None,
+        enrichment_revision,
+    ));
     true
 }
 
@@ -805,7 +811,7 @@ fn build_save_response(
     let status = if enrichment_enqueued {
         "saved (enrichment pending)"
     } else {
-        "saved (enrichment skipped by policy)"
+        "saved"
     };
     response.insert("status".into(), json!(status));
     if let Some(warning) = warning {
@@ -1086,6 +1092,110 @@ pub(crate) async fn handle_remember(
     handle_save_memory(server, save_params).await
 }
 
+fn list_available_named_projects() -> Vec<String> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let app_home = std::env::var("TACHI_HOME")
+        .map(|v| {
+            if v.starts_with("~/") {
+                home.join(&v[2..])
+            } else {
+                PathBuf::from(v)
+            }
+        })
+        .unwrap_or_else(|_| home.join(".tachi"));
+    let projects_dir = app_home.join("projects");
+    let Ok(read_dir) = std::fs::read_dir(projects_dir) else {
+        return Vec::new();
+    };
+    read_dir
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            if !entry.path().is_dir() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name.contains("..") {
+                return None;
+            }
+            let db_path = entry.path().join("memory.db");
+            db_path.exists().then_some(name)
+        })
+        .collect()
+}
+
+fn named_project_db_exists(name: &str) -> bool {
+    crate::MemoryServer::resolve_named_project_db_path(name).is_ok()
+}
+
+/// Infer a named project library from query text when the caller omitted `project`.
+pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
+    if matches!(
+        domain.map(str::trim),
+        Some("equity_trading") | Some("trading") | Some("finance") | Some("hyperion")
+    ) && named_project_db_exists("hyperion")
+    {
+        return Some("hyperion".to_string());
+    }
+
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let q_lower = q.to_lowercase();
+
+    static TICKER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let ticker_re = TICKER_RE.get_or_init(|| regex::Regex::new(r"\b\d{6}\b").unwrap());
+    if ticker_re.is_match(q) && named_project_db_exists("hyperion") {
+        return Some("hyperion".to_string());
+    }
+
+    for project in list_available_named_projects() {
+        if q_lower.contains(&project.to_lowercase()) {
+            return Some(project);
+        }
+    }
+
+    const ROUTES: &[(&str, &[&str])] = &[
+        (
+            "hyperion",
+            &[
+                "hyperion",
+                "radar",
+                "warpcore",
+                "hapi",
+                "hermes",
+                "trading",
+                "止损",
+                "iron rules",
+                "牛市",
+                "daemon",
+            ],
+        ),
+        ("sigil", &["sigil", "memory-server", "tachi", "mcp", "foundry"]),
+    ];
+    for (project, terms) in ROUTES {
+        if named_project_db_exists(project) && terms.iter().any(|term| q_lower.contains(term)) {
+            return Some((*project).to_string());
+        }
+    }
+
+    None
+}
+
+fn normalize_search_relevance(results: &mut [(memory_core::SearchResult, DbScope)]) {
+    let max_score = results
+        .iter()
+        .map(|(result, _)| result.score.final_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+    if max_score <= f64::EPSILON {
+        return;
+    }
+    for (result, _) in results.iter_mut() {
+        result.score.final_score = (result.score.final_score / max_score).clamp(0.0, 1.0);
+    }
+}
+
 pub(super) async fn search_memory_rows(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
@@ -1140,6 +1250,14 @@ pub(super) async fn search_memory_rows(
         })?;
         combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
     } else {
+        let inferred_project = infer_search_project(&params.query, params.domain.as_deref());
+        let inferred_db_path = inferred_project
+            .as_deref()
+            .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
+        let workspace_db_path = server.project_db_path_buf();
+        let skip_workspace = inferred_db_path.is_some()
+            && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+
         let global_opts = params.to_search_options(server.global_vec_available);
         let global_results = server.with_global_store_read(|store| {
             store
@@ -1148,7 +1266,19 @@ pub(super) async fn search_memory_rows(
         })?;
         combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-        if server.has_project_db() {
+        if let Some(ref project_name) = inferred_project {
+            if let Ok(project_results) = server.with_named_project_store_read(project_name, |store| {
+                let vec_avail = store.vec_available;
+                let project_opts = params.to_search_options(vec_avail);
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| {
+                        format!("Search failed in inferred project DB '{project_name}': {e}")
+                    })
+            }) {
+                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            }
+        } else if server.has_project_db() && !skip_workspace {
             let project_opts = params.to_search_options(server.project_vec_available);
             let project_results = server.with_project_store_read(|store| {
                 store
@@ -1184,6 +1314,8 @@ pub(super) async fn search_memory_rows(
             break;
         }
     }
+
+    normalize_search_relevance(&mut deduped_results);
 
     // Sandbox filtering: if agent_role is specified, filter out denied entries
     if let Some(ref role) = params.agent_role {
@@ -1429,6 +1561,33 @@ fn pattern_matches_context(pattern: &str, context: &str) -> bool {
     }
 }
 
+fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
+    let max_score = rows
+        .iter()
+        .filter_map(|row| row.get("relevance").and_then(serde_json::Value::as_f64))
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+    if max_score <= f64::EPSILON {
+        return;
+    }
+    for row in rows.iter_mut() {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        if let Some(rel) = obj.get("relevance").and_then(serde_json::Value::as_f64) {
+            let normalized = (rel / max_score).clamp(0.0, 1.0);
+            obj.insert("relevance".into(), json!(round_score(normalized)));
+            if let Some(score) = obj.get_mut("score").and_then(serde_json::Value::as_object_mut) {
+                score.insert("final".into(), json!(round_score(normalized)));
+            }
+        }
+    }
+}
+
+fn round_score(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
 pub(crate) async fn handle_search_memory(
     server: &MemoryServer,
     params: SearchMemoryParams,
@@ -1465,6 +1624,7 @@ pub(crate) async fn handle_search_memory(
     } else {
         rows.truncate(top_k);
     }
+    normalize_json_relevance(&mut rows);
     serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
@@ -1725,16 +1885,81 @@ mod tests {
     }
 
     #[test]
-    fn should_enqueue_enrichment_high_importance() {
+    fn should_enqueue_enrichment_always_true() {
         let mut e = test_entry("enr-1", "test");
-        e.importance = 0.5;
-        assert!(should_enqueue_enrichment(&e));
-
         e.importance = 0.3;
         e.vector = None;
-        assert!(!should_enqueue_enrichment(&e));
+        assert!(should_enqueue_enrichment(&e));
+    }
 
+    #[test]
+    fn enrichment_work_pending_when_metadata_missing() {
+        let mut e = test_entry("enr-2", "test");
+        e.summary = "ready".into();
         e.vector = Some(vec![0.1; 64]);
+        e.keywords = vec![];
+        e.entities = vec![];
+        assert!(enrichment_work_pending(&e, false, false));
+
+        e.keywords = vec!["tag".into()];
+        e.entities = vec!["entity".into()];
+        assert!(!enrichment_work_pending(&e, false, false));
+    }
+
+    #[test]
+    fn infer_search_project_routes_tickers_to_hyperion() {
+        if !named_project_db_exists("hyperion") {
+            return;
+        }
+        assert_eq!(
+            infer_search_project("688981 止损记录", None).as_deref(),
+            Some("hyperion")
+        );
+        assert_eq!(
+            infer_search_project("portfolio risk", Some("equity_trading")).as_deref(),
+            Some("hyperion")
+        );
+    }
+
+    #[test]
+    fn normalize_search_relevance_scales_top_hit_to_one() {
+        let mut results = vec![
+            (
+                memory_core::SearchResult {
+                    entry: test_entry("a", "alpha"),
+                    score: memory_core::HybridScore {
+                        vector: 0.2,
+                        fts: 0.1,
+                        symbolic: 0.0,
+                        decay: 0.0,
+                        final_score: 0.03,
+                    },
+                },
+                DbScope::Project,
+            ),
+            (
+                memory_core::SearchResult {
+                    entry: test_entry("b", "beta"),
+                    score: memory_core::HybridScore {
+                        vector: 0.1,
+                        fts: 0.05,
+                        symbolic: 0.0,
+                        decay: 0.0,
+                        final_score: 0.015,
+                    },
+                },
+                DbScope::Project,
+            ),
+        ];
+        normalize_search_relevance(&mut results);
+        assert!((results[0].0.score.final_score - 1.0).abs() < f64::EPSILON);
+        assert!((results[1].0.score.final_score - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn should_enqueue_enrichment_high_importance_legacy() {
+        let mut e = test_entry("enr-1", "test");
+        e.importance = 0.5;
         assert!(should_enqueue_enrichment(&e));
     }
 

@@ -512,22 +512,114 @@ pub fn tokenize(s: &str) -> Vec<String> {
 
 // Re-use is_cjk from noise module (single source of truth)
 use crate::noise::is_cjk;
+use regex::Regex;
+use std::sync::OnceLock;
 
 /// Compute a normalised token-overlap (Jaccard-like) score [0, 1].
-pub fn symbolic_score(query: &str, entry_text: &str, keywords: &[String]) -> f64 {
-    let query_tokens: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
+pub fn symbolic_score(
+    query: &str,
+    entry_text: &str,
+    keywords: &[String],
+    entities: &[String],
+) -> f64 {
+    let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
     if query_tokens.is_empty() {
         return 0.0;
     }
 
-    let mut text_tokens: std::collections::HashSet<String> =
-        tokenize(entry_text).into_iter().collect();
+    let mut text_tokens: HashSet<String> = tokenize(entry_text).into_iter().collect();
     for kw in keywords {
         text_tokens.extend(tokenize(kw));
+    }
+    for ent in entities {
+        let trimmed = ent.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        text_tokens.extend(tokenize(trimmed));
+        text_tokens.insert(trimmed.to_ascii_lowercase());
     }
 
     let overlap = query_tokens.intersection(&text_tokens).count();
     (overlap as f64) / (query_tokens.len() as f64)
+}
+
+/// Extract A-share style 6-digit stock codes from a query.
+pub fn extract_stock_codes(query: &str) -> Vec<String> {
+    static CODE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap());
+    re.find_iter(query)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
+    let code = code.trim();
+    if code.is_empty() {
+        return false;
+    }
+    entry.entities.iter().any(|e| e.trim() == code)
+        || entry.keywords.iter().any(|k| k.contains(code))
+        || entry.text.contains(code)
+        || entry.summary.contains(code)
+        || entry.path.contains(code)
+}
+
+/// Strong multiplier for exact ticker / trading-term precision matches.
+pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
+    for code in extract_stock_codes(query) {
+        if entry_has_stock_code(entry, &code) {
+            return 12.0;
+        }
+    }
+
+    let q = query.to_ascii_lowercase();
+    let path = entry.path.to_ascii_lowercase();
+    let bundle = format!(
+        "{} {} {} {} {}",
+        entry.text.to_ascii_lowercase(),
+        entry.summary.to_ascii_lowercase(),
+        entry.keywords.join(" ").to_ascii_lowercase(),
+        entry.entities.join(" ").to_ascii_lowercase(),
+        entry.topic.to_ascii_lowercase(),
+    );
+
+    let mut mult: f64 = 1.0;
+    if (q.contains("iron") && q.contains("rule")) || q.contains("iron_rules") {
+        if path.contains("iron_rule")
+            || bundle.contains("iron rule")
+            || bundle.contains("iron_rules")
+            || bundle.contains("iron rules")
+        {
+            mult = mult.max(5.0);
+        }
+    }
+    if q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损") {
+        if bundle.contains("stop loss")
+            || bundle.contains("止损")
+            || path.contains("iron_rule")
+            || path.contains("principles")
+        {
+            mult = mult.max(4.0);
+        }
+    }
+    mult
+}
+
+/// Deterministic ticker/entity hints from memory text (no LLM).
+pub fn heuristic_metadata_from_text(text: &str) -> (Vec<String>, Vec<String>) {
+    static CODE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap());
+    let mut entities = Vec::new();
+    let mut keywords = Vec::new();
+    for m in re.find_iter(text) {
+        let code = m.as_str().to_string();
+        if !entities.iter().any(|e| e == &code) {
+            entities.push(code.clone());
+            keywords.push(format!("ticker:{code}"));
+        }
+    }
+    (entities, keywords)
 }
 
 #[cfg(test)]
@@ -549,8 +641,49 @@ mod tests {
 
     #[test]
     fn symbolic_exact_match() {
-        let score = symbolic_score("hello world", "hello world", &[]);
+        let score = symbolic_score("hello world", "hello world", &[], &[]);
         assert!(score > 0.9, "score={score}");
+    }
+
+    #[test]
+    fn symbolic_uses_entities_for_stock_codes() {
+        let entities = vec!["688981".to_string()];
+        let score = symbolic_score("688981", "无关正文", &[], &entities);
+        assert!(score >= 0.99, "score={score}");
+    }
+
+    #[test]
+    fn precision_multiplier_for_exact_ticker() {
+        use chrono::Utc;
+        let mut entry = crate::types::MemoryEntry {
+            id: "t".into(),
+            path: "/trading/journal".into(),
+            summary: "journal".into(),
+            text: "trade note".into(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec!["688981".into()],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "project".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            retention_policy: None,
+            domain: None,
+            vector: None,
+        };
+        assert!(precision_query_multiplier("688981 止损", &entry) >= 10.0);
+        entry.entities.clear();
+        assert!(precision_query_multiplier("688981 止损", &entry) <= 1.0);
     }
 
     #[test]

@@ -293,20 +293,19 @@ async fn run_truth_maintenance_for_target(
             rusqlite::params![entry.id],
         )
         .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
-        let _ = server.enrichment_lock().enrich_tx.try_send(EnrichmentItem {
-            id: entry.id.clone(),
-            text: entry.text.clone(),
-            summary: entry.summary.clone(),
-            keywords: entry.keywords.clone(),
-            needs_embedding: true,
-            needs_summary: false,
-            target_db,
-            named_project: named_project.clone(),
-            db_path: None,
-            foundry_agent_id: None,
-            foundry_path_prefix: None,
-            revision: entry.revision,
-        });
+        let _ = server.enrichment_lock().enrich_tx.try_send(
+            crate::enrichment::build_enrichment_item(
+                entry,
+                true,
+                false,
+                target_db,
+                named_project.clone(),
+                None,
+                None,
+                None,
+                entry.revision,
+            ),
+        );
     }
 
     Ok(())

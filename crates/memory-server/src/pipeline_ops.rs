@@ -45,8 +45,8 @@ fn is_lazy_source(source: &str) -> bool {
     matches!(source, "extraction" | "auto" | "ingest_event")
 }
 
-fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
-    entry.importance >= 0.5 || entry.vector.is_some()
+fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
+    true
 }
 
 fn days_since(timestamp: &str) -> f64 {
@@ -615,20 +615,17 @@ async fn ingest_structured_event(
         let _ = server
             .enrichment_lock()
             .enrich_tx
-            .try_send(super::EnrichmentItem {
-                id: entry_id.clone(),
-                text: entry.text.clone(),
-                summary: entry.summary.clone(),
-                keywords: entry.keywords.clone(),
-                needs_embedding: true,
-                needs_summary: true,
+            .try_send(crate::enrichment::build_enrichment_item(
+                &entry,
+                true,
+                true,
                 target_db,
-                named_project: named_project.clone(),
-                db_path: None,
-                foundry_agent_id: None,
-                foundry_path_prefix: None,
-                revision: 1,
-            });
+                named_project.clone(),
+                None,
+                None,
+                None,
+                1,
+            ));
     }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);
@@ -1126,20 +1123,17 @@ pub(crate) async fn handle_ingest_source(
             let _ = server
                 .enrichment_lock()
                 .enrich_tx
-                .try_send(super::EnrichmentItem {
-                    id: entry.id.clone(),
-                    text: entry.text.clone(),
-                    summary: entry.summary.clone(),
-                    keywords: entry.keywords.clone(),
-                    needs_embedding: true,
-                    needs_summary: params.auto_summarize,
+                .try_send(crate::enrichment::build_enrichment_item(
+                    entry,
+                    true,
+                    params.auto_summarize,
                     target_db,
-                    named_project: named_project.clone(),
-                    db_path: None,
-                    foundry_agent_id: None,
-                    foundry_path_prefix: None,
-                    revision: 1,
-                });
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    1,
+                ));
         }
     }
 

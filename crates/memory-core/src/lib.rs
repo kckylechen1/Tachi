@@ -234,13 +234,15 @@ impl MemoryStore {
         )
     }
 
-    /// Update only enrichment fields (summary + vector) with revision check.
+    /// Update only enrichment fields (summary, vector, keywords, entities) with revision check.
     /// Returns false if revision mismatch (entry was updated since enrichment started).
     pub fn update_enrichment_fields(
         &mut self,
         id: &str,
         new_summary: Option<&str>,
         new_vec: Option<&[f32]>,
+        new_keywords: Option<&[String]>,
+        new_entities: Option<&[String]>,
         expected_revision: i64,
     ) -> Result<bool, MemoryError> {
         let vec_blob = if self.vec_available {
@@ -253,6 +255,8 @@ impl MemoryStore {
             id,
             new_summary,
             vec_blob.as_deref(),
+            new_keywords,
+            new_entities,
             expected_revision,
         )
     }
@@ -308,6 +312,43 @@ impl MemoryStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// List entries missing keywords and/or entities metadata.
+    /// Returns (id, text, summary, revision) tuples.
+    pub fn entries_missing_metadata(&self) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, summary, revision FROM memories
+             WHERE trim(keywords) IN ('', '[]')
+                OR trim(entities) IN ('', '[]')
+             ORDER BY rowid",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Count entries with empty keywords or entities.
+    pub fn metadata_stats(&self) -> Result<(i64, i64), MemoryError> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        let missing: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM memories
+             WHERE trim(keywords) IN ('', '[]')
+                OR trim(entities) IN ('', '[]')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((total, total - missing))
     }
 
     /// Get total memory count and FTS index count.

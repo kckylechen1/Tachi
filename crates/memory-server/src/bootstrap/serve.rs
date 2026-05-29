@@ -355,6 +355,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         return super::backfill::run_backfill_summaries(&target_path, *dry_run).await;
     }
 
+    if let Commands::BackfillMetadata { db, dry_run } = &command {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return super::backfill::run_backfill_metadata(&target_path, *dry_run).await;
+    }
+
     if let Commands::BackfillFts { db, full, dry_run } = &command {
         let target_path = if let Some(p) = db {
             expand_user_path(p.to_string_lossy().as_ref())

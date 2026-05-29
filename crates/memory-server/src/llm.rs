@@ -722,6 +722,53 @@ impl LlmClient {
         Ok(trimmed.to_string())
     }
 
+    /// Extract keywords + entities for search enrichment.
+    pub async fn extract_metadata(&self, text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let response = self
+            .call_extract_llm(
+                crate::prompts::METADATA_EXTRACTION_PROMPT,
+                text,
+                None,
+                0.2,
+                400,
+            )
+            .await?;
+        let json_str = Self::extract_json_payload(&response)?;
+        let parsed: Value = serde_json::from_str(json_str).map_err(|e| {
+            format!(
+                "Failed to parse metadata JSON: {} - response was: {}",
+                e, json_str
+            )
+        })?;
+        let keywords = parsed
+            .get("keywords")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let entities = parsed
+            .get("entities")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok((keywords, entities))
+    }
+
     /// Extract structured facts from text using EXTRACTION_PROMPT
     pub async fn extract_facts(&self, text: &str) -> Result<Vec<Value>, String> {
         let response = self
