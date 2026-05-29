@@ -179,7 +179,7 @@ async fn handle_memory_briefing(
         params.domain.as_deref(),
     );
 
-    // Memory first — structured rows agents can scan immediately.
+    // Memory + wiki searches run concurrently to reduce briefing latency.
     let mem_params = SearchMemoryParams {
         query: query.clone(),
         query_vec: None,
@@ -199,56 +199,54 @@ async fn handle_memory_briefing(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
     };
-    let memories = slim_memory_rows(parse_evidence_array(
-        handle_search_memory(server, mem_params).await?,
-    ));
 
+    let wiki_params = if include_wiki {
+        Some(SearchMemoryParams {
+            query: query.clone(),
+            query_vec: None,
+            top_k: top_k.min(5),
+            path_prefix: Some(
+                params
+                    .path_prefix
+                    .clone()
+                    .unwrap_or_else(|| "/wiki".to_string()),
+            ),
+            include_archived: params.include_archived,
+            candidates_per_channel: 20,
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
+            enable_rerank: false,
+            as_of: params.as_of.clone(),
+        })
+    } else {
+        None
+    };
+
+    let (memories_result, wiki_result) =
+        tokio::join!(handle_search_memory(server, mem_params), async {
+            if let Some(wp) = wiki_params {
+                search_memory_rows(server, wp).await
+            } else {
+                Ok(vec![])
+            }
+        });
+
+    let memories = slim_memory_rows(parse_evidence_array(memories_result?));
     let wiki = if include_wiki {
-        slim_memory_rows(parse_evidence_array(
-            serde_json::to_string(
-                &search_memory_rows(
-                    server,
-                    SearchMemoryParams {
-                        query: query.clone(),
-                        query_vec: None,
-                        top_k: top_k.min(5),
-                        path_prefix: Some(
-                            params
-                                .path_prefix
-                                .clone()
-                                .unwrap_or_else(|| "/wiki".to_string()),
-                        ),
-                        include_archived: params.include_archived,
-                        candidates_per_channel: 20,
-                        mmr_threshold: Some(0.85),
-                        graph_expand_hops: 1,
-                        graph_relation_filter: None,
-                        weights: None,
-                        agent_role: None,
-                        project: params.project.clone(),
-                        domain: params.domain.clone(),
-                        file_context: params.file_context.clone(),
-                        error_context: params.error_context.clone(),
-                        enable_rerank: false,
-                        as_of: params.as_of.clone(),
-                    },
-                )
-                .await?,
-            )
-            .map_err(|e| format!("serialize wiki rows: {e}"))?,
-        ))
+        slim_memory_rows(serde_json::Value::Array(wiki_result?))
     } else {
         json!([])
     };
 
-    let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
-    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    let health_summary = json!({
-        "health_score": if warnings.is_empty() { 95 } else { 85 },
-        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
-        "wiki": wiki_counts,
-    });
-    let board = slim_kanban(parse_json_or_empty(
+    let (warnings_res, board_res, checkpoints_res) = tokio::join!(
+        crate::status_ops::collect_agent_warning_lines(server),
         crate::dispatch_ops::handle_tachi_board(
             server,
             TachiBoardParams {
@@ -256,10 +254,19 @@ async fn handle_memory_briefing(
                 limit: Some(top_k.min(5)),
                 project: params.project.clone(),
             },
-        )
-        .await?,
-    ));
-    let checkpoints = json!(crate::status_ops::list_recent_checkpoint_entries(server, 3));
+        ),
+        async { crate::status_ops::list_recent_checkpoint_entries(server, 3) },
+    );
+    let warnings = warnings_res;
+    let board = slim_kanban(parse_json_or_empty(board_res?));
+    let checkpoints = json!(checkpoints_res);
+
+    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let health_summary = json!({
+        "health_score": if warnings.is_empty() { 95 } else { 85 },
+        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
+        "wiki": wiki_counts,
+    });
 
     Ok(agent_markdown::format_briefing(
         &ctx,
@@ -611,7 +618,10 @@ async fn handle_memory_readiness(
 }
 
 fn parse_json_or_empty(raw: String) -> Value {
-    serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "raw": raw }))
+    serde_json::from_str(&raw).unwrap_or_else(|_| {
+        let preview: String = raw.chars().take(500).collect();
+        json!({ "raw_preview": preview, "parse_error": true })
+    })
 }
 
 fn slim_memory_rows(value: Value) -> Value {
@@ -849,8 +859,17 @@ fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
         }
         let body =
             serde_json::to_string_pretty(&status).map_err(|e| format!("serialize status: {e}"))?;
-        std::fs::write(&status_path, body)
-            .map_err(|e| format!("write {}: {e}", status_path.display()))
+        // Atomic write: write to temp file then rename to avoid corruption on crash
+        let tmp_path = status_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &body)
+            .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, &status_path).map_err(|e| {
+            format!(
+                "rename {} -> {}: {e}",
+                tmp_path.display(),
+                status_path.display()
+            )
+        })
     })
 }
 
@@ -940,7 +959,14 @@ fn visit_jsonl_files(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // Use symlink_metadata to detect and skip symlinks
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             visit_jsonl_files(&path, newest, depth + 1);
             continue;
         }

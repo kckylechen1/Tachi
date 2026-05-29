@@ -70,7 +70,11 @@ pub fn upsert(
 
     let clean_text = crate::noise::scrub_think_tags(&entry.text);
     let clean_summary = crate::noise::scrub_think_tags(&entry.summary);
-    let force = entry.metadata.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force = entry
+        .metadata
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let importance = crate::types::normalize_importance(entry.importance, category, force);
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
@@ -339,7 +343,7 @@ pub fn update_enrichment_fields(
 
     let now = now_utc_iso();
     let tx = conn.transaction()?;
-    let clean_summary = new_summary.map(|s| crate::noise::scrub_think_tags(s));
+    let clean_summary = new_summary.map(crate::noise::scrub_think_tags);
     let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
     let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 

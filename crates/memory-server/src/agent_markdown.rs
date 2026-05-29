@@ -3,6 +3,14 @@
 use crate::db_context::{diagnostics_footer, format_db_context_markdown, DbContext};
 use serde_json::Value;
 
+/// Escape characters that have special meaning in Markdown bold/code contexts.
+fn md_escape(s: &str) -> String {
+    s.replace('*', "\\*")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('_', "\\_")
+}
+
 pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> String {
     let mut out = vec![format!("## {title}\n"), format_db_context_markdown(ctx)];
     let Some(items) = rows.as_array() else {
@@ -31,8 +39,10 @@ pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> 
             .unwrap_or("(no summary)");
         let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         out.push(format!(
-            "\n{}. **{topic}** ({db}, relevance {relevance})\n   - {summary}\n   - Path: `{path}`",
-            idx + 1
+            "\n{}. **{}** ({db}, relevance {relevance})\n   - {}\n   - Path: `{path}`",
+            idx + 1,
+            md_escape(topic),
+            md_escape(summary),
         ));
     }
     out.join("\n")
@@ -74,20 +84,16 @@ pub(crate) fn format_briefing(
                 }
             }
         }
-        let wiki_h = health_summary.get("wiki");
-        if wiki_h.is_some() {
+        if let Some(wiki_h) = health_summary.get("wiki") {
             out.push(format!(
                 "- Wiki hygiene: {} orphan(s), {} stale, {} duplicate(s)",
+                wiki_h.get("orphans").and_then(Value::as_u64).unwrap_or(0),
                 wiki_h
-                    .and_then(|v| v.get("orphans"))
+                    .get("stale_nodes")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
                 wiki_h
-                    .and_then(|v| v.get("stale_nodes"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                wiki_h
-                    .and_then(|v| v.get("duplicates"))
+                    .get("duplicates")
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
             ));
@@ -176,11 +182,11 @@ pub(crate) fn format_wiki_search(
         format_db_context_markdown(ctx),
         format!("\n### Results ({count})"),
     ];
-    let rows = results
+    let rows: &[Value] = results
         .as_array()
         .or_else(|| results.get("results").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     if rows.is_empty() {
         out.push("_No wiki entries matched._".to_string());
     } else {
@@ -257,8 +263,9 @@ pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> Stri
             .map(|v| v.to_string())
             .unwrap_or_else(|| "?".to_string());
         out.push(format!(
-            "{}. **`{entry_path}`** (importance {importance})\n   {summary}",
-            idx + 1
+            "{}. **`{entry_path}`** (importance {importance})\n   {}",
+            idx + 1,
+            md_escape(summary),
         ));
     }
     out.join("\n")
@@ -343,8 +350,10 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             .unwrap_or_else(|| "?".to_string());
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{topic}**{id_suffix} (relevance {relevance})\n   - {summary}\n   - `{path}`",
-            idx + 1
+            "{}. **{}**{id_suffix} (relevance {relevance})\n   - {}\n   - `{path}`",
+            idx + 1,
+            md_escape(topic),
+            md_escape(summary),
         ));
     }
     out.join("\n")

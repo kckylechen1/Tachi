@@ -14,7 +14,10 @@ use crate::{
         search_fts, search_vec,
     },
     error::MemoryError,
-    scorer::{cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize, HybridWeights},
+    scorer::{
+        cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize,
+        HybridWeights,
+    },
     types::{MemoryEntry, SearchResult},
 };
 
@@ -439,25 +442,24 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {
-    if entry.source.eq_ignore_ascii_case("foundry_distill") {
-        return 0.75;
+    let base = if entry.is_foundry_distill() {
+        0.75
+    } else if entry.is_wiki() {
+        1.15
+    } else if entry.is_guide() {
+        1.12
+    } else if entry.is_kanban() || entry.is_handoff() {
+        0.65
+    } else {
+        1.0
+    };
+    // High-importance entries get a floor of 1.0 so they aren't suppressed,
+    // but foundry_distill entries stay penalized regardless of importance
+    if entry.importance >= 0.9 && base < 1.0 && !entry.is_foundry_distill() {
+        1.0
+    } else {
+        base
     }
-    if metadata_bool(entry, "wiki")
-        || entry.domain.as_deref() == Some("wiki")
-        || entry.category.eq_ignore_ascii_case("wiki")
-    {
-        return 1.15;
-    }
-    if entry.is_guide() {
-        return 1.12;
-    }
-    if matches!(entry.category.as_str(), "kanban" | "handoff")
-        || entry.path.starts_with("/kanban/")
-        || entry.path.starts_with("/handoff/")
-    {
-        return 0.65;
-    }
-    1.0
 }
 
 fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<String, f64> {
@@ -625,9 +627,13 @@ pub fn hybrid_search(
     }
 
     // Precision boosts for exact tickers and high-signal trading terms.
+    // In non-RRF mode, cap the multiplier so it amplifies but doesn't overwhelm.
     for (id, entry) in &entries_ref {
-        let multiplier = precision_query_multiplier(query, entry);
+        let mut multiplier = precision_query_multiplier(query, entry);
         if multiplier > 1.0 {
+            if !weights.use_rrf {
+                multiplier = multiplier.clamp(1.0, 3.0);
+            }
             if let Some(score) = scores.get_mut(id) {
                 score.final_score *= multiplier;
                 if multiplier >= 10.0 {
@@ -642,6 +648,9 @@ pub fn hybrid_search(
         .map(|score| score.final_score)
         .filter(|score| score.is_finite())
         .fold(0.0_f64, f64::max);
+    // Quality boosts are only applied to entries already scoring above the 85th
+    // percentile floor. This prevents low-relevance wiki/guide entries from being
+    // boosted into the top results purely on type. Penalties apply unconditionally.
     let quality_boost_floor = top_pre_quality_score * 0.85;
     for (id, entry) in &entries_ref {
         let multiplier = quality_multiplier(entry);
@@ -679,7 +688,7 @@ pub fn hybrid_search(
         .filter(|(id, _)| entries_ref.contains_key(*id))
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // ── MMR diversity: defer near-duplicate entries to end ─────────────────────
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
@@ -707,6 +716,7 @@ pub fn hybrid_search(
         let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         let rel_filter = opts.graph_relation_filter.as_deref();
 
+        // Graph expansion is a best-effort enrichment; failures are non-fatal.
         if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
         {
             let existing_ids: std::collections::HashSet<String> =
@@ -770,8 +780,7 @@ pub fn hybrid_search(
             new_entries.sort_by(|a, b| {
                 b.score
                     .final_score
-                    .partial_cmp(&a.score.final_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.score.final_score)
                     .then_with(|| a.entry.id.cmp(&b.entry.id))
             });
 

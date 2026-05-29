@@ -50,7 +50,7 @@ pub(crate) async fn handle_tachi_save(
             "wiki"
         } else if path_looks_like_db_path {
             "memory"
-        } else if params.text.len() < 200 {
+        } else if params.text.chars().count() < 200 {
             "note"
         } else {
             "memory"

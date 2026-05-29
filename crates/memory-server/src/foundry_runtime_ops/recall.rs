@@ -282,7 +282,7 @@ pub(crate) async fn rerank_rows_with_outcome(
             (rows, outcome)
         }
         Err(err) => {
-            eprintln!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
+            tracing::warn!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
             (
                 rows.into_iter().take(top_k).collect(),
                 super::RerankOutcome::Fallback,

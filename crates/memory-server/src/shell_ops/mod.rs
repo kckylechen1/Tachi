@@ -163,7 +163,10 @@ fn write_status(run_dir: &Path, status: &Value) -> Result<(), String> {
     let status_path = run_dir.join("status.json");
     let serialized =
         serde_json::to_string_pretty(status).map_err(|e| format!("serialize status.json: {e}"))?;
-    std::fs::write(&status_path, serialized).map_err(|e| format!("write status.json: {e}"))?;
+    // Atomic write: write to temp file then rename to avoid corruption on crash
+    let tmp_path = status_path.with_extension("json.tmp");
+    std::fs::write(&tmp_path, serialized).map_err(|e| format!("write status.json.tmp: {e}"))?;
+    std::fs::rename(&tmp_path, &status_path).map_err(|e| format!("rename status.json.tmp: {e}"))?;
     Ok(())
 }
 

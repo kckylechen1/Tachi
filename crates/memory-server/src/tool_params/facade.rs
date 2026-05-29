@@ -128,7 +128,10 @@ pub(crate) struct TachiSaveParams {
     pub path: Option<String>,
 
     /// 0.0–1.0 importance score
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
@@ -236,7 +239,10 @@ pub(crate) struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
     #[serde(default)]
     pub retention_policy: Option<String>,
@@ -485,11 +491,17 @@ pub(crate) struct TachiCompleteParams {
     pub cost_tokens: Option<u64>,
 
     /// Cost in USD (if known)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub cost_usd: Option<f64>,
 
     /// Quality score 0.0–1.0 (self-reported or computed later)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub quality_score: Option<f64>,
 
     /// Free-form notes / summary of what was done
@@ -552,7 +564,10 @@ pub(crate) struct TachiWikiParams {
     #[serde(default)]
     #[schemars(description = "Related repos, tools, or people.")]
     pub entities: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
     #[serde(default)]
     pub scope: Option<String>,

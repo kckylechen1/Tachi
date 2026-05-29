@@ -80,6 +80,11 @@ pub fn resolve_batch_size() -> usize {
 /// scheduler's threshold so we don't stitch tiny noisy groups.
 const MIN_BUCKET_SIZE: usize = 3;
 
+/// Max characters of the batch user payload before dispatching. If the
+/// serialized JSON exceeds this, groups are dropped from the tail to stay
+/// within the limit and avoid token overflow on the model side.
+const MAX_BATCH_PAYLOAD_CHARS: usize = 60_000;
+
 /// System prompt for the batch distill mega-call. Mirrors the design doc
 /// (Phase 1 mega-prompt) — instructs the model to return a JSON array
 /// with one object per input group.
@@ -268,8 +273,9 @@ async fn process_api_batch(
     manifest: &mut Vec<SourceManifestEntry>,
     batch_run_id: &str,
 ) {
-    let mut pending: Vec<&[CandidateGroup]> = vec![chunk];
-    while let Some(batch) = pending.pop() {
+    let mut pending: Vec<(&[CandidateGroup], usize)> = vec![(chunk, 0)];
+    let max_depth = 8;
+    while let Some((batch, depth)) = pending.pop() {
         if batch.is_empty() {
             continue;
         }
@@ -289,14 +295,14 @@ async fn process_api_batch(
                     )
                     .await;
                 }
-                Err(err) if batch.len() > 1 => {
+                Err(err) if batch.len() > 1 && depth < max_depth => {
                     report.errors.push(format!(
                         "parse api batch {chunk_idx} ({} groups): {err}; splitting",
                         batch.len()
                     ));
                     let mid = batch.len() / 2;
-                    pending.push(&batch[mid..]);
-                    pending.push(&batch[..mid]);
+                    pending.push((&batch[mid..], depth + 1));
+                    pending.push((&batch[..mid], depth + 1));
                 }
                 Err(err) => {
                     report
@@ -307,14 +313,14 @@ async fn process_api_batch(
                     }
                 }
             },
-            Err(err) if batch.len() > 1 => {
+            Err(err) if batch.len() > 1 && depth < max_depth => {
                 report.errors.push(format!(
                     "api batch {chunk_idx} ({} groups): {err}; splitting",
                     batch.len()
                 ));
                 let mid = batch.len() / 2;
-                pending.push(&batch[mid..]);
-                pending.push(&batch[..mid]);
+                pending.push((&batch[mid..], depth + 1));
+                pending.push((&batch[..mid], depth + 1));
             }
             Err(err) => {
                 report.errors.push(format!("api batch {chunk_idx}: {err}"));
@@ -616,10 +622,28 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
         }));
     }
     let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
+    // If payload exceeds token budget, drop groups from the tail to stay within limits.
+    let (groups_json, actual_count) = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
+        let mut trimmed = payload;
+        while trimmed.len() > 1
+            && serde_json::to_string_pretty(&trimmed)
+                .unwrap_or_default()
+                .len()
+                > MAX_BATCH_PAYLOAD_CHARS
+        {
+            trimmed.pop();
+        }
+        let count = trimmed.len();
+        (
+            serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string()),
+            count,
+        )
+    } else {
+        (groups_json, groups.len())
+    };
     format!(
         "Here are {} groups to distill:\n\n{}",
-        groups.len(),
-        groups_json
+        actual_count, groups_json
     )
 }
 
@@ -701,10 +725,24 @@ async fn fallback_distill(llm: &LlmClient, group: &CandidateGroup) -> Result<Gro
         return Err("fallback llm returned empty text".to_string());
     }
     let summary: String = trimmed.chars().take(120).collect();
+    // Extract keywords from the distilled text and source group metadata
+    let mut keywords: Vec<String> = Vec::new();
+    for entry in &group.entries {
+        keywords.extend(
+            entry
+                .keywords
+                .iter()
+                .filter(|k| !k.trim().is_empty())
+                .cloned(),
+        );
+    }
+    keywords.sort();
+    keywords.dedup();
+    keywords.truncate(12);
     Ok(GroupPayload {
         summary,
         text: trimmed,
-        keywords: Vec::new(),
+        keywords,
         skip_reason: None,
     })
 }

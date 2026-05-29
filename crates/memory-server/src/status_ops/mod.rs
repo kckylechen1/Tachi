@@ -248,8 +248,13 @@ pub(crate) fn collect_snapshot(
     let distill_marker = read_distill_marker(app_home);
     let mut api_keys = status_health::collect_api_key_status(global_db_path);
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
-    let health_score =
-        status_health::calculate_health_score(&daemon, &dbs, distill_marker.as_ref(), &api_keys);
+    let health_score = status_health::calculate_health_score(
+        &daemon,
+        &dbs,
+        distill_marker.as_ref(),
+        &api_keys,
+        None,
+    );
 
     StatusSnapshot {
         daemon,
@@ -533,8 +538,10 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
     )
     .or_else(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => Ok(0),
-        rusqlite::Error::SqliteFailure(_, _) => Ok(0),
-        other => Err(other),
+        other => {
+            tracing::warn!("count_stuck_in_progress query failed: {other}");
+            Err(other)
+        }
     })
 }
 

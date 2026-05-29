@@ -269,6 +269,10 @@ pub(super) async fn run_interactive_wizard(
 
     if let Some(parent) = config_env_path.parent() {
         std::fs::create_dir_all(parent)?;
+        // Pre-flight write check: create and delete a temp file to verify permissions
+        let probe = parent.join(".tachi_write_probe");
+        std::fs::write(&probe, b"")?;
+        let _ = std::fs::remove_file(&probe);
     }
     let existing = std::fs::read_to_string(config_env_path).unwrap_or_default();
     let merged = merge_config_env(&existing, &new_entries);
@@ -516,7 +520,20 @@ pub(super) fn merge_config_env(existing: &str, updates: &[(String, String)]) -> 
                     .map(|s| s.trim_start().starts_with(&prefix))
                     .unwrap_or(false);
             if is_match {
-                *line = format!("{key}={value}");
+                // Keep inline comments (text after value) but drop the # prefix if the whole line was commented
+                let inline_comment = if !trimmed.starts_with('#') {
+                    // Active line — check for inline comment after the value
+                    let after_key = trimmed.strip_prefix(&prefix).unwrap_or("");
+                    // Find # that is preceded by whitespace (inline comment marker)
+                    if let Some(pos) = after_key.find(" #") {
+                        format!("{}", &after_key[pos..])
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new() // Commented-out line: just activate it
+                };
+                *line = format!("{key}={value}{inline_comment}");
                 replaced = true;
                 break;
             }

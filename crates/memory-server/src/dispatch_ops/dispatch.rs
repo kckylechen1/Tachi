@@ -304,7 +304,9 @@ pub(crate) async fn handle_tachi_dispatch(
                 "trajectory_file": trajectory_path.to_string_lossy(),
                 "run_dir": workspace_dir.to_string_lossy(),
             });
-            return serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"));
+            return Ok(
+                serde_json::to_string(&response).unwrap_or_else(|e| format!("serialize: {e}"))
+            );
         }
 
         // Auto-approve: rewrite the prompt fed to the executing agent so
@@ -436,9 +438,25 @@ pub(crate) async fn handle_tachi_dispatch(
         }
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
-        tokio::time::sleep(Duration::from_secs(2)).await; // grace period for tachi_complete to propagate
-
-        let kanban_state = get_kanban_state(&server_clone, &d_id).await;
+        // Poll for kanban state instead of a fixed sleep to avoid race conditions
+        let mut kanban_state = None;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let state = get_kanban_state(&server_clone, &d_id).await;
+            if let Some(ref s) = state {
+                if matches!(
+                    s.as_str(),
+                    "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+                ) {
+                    kanban_state = state;
+                    break;
+                }
+            }
+        }
+        let kanban_state = match kanban_state {
+            Some(s) => Some(s),
+            None => get_kanban_state(&server_clone, &d_id).await,
+        };
         let is_closed = matches!(
             kanban_state.as_deref(),
             Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")

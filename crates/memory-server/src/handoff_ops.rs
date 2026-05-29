@@ -343,12 +343,17 @@ pub(crate) async fn handle_handoff_leave(
         if let Ok(pending) = pending_handoff_entries(store) {
             for old_entry in pending {
                 let old_memo = memo_from_entry(&old_entry);
-                if old_memo.from_agent == memo.from_agent && old_memo.target_agent == memo.target_agent {
+                if old_memo.from_agent == memo.from_agent
+                    && old_memo.target_agent == memo.target_agent
+                {
                     let mut old_entry_mut = old_entry.clone();
                     old_entry_mut.archived = true;
                     old_entry_mut.vector = None;
                     if let Some(obj) = old_entry_mut.metadata.as_object_mut() {
-                        obj.insert("status".to_string(), serde_json::Value::String("superseded".to_string()));
+                        obj.insert(
+                            "status".to_string(),
+                            serde_json::Value::String("superseded".to_string()),
+                        );
                     }
                     let _ = store.upsert(&old_entry_mut);
                     let _ = store.supersede_memory(&old_entry.id, &entry.id);
@@ -772,7 +777,7 @@ pub(crate) fn gc_expired_handoff_memories(
 ) -> Result<usize, String> {
     let cutoff = chrono::Utc::now()
         - chrono::Duration::days(std::cmp::min(max_age_days, i64::MAX as u64) as i64);
-    
+
     let mut stmt = store
         .connection()
         .prepare(
@@ -798,8 +803,11 @@ pub(crate) fn gc_expired_handoff_memories(
             row.map_err(|e| format!("read expired handoff candidate failed: {e}"))?;
         let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
             .map_err(|e| format!("parse handoff metadata for '{id}' failed: {e}"))?;
-        
-        let status = metadata.get("status").and_then(|v| v.as_str()).unwrap_or("pending");
+
+        let status = metadata
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pending");
         if status != "acknowledged" && status != "promoted" && status != "superseded" && !archived {
             continue;
         }
@@ -1371,7 +1379,7 @@ mod tests {
     #[test]
     fn test_gc_expired_handoff_memories() {
         let mut store = test_store();
-        
+
         let old_ack = HandoffMemo {
             id: "old-ack".to_string(),
             from_agent: "agent-a".to_string(),
@@ -1411,7 +1419,9 @@ mod tests {
             acknowledged: false,
         };
         let entry_old_pending = test_entry(old_pending);
-        store.upsert(&entry_old_pending).expect("upsert old pending");
+        store
+            .upsert(&entry_old_pending)
+            .expect("upsert old pending");
 
         let deleted = gc_expired_handoff_memories(&mut store, 30).expect("gc");
         assert_eq!(deleted, 1);
@@ -1423,10 +1433,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handoff_leave_supersedes_pending_duplicate() {
-        let db_path = std::env::temp_dir().join(format!(
-            "handoff-dup-test-{}.sqlite",
-            uuid::Uuid::new_v4()
-        ));
+        let db_path =
+            std::env::temp_dir().join(format!("handoff-dup-test-{}.sqlite", uuid::Uuid::new_v4()));
         let server = test_server(db_path.clone());
         server
             .agent_register(Parameters(AgentRegisterParams {
@@ -1464,16 +1472,21 @@ mod tests {
         let second_json: serde_json::Value = serde_json::from_str(&second_resp).expect("json");
         let second_id = second_json["memo_id"].as_str().expect("id").to_string();
 
-        server.with_global_store_read(|store| {
-            let entry1 = store.get_with_options(&format!("handoff:{first_id}"), true).unwrap().unwrap();
-            assert!(entry1.archived);
-            assert_eq!(entry1.metadata["status"], "superseded");
+        server
+            .with_global_store_read(|store| {
+                let entry1 = store
+                    .get_with_options(&format!("handoff:{first_id}"), true)
+                    .unwrap()
+                    .unwrap();
+                assert!(entry1.archived);
+                assert_eq!(entry1.metadata["status"], "superseded");
 
-            let entry2 = store.get(&format!("handoff:{second_id}")).unwrap().unwrap();
-            assert!(!entry2.archived);
-            assert_eq!(entry2.metadata["status"], "pending");
-            Ok(())
-        }).unwrap();
+                let entry2 = store.get(&format!("handoff:{second_id}")).unwrap().unwrap();
+                assert!(!entry2.archived);
+                assert_eq!(entry2.metadata["status"], "pending");
+                Ok(())
+            })
+            .unwrap();
 
         let _ = std::fs::remove_file(db_path);
     }
