@@ -47,6 +47,7 @@ mod daily_pipeline;
 mod db_context;
 mod dispatch_ops;
 mod dlq_ops;
+pub(crate) mod docs_ops;
 mod doctor;
 mod doctor_ops;
 mod enrichment;

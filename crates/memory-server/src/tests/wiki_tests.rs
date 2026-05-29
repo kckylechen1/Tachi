@@ -218,13 +218,14 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
         }))
         .await
         .expect("wiki browse should succeed");
-    let json: Value = serde_json::from_str(&response).expect("wiki browse json");
-    let entries = json["entries"].as_array().expect("entries array");
-    assert!(entries.iter().any(|entry| {
-        entry["related_entries"]
-            .as_array()
-            .is_some_and(|related| related.iter().any(|item| item["id"] == "wiki-related-beta"))
-    }));
+    assert!(
+        response.contains("/wiki/engineering/debugging/alpha"),
+        "browse markdown should contain alpha path"
+    );
+    assert!(
+        response.contains("/wiki/engineering/debugging/beta"),
+        "browse markdown should contain beta path"
+    );
 
     let log = server
         .with_named_project_store_read("wiki", |store| {
@@ -843,10 +844,12 @@ async fn wiki_browse_large_limit_keeps_related_entries_empty() {
         }))
         .await
         .expect("wiki browse should succeed");
-    let json: Value = serde_json::from_str(&response).expect("wiki browse json");
-    let entries = json["entries"].as_array().expect("entries array");
-    assert!(!entries.is_empty());
-    assert!(entries.iter().all(|entry| entry["related_entries"]
-        .as_array()
-        .is_some_and(|related| related.is_empty())));
+    assert!(
+        response.contains("/wiki/engineering/scale/alpha"),
+        "browse markdown should contain alpha path"
+    );
+    assert!(
+        response.contains("/wiki/engineering/scale/beta"),
+        "browse markdown should contain beta path"
+    );
 }

@@ -1133,3 +1133,9 @@ pub(crate) fn fact_to_entry(
         domain: None,
     })
 }
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWikiOrganizeParams {
+    /// Absolute path to the docs directory to organize.
+    pub dir_path: String,
+}
