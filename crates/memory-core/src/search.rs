@@ -679,7 +679,7 @@ pub fn hybrid_search(
         .filter(|(id, _)| entries_ref.contains_key(*id))
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // ── MMR diversity: defer near-duplicate entries to end ─────────────────────
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
@@ -770,8 +770,7 @@ pub fn hybrid_search(
             new_entries.sort_by(|a, b| {
                 b.score
                     .final_score
-                    .partial_cmp(&a.score.final_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.score.final_score)
                     .then_with(|| a.entry.id.cmp(&b.entry.id))
             });
 

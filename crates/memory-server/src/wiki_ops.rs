@@ -1313,7 +1313,7 @@ pub(crate) fn handle_wiki_read(
     project: &str,
 ) -> Result<String, String> {
     let resolved = if path.trim().starts_with('/') {
-        path.trim().to_string()
+        path.trim().trim_end_matches('/').to_string()
     } else {
         resolve_wiki_category(path)
     };

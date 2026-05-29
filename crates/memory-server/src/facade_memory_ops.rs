@@ -204,39 +204,35 @@ async fn handle_memory_briefing(
     ));
 
     let wiki = if include_wiki {
-        slim_memory_rows(parse_evidence_array(
-            serde_json::to_string(
-                &search_memory_rows(
-                    server,
-                    SearchMemoryParams {
-                        query: query.clone(),
-                        query_vec: None,
-                        top_k: top_k.min(5),
-                        path_prefix: Some(
-                            params
-                                .path_prefix
-                                .clone()
-                                .unwrap_or_else(|| "/wiki".to_string()),
-                        ),
-                        include_archived: params.include_archived,
-                        candidates_per_channel: 20,
-                        mmr_threshold: Some(0.85),
-                        graph_expand_hops: 1,
-                        graph_relation_filter: None,
-                        weights: None,
-                        agent_role: None,
-                        project: params.project.clone(),
-                        domain: params.domain.clone(),
-                        file_context: params.file_context.clone(),
-                        error_context: params.error_context.clone(),
-                        enable_rerank: false,
-                        as_of: params.as_of.clone(),
-                    },
-                )
-                .await?,
-            )
-            .map_err(|e| format!("serialize wiki rows: {e}"))?,
-        ))
+        let wiki_rows = search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.clone(),
+                query_vec: None,
+                top_k: top_k.min(5),
+                path_prefix: Some(
+                    params
+                        .path_prefix
+                        .clone()
+                        .unwrap_or_else(|| "/wiki".to_string()),
+                ),
+                include_archived: params.include_archived,
+                candidates_per_channel: 20,
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: None,
+                project: params.project.clone(),
+                domain: params.domain.clone(),
+                file_context: params.file_context.clone(),
+                error_context: params.error_context.clone(),
+                enable_rerank: false,
+                as_of: params.as_of.clone(),
+            },
+        )
+        .await?;
+        slim_memory_rows(serde_json::Value::Array(wiki_rows))
     } else {
         json!([])
     };
@@ -849,8 +845,12 @@ fn update_progress_status(run_dir: &Path, line: &Value) -> Result<(), String> {
         }
         let body =
             serde_json::to_string_pretty(&status).map_err(|e| format!("serialize status: {e}"))?;
-        std::fs::write(&status_path, body)
-            .map_err(|e| format!("write {}: {e}", status_path.display()))
+        // Atomic write: write to temp file then rename to avoid corruption on crash
+        let tmp_path = status_path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &body)
+            .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, &status_path)
+            .map_err(|e| format!("rename {} -> {}: {e}", tmp_path.display(), status_path.display()))
     })
 }
 
@@ -935,12 +935,23 @@ fn visit_jsonl_files(
     if depth > 4 || !root.exists() {
         return;
     }
+    // Skip symlink directories to prevent arbitrary file read
+    if root.is_symlink() {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        // Use symlink_metadata to detect and skip symlinks
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             visit_jsonl_files(&path, newest, depth + 1);
             continue;
         }

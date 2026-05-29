@@ -74,22 +74,12 @@ pub(crate) fn format_briefing(
                 }
             }
         }
-        let wiki_h = health_summary.get("wiki");
-        if wiki_h.is_some() {
+        if let Some(wiki_h) = health_summary.get("wiki") {
             out.push(format!(
                 "- Wiki hygiene: {} orphan(s), {} stale, {} duplicate(s)",
-                wiki_h
-                    .and_then(|v| v.get("orphans"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                wiki_h
-                    .and_then(|v| v.get("stale_nodes"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                wiki_h
-                    .and_then(|v| v.get("duplicates"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
+                wiki_h.get("orphans").and_then(Value::as_u64).unwrap_or(0),
+                wiki_h.get("stale_nodes").and_then(Value::as_u64).unwrap_or(0),
+                wiki_h.get("duplicates").and_then(Value::as_u64).unwrap_or(0),
             ));
         }
     }
@@ -176,11 +166,11 @@ pub(crate) fn format_wiki_search(
         format_db_context_markdown(ctx),
         format!("\n### Results ({count})"),
     ];
-    let rows = results
+    let rows: &[Value] = results
         .as_array()
         .or_else(|| results.get("results").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     if rows.is_empty() {
         out.push("_No wiki entries matched._".to_string());
     } else {

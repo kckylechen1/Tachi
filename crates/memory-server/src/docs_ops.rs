@@ -95,6 +95,13 @@ fn parse_frontmatter(content: &str) -> (Option<Frontmatter>, &str) {
             bytes_offset = idx + 1;
         }
     }
+    // Handle closing "---" at end of file with no trailing newline
+    if delim_count == 1 {
+        let last_line = content[bytes_offset..].trim_end();
+        if last_line == "---" {
+            char_idx = content.len();
+        }
+    }
 
     let rest = if char_idx < content.len() {
         &content[char_idx..]
@@ -271,8 +278,10 @@ fn is_task_resolved(
 /// 清洗并标准化 Markdown 行中的任务文本以作匹配
 fn clean_task_text(text: &str) -> String {
     // 移除诸如 P0:, P1:, [P0], (P0) 之类的前缀
-    let re_prefix =
-        Regex::new(r"(?i)^\s*(p[0-9]\s*[:：\-]*\s*|\[p[0-9]\]\s*|\(p[0-9]\)\s*)").unwrap();
+    static RE_PREFIX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re_prefix = RE_PREFIX.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(p[0-9]\s*[:：\-]*\s*|\[p[0-9]\]\s*|\(p[0-9]\)\s*)").unwrap()
+    });
     let text_no_prio = re_prefix.replace(text, "");
 
     // 移除开头的空格及符号
@@ -286,8 +295,10 @@ fn clean_task_text(text: &str) -> String {
 
 /// 扫描并就地勾选 Markdown 正文中的任务项
 fn sync_tasks_in_content(server: &MemoryServer, content: &str) -> (String, bool) {
-    let re_todo = Regex::new(r"^(\s*[\-\*\+]\s+\[\s*\]\s+)(.+)$").unwrap();
-    let re_card = Regex::new(r"<!--\s*tachi:([a-zA-Z0-9_\-]+)\s*-->").unwrap();
+    static RE_TODO: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static RE_CARD: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re_todo = RE_TODO.get_or_init(|| Regex::new(r"^(\s*[\-\*\+]\s+\[\s*\]\s+)(.+)$").unwrap());
+    let re_card = RE_CARD.get_or_init(|| Regex::new(r"<!--\s*tachi:([a-zA-Z0-9_\-]+)\s*-->").unwrap());
 
     let mut modified = false;
     let mut new_lines = Vec::new();
@@ -371,6 +382,16 @@ fn secure_join(root: &Path, rel_part: &str) -> Result<PathBuf, String> {
                 "Path '{}' escapes root '{}'",
                 cursor.display(),
                 root.display()
+            ));
+        }
+    }
+
+    // Final safeguard: verify the resolved path doesn't escape via any TOCTOU race
+    if let Some(Ok(canonical)) = cursor.parent().and_then(|_| Some(cursor.canonicalize())) {
+        if canonical != canonical_root && !canonical.starts_with(&canonical_root) {
+            return Err(format!(
+                "Resolved path '{}' escapes root after canonicalize",
+                cursor.display()
             ));
         }
     }
@@ -572,6 +593,26 @@ pub(crate) async fn handle_wiki_organize(
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize docs path '{}': {e}", dir_path))?;
 
+    // Confine to known workspace roots: CWD, home directory, temp, or global_db_path parent
+    let canonical_bases: Vec<PathBuf> = [
+        std::env::current_dir().ok(),
+        dirs::home_dir(),
+        Some(std::env::temp_dir()),
+        server.global_db_path.parent().map(|p| p.to_path_buf()),
+    ]
+    .iter()
+    .filter_map(|opt| opt.as_ref().and_then(|p| p.canonicalize().ok()))
+    .collect();
+    let confined = canonical_bases
+        .iter()
+        .any(|base| canonical_root.starts_with(base));
+    if !confined {
+        return Err(format!(
+            "dir_path '{}' is outside workspace roots (cwd, home, temp, or DB parent)",
+            dir_path
+        ));
+    }
+
     // 白名单保护文件列表
     let whitelist = ["README.md", "INSTALL.md", "_index.md"];
 
@@ -635,7 +676,7 @@ pub(crate) async fn handle_wiki_organize(
         let relative_path = path
             .strip_prefix(&canonical_root)
             .map_err(|e| format!("Strip prefix failed: {e}"))?;
-        let relative_str = relative_path.to_string_lossy().to_string();
+        let relative_str = relative_path.to_string_lossy().replace('\\', "/");
 
         let content = fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read file {}: {e}", path.display()))?;
@@ -658,8 +699,12 @@ pub(crate) async fn handle_wiki_organize(
                     } else {
                         new_body
                     };
-                    fs::write(&path, new_content).map_err(|e| {
-                        format!("Failed to write task sync back to {}: {e}", path.display())
+                    let tmp = path.with_extension("md.tmp");
+                    fs::write(&tmp, new_content).map_err(|e| {
+                        format!("Failed to write task sync temp to {}: {e}", tmp.display())
+                    })?;
+                    fs::rename(&tmp, &path).map_err(|e| {
+                        format!("Failed to rename task sync {} -> {}: {e}", tmp.display(), path.display())
                     })?;
                     synced_count += 1;
                 }
@@ -784,10 +829,18 @@ pub(crate) async fn handle_wiki_organize(
                         )
                     })?;
 
-                    // 写入最终内容到目的地，然后删除源文件
-                    fs::write(&dest_path, &final_content).map_err(|e| {
+                    // Atomic write: write to temp file then rename to avoid corruption on crash
+                    let tmp_dest = dest_path.with_extension("md.tmp");
+                    fs::write(&tmp_dest, &final_content).map_err(|e| {
                         format!(
-                            "Failed to write to destination {}: {e}",
+                            "Failed to write temp file {}: {e}",
+                            tmp_dest.display()
+                        )
+                    })?;
+                    fs::rename(&tmp_dest, &dest_path).map_err(|e| {
+                        format!(
+                            "Failed to rename {} -> {}: {e}",
+                            tmp_dest.display(),
                             dest_path.display()
                         )
                     })?;
@@ -804,9 +857,12 @@ pub(crate) async fn handle_wiki_organize(
                     let (archive_path, archive_filename) =
                         unique_archive_target(&archive_dir, &stem);
 
-                    // 同样需要写入最新的勾选和 frontmatter 状态到归档，避免丢失
-                    fs::write(&archive_path, &final_content)
-                        .map_err(|e| format!("Failed to write source to archive: {e}"))?;
+                    // Atomic write to archive
+                    let tmp_archive = archive_path.with_extension("md.tmp");
+                    fs::write(&tmp_archive, &final_content)
+                        .map_err(|e| format!("Failed to write archive temp: {e}"))?;
+                    fs::rename(&tmp_archive, &archive_path)
+                        .map_err(|e| format!("Failed to rename archive temp: {e}"))?;
                     fs::remove_file(&path)
                         .map_err(|e| format!("Failed to remove source file after archive: {e}"))?;
 
@@ -873,7 +929,7 @@ pub(crate) async fn handle_wiki_organize(
                         .strip_prefix(&canonical_root)
                         .unwrap()
                         .to_string_lossy()
-                        .to_string();
+                        .replace('\\', "/");
 
                     let file_content = fs::read_to_string(&path).unwrap_or_default();
                     let (fm_opt, _) = parse_frontmatter(&file_content);

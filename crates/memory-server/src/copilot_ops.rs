@@ -124,12 +124,18 @@ fn supersede_wiki_duplicates(
         if candidate.id == canonical_id {
             continue;
         }
-        let same_subject = candidate.path == path
-            || target_subject
-                .as_ref()
-                .is_some_and(|token| wiki_subject_token(&candidate.topic).as_ref() == Some(token))
-            || wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+        // Dedup criteria (OR-combined, but single-token topic match requires path prefix overlap)
+        let same_path = candidate.path == path;
+        let same_topic = target_subject.as_ref().is_some_and(|token| {
+            let cand_token = wiki_subject_token(&candidate.topic);
+            cand_token.as_ref() == Some(token)
+                // Single-token topics require path prefix overlap to avoid over-broad matching
+                && (token.len() > 1
+                    || candidate.path.rsplit_once('/').map(|(_, dir)| dir) == path.rsplit_once('/').map(|(_, dir)| dir))
+        });
+        let similar_text = wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
                 >= WIKI_DUP_JACCARD_THRESHOLD;
+        let same_subject = same_path || same_topic || similar_text;
         if !same_subject {
             continue;
         }
