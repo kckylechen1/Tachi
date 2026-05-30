@@ -1154,6 +1154,24 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
         }
 
+        {
+            let rem_server = server.clone();
+            tokio::spawn(async move {
+                loop {
+                    let next_run = crate::daily_pipeline::next_weekly_rem_run_time();
+                    tokio::time::sleep_until(next_run).await;
+                    match crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&rem_server).await {
+                        Ok(report) => eprintln!(
+                            "[rem-wiki-evolver] completed: clusters={} drafts={} skipped={} errors={}",
+                            report.clusters_found, report.drafts_written, report.skipped, report.errors
+                        ),
+                        Err(e) => eprintln!("[rem-wiki-evolver] failed: {e}"),
+                    }
+                }
+            });
+            eprintln!("[daemon] REM wiki evolver scheduled for Sunday 05:00 Asia/Shanghai");
+        }
+
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         };

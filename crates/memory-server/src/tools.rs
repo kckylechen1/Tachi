@@ -1208,6 +1208,50 @@ impl MemoryServer {
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }
 
+    /// Zero-param briefing alias. Call at the start of any non-trivial task to
+    /// load prior session context without having to remember the action name.
+    #[tool(
+        description = "Call at the START of any non-trivial task. Returns prior session context, recent decisions, and active todos. Zero params required — equivalent to tachi_memory(action='briefing')."
+    )]
+    pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
+        let params = TachiMemoryParams {
+            action: "briefing".to_string(),
+            query: None,
+            scope: None,
+            top_k: 6,
+            path_prefix: None,
+            file_context: None,
+            error_context: None,
+            category: None,
+            include_archived: false,
+            enable_rerank: false,
+            as_of: None,
+            synthesize: false,
+            model: None,
+            text: None,
+            title: None,
+            summary: None,
+            topic: None,
+            keywords: vec![],
+            entities: vec![],
+            importance: None,
+            retention_policy: None,
+            kind: None,
+            path: None,
+            id: None,
+            force: false,
+            source: None,
+            valid_from: None,
+            valid_until: None,
+            flow_id: None,
+            event: None,
+            state: None,
+            project: None,
+            domain: None,
+        };
+        crate::facade_memory_ops::handle_tachi_memory(self, params).await
+    }
+
     #[tool(
         description = "Unified search across wiki and memory. Use scope to target 'wiki', 'memory', or 'all' (default)."
     )]
