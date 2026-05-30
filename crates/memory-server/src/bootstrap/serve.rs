@@ -1250,28 +1250,27 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                                 });
                                 // Wait for daemon to become ready by polling the health endpoint
                                 let port_val = cli.port;
-                                let ready = tokio::time::timeout(
-                                    Duration::from_secs(5),
-                                    async {
-                                        for _ in 0..25 {
-                                            tokio::time::sleep(Duration::from_millis(200)).await;
-                                            if let Ok(resp) = reqwest::get(
-                                                format!("http://127.0.0.1:{port_val}/health"),
-                                            )
-                                            .await
-                                            {
-                                                if resp.status().is_success() {
-                                                    return true;
-                                                }
+                                let ready = tokio::time::timeout(Duration::from_secs(5), async {
+                                    for _ in 0..25 {
+                                        tokio::time::sleep(Duration::from_millis(200)).await;
+                                        if let Ok(resp) = reqwest::get(format!(
+                                            "http://127.0.0.1:{port_val}/health"
+                                        ))
+                                        .await
+                                        {
+                                            if resp.status().is_success() {
+                                                return true;
                                             }
                                         }
-                                        false
-                                    },
-                                )
+                                    }
+                                    false
+                                })
                                 .await
                                 .unwrap_or(false);
                                 if !ready {
-                                    tracing::warn!("[auto-daemon] daemon did not become ready within 5s");
+                                    tracing::warn!(
+                                        "[auto-daemon] daemon did not become ready within 5s"
+                                    );
                                 }
                             }
                             Err(e) => {

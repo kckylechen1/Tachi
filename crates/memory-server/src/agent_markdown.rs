@@ -1,6 +1,5 @@
 //! Human-readable Markdown formatting for agent-facing MCP tools.
 
-use crate::db_context::{diagnostics_footer, format_db_context_markdown, DbContext};
 use serde_json::Value;
 
 /// Escape characters that have special meaning in Markdown bold/code contexts.
@@ -11,45 +10,16 @@ fn md_escape(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> String {
-    let mut out = vec![format!("## {title}\n"), format_db_context_markdown(ctx)];
-    let Some(items) = rows.as_array() else {
-        out.push("\n_No results._".to_string());
-        return out.join("\n");
-    };
-    if items.is_empty() {
-        out.push("\n_No results._".to_string());
-        return out.join("\n");
+fn compact_text(s: &str, limit: usize) -> String {
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= limit {
+        one_line
+    } else {
+        format!("{}...", one_line.chars().take(limit).collect::<String>())
     }
-    out.push(format!("\n### Results ({})", items.len()));
-    for (idx, row) in items.iter().enumerate() {
-        let topic = row
-            .get("topic")
-            .and_then(Value::as_str)
-            .unwrap_or("untitled");
-        let db = row.get("db").and_then(Value::as_str).unwrap_or("?");
-        let relevance = row
-            .get("relevance")
-            .or_else(|| row.get("score"))
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let summary = row
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or("(no summary)");
-        let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
-        out.push(format!(
-            "\n{}. **{}** ({db}, relevance {relevance})\n   - {}\n   - Path: `{path}`",
-            idx + 1,
-            md_escape(topic),
-            md_escape(summary),
-        ));
-    }
-    out.join("\n")
 }
 
 pub(crate) fn format_briefing(
-    ctx: &DbContext,
     query: &str,
     memories: &Value,
     wiki: &Value,
@@ -57,11 +27,7 @@ pub(crate) fn format_briefing(
     kanban: &Value,
     checkpoints: &Value,
 ) -> String {
-    let mut out = vec![
-        "## Tachi briefing".to_string(),
-        format!("**Query:** {query}\n"),
-        format_db_context_markdown(ctx),
-    ];
+    let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
 
     out.push("\n### Memories".to_string());
     out.push(format_section_rows(memories, 12));
@@ -131,16 +97,11 @@ pub(crate) fn format_briefing(
         }
     }
 
-    out.push(diagnostics_footer().to_string());
     out.join("\n")
 }
 
-pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &Value) -> String {
-    let mut out = vec![
-        "## Tachi alerts".to_string(),
-        format_db_context_markdown(ctx),
-        "\n### Warnings".to_string(),
-    ];
+pub(crate) fn format_alerts(warnings: &[String], wiki_counts: &Value) -> String {
+    let mut out = vec!["## Tachi alerts".to_string(), "\n### Warnings".to_string()];
     if warnings.is_empty() {
         out.push("- No active warnings".to_string());
     } else {
@@ -167,20 +128,13 @@ pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &
         ));
     }
 
-    out.push(diagnostics_footer().to_string());
     out.join("\n")
 }
 
-pub(crate) fn format_wiki_search(
-    ctx: &DbContext,
-    query: &str,
-    count: usize,
-    results: &Value,
-) -> String {
+pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
     let mut out = vec![
         format!("## Wiki search: \"{query}\""),
-        format_db_context_markdown(ctx),
-        format!("\n### Results ({count})"),
+        format!("Results: {count}"),
     ];
     let rows: &[Value] = results
         .as_array()
@@ -201,23 +155,17 @@ pub(crate) fn format_wiki_search(
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             out.push(format!(
-                "\n{}. `{path}` (relevance {relevance})\n   {summary}",
-                idx + 1
+                "{}. {relevance} `{path}` - {}",
+                idx + 1,
+                md_escape(&compact_text(summary, 120)),
             ));
         }
     }
     out.join("\n")
 }
 
-pub(crate) fn format_search_sections(
-    ctx: &DbContext,
-    query: &str,
-    sections: &[(String, Value)],
-) -> String {
-    let mut out = vec![
-        format!("## Tachi search: \"{query}\""),
-        format_db_context_markdown(ctx),
-    ];
+pub(crate) fn format_search_sections(query: &str, sections: &[(String, Value)]) -> String {
+    let mut out = vec![format!("## Tachi search: \"{query}\"")];
     for (heading, rows) in sections {
         out.push(format!("\n### {heading}"));
         if let Some(text) = rows.as_str() {
@@ -350,10 +298,10 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             .unwrap_or_else(|| "?".to_string());
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{}**{id_suffix} (relevance {relevance})\n   - {}\n   - `{path}`",
+            "{}. **{}**{id_suffix} {relevance} `{path}` - {}",
             idx + 1,
             md_escape(topic),
-            md_escape(summary),
+            md_escape(&compact_text(summary, 120)),
         ));
     }
     out.join("\n")

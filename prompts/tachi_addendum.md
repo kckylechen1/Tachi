@@ -28,7 +28,7 @@
 | 跨 session 交接 | `tachi_handoff_leave` / `tachi_handoff_check` | session 开头先 check。 |
 | 找技能 | `tachi_recommend_skill` `tachi_recommend_capability` `tachi_recommend_toolchain` | 按自然语言任务找技能。 |
 | 执行技能 | `tachi_run_skill` | 入参 `skill_id` + `args`。 |
-| 列举技能 | `tachi-hub list` (CLI) | 见下文 §tachi-hub。 |
+| 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |
 
 ## save_memory 范式
 
@@ -48,17 +48,17 @@
 { "text": "fixed it" }
 ```
 
-## tachi-hub CLI
+## `tachi hub` CLI
 
-`tachi-hub` 是一个独立的命令行工具，用来不开 MCP 也能查技能/包/虚拟绑定。
+用 `tachi hub` 子命令不开 MCP 查技能/包/虚拟绑定（`tachi-hub` 已废弃，兼容脚本会转发到 `tachi hub`）。
 
 ```bash
-tachi-hub list                  # 列全部已注册技能/插件/MCP
-tachi-hub list --type skill     # 只看 skill
-tachi-hub show skill:code-review
-tachi-hub packs                 # 已安装的 pack
-tachi-hub stats                 # 总量统计
-tachi-hub doctor                # 健康巡检（vector 缺失、卡死任务、过期 ghost）
+tachi hub list                  # 列全部已注册技能/插件/MCP
+tachi hub list --type skill     # 只看 skill
+tachi hub show skill:code-review
+tachi hub packs                 # 已安装的 pack
+tachi hub stats                 # 总量统计
+tachi hub doctor                # 轻量 schema 巡检（与 `tachi doctor` v2 不同）
 ```
 
 输出与 `tachi_recommend_*` MCP 工具一致；CLI 走的是 `~/.tachi/global/memory.db`。
@@ -82,7 +82,7 @@ tachi-hub doctor                # 健康巡检（vector 缺失、卡死任务、
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `no such column: retention_policy` | 老库 schema drift | `tachi-hub doctor --fix` 或重启 memory-server（启动会 migrate） |
+| `no such column: retention_policy` | 老库 schema drift | `tachi hub doctor --fix` 或重启 memory-server（启动会 migrate） |
 | `vec0 module not loaded` | sqlite-vec 扩展未装 | brew 安装的二进制自带；裸 `sqlite3` CLI 没有 |
 | `distill produced empty` | bucket 不满 `FOUNDRY_DISTILL_MIN_BATCH=3` | 正常，等够 3 条同 topic/entity 的记忆再触发 |
 | `VOYAGE_RERANK_API_KEY missing` | 未配置 rerank | 可选项，不配置不影响核心检索 |

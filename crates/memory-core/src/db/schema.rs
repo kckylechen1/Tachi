@@ -1018,32 +1018,32 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Memo
 }
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
+    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
+
     let memories_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
     if memories_count == 0 {
         return Ok(());
     }
 
-    let fts_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))?;
-    if fts_count > 0 {
-        return Ok(());
-    }
+    conn.execute(
+        "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
+        [],
+    )?;
 
     conn.execute(
         r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
            SELECT
-             id,
-             path,
-             summary,
-             text,
-             trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-             trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
-           FROM memories"#,
+             m.id,
+             m.path,
+             m.summary,
+             m.text,
+             trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
+             trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
+           FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.id = m.id)"#,
         [],
     )?;
-
-    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
 
     Ok(())
 }
@@ -1456,5 +1456,56 @@ mod migration_tests {
             .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
             .unwrap();
         assert!(cnt >= 1);
+    }
+
+    #[test]
+    fn migration_repairs_partial_fts_drift() {
+        libsimple::enable_auto_extension().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, persons, entities, location, source, scope, archived,
+                 created_at, updated_at, access_count, revision, metadata)
+            VALUES
+                ('row1', '/notes/a', '', 'alpha', 0.5, '2026-04-30T00:00:00Z',
+                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}'),
+                ('row2', '/notes/b', '', 'bravo', 0.5, '2026-04-30T00:00:00Z',
+                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}');
+            INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+            VALUES
+                ('row1', '/notes/a', '', 'alpha', '', ''),
+                ('ghost', '/notes/ghost', '', 'ghost', '', '');
+            "#,
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
+            .unwrap();
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts f LEFT JOIN memories m ON m.id=f.id WHERE m.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let missing_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories m LEFT JOIN memories_fts f ON f.id=m.id WHERE f.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(fts_count, 2);
+        assert_eq!(orphan_count, 0);
+        assert_eq!(missing_count, 0);
     }
 }

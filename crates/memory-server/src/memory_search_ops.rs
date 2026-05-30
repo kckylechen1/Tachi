@@ -800,16 +800,19 @@ fn enqueue_save_enrichment(
 }
 
 fn build_save_response(
-    entry_id: &str,
+    entry: &MemoryEntry,
     timestamp: &str,
     target_db: DbScope,
     enrichment_enqueued: bool,
+    needs_embedding: bool,
+    needs_summary: bool,
     warning: Option<String>,
     gate_warnings: Option<serde_json::Value>,
     secret_redactions: usize,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut response = serde_json::Map::new();
-    response.insert("id".into(), json!(entry_id));
+    response.insert("id".into(), json!(entry.id.clone()));
+    response.insert("path".into(), json!(entry.path.clone()));
     response.insert("timestamp".into(), json!(timestamp));
     response.insert("db".into(), json!(target_db.as_str()));
     let status = if enrichment_enqueued {
@@ -818,6 +821,14 @@ fn build_save_response(
         "saved"
     };
     response.insert("status".into(), json!(status));
+    response.insert(
+        "enrichment".into(),
+        json!({
+            "queued": enrichment_enqueued,
+            "embedding_pending": needs_embedding && entry.vector.is_none(),
+            "summary_pending": needs_summary && entry.summary.is_empty(),
+        }),
+    );
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
     }
@@ -1034,10 +1045,12 @@ pub(crate) async fn handle_save_memory(
         enrichment_revision,
     );
     let mut response = build_save_response(
-        &id,
+        &entry,
         &timestamp,
         target_db,
         enrichment_enqueued,
+        needs_embedding,
+        needs_summary,
         warning,
         gate_warnings,
         secret_redactions,
@@ -1284,7 +1297,8 @@ pub(super) async fn search_memory_rows(
                     })
             }) {
                 Ok(project_results) => {
-                    combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    combined_results
+                        .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                 }
                 Err(e) => {
                     tracing::warn!("Search failed in inferred project DB '{project_name}': {e}");
@@ -1495,7 +1509,11 @@ fn dedup_subject_key(entry: &MemoryEntry) -> Option<String> {
     if !topic.is_empty()
         && (entry.source.eq_ignore_ascii_case("foundry_distill") || entry.is_guide())
     {
-        return Some(format!("distill:{topic}:{}:{}", path, entry.entities.join("|")));
+        return Some(format!(
+            "distill:{topic}:{}:{}",
+            path,
+            entry.entities.join("|")
+        ));
     }
     None
 }

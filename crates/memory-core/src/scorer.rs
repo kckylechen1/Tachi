@@ -268,31 +268,25 @@ fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
         .collect()
 }
 
-fn normalized_rank_score(rank: usize, total: usize) -> f64 {
-    if total <= 1 {
-        return 1.0;
-    }
-    1.0 - ((rank.saturating_sub(1)) as f64 / (total.saturating_sub(1)) as f64)
-}
-
 fn blend_rrf_with_vector_signal(
     id: &str,
     rrf_score: f64,
     vec_scores: &HashMap<String, f64>,
-    vec_ranks: Option<&HashMap<String, usize>>,
+    vec_weight: f64,
 ) -> f64 {
     let Some(cosine) = vec_scores.get(id).copied().map(normalize) else {
         return rrf_score;
     };
-    let Some(rank_score) = vec_ranks
-        .and_then(|ranks| ranks.get(id))
-        .map(|rank| normalized_rank_score(*rank, vec_scores.len()))
-    else {
-        return rrf_score;
-    };
 
-    let improvement = (cosine - rank_score).max(0.0);
-    rrf_score * (1.0 + 0.3 * improvement)
+    rrf_score * (1.0 + 0.15 * vec_weight.clamp(0.0, 1.0) * cosine)
+}
+
+fn retrieval_rrf_weight(weight: f64, total: f64) -> f64 {
+    if !weight.is_finite() || weight <= 0.0 || total <= 0.0 {
+        0.0
+    } else {
+        weight / total
+    }
 }
 
 pub fn graph_relation_activation_weight(relation: &str) -> f64 {
@@ -438,24 +432,28 @@ pub fn hybrid_score(
             // Reciprocal Rank Fusion: rewards agreement across channels
             // without overtrusting raw score calibration differences.
             let rrf_k = 60.0;
+            let retrieval_weight_total =
+                (weights.semantic + weights.fts + weights.symbolic).max(0.0);
+            let vec_weight = retrieval_rrf_weight(weights.semantic, retrieval_weight_total);
+            let fts_weight = retrieval_rrf_weight(weights.fts, retrieval_weight_total);
+            let symbolic_weight = retrieval_rrf_weight(weights.symbolic, retrieval_weight_total);
             let vec_part = vec_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .map(|rank| vec_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let fts_part = fts_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .map(|rank| fts_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let symbolic_part = symbolic_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 0.5 / (rrf_k + *rank as f64))
+                .map(|rank| symbolic_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let rrf_score = vec_part + fts_part + symbolic_part;
-            let blended =
-                blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_ranks.as_ref());
+            let blended = blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_weight);
             // Decay re-injected as a proportional bonus so recency still
             // influences ranking in RRF mode (scaled to the RRF score range).
             blended + weights.decay * ds / rrf_k
@@ -525,7 +523,7 @@ fn stock_code_re() -> &'static Regex {
     STOCK_CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap())
 }
 
-/// Compute a normalised token-recall score [0, 1].
+/// Compute a normalised query-token recall score [0, 1].
 /// Measures what fraction of query tokens appear in the entry's text/keywords/entities.
 pub fn symbolic_score(
     query: &str,
@@ -552,8 +550,7 @@ pub fn symbolic_score(
     }
 
     let overlap = query_tokens.intersection(&text_tokens).count();
-    let union_size = query_tokens.union(&text_tokens).count().max(1);
-    (overlap as f64) / (union_size as f64)
+    (overlap as f64) / (query_tokens.len().max(1) as f64)
 }
 
 /// Extract A-share style 6-digit stock codes from a query.
@@ -583,11 +580,6 @@ pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
 /// matches across thousands of unrelated entries. The 12.0x factor ensures
 /// an exact ticker match dominates hybrid ranking.
 ///
-/// Rationale: A-share 6-digit codes (e.g. "688981") are extremely common
-/// numeric strings. Without boosting, FTS/symbolic channels dilute exact
-/// matches across thousands of unrelated entries. The 12.0x factor ensures
-/// an exact ticker match dominates hybrid ranking.
-///
 /// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
 /// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
 const TICKER_EXACT_MATCH_BOOST: f64 = 12.0;
@@ -605,7 +597,9 @@ pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
 
     let mut mult: f64 = 1.0;
     let needs_bundle = ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
-        || q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损");
+        || q.contains("stop loss")
+        || q.contains("stop-loss")
+        || query.contains("止损");
 
     if !needs_bundle {
         // Fast path: query doesn't contain any precision terms, skip expensive bundle construction
@@ -658,6 +652,36 @@ pub fn heuristic_metadata_from_text(text: &str) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn test_entry(id: &str) -> crate::types::MemoryEntry {
+        crate::types::MemoryEntry {
+            id: id.into(),
+            path: "/test".into(),
+            summary: String::new(),
+            text: String::new(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            retention_policy: None,
+            domain: None,
+            vector: None,
+        }
+    }
 
     #[test]
     fn cosine_identity() {
@@ -679,14 +703,73 @@ mod tests {
     }
 
     #[test]
+    fn symbolic_exact_query_match_is_not_diluted_by_long_text() {
+        let long_text = format!(
+            "{} mcp handshake {}",
+            "filler ".repeat(200),
+            "extra ".repeat(200)
+        );
+        let score = symbolic_score("mcp handshake", &long_text, &[], &[]);
+        assert!(score > 0.9, "score={score}");
+    }
+
+    #[test]
     fn symbolic_uses_entities_for_stock_codes() {
         let entities = vec!["688981".to_string()];
         let score = symbolic_score("688981", "无关正文", &[], &entities);
-        // With Jaccard denominator (union), entity match still produces a positive score
-        // but is dampened by non-overlapping text tokens. Precise ranking is handled
-        // by precision_query_multiplier's 12x boost upstream.
-        assert!(score > 0.0, "score={score}");
+        assert!(score > 0.9, "score={score}");
         assert!(score <= 1.0, "score={score}");
+    }
+
+    #[test]
+    fn rrf_respects_channel_weights() {
+        let a = test_entry("a");
+        let b = test_entry("b");
+        let entries = HashMap::from([("a".to_string(), &a), ("b".to_string(), &b)]);
+        let vec_scores = HashMap::from([("a".to_string(), 0.9), ("b".to_string(), 0.8)]);
+        let fts_scores = HashMap::from([("a".to_string(), 0.1), ("b".to_string(), 0.9)]);
+        let symbolic_scores = HashMap::new();
+        let access_times = HashMap::new();
+
+        let vector_heavy = HybridWeights {
+            semantic: 0.9,
+            fts: 0.1,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: true,
+        };
+        let vector_ranked = hybrid_score(
+            &entries,
+            &vec_scores,
+            &fts_scores,
+            &symbolic_scores,
+            &vector_heavy,
+            &access_times,
+        );
+        assert!(
+            vector_ranked["a"].final_score > vector_ranked["b"].final_score,
+            "vector-heavy RRF should prefer vector rank"
+        );
+
+        let fts_heavy = HybridWeights {
+            semantic: 0.1,
+            fts: 0.9,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: true,
+        };
+        let fts_ranked = hybrid_score(
+            &entries,
+            &vec_scores,
+            &fts_scores,
+            &symbolic_scores,
+            &fts_heavy,
+            &access_times,
+        );
+        assert!(
+            fts_ranked["b"].final_score > fts_ranked["a"].final_score,
+            "fts-heavy RRF should prefer FTS rank"
+        );
     }
 
     #[test]
@@ -807,15 +890,12 @@ mod tests {
             ("b".to_string(), 0.98),
             ("c".to_string(), 0.97),
         ]);
-        let ranks = rank_map(&vec_scores);
         let base = 0.02;
 
-        let blended =
-            blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, Some(&ranks));
+        let blended = blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, 1.0);
         assert!(blended > base, "blended={blended}, base={base}");
 
-        let missing =
-            blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, Some(&ranks));
+        let missing = blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, 1.0);
         assert_eq!(missing, base);
     }
 

@@ -1,81 +1,13 @@
-// tachi-hub — Standalone CLI to inspect Tachi Hub registry without spawning MCP server.
-//
-// Reads ~/.tachi/global/memory.db (or $TACHI_HOME/global/memory.db, or --db override)
-// and prints capability / pack / virtual binding info. Read-only by default.
+//! Read-only Hub registry inspection (formerly the standalone `tachi-hub` binary).
+//! Invoked via `tachi hub <subcommand>`.
 
-#![allow(clippy::print_literal, clippy::type_complexity)]
+use std::path::{Path, PathBuf};
 
-use std::path::PathBuf;
-use std::process::ExitCode;
-
-use clap::{Parser, Subcommand};
 use rusqlite::Connection;
 
-#[derive(Parser, Debug)]
-#[command(
-    name = "tachi-hub",
-    about = "Inspect Tachi Hub registry (skills, packs, MCP servers, virtual bindings).",
-    version
-)]
-struct Cli {
-    /// Override DB path (default: $TACHI_HOME/global/memory.db or ~/.tachi/global/memory.db)
-    #[arg(long, global = true)]
-    db: Option<PathBuf>,
+use crate::cli::HubAction;
 
-    #[command(subcommand)]
-    cmd: Cmd,
-}
-
-#[derive(Subcommand, Debug)]
-enum Cmd {
-    /// List capabilities (skills / plugins / MCP servers)
-    List {
-        /// Filter by type: skill | plugin | mcp
-        #[arg(long, value_name = "TYPE")]
-        r#type: Option<String>,
-        /// Show disabled capabilities too
-        #[arg(long)]
-        all: bool,
-    },
-    /// Show full detail for a single capability id
-    Show {
-        /// Capability id, e.g. "skill:code-review"
-        id: String,
-    },
-    /// List installed skill packs
-    Packs {
-        /// Show disabled packs too
-        #[arg(long)]
-        all: bool,
-    },
-    /// List virtual capability bindings
-    Bindings,
-    /// Aggregate stats
-    Stats,
-    /// Health check: scan all known DBs for schema drift, missing vectors, etc.
-    Doctor {
-        /// Apply trivial migrations (ALTER TABLE for missing columns)
-        #[arg(long)]
-        fix: bool,
-    },
-}
-
-fn resolve_db(cli_path: Option<&PathBuf>) -> PathBuf {
-    if let Some(p) = cli_path {
-        return expand(p.to_string_lossy().as_ref());
-    }
-    if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
-        return expand(&p);
-    }
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_home = std::env::var("TACHI_HOME")
-        .or_else(|_| std::env::var("SIGIL_HOME"))
-        .map(|v| expand(&v))
-        .unwrap_or_else(|_| home.join(".tachi"));
-    app_home.join("global/memory.db")
-}
-
-fn expand(raw: &str) -> PathBuf {
+pub(crate) fn expand_path(raw: &str) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     if raw == "~" {
         home
@@ -86,35 +18,44 @@ fn expand(raw: &str) -> PathBuf {
     }
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let db_path = resolve_db(cli.db.as_ref());
-
-    match run(&cli, &db_path) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("tachi-hub: {e}");
-            ExitCode::FAILURE
-        }
+pub(crate) fn resolve_hub_db(db_override: Option<&PathBuf>, app_home: &Path) -> PathBuf {
+    if let Some(p) = db_override {
+        return expand_path(p.to_string_lossy().as_ref());
     }
+    if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
+        return expand_path(&p);
+    }
+    app_home.join("global/memory.db")
 }
 
-fn run(cli: &Cli, db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    if !matches!(cli.cmd, Cmd::Doctor { .. }) && !db_path.exists() {
+pub(crate) fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Result<(), String> {
+    if !matches!(action, HubAction::Doctor { .. }) && !db_path.exists() {
         return Err(format!(
             "DB not found: {}. Run `tachi setup` or set TACHI_HOME.",
             db_path.display()
-        )
-        .into());
+        ));
     }
 
-    match &cli.cmd {
-        Cmd::List { r#type, all } => cmd_list(db_path, r#type.as_deref(), *all),
-        Cmd::Show { id } => cmd_show(db_path, id),
-        Cmd::Packs { all } => cmd_packs(db_path, *all),
-        Cmd::Bindings => cmd_bindings(db_path),
-        Cmd::Stats => cmd_stats(db_path),
-        Cmd::Doctor { fix } => cmd_doctor(*fix),
+    match action {
+        HubAction::List {
+            cap_type,
+            all,
+            json: false,
+        } => cmd_list(db_path, cap_type.as_deref(), *all).map_err(|e| e.to_string()),
+        HubAction::List { json: true, .. } => {
+            Err("JSON hub list is handled in cli_tool".into())
+        }
+        HubAction::Show { id } => cmd_show(db_path, id).map_err(|e| e.to_string()),
+        HubAction::Packs { all } => cmd_packs(db_path, *all).map_err(|e| e.to_string()),
+        HubAction::Bindings => cmd_bindings(db_path).map_err(|e| e.to_string()),
+        HubAction::Stats { json: false } => cmd_stats(db_path).map_err(|e| e.to_string()),
+        HubAction::Doctor { fix } => cmd_doctor(app_home, *fix).map_err(|e| e.to_string()),
+        HubAction::Register { .. }
+        | HubAction::Enable { .. }
+        | HubAction::Disable { .. }
+        | HubAction::Stats { json: true } => {
+            Err("handled by MemoryStore in cli_tool".into())
+        }
     }
 }
 
@@ -133,7 +74,6 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-// ─── list ─────────────────────────────────────────────────────────────────────
 fn cmd_list(
     db: &PathBuf,
     type_filter: Option<&str>,
@@ -228,7 +168,6 @@ fn cmd_list(
     Ok(())
 }
 
-// ─── show ─────────────────────────────────────────────────────────────────────
 fn cmd_show(db: &PathBuf, id: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let mut stmt = conn.prepare(
@@ -314,7 +253,6 @@ fn cmd_show(db: &PathBuf, id: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ─── packs ────────────────────────────────────────────────────────────────────
 fn cmd_packs(db: &PathBuf, show_all: bool) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let sql = if show_all {
@@ -362,7 +300,6 @@ fn cmd_packs(db: &PathBuf, show_all: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-// ─── bindings ─────────────────────────────────────────────────────────────────
 fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
     let mut stmt = conn.prepare(
@@ -403,8 +340,7 @@ fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ─── stats ────────────────────────────────────────────────────────────────────
-fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let conn = open_ro(db)?;
 
     let count = |sql: &str| -> rusqlite::Result<i64> { conn.query_row(sql, [], |r| r.get(0)) };
@@ -432,14 +368,7 @@ fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// ─── doctor ───────────────────────────────────────────────────────────────────
-fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_home = std::env::var("TACHI_HOME")
-        .or_else(|_| std::env::var("SIGIL_HOME"))
-        .map(|v| expand(&v))
-        .unwrap_or_else(|_| home.join(".tachi"));
-
+fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Error>> {
     let mut dbs: Vec<PathBuf> = Vec::new();
     let global = app_home.join("global/memory.db");
     if global.exists() {
@@ -468,7 +397,6 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
         println!("── {} ──", db.display());
         let conn = Connection::open(db)?;
 
-        // schema drift on memories
         let mut existing: Vec<String> = Vec::new();
         let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
@@ -491,7 +419,6 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // memories without vectors
         let missing_vec: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE vector IS NULL OR length(vector) = 0",
@@ -500,10 +427,12 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
             )
             .unwrap_or(0);
         if missing_vec > 0 {
-            println!("  [info] {missing_vec} memories without vectors (run `memory-server backfill-vectors --db {}`)", db.display());
+            println!(
+                "  [info] {missing_vec} memories without vectors (run `tachi backfill-vectors --db {}`)",
+                db.display()
+            );
         }
 
-        // ghost messages stuck
         let ghost_old: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM ghost_messages WHERE promoted = 0 AND created_at < datetime('now', '-30 days')",
@@ -515,7 +444,6 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
             println!("  [info] {ghost_old} unpromoted ghost messages older than 30d");
         }
 
-        // kanban open cards
         let kanban_open: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM kanban_cards WHERE status='open' AND created_at < datetime('now', '-14 days')",

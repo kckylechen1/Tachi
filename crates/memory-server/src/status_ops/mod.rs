@@ -101,6 +101,7 @@ pub(crate) struct DbStatus {
     pub(crate) memory_total: usize,
     pub(crate) vector_count: usize,
     pub(crate) vector_missing: usize,
+    pub(crate) vector_orphans: usize,
     pub(crate) vector_coverage: f64,
     pub(crate) vector_dimension: Option<usize>,
     pub(crate) enrichment_failed_recent: usize,
@@ -183,6 +184,7 @@ pub(crate) fn collect_snapshot(
                 memory_total: 0,
                 vector_count: 0,
                 vector_missing: 0,
+                vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
                 enrichment_failed_recent: 0,
@@ -206,6 +208,7 @@ pub(crate) fn collect_snapshot(
                 memory_total: vector.total,
                 vector_count: vector.with_vec,
                 vector_missing: vector.missing,
+                vector_orphans: vector.orphans,
                 vector_coverage: vector.coverage,
                 vector_dimension: vector.dimension,
                 enrichment_failed_recent: vector.enrichment_failed_recent,
@@ -226,6 +229,7 @@ pub(crate) fn collect_snapshot(
                 memory_total: 0,
                 vector_count: 0,
                 vector_missing: 0,
+                vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
                 enrichment_failed_recent: 0,
@@ -274,6 +278,7 @@ struct VectorHealth {
     total: usize,
     with_vec: usize,
     missing: usize,
+    orphans: usize,
     coverage: f64,
     dimension: Option<usize>,
     enrichment_failed_recent: usize,
@@ -317,6 +322,16 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
+    let orphans: usize = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM memories_vec v
+             LEFT JOIN memories m ON m.id = v.id
+             WHERE m.id IS NULL",
+            [],
+            |row| row.get::<_, i64>(0).map(|n| n as usize),
+        )
+        .unwrap_or(0);
     let enrichment_failed_recent: usize = conn
         .query_row(
             "SELECT COUNT(*) FROM memories
@@ -336,6 +351,7 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
         total,
         with_vec,
         missing,
+        orphans,
         coverage,
         dimension,
         enrichment_failed_recent,
@@ -359,6 +375,7 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
                 "memory_total": health.total,
                 "vector_count": health.with_vec,
                 "vector_missing": health.missing,
+                "vector_orphans": health.orphans,
                 "coverage": health.coverage,
                 "dimension": health.dimension,
                 "expected_dimension": EXPECTED_EMBEDDING_DIM,
@@ -575,7 +592,12 @@ fn named_project_from_path(db_path: &Path) -> Option<String> {
     let name = parent.file_name()?.to_str()?;
     let grand = parent.parent()?;
     let grand_name = grand.file_name()?.to_str()?;
-    if grand_name == "projects" && db_path.file_name()?.to_str()? == "memory.db" {
+    let root = grand.parent()?;
+    let root_name = root.file_name()?.to_str()?;
+    if grand_name == "projects"
+        && root_name == ".tachi"
+        && db_path.file_name()?.to_str()? == "memory.db"
+    {
         Some(name.to_string())
     } else {
         None
@@ -881,6 +903,19 @@ async fn handle_tachi_status_detail(
             })
         })
         .collect();
+    let vector_orphan_dbs: Vec<serde_json::Value> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.vector_orphans > 0)
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "path": d.path,
+                "orphans": d.vector_orphans,
+                "remediation": "Run `tachi repair --rule R7 --apply` to remove vector rows whose memory no longer exists.",
+            })
+        })
+        .collect();
     let auth_failures: Vec<serde_json::Value> = snapshot
         .dbs
         .iter()
@@ -934,6 +969,7 @@ async fn handle_tachi_status_detail(
                 "stuck_jobs": total_stuck,
                 "low_vector_coverage": low_coverage,
                 "vector_dimension_mismatches": vector_dimension_mismatches,
+                "vector_orphans": vector_orphan_dbs,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },

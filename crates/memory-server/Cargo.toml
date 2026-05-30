@@ -42,7 +42,3 @@ libsimple = "~0.7"
 [[bin]]
 name = "memory-server"
 path = "src/main.rs"
-
-[[bin]]
-name = "tachi-hub"
-path = "src/bin/tachi_hub.rs"

@@ -5,7 +5,6 @@
 //! delegates to [`handle_tachi_memory`].
 
 use crate::agent_markdown;
-use crate::db_context;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::facade_search_ops::handle_tachi_search;
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
@@ -173,12 +172,6 @@ async fn handle_memory_briefing(
         Some("memory")
     );
 
-    let ctx = db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
-
     // Memory + wiki searches run concurrently to reduce briefing latency.
     let mem_params = SearchMemoryParams {
         query: query.clone(),
@@ -269,7 +262,6 @@ async fn handle_memory_briefing(
     });
 
     Ok(agent_markdown::format_briefing(
-        &ctx,
         &query,
         &memories,
         &wiki,
@@ -414,16 +406,11 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
 
 async fn handle_memory_alerts(
     server: &MemoryServer,
-    params: &TachiMemoryParams,
+    _params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    let ctx = db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
     let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
     let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
-    Ok(agent_markdown::format_alerts(&ctx, &warnings, &wiki_counts))
+    Ok(agent_markdown::format_alerts(&warnings, &wiki_counts))
 }
 
 async fn handle_memory_ask(

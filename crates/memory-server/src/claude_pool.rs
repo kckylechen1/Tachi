@@ -158,9 +158,7 @@ impl ClaudePool {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
         let mut cmd = Command::new(&self.binary);
-        cmd.arg("-p")
-            .arg("--output-format")
-            .arg("json");
+        cmd.arg("-p").arg("--output-format").arg("json");
         if skip_perms {
             cmd.arg("--dangerously-skip-permissions");
         }

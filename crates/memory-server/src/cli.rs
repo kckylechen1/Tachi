@@ -152,7 +152,7 @@ pub(crate) enum Commands {
     },
     /// Run garbage collection
     Gc,
-    /// Hub management
+    /// Hub registry (list/show/packs/bindings/stats/doctor) and capability management
     Hub {
         #[command(subcommand)]
         action: HubAction,
@@ -662,10 +662,30 @@ pub(crate) enum WikiAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum HubAction {
+    /// List capabilities (table by default; pass --json for machine output)
     List {
-        #[arg(long)]
+        /// Filter by type: skill | plugin | mcp
+        #[arg(long, value_name = "TYPE")]
         cap_type: Option<String>,
+        /// Show disabled capabilities too
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON instead of the human table
+        #[arg(long)]
+        json: bool,
     },
+    /// Show full detail for a single capability id
+    Show {
+        /// Capability id, e.g. "skill:code-review"
+        id: String,
+    },
+    /// List installed skill packs
+    Packs {
+        #[arg(long)]
+        all: bool,
+    },
+    /// List virtual capability bindings
+    Bindings,
     Register {
         id: String,
         #[arg(long)]
@@ -683,7 +703,16 @@ pub(crate) enum HubAction {
     Disable {
         id: String,
     },
-    Stats,
+    /// Aggregate stats (table by default; pass --json for machine output)
+    Stats {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Lightweight multi-DB schema drift scan (not `tachi doctor` v2)
+    Doctor {
+        #[arg(long)]
+        fix: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
