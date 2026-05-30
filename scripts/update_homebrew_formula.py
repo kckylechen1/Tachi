@@ -89,28 +89,34 @@ def update_bottle_block(text: str, bottle_block: str) -> str:
 
 
 def ensure_tachi_hub_install(text: str) -> str:
-    """Install a `tachi-hub` shim that forwards to `tachi hub` (no second Rust binary)."""
-    shim_src = 'buildpath/"scripts/tachi-hub-compat.sh"'
-    shim_install = f'    bin.install {shim_src}, :rename => "tachi-hub"'
-
-    text = text.replace(
+    """Formula ships only `tachi`; Hub inspection is `tachi hub` (no second binary)."""
+    legacy_installs = [
         'bin.install buildpath/"target/release/tachi_hub" => "tachi-hub"',
-        shim_install,
-    )
-    text = text.replace(
         'bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"',
-        shim_install,
-    )
+        'bin.install buildpath/"scripts/tachi-hub-compat.sh", :rename => "tachi-hub"',
+    ]
+    for line in legacy_installs:
+        text = text.replace(f"    {line}\n", "")
+        text = text.replace(f"    {line}", "")
 
-    if shim_install not in text:
-        install_line = '    bin.install buildpath/"target/release/memory-server" => "tachi"'
-        replacement = install_line + "\n" + shim_install
-        text = replace_or_fail(
-            r'^\s*bin\.install buildpath/"target/release/memory-server" => "tachi"$',
-            replacement,
-            text,
-            "tachi-hub compat shim install",
-        )
+    text = re.sub(
+        r'^\s*#\{opt_bin\}/tachi-hub\s*\n',
+        "",
+        text,
+        flags=re.M,
+    )
+    text = re.sub(
+        r'^\s*assert_match version\.to_s, shell_output\("#\{bin\}/tachi-hub --version"\)\s*\n',
+        "",
+        text,
+        flags=re.M,
+    )
+    text = re.sub(
+        r'^\s*assert_match "Inspect Tachi Hub registry", shell_output\("#\{bin\}/tachi-hub --help"\)\s*\n',
+        "",
+        text,
+        flags=re.M,
+    )
 
     if 'shell_output("#{bin}/tachi hub --help")' not in text:
         hook = '    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")'

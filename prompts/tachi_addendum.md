@@ -7,7 +7,7 @@
 
 | 你 | 工具 |
 |---|---|
-| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi-*` MCP 工具集 + `tachi-hub` CLI |
+| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi-*` MCP 工具集 + `tachi hub` CLI |
 
 ## 三条铁律
 
@@ -50,7 +50,7 @@
 
 ## `tachi hub` CLI
 
-用 `tachi hub` 子命令不开 MCP 查技能/包/虚拟绑定（`tachi-hub` 已废弃，兼容脚本会转发到 `tachi hub`）。
+用 `tachi hub` 子命令不开 MCP 查技能/包/虚拟绑定（只有一个 `tachi` 可执行文件）。
 
 ```bash
 tachi hub list                  # 列全部已注册技能/插件/MCP
