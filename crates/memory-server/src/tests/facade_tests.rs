@@ -178,7 +178,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
 
     let parsed: Value = serde_json::from_str(&body).expect("checkpoint JSON");
     assert!(parsed["id"].as_str().is_some());
-    assert_eq!(parsed["status"], json!("saved (enrichment pending)"));
+    assert_eq!(parsed["status"], json!("saved"));
 }
 
 #[tokio::test]

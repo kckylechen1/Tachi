@@ -696,6 +696,9 @@ mod tests {
             vector: None,
             retention_policy: Some("durable".to_string()),
             domain: Some("coding".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         }
     }
 

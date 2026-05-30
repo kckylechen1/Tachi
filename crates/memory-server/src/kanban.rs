@@ -508,6 +508,9 @@ pub(crate) async fn handle_post_card(
         metadata: metadata.clone(),
         retention_policy: Some("ephemeral".to_string()),
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     server.with_global_store(|store| {

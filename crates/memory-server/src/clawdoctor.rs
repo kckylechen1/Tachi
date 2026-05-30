@@ -232,6 +232,9 @@ async fn save_incident_memory(server: &MemoryServer, text: &str) {
         vector: None,
         retention_policy: None,
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     let result =

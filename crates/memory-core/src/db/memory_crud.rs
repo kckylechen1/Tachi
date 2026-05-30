@@ -8,6 +8,32 @@ use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemorySco
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/// FNV-1a 32-bit hash of a query string for query_diversity tracking.
+fn fnv1a_hash(s: &str) -> String {
+    let mut hash: u32 = 2_166_136_261;
+    for byte in s.bytes() {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    format!("{hash:08x}")
+}
+
+/// Token-based Jaccard similarity between two texts.
+/// Uses the same tokeniser as [`crate::scorer::tokenize`].
+fn jaccard_similarity(a: &str, b: &str) -> f64 {
+    use std::collections::HashSet;
+    let ta: HashSet<String> = crate::scorer::tokenize(a).into_iter().collect();
+    let tb: HashSet<String> = crate::scorer::tokenize(b).into_iter().collect();
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ta.intersection(&tb).count() as f64;
+    let union = ta.union(&tb).count() as f64;
+    if union == 0.0 { 0.0 } else { intersection / union }
+}
+
 // ─── Normalization ────────────────────────────────────────────────────────────
 
 /// Coerce caller-provided enum-like fields to the canonical vocabulary
@@ -103,6 +129,95 @@ pub fn upsert(
     // All writes for one upsert must be atomic across main table + FTS + vec.
     let tx = conn.transaction()?;
 
+    // ── Write-time Jaccard deduplication (new entries only) ──────────────────
+    // Only for net-new IDs; ON CONFLICT path below handles updates.
+    let is_new: bool = tx.query_row(
+        "SELECT COUNT(*) FROM memories WHERE id = ?1",
+        params![entry.id],
+        |r| r.get::<_, i64>(0),
+    ).unwrap_or(0) == 0;
+
+    if is_new {
+        // Run FTS search for potential overlapping entries
+        let safe_query: String = entry.text
+            .split_whitespace()
+            .take(12)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !safe_query.is_empty() {
+            let fts_candidates: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT m.id, m.text FROM memories_fts
+                     JOIN memories m ON m.id = memories_fts.id
+                     WHERE memories_fts MATCH simple_query(?1)
+                       AND m.archived = 0 AND m.superseded_by IS NULL
+                     LIMIT 5"
+                ).ok();
+                if let Some(ref mut s) = stmt {
+                    s.query_map(params![safe_query], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .ok()
+                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                    .unwrap_or_default()
+                } else { vec![] }
+            };
+            for (cand_id, cand_text) in fts_candidates {
+                if jaccard_similarity(&entry.text, &cand_text) > 0.9 {
+                    // Merge: update candidate with max importance and merged tags
+                    let merge_kws = {
+                        let cand_kws_json: String = tx.query_row(
+                            "SELECT keywords FROM memories WHERE id = ?1", params![cand_id],
+                            |r| r.get(0)
+                        ).unwrap_or_else(|_| "[]".to_string());
+                        let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
+                        for k in &entry.keywords { if !kws.contains(k) { kws.push(k.clone()); } }
+                        serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
+                    };
+                    let merge_ents = {
+                        let cand_ents_json: String = tx.query_row(
+                            "SELECT entities FROM memories WHERE id = ?1", params![cand_id],
+                            |r| r.get(0)
+                        ).unwrap_or_else(|_| "[]".to_string());
+                        let mut ents: Vec<String> = serde_json::from_str(&cand_ents_json).unwrap_or_default();
+                        for e in &entry.entities { if !ents.contains(e) { ents.push(e.clone()); } }
+                        serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
+                    };
+                    tx.execute(
+                        "UPDATE memories SET keywords = ?1, entities = ?2,
+                         importance = MAX(importance, ?3), updated_at = ?4
+                         WHERE id = ?5",
+                        params![merge_kws, merge_ents, importance, &write_time_utc, cand_id],
+                    ).ok();
+                    // Write this entry as superseded by the candidate
+                    tx.execute(
+                        r#"INSERT INTO memories
+                              (id, path, summary, text, importance,
+                               timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
+                               location, source, scope, archived, created_at, updated_at,
+                               access_count, last_access, revision, metadata,
+                               retention_policy, domain, recall_count, query_diversity, tier,
+                               superseded_by)
+                           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                           ON CONFLICT(id) DO NOTHING"#,
+                        params![
+                            entry.id, &path, &clean_summary, &clean_text, importance,
+                            timestamp_utc, valid_from_utc, valid_until_utc, category, entry.topic,
+                            kws_json, p_json, e_json, entry.location, &source, scope,
+                            entry.archived, &write_time_utc, &write_time_utc,
+                            entry.access_count, last_access_utc, entry.revision.max(1),
+                            metadata_json, &retention_policy, entry.domain,
+                            0i64, 0i64, "raw",
+                            cand_id,
+                        ],
+                    )?;
+                    tx.commit()?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     // Write to main table
     tx.execute(
         r#"INSERT INTO memories
@@ -110,8 +225,8 @@ pub fn upsert(
                timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
                location, source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
-               retention_policy, domain)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+               retention_policy, domain, recall_count, query_diversity, tier)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -136,7 +251,8 @@ pub fn upsert(
                revision     = memories.revision + 1,
                metadata     = excluded.metadata,
                retention_policy = excluded.retention_policy,
-               domain       = excluded.domain"#,
+               domain       = excluded.domain,
+               tier         = CASE WHEN memories.tier IN ('consolidated','pattern') THEN memories.tier ELSE excluded.tier END"#,
         params![
             entry.id,
             &path,
@@ -163,6 +279,9 @@ pub fn upsert(
             metadata_json,
             &retention_policy,
             entry.domain,
+            entry.recall_count,
+            entry.query_diversity,
+            &entry.tier,
         ],
     )?;
 
@@ -630,7 +749,7 @@ pub fn fetch_by_ids(
             .collect::<Vec<_>>()
             .join(",");
         let mut sql = format!(
-            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
              FROM memories WHERE id IN ({})",
             placeholders
         );
@@ -685,10 +804,10 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
          FROM memories ORDER BY timestamp DESC LIMIT ?"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
          FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -725,13 +844,13 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC
@@ -754,7 +873,7 @@ pub fn find_active_wiki_entry_by_path_or_topic(
     topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        r#"SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        r#"SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
@@ -770,33 +889,74 @@ pub fn find_active_wiki_entry_by_path_or_topic(
 }
 
 /// Bump access_count and last_access for a list of IDs (called after every search).
-/// Also records access timestamps for ACT-R base-level activation.
-pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
+/// `fts_hits` are the IDs matched by the FTS channel (get recall_count incremented).
+/// `query` is the raw query string; its FNV-1a hash is stored in access_history and
+/// used to compute `query_diversity` (distinct queries that reached this memory).
+/// Applies a promotion gate: tier → "consolidated" when recall_count ≥ 3,
+/// query_diversity ≥ 3, and (importance ≥ 0.8 OR query_diversity ≥ 3).
+pub fn record_access(
+    conn: &Connection,
+    ids: &[String],
+    fts_hits: &[String],
+    query: Option<&str>,
+) -> Result<(), MemoryError> {
     if ids.is_empty() {
         return Ok(());
     }
 
     let now = now_utc_iso();
+    let query_hash = query.map(fnv1a_hash).unwrap_or_default();
     let tx = conn.unchecked_transaction()?;
+
+    // Build a set of FTS hit IDs for O(1) lookup
+    let fts_set: std::collections::HashSet<&str> =
+        fts_hits.iter().map(String::as_str).collect();
+
     for id in ids {
-        // NOTE: do NOT bump `updated_at` or `revision` here. record_access is
-        // a pure read-side accounting bump; treating it as a content mutation
-        // spuriously invalidates downstream caches (SDK consumers key off
-        // `updated_at`) and conflates read frequency with content change.
-        // Optimistic-concurrency guards (`update_with_revision`,
-        // `update_enrichment_fields`) gate on `revision` and are unaffected.
+        // NOTE: do NOT bump `updated_at` or `revision` here — see original comment.
         tx.execute(
             "UPDATE memories
              SET access_count = access_count + 1, last_access = ?1
              WHERE id = ?2",
             params![&now, id],
         )?;
-        // Also record timestamp for ACT-R base-level activation
+        // Record access timestamp + query hash for ACT-R / diversity tracking
         tx.execute(
-            "INSERT INTO access_history (memory_id, accessed_at) VALUES (?1, ?2)",
-            params![id, &now],
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+            params![id, &now, &query_hash],
+        )?;
+
+        // Increment recall_count for FTS hits (exact term retrieval signal)
+        if fts_set.contains(id.as_str()) {
+            tx.execute(
+                "UPDATE memories SET recall_count = recall_count + 1 WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
+        // Recompute query_diversity from distinct hashes in access_history
+        let diversity: i64 = tx.query_row(
+            "SELECT COUNT(DISTINCT query_hash) FROM access_history
+             WHERE memory_id = ?1 AND query_hash != ''",
+            params![id],
+            |r| r.get(0),
+        ).unwrap_or(0);
+        tx.execute(
+            "UPDATE memories SET query_diversity = ?1 WHERE id = ?2",
+            params![diversity, id],
+        )?;
+
+        // Promotion gate: raw → consolidated when recall_count ≥ 3 AND query_diversity ≥ 3
+        tx.execute(
+            "UPDATE memories SET tier = 'consolidated'
+             WHERE id = ?1
+               AND tier = 'raw'
+               AND recall_count >= 3
+               AND query_diversity >= 3",
+            params![id],
         )?;
     }
+
     tx.commit()?;
     Ok(())
 }

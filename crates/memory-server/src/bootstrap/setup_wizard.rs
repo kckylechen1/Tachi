@@ -340,12 +340,14 @@ const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 /// MCP `initialize` instructions (also mirrored in agent rule blocks).
 pub(crate) fn mcp_server_instructions() -> String {
     "Tachi — memory + Hub copilot for coding agents. \
-Before non-trivial work: tachi_memory(action='briefing') or tachi_task(action='plan'). \
-At task end (required unless trivial Q&A): tachi_memory(action='save', text=…, path='/scratch/…' or '/code-review/…', keywords=[tags], entities=[repos/modules], project='<git-project>'). \
-Mid-task handoff without finishing: action='checkpoint' (summary + next steps). \
-OpenClaw auto-captures on agent_end; Cursor/Windsurf/CLI do not — you must save explicitly. \
-Wiki/long-form → tachi_wiki(action='write'). Pass project for ~/.tachi/projects/<name>/memory.db. \
-Diagnostics: tachi_status / tachi_doctor."
+WORKFLOW: (1) briefing at session start: tachi_memory(action='briefing'). \
+(2) save PROACTIVELY after any meaningful milestone — decision made, root cause found, sub-task done, key command confirmed. Do NOT wait until session end: tachi_memory(action='save', text=…, path='/scratch/…' or '/code-review/…', keywords=[tags], entities=[repos/modules], project='<git-project>'). \
+(3) checkpoint for mid-task pause or handoff (not a substitute for save): action='checkpoint'. \
+(4) extract_facts to atomize raw text/logs via LLM into N searchable facts: action='extract_facts'. \
+Cursor/Windsurf have no auto-capture — you must call save explicitly. OpenClaw auto-captures on agent_end. \
+Wiki for stable reusable knowledge: tachi_wiki(action='write'). \
+Skills: tachi_skill(action='discover') before solving complex problems. \
+Diagnostics: tachi_status."
         .to_string()
 }
 
@@ -356,10 +358,13 @@ fn agent_memory_rules_block() -> String {
 ### Session start (non-trivial work)\n\
 - Call `tachi_memory` with `action=\"briefing\"` (or `tachi_task` `action=\"plan\"`).\n\
 - Optionally `tachi_status` when DB health, vectors, or Foundry jobs may matter.\n\n\
-### Session end (required unless trivial lookup)\n\
-- **Save durable outcomes** with `tachi_memory` `action=\"save\"`: decisions, root causes, commands, file paths, release tags, API contracts, test commands. Use `project` for the git repo (e.g. `sigil`), `path` under allowed buckets (`/scratch/…`, `/code-review/…`, `/wiki/…`), `keywords` + `entities`.\n\
+### Save — call proactively after any meaningful milestone\n\
+- **Do NOT wait until session end.** Save after: decision made, root cause found, sub-task done, key command confirmed.\n\
+- **`tachi_memory` `action=\"save\"`**: your own concise conclusion. Pass `project` (git repo), `path` under `/scratch/…` or `/code-review/…`, `keywords` + `entities`.\n\
+- **`action=\"extract_facts\"`**: feed raw undigested text/logs/docs — LLM atomizes into N searchable entries.\n\
+- **`action=\"checkpoint\"`**: mid-task pause or handoff (progress + next steps). Not a substitute for save when facts are final.\n\
 - **Do not rely on chat history** — Cursor/Windsurf have no `agent_end` auto-capture (OpenClaw does via `capture_session`).\n\
-- Skip save only for one-off trivia with nothing worth recalling next week.\n\n\
+- Skip save only for one-off trivia with nothing worth recalling next session.\n\n\
 ### Handoff without finishing\n\
 - `action=\"checkpoint\"` with concise summary + next steps (not a substitute for `save` when facts are final).\n\n\
 ### While working\n\

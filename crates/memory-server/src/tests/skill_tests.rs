@@ -266,6 +266,9 @@ async fn ingest_source_chunks_content_and_builds_graph_edges() {
                 vector: None,
                 retention_policy: None,
                 domain: Some("coding".to_string()),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
             };
             store.upsert(&entry).map_err(|e| e.to_string())
         })

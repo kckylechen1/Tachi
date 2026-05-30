@@ -122,6 +122,9 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
                     vector: None,
                     retention_policy: Some("permanent".to_string()),
                     domain: Some("coding".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 })
                 .map_err(|e| e.to_string())
         })

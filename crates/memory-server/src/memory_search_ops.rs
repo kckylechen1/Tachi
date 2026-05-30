@@ -26,7 +26,12 @@ struct ContradictionVerification {
     reason: String,
 }
 
-fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
+fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
+    // Raw-tier memories skip LLM embedding — they haven't been promoted yet.
+    // Post-distillation embedding is enqueued asynchronously by the daily pipeline.
+    if entry.tier.eq_ignore_ascii_case("raw") {
+        return false;
+    }
     true
 }
 
@@ -724,6 +729,9 @@ fn build_save_entry(
         vector: params.vector,
         retention_policy: params.retention_policy,
         domain: params.domain,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     }
 }
 
@@ -1853,6 +1861,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         }
     }
 
@@ -1918,11 +1929,13 @@ mod tests {
     }
 
     #[test]
-    fn should_enqueue_enrichment_always_true() {
+    fn should_enqueue_enrichment_skips_raw_tier() {
         let mut e = test_entry("enr-1", "test");
         e.importance = 0.3;
         e.vector = None;
-        assert!(should_enqueue_enrichment(&e));
+        e.tier = "raw".to_string();
+        // raw tier must be skipped to defer LLM embedding
+        assert!(!should_enqueue_enrichment(&e));
     }
 
     #[test]
@@ -1990,9 +2003,10 @@ mod tests {
     }
 
     #[test]
-    fn should_enqueue_enrichment_high_importance_legacy() {
-        let mut e = test_entry("enr-1", "test");
+    fn should_enqueue_enrichment_consolidated_enqueues() {
+        let mut e = test_entry("enr-2", "test");
         e.importance = 0.5;
+        e.tier = "consolidated".to_string();
         assert!(should_enqueue_enrichment(&e));
     }
 

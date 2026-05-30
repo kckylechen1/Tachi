@@ -104,6 +104,11 @@ pub(crate) async fn run_daily_pipeline(
     if let Err(e) = run_truth_maintenance_stage(server, &app_home).await {
         eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
     }
+
+    // ── SFT Factory: generate fine-tuning dialogues from distilled memories ───
+    if let Err(e) = crate::foundry_runtime_ops::sft_factory::run_daily_sft_distillation(server).await {
+        eprintln!("[daily_pipeline] SFT factory skipped: {e}");
+    }
     let agent_stage = run_agent_evolution_stage(server, &app_home).await;
     let skill_stage = run_skill_evolution_stage(server).await;
     let routing_stage = run_routing_analysis_stage(server, &date).await;
@@ -255,12 +260,90 @@ async fn run_truth_maintenance_for_target(
         "UPDATE memories
          SET archived = 1, updated_at = datetime('now')
          WHERE archived = 0
-           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned')
+           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
+           AND importance < 0.70
            AND access_count = 0
            AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
         [],
     )
     .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
+
+    // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
+    let total_active: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE archived = 0", [], |r| r.get(0))
+        .unwrap_or(0);
+    let consolidated_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE archived = 0 AND tier IN ('consolidated','pattern')",
+            [], |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let health_ratio = if total_active > 0 {
+        consolidated_count as f64 / total_active as f64
+    } else {
+        1.0
+    };
+    if health_ratio < 0.35 && total_active > 0 {
+        // Scan frequently accessed raw entries and force-promote them
+        let promoted = conn
+            .execute(
+                "UPDATE memories
+                 SET tier = 'consolidated', updated_at = datetime('now')
+                 WHERE archived = 0
+                   AND tier = 'raw'
+                   AND (access_count >= 2 OR recall_count >= 2)
+                   AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
+                [],
+            )
+            .unwrap_or(0);
+        if promoted > 0 {
+            eprintln!(
+                "[daily_pipeline] self-heal {}: promoted {promoted} raw → consolidated (ratio was {health_ratio:.2})",
+                target.label
+            );
+        }
+    }
+
+    // ── Post-distillation embedding: enqueue non-raw entries without vectors ──
+    let needs_embed_ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id FROM memories m
+                 LEFT JOIN memories_vec v ON m.id = v.id
+                 WHERE m.archived = 0
+                   AND m.tier != 'raw'
+                   AND v.id IS NULL
+                 ORDER BY m.importance DESC
+                 LIMIT 50",
+            )
+            .map_err(|e| format!("prepare embedding scan {}: {e}", target.label))?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| format!("query embedding scan {}: {e}", target.label))?
+            .filter_map(Result::ok)
+            .collect();
+        ids
+    };
+    if !needs_embed_ids.is_empty() {
+        let candidates =
+            memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false)
+                .unwrap_or_default();
+        for entry in candidates.values() {
+            let _ = server.enrichment_lock().enrich_tx.try_send(
+                crate::enrichment::build_enrichment_item(
+                    entry,
+                    true,  // needs_embedding
+                    false, // needs_summary
+                    target_db,
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    entry.revision,
+                ),
+            );
+        }
+    }
 
     let mut stmt = conn
         .prepare(

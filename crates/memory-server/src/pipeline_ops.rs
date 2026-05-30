@@ -45,7 +45,11 @@ fn is_lazy_source(source: &str) -> bool {
     matches!(source, "extraction" | "auto" | "ingest_event")
 }
 
-fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
+fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
+    // Raw-tier memories skip LLM embedding — deferred to post-distillation pass.
+    if entry.tier.eq_ignore_ascii_case("raw") {
+        return false;
+    }
     true
 }
 
@@ -193,6 +197,9 @@ fn build_ingest_entry(
         vector: None,
         retention_policy,
         domain,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     }
 }
 

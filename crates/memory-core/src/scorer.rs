@@ -7,8 +7,25 @@ use crate::types::{HybridScore, MemoryEntry};
 use chrono::{NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 
-// Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
+// Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem).
+// Consolidated memories decay at half speed; pattern memories are virtually permanent.
 const HALF_LIFE_DAYS: f64 = 30.0;
+
+fn tier_half_life(tier: &str) -> f64 {
+    match tier {
+        "pattern"      => 30_000.0, // virtually no decay
+        "consolidated" => 60.0,     // half speed
+        _              => HALF_LIFE_DAYS, // raw default
+    }
+}
+
+fn tier_actr_d(tier: &str) -> f64 {
+    match tier {
+        "pattern"      => 0.01,
+        "consolidated" => 0.25,
+        _              => 0.5, // raw
+    }
+}
 
 /// Normalise an f64 to [0, 1].
 #[inline]
@@ -57,7 +74,8 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
         });
     let age_days = (now - reference).num_seconds().max(0) as f64 / 86_400.0;
 
-    let recency = (-0.693 * age_days / HALF_LIFE_DAYS).exp();
+    let half_life = tier_half_life(&entry.tier);
+    let recency = (-0.693 * age_days / half_life).exp();
     let frequency = (1.0 + entry.access_count as f64).log10();
     let importance_floor = entry.importance * 0.3;
 
@@ -107,9 +125,10 @@ pub fn base_level_activation(access_ages_secs: &[f64], d: f64) -> f64 {
 /// Enhanced decay score using ACT-R base-level activation when access history is available.
 /// Falls back to the simplified decay_score when no history is provided.
 pub fn decay_score_actr(entry: &MemoryEntry, access_ages: Option<&[f64]>) -> f64 {
+    let d = tier_actr_d(&entry.tier);
     match access_ages {
         Some(ages) if !ages.is_empty() => {
-            let bla = base_level_activation(ages, 0.5);
+            let bla = base_level_activation(ages, d);
             // Normalize to [0, 1] range: BLA typically ranges from -5 to +5
             let normalized = (bla + 5.0) / 10.0;
             normalized
@@ -680,6 +699,9 @@ mod tests {
             retention_policy: None,
             domain: None,
             vector: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         }
     }
 
@@ -800,6 +822,9 @@ mod tests {
             retention_policy: None,
             domain: None,
             vector: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         };
         assert!(precision_query_multiplier("688981 止损", &entry) >= 10.0);
         entry.entities.clear();
@@ -834,6 +859,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         };
         let s = decay_score(&entry);
         // 60-day old, no access → recency ~ exp(-0.693*2) ≈ 0.25, floor=0.7*0.3=0.21 → ~0.25
@@ -873,6 +901,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         };
 
         let never = decay_score_actr(&entry, None);

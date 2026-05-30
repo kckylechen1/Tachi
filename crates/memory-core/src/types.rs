@@ -529,6 +529,24 @@ pub struct MemoryEntry {
     /// source_refs, caused_by, leads_to, etc.
     #[serde(default = "default_metadata")]
     pub metadata: serde_json::Value,
+
+    // ── Memory Lifecycle fields (tier-based decay & SFT factory) ──────────────
+
+    /// How many times this memory has been retrieved via a search hit (FTS).
+    #[serde(default)]
+    pub recall_count: i64,
+
+    /// Number of distinct query contexts (FNV-1a hash of query string) that
+    /// have retrieved this memory.  Used as the promotion gate signal.
+    #[serde(default)]
+    pub query_diversity: i64,
+
+    /// Quality tier: "raw" | "consolidated" | "pattern".
+    /// - raw:          newly written, no LLM enrichment yet, fast decay.
+    /// - consolidated: distilled or manually promoted, slow decay.
+    /// - pattern:      architectural / permanent knowledge, virtually no decay.
+    #[serde(default = "default_tier")]
+    pub tier: String,
 }
 
 impl MemoryEntry {
@@ -636,6 +654,9 @@ fn default_revision() -> i64 {
 }
 fn default_metadata() -> serde_json::Value {
     serde_json::Value::Object(Default::default())
+}
+pub fn default_tier() -> String {
+    "raw".to_string()
 }
 
 fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Vec<String> {
@@ -801,6 +822,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         };
         entry.fold_persons_into_entities();
         assert!(entry.persons.is_empty());
@@ -953,6 +977,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
             metadata: serde_json::json!({
                 "guide": true,
                 "guide_type": "fix_pattern",

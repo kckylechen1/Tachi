@@ -470,6 +470,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     // the stale check still flags this fixture.
                     retention_policy: Some("durable".to_string()),
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "wiki-always".to_string(),
@@ -496,6 +499,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: None,
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "wiki-never".to_string(),
@@ -522,6 +528,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: None,
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "wiki-dirty".to_string(),
@@ -548,6 +557,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: None,
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "wiki-duplicate-a".to_string(),
@@ -575,6 +587,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: None,
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "wiki-duplicate-b".to_string(),
@@ -602,6 +617,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: None,
                     domain: Some("general".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "skill-snapshot-a".to_string(),
@@ -629,6 +647,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: Some("permanent".to_string()),
                     domain: Some("coding".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
                 MemoryEntry {
                     id: "skill-snapshot-b".to_string(),
@@ -656,6 +677,9 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     vector: None,
                     retention_policy: Some("permanent".to_string()),
                     domain: Some("coding".to_string()),
+                    recall_count: 0,
+                    query_diversity: 0,
+                    tier: "raw".to_string(),
                 },
             ];
             for entry in entries {

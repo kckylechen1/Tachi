@@ -403,6 +403,9 @@ pub(crate) async fn handle_compact_session_memory(
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         });
     }
 
@@ -475,6 +478,9 @@ pub(crate) async fn handle_compact_session_memory(
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         });
     }
 
@@ -1069,6 +1075,9 @@ pub(crate) async fn handle_capture_session(
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         });
     }
 
@@ -1199,6 +1208,9 @@ pub(crate) async fn handle_capture_session(
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         });
     }
 

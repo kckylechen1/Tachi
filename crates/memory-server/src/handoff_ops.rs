@@ -110,6 +110,9 @@ fn memo_to_memory_entry(server: &MemoryServer, memo: &HandoffMemo) -> MemoryEntr
         metadata,
         retention_policy: Some("ephemeral".to_string()),
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     }
 }
 
@@ -891,6 +894,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         }
     }
 

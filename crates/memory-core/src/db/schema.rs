@@ -69,12 +69,15 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             archived     INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL DEFAULT '',
             updated_at   TEXT NOT NULL DEFAULT '',
-            access_count INTEGER NOT NULL DEFAULT 0,
-            last_access  TEXT,
-            revision     INTEGER NOT NULL DEFAULT 1,
-            metadata     TEXT NOT NULL DEFAULT '{}',
-            superseded_by TEXT
-        );
+                access_count    INTEGER NOT NULL DEFAULT 0,
+                last_access     TEXT,
+                revision        INTEGER NOT NULL DEFAULT 1,
+                metadata        TEXT NOT NULL DEFAULT '{}',
+                superseded_by   TEXT,
+                recall_count    INTEGER NOT NULL DEFAULT 0,
+                query_diversity INTEGER NOT NULL DEFAULT 0,
+                tier            TEXT NOT NULL DEFAULT 'raw'
+            );
 
         CREATE INDEX IF NOT EXISTS idx_memories_path        ON memories(path);
         CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance DESC);
@@ -416,6 +419,12 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "domain", "TEXT")?;
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
 
+    // Memory lifecycle columns for tier-based decay and SFT factory (Phase 1)
+    ensure_column(conn, "memories", "recall_count", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "memories", "query_diversity", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "memories", "tier", "TEXT NOT NULL DEFAULT 'raw'")?;
+    ensure_column(conn, "access_history", "query_hash", "TEXT")?;
+
     // Temporal edge columns for memory_edges
     ensure_column(
         conn,
@@ -491,6 +500,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
         CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
         CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
+        CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
+        CREATE INDEX IF NOT EXISTS idx_memories_recall ON memories(recall_count DESC);
     "#,
     )?;
 
@@ -860,10 +871,13 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             last_access  TEXT,
             revision     INTEGER NOT NULL DEFAULT 1,
             metadata     TEXT NOT NULL DEFAULT '{}',
-            retention_policy TEXT,
-            domain       TEXT,
-            superseded_by TEXT,
-            CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')),
+             retention_policy TEXT,
+             domain       TEXT,
+             superseded_by TEXT,
+             recall_count    INTEGER NOT NULL DEFAULT 0,
+             query_diversity INTEGER NOT NULL DEFAULT 0,
+             tier            TEXT NOT NULL DEFAULT 'raw',
+             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')),
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
             CHECK (
@@ -876,13 +890,15 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             (id, path, summary, text, importance, timestamp, valid_from, valid_until,
              category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain, superseded_by)
+             metadata, retention_policy, domain, superseded_by,
+             recall_count, query_diversity, tier)
         SELECT
              id, path, summary, text, importance, timestamp,
              COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
              category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
-             metadata, retention_policy, domain, superseded_by
+             metadata, retention_policy, domain, superseded_by,
+             COALESCE(recall_count, 0), COALESCE(query_diversity, 0), COALESCE(tier, 'raw')
         FROM memories;
 
         DROP TABLE memories;
@@ -895,8 +911,10 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_valid_time  ON memories(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
-        CREATE INDEX IF NOT EXISTS idx_memories_domain      ON memories(domain);
-        CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by);
+        CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
+        CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
+        CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
+        CREATE INDEX IF NOT EXISTS idx_memories_recall ON memories(recall_count DESC);
 
         "#,
     )?;
