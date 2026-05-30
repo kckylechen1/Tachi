@@ -60,6 +60,7 @@ mod gh_ops;
 mod gh_safe_merge;
 mod graph_state_ops;
 mod handoff_ops;
+mod hub_cli;
 mod hub_helpers;
 mod hub_ops;
 mod kanban;

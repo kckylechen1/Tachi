@@ -101,11 +101,53 @@ pub(super) async fn run_cli_command(
             unreachable!("Tidy is handled in async context before generic CLI dispatch")
         }
         Commands::Hub { action } => {
-            let store = open_cli_store(db_path)?;
+            let hub_db = crate::hub_cli::resolve_hub_db(None, app_home);
             match action {
-                HubAction::List { cap_type } => {
-                    let caps = store.hub_list(cap_type.as_deref(), false)?;
+                HubAction::List {
+                    cap_type,
+                    all,
+                    json: true,
+                } => {
+                    let store = open_cli_store(&hub_db)?;
+                    let caps = store.hub_list(cap_type.as_deref(), all)?;
                     print_pretty_json(&serde_json::to_value(caps)?)
+                }
+                HubAction::List {
+                    cap_type,
+                    all,
+                    json: false,
+                } => {
+                    crate::hub_cli::run(
+                        &HubAction::List {
+                            cap_type,
+                            all,
+                            json: false,
+                        },
+                        &hub_db,
+                        app_home,
+                    )
+                    .map_err(std::io::Error::other)?;
+                    Ok(())
+                }
+                HubAction::Show { id } => {
+                    crate::hub_cli::run(&HubAction::Show { id }, &hub_db, app_home)
+                        .map_err(std::io::Error::other)?;
+                    Ok(())
+                }
+                HubAction::Packs { all } => {
+                    crate::hub_cli::run(&HubAction::Packs { all }, &hub_db, app_home)
+                        .map_err(std::io::Error::other)?;
+                    Ok(())
+                }
+                HubAction::Bindings => {
+                    crate::hub_cli::run(&HubAction::Bindings, &hub_db, app_home)
+                        .map_err(std::io::Error::other)?;
+                    Ok(())
+                }
+                HubAction::Doctor { fix } => {
+                    crate::hub_cli::run(&HubAction::Doctor { fix }, &hub_db, app_home)
+                        .map_err(std::io::Error::other)?;
+                    Ok(())
                 }
                 HubAction::Register {
                     id,
@@ -114,6 +156,7 @@ pub(super) async fn run_cli_command(
                     definition,
                     description,
                 } => {
+                    let store = open_cli_store(&hub_db)?;
                     let (enabled, warning) =
                         evaluate_cli_capability_enabled(&cap_type, &definition)?;
                     let is_mcp = cap_type.eq_ignore_ascii_case("mcp");
@@ -165,6 +208,7 @@ pub(super) async fn run_cli_command(
                     print_pretty_json(&output)
                 }
                 HubAction::Enable { id } => {
+                    let store = open_cli_store(&hub_db)?;
                     let updated = store.hub_set_enabled(&id, true)?;
                     print_pretty_json(&json!({
                         "updated": updated,
@@ -173,6 +217,7 @@ pub(super) async fn run_cli_command(
                     }))
                 }
                 HubAction::Disable { id } => {
+                    let store = open_cli_store(&hub_db)?;
                     let updated = store.hub_set_enabled(&id, false)?;
                     print_pretty_json(&json!({
                         "updated": updated,
@@ -180,7 +225,8 @@ pub(super) async fn run_cli_command(
                         "enabled": false,
                     }))
                 }
-                HubAction::Stats => {
+                HubAction::Stats { json: true } => {
+                    let store = open_cli_store(&hub_db)?;
                     let caps = store.hub_list(None, false)?;
                     let mut by_type: HashMap<String, usize> = HashMap::new();
                     for cap in &caps {
@@ -195,6 +241,11 @@ pub(super) async fn run_cli_command(
                         "total_successes": total_successes,
                         "success_rate": if total_uses > 0 { total_successes as f64 / total_uses as f64 } else { 0.0 },
                     }))
+                }
+                HubAction::Stats { json: false } => {
+                    crate::hub_cli::cmd_stats(&hub_db)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    Ok(())
                 }
             }
         }
