@@ -361,6 +361,128 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
 }
 
 #[tokio::test]
+async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
+    let _guard = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    use axum::{routing::post, Json, Router};
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|Json(_body): Json<serde_json::Value>| async {
+            Json(json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "{\n  \"title\": \"Recall Gate Pattern\",\n  \"body\": \"## Pattern\\nUse recall diversity before promoting raw notes into durable knowledge.\\n\\n## Gotcha\\nDo not activate drafts without review.\",\n  \"summary\": \"Recall diversity gates promotion.\",\n  \"keywords\": [\"recall\", \"promotion\"],\n  \"entities\": [\"Tachi\"],\n  \"domain\": \"memory\"\n}"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let original_home = std::env::var_os("HOME");
+    let original_tachi_home = std::env::var_os("TACHI_HOME");
+    let original_siliconflow_base = std::env::var_os("SILICONFLOW_BASE_URL");
+    let original_reasoning_base = std::env::var_os("REASONING_BASE_URL");
+    let original_siliconflow_key = std::env::var_os("SILICONFLOW_API_KEY");
+    let original_voyage_key = std::env::var_os("VOYAGE_API_KEY");
+    let temp_home = std::env::temp_dir().join(format!("tachi-rem-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(temp_home.join(".tachi/projects/wiki")).expect("create wiki project");
+    std::env::set_var("HOME", &temp_home);
+    std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
+    let mock_url = format!("http://127.0.0.1:{port}/chat/completions");
+    std::env::set_var("SILICONFLOW_BASE_URL", &mock_url);
+    std::env::set_var("REASONING_BASE_URL", &mock_url);
+    std::env::set_var("SILICONFLOW_API_KEY", "test-mock-key");
+    std::env::set_var("VOYAGE_API_KEY", "test-mock-key");
+
+    let wiki_db = temp_home.join(".tachi/projects/wiki/memory.db");
+    MemoryStore::open(wiki_db.to_str().expect("wiki db utf8")).expect("init wiki db");
+    let server = MemoryServer::new(temp_home.join("global.db"), Some(temp_home.join("project.db")))
+        .expect("server");
+    server.with_project_store(|store| {
+        for (id, summary, text) in [
+            (
+                "pattern-a",
+                "Recall diversity gate",
+                "Recall diversity should gate raw promotion before durable wiki synthesis. This fixture covers the first retrieval signal and promotion rule.",
+            ),
+            (
+                "pattern-b",
+                "Pending review draft gate",
+                "Weekly REM synthesis should write wiki entries as durable references. This fixture covers direct wiki routing and LATEST_TRUTHS updates.",
+            ),
+        ] {
+            let mut entry = make_entry(id);
+            entry.path = format!("/project/tachi/{id}");
+            entry.summary = summary.to_string();
+            entry.text = text.to_string();
+            entry.importance = 0.9;
+            entry.topic = "recall-gate".to_string();
+            entry.keywords = vec!["recall".to_string(), "promotion".to_string()];
+            entry.source = "manual".to_string();
+            entry.tier = "pattern".to_string();
+            store.upsert(&entry).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }).expect("seed patterns");
+    let seeded_count: i64 = server.with_project_store_read(|store| {
+        store.connection().query_row(
+            "SELECT COUNT(*) FROM memories WHERE tier = 'pattern' AND topic = 'recall-gate'",
+            [],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())
+    }).expect("count seeded patterns");
+    assert_eq!(seeded_count, 2, "expected two pattern memories before REM run");
+
+    let report = crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server)
+        .await
+        .expect("wiki evolution");
+    assert_eq!(report.drafts_written, 1);
+
+    // Verify the wiki entry was written to /wiki/<domain>/<slug> (not /wiki/drafts/...)
+    // Note: source is set by the wiki write pipeline, not directly from TachiSaveParams.
+    // The wiki entry path is determined by normalize_wiki_path which may use the domain.
+    let wiki_paths: Vec<String> = server.with_global_store_read(|store| -> Result<Vec<String>, String> {
+        let mut stmt = store.connection().prepare("SELECT path FROM memories WHERE path LIKE '/wiki/%' AND path NOT LIKE '/wiki/truths/%'").map_err(|e| e.to_string())?;
+        let paths: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
+        Ok(paths)
+    }).unwrap_or_default();
+    assert!(!wiki_paths.is_empty(), "at least one wiki entry should be written at /wiki/<domain>/<slug>");
+    let wiki_entry_path = &wiki_paths[0];
+    assert!(wiki_entry_path.starts_with("/wiki/"), "wiki entry should be at /wiki/<domain>/<slug>, got: {wiki_entry_path}");
+    // Should NOT be under /wiki/drafts/ anymore
+    assert!(!wiki_entry_path.contains("/drafts/"), "wiki entry should NOT be under /wiki/drafts/, got: {wiki_entry_path}");
+
+    // Verify LATEST_TRUTHS was written
+    let truths_found = server.with_global_store_read(|store| -> Result<bool, String> {
+        Ok(store.connection().query_row(
+            "SELECT COUNT(*) FROM memories WHERE path = '/wiki/truths/memory'",
+            [],
+            |row| row.get::<_, i64>(0),
+        ).unwrap_or(0) > 0)
+    }).unwrap_or(false);
+    assert!(truths_found, "LATEST_TRUTHS should be written at /wiki/truths/memory");
+
+    server_task.abort();
+    if let Some(value) = original_home { std::env::set_var("HOME", value); } else { std::env::remove_var("HOME"); }
+    if let Some(value) = original_tachi_home { std::env::set_var("TACHI_HOME", value); } else { std::env::remove_var("TACHI_HOME"); }
+    if let Some(value) = original_siliconflow_base { std::env::set_var("SILICONFLOW_BASE_URL", value); } else { std::env::remove_var("SILICONFLOW_BASE_URL"); }
+    if let Some(value) = original_reasoning_base { std::env::set_var("REASONING_BASE_URL", value); } else { std::env::remove_var("REASONING_BASE_URL"); }
+    if let Some(value) = original_siliconflow_key { std::env::set_var("SILICONFLOW_API_KEY", value); } else { std::env::remove_var("SILICONFLOW_API_KEY"); }
+    if let Some(value) = original_voyage_key { std::env::set_var("VOYAGE_API_KEY", value); } else { std::env::remove_var("VOYAGE_API_KEY"); }
+    let _ = std::fs::remove_dir_all(temp_home);
+}
+
+#[tokio::test]
 async fn wiki_export_obsidian_writes_markdown_index_and_wikilinks() {
     let mut entry = make_entry("wiki-export-entry");
     entry.path = "/wiki/engineering/debugging/export".to_string();

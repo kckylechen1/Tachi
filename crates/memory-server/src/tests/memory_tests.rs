@@ -462,6 +462,51 @@ async fn save_memory_includes_provenance_for_registered_agent() {
 }
 
 #[tokio::test]
+async fn save_memory_allows_curated_tier_metadata() {
+    let server = make_server();
+
+    let saved = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "Curated trading lessons should enter the lifecycle as consolidated knowledge.".to_string(),
+            summary: "Curated lifecycle tier".to_string(),
+            path: "/trading/equity/lessons/tier-test".to_string(),
+            importance: 0.85,
+            category: "experience".to_string(),
+            topic: "memory-lifecycle".to_string(),
+            keywords: vec!["tier".to_string()],
+            persons: vec![],
+            entities: vec!["Tachi".to_string()],
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("equity_trading".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({"tier": "consolidated"})),
+        }))
+        .await
+        .expect("save_memory should succeed");
+    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
+    let id = saved_json["id"].as_str().expect("id").to_string();
+
+    let tier = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT tier FROM memories WHERE id = ?1", [&id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())
+        })
+        .expect("read tier");
+    assert_eq!(tier, "consolidated");
+}
+
+#[tokio::test]
 async fn memory_gc_prunes_expired_resolved_kanban_cards() {
     std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
     let server = make_server();

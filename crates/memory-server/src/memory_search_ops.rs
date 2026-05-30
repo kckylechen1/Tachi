@@ -703,6 +703,12 @@ fn build_save_entry(
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
     }
+    let tier = metadata
+        .get("tier")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "raw" | "consolidated" | "pattern"))
+        .unwrap_or("raw")
+        .to_string();
 
     MemoryEntry {
         id,
@@ -731,7 +737,7 @@ fn build_save_entry(
         domain: params.domain,
         recall_count: 0,
         query_diversity: 0,
-        tier: "raw".to_string(),
+        tier,
     }
 }
 

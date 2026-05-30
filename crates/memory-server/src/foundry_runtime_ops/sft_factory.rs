@@ -11,7 +11,7 @@
 //!
 //! Called once per daily pipeline run after truth maintenance completes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -74,9 +74,18 @@ pub(crate) async fn run_daily_sft_distillation(
         .await
         .map_err(|e| format!("create SFT output dir: {e}"))?;
 
+    let batch_id = Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+    let pending_dir = out_dir.join("pending");
+    tokio::fs::create_dir_all(&pending_dir)
+        .await
+        .map_err(|e| format!("create SFT pending dir: {e}"))?;
+
     let v3_path = out_dir.join("sft_v3.jsonl");
     let chat_path = out_dir.join("sft_data_chat.jsonl");
     let hf_path = out_dir.join("sft_data_hf.jsonl");
+    let pending_v3_path = pending_dir.join(format!("{batch_id}.sft_v3.jsonl"));
+    let pending_chat_path = pending_dir.join(format!("{batch_id}.sft_data_chat.jsonl"));
+    let pending_hf_path = pending_dir.join(format!("{batch_id}.sft_data_hf.jsonl"));
 
     let mut v3_lines = Vec::new();
     let mut chat_lines = Vec::new();
@@ -113,13 +122,20 @@ pub(crate) async fn run_daily_sft_distillation(
         return Ok(());
     }
 
+    // Write a durable batch copy before mutating the append-only exports. If a
+    // process dies after append and before the DB marker, the batch id gives the
+    // next audit pass enough provenance to de-duplicate safely.
+    write_jsonl_lines(&pending_v3_path, &v3_lines).await?;
+    write_jsonl_lines(&pending_chat_path, &chat_lines).await?;
+    write_jsonl_lines(&pending_hf_path, &hf_lines).await?;
+
     // Append to output files
     append_jsonl_lines(&v3_path, &v3_lines).await?;
     append_jsonl_lines(&chat_path, &chat_lines).await?;
     append_jsonl_lines(&hf_path, &hf_lines).await?;
 
     // Mark processed entries to avoid re-processing
-    mark_sft_processed(server, processed_entries.into_iter())?;
+    mark_sft_processed(server, processed_entries.into_iter(), &batch_id)?;
 
     eprintln!("[sft_factory] exported {processed} SFT pairs → {}", out_dir.display());
     Ok(())
@@ -246,6 +262,7 @@ fn build_hf_jsonl(
 fn mark_sft_processed<'a>(
     server: &MemoryServer,
     entries: impl Iterator<Item = &'a MemoryEntry>,
+    batch_id: &str,
 ) -> Result<(), String> {
     let ids: Vec<String> = entries.map(|e| e.id.clone()).collect();
     if ids.is_empty() {
@@ -258,12 +275,13 @@ fn mark_sft_processed<'a>(
             conn.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.sft.processed', 1,
-                         '$.sft.processed_at', ?1
-                       )
-                   WHERE id = ?2"#,
-                rusqlite::params![now, id],
+                          CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                          '$.sft.processed', 1,
+                          '$.sft.processed_at', ?1,
+                          '$.sft.batch_id', ?2
+                        )
+                   WHERE id = ?3"#,
+                rusqlite::params![now, batch_id, id],
             ).map_err(|e| format!("update SFT marker for {id}: {e}"))?;
         }
         Ok(())
@@ -272,7 +290,7 @@ fn mark_sft_processed<'a>(
 }
 
 async fn append_jsonl_lines(
-    path: &PathBuf,
+    path: &Path,
     lines: &[String],
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
@@ -292,6 +310,33 @@ async fn append_jsonl_lines(
                 .map_err(|e| format!("write JSONL newline: {e}"))?;
         }
     }
+    Ok(())
+}
+
+async fn write_jsonl_lines(
+    path: &Path,
+    lines: &[String],
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .await
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
+    for line in lines {
+        if !line.is_empty() {
+            file.write_all(line.as_bytes())
+                .await
+                .map_err(|e| format!("write JSONL line: {e}"))?;
+            file.write_all(b"\n")
+                .await
+                .map_err(|e| format!("write JSONL newline: {e}"))?;
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush {}: {e}", path.display()))?;
     Ok(())
 }
 

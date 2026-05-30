@@ -871,20 +871,26 @@ async fn test_run_daily_sft_distillation() {
     let v3_content = std::fs::read_to_string(v3_file).unwrap();
     assert!(v3_content.contains("How to design Promotion Gates?"));
     assert!(v3_content.contains("Promotion Gates protect long-term memory"));
+    let pending_dir = sft_dir.join("pending");
+    let pending_batches = std::fs::read_dir(&pending_dir)
+        .expect("pending SFT dir")
+        .filter_map(Result::ok)
+        .count();
+    assert_eq!(pending_batches, 3, "expected one durable pending file per export format");
 
     // 6. Verify entry in DB has been updated to processed
-    let is_processed = server.with_project_store_read(|store| {
+    let (is_processed, batch_id) = server.with_project_store_read(|store| {
         let conn = store.connection();
-        let val: Option<i64> = conn.query_row(
-            "SELECT json_extract(metadata, '$.sft.processed') FROM memories WHERE id = 'sft-test-1'",
+        let row: (Option<i64>, Option<String>) = conn.query_row(
+            "SELECT json_extract(metadata, '$.sft.processed'), json_extract(metadata, '$.sft.batch_id') FROM memories WHERE id = 'sft-test-1'",
             [],
-            |row| row.get(0)
+            |row| Ok((row.get(0)?, row.get(1)?))
         ).map_err(|e| e.to_string())?;
-        Ok(val.unwrap_or(0) == 1)
+        Ok((row.0.unwrap_or(0) == 1, row.1))
     }).unwrap();
     assert!(is_processed, "entry was not marked as sft.processed");
+    assert!(batch_id.is_some(), "SFT marker should include durable batch id");
 
     // 7. Cleanup server task
     server_task.abort();
 }
-
