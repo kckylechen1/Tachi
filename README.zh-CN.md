@@ -171,7 +171,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 
 ## ✨ 核心特性
 
-- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Python (`PyO3`) 提供原生高性能绑定。Node.js (`NAPI-RS`) 桥接层已于 v1.0.0 移除，OpenClaw 等插件现纯粹依赖稳定、跨平台的 MCP stdio 协议连接 Tachi 原生二进制。最终暴露工具数由内置工具 + 已注册 MCP/Skill 动态决定。
+- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现。各路客户端（MCP、OpenClaw 等）均通过稳定、跨平台的 MCP stdio 协议直连 Tachi 原生二进制。最终暴露工具数由内置工具 + 已注册 MCP/Skill 动态决定。
 - **🗂️ 文件系统命名空间**：记忆信息摒弃扁平存储，采用 `path` 路径参数（如 `/user/preferences`, `/project/architecture`）进行拓扑层级管理，有效实现业务数据的隔离与精准定向。
 - **🔍 三通道分流检索引擎**：
   - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
@@ -252,11 +252,7 @@ graph TD
     end
 
     subgraph Core["Tachi 核心 (Rust memory-core)"]
-        NAPI["NAPI Binding"]
-        PYO3["PyO3 Binding"]
-
-        NAPI --- LIB[/"lib.rs (Store API)"/]
-        PYO3 --- LIB
+        LIB[/"lib.rs (Store API)"/]
 
         LIB --> SEARCH["五通道混合检索引擎"]
         LIB --> GRAPH["记忆图谱 (PageRank)"]
@@ -265,12 +261,10 @@ graph TD
         GRAPH --> SQLITE
     end
 
-    RMCP ==>|"静态链接·无 FFI"| LIB
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
     CLI -->|"MCP stdio"| RMCP
-    OC -->|"MCP stdio 优先"| RMCP
-    OC -.->|"NAPI 备降"| NAPI
+    OC -->|"MCP stdio"| RMCP
 
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
@@ -281,7 +275,7 @@ graph TD
     class CLI,RMCP,OC,NATIVE client;
     class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
-    class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
+    class LIB,SEARCH,GRAPH rust;
     class SQLITE db;
 ```
 

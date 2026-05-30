@@ -234,7 +234,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 
 ## ✨ 五、 镇派绝学
 
-- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Python (`PyO3`) 以应变千万。至于 Node.js (`NAPI-RS`) 之旁支皮囊已于 v1.0.0 尽数褪去，OpenClaw 等分舵今后皆奉纯血 MCP 通讯管道直连 Tachi 真身。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
+- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。各路灵枢（MCP、OpenClaw 等）皆奉纯血 MCP 通讯管道直连 Tachi 真身。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
 - **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
 - **🔍 五脉归元（多系搜魂）**：五路灵力以 RRF 融合出奇，向量余弦亦纳入最终权衡，减少高语义查询之排名倒置：
   - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥（KNN 向量检索）。
@@ -325,11 +325,7 @@ graph TD
     end
 
     subgraph Core["Tachi 剑冢 (Rust memory-core)"]
-        NAPI["NAPI 皮囊"]
-        PYO3["PyO3 皮囊"]
-
-        NAPI --- LIB[/"lib.rs (心经)"/]
-        PYO3 --- LIB
+        LIB[/"lib.rs (心经)"/]
 
         LIB --> SEARCH["五行搜魂阵"]
         LIB --> GRAPH["因果千丝网"]
@@ -338,12 +334,10 @@ graph TD
         GRAPH --> SQLITE
     end
 
-    RMCP ==>|"静态链接·无皮囊"| LIB
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
     CLI -->|"MCP stdio"| RMCP
-    OC -->|"MCP stdio 优先"| RMCP
-    OC -.->|"NAPI 备降"| NAPI
+    OC -->|"MCP stdio"| RMCP
 
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
@@ -354,7 +348,7 @@ graph TD
     class CLI,RMCP,OC,NATIVE client;
     class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
-    class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
+    class LIB,SEARCH,GRAPH rust;
     class SQLITE db;
 ```
 

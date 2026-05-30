@@ -1,9 +1,6 @@
-name: Update Homebrew Tap
+name: Manual Update Homebrew Tap
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
@@ -12,7 +9,7 @@ on:
 
 jobs:
   update-homebrew-tap:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -29,17 +26,17 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
       - name: Resolve version
         id: version
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
           else
             version="${GITHUB_REF_NAME#v}"
@@ -52,6 +49,10 @@ jobs:
             exit 1
           fi
 
+          if [ -z "$version" ]; then
+            version="$cargo_version"
+          fi
+
           if [ "$version" != "$cargo_version" ]; then
             echo "Tag/workflow version ($version) does not match crates/memory-server/Cargo.toml ($cargo_version)."
             exit 1
@@ -60,7 +61,7 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Check out Homebrew tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

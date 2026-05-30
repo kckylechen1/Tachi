@@ -206,16 +206,6 @@ install_openclaw_plugin() {
   echo ">> Verifying OpenClaw plugin..."
   node -e "import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(process.argv[1]).href)).then(() => console.log('   ✅ Plugin load smoke test passed')).catch((err) => { console.error(err); process.exit(1); })" "$PLUGIN_DIR/index.js"
 
-  echo ">> Verifying native module..."
-  if (
-    cd "$PLUGIN_DIR"
-    node --input-type=module -e "import('@chaoxlabs/tachi-node').then(m => { if (!m.JsMemoryStore) throw new Error('missing export'); console.log('   ✅ Native module loaded OK') })"
-  ) 2>/dev/null; then
-    :
-  else
-    echo "   ⚠ Native module not available — OpenClaw will run in MCP-first mode."
-  fi
-
   configure_openclaw_json
 
   rm -rf "$tmpdir"

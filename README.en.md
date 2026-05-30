@@ -188,7 +188,7 @@ Operational notes:
 
 ## ✨ Key Features
 
-- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Python (`PyO3`). The legacy Node.js (`NAPI-RS`) bridge was removed in v1.0.0, and plugins like OpenClaw now communicate exclusively via the stable cross-platform MCP stdio protocol. Built-in tools plus registered proxy/skill tools are exposed dynamically.
+- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in pure Rust. All clients (MCP, OpenClaw, etc.) communicate exclusively via the stable cross-platform MCP stdio protocol. Built-in tools plus registered proxy/skill tools are exposed dynamically.
 - **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
 - **🔍 5-Channel Hybrid Search Engine**: retrieval combines five signals, fused via RRF with optional vector-score blending:
   - **Semantic**: built-in KNN vector search via `sqlite-vec` (Voyage-4 embeddings).
@@ -278,11 +278,7 @@ graph TD
     end
 
     subgraph Core["Tachi Core (Rust memory-core)"]
-        NAPI["NAPI Binding"]
-        PYO3["PyO3 Binding"]
-
-        NAPI --- LIB[/"lib.rs (Store API)"/]
-        PYO3 --- LIB
+        LIB[/"lib.rs (Store API)"/]
 
         LIB --> SEARCH["5-Channel Hybrid Search"]
         LIB --> GRAPH["Memory Graph (PageRank)"]
@@ -291,12 +287,10 @@ graph TD
         GRAPH --> SQLITE
     end
 
-    RMCP ==>|"Static link, no FFI"| LIB
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
     CLI -->|"MCP stdio"| RMCP
-    OC -->|"MCP stdio preferred"| RMCP
-    OC -.->|"NAPI fallback"| NAPI
+    OC -->|"MCP stdio"| RMCP
 
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
@@ -307,7 +301,7 @@ graph TD
     class CLI,RMCP,OC,NATIVE client;
     class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
-    class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
+    class LIB,SEARCH,GRAPH rust;
     class SQLITE db;
 ```
 
