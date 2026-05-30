@@ -34,6 +34,35 @@ pub(crate) async fn handle_tachi_init_project_db(
     // Hot-activate the project DB on the running server (no restart needed)
     let was_new_activation = server.activate_project_db(db_path.clone())?;
 
+    // Implement Plan C: Symlink at ~/.tachi/projects/{name}/memory.db -> project-local DB
+    if let Some(project_name_os) = project_root.file_name() {
+        if let Some(project_name) = project_name_os.to_str() {
+            let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
+            let app_home = std::env::var("TACHI_HOME")
+                .map(|v| {
+                    if v.starts_with("~/") {
+                        home.join(&v[2..])
+                    } else {
+                        PathBuf::from(v)
+                    }
+                })
+                .unwrap_or_else(|_| home.join(".tachi"));
+            let global_project_dir = app_home.join("projects").join(project_name);
+            tokio::fs::create_dir_all(&global_project_dir)
+                .await
+                .map_err(|e| format!("create global project dir: {e}"))?;
+            let global_link = global_project_dir.join("memory.db");
+            if global_link.exists() || global_link.is_symlink() {
+                let _ = tokio::fs::remove_file(&global_link).await;
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&db_path, &global_link)
+                    .map_err(|e| format!("create project symlink: {e}"))?;
+            }
+        }
+    }
+
     serde_json::to_string(&json!({
         "initialized": true,
         "created": !existed,

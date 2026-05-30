@@ -420,6 +420,50 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         None
     };
 
+    // Implement Plan C symlink validation at startup
+    if let Some(ref db_path) = project_db_path {
+        if let Some(root) = git_root.as_ref() {
+            if let Some(project_name) = root.file_name().and_then(|n| n.to_str()) {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                let app_home = std::env::var("TACHI_HOME")
+                    .map(|v| {
+                        if v.starts_with("~/") {
+                            home.join(&v[2..])
+                        } else {
+                            PathBuf::from(v)
+                        }
+                    })
+                    .unwrap_or_else(|_| home.join(".tachi"));
+                let projects_root = app_home.join("projects");
+                
+                // Do not create symlink if target is already inside ~/.tachi/projects/
+                if !db_path.starts_with(&projects_root) {
+                    let global_project_dir = projects_root.join(project_name);
+                    if let Ok(_) = std::fs::create_dir_all(&global_project_dir) {
+                        let global_link = global_project_dir.join("memory.db");
+                        let link_is_correct = if global_link.is_symlink() || global_link.exists() {
+                            match std::fs::read_link(&global_link) {
+                                Ok(target) => target == *db_path,
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
+                        if !link_is_correct {
+                            let _ = std::fs::remove_file(&global_link);
+                            #[cfg(unix)]
+                            {
+                                if let Err(e) = std::os::unix::fs::symlink(db_path, &global_link) {
+                                    tracing::warn!(error = %e, "Failed to create project symlink at startup");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Commands::Distill { action } = &command {
         use crate::cli::DistillAction;
         let DistillAction::Run { db } = action;
