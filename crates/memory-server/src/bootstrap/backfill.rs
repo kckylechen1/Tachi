@@ -36,7 +36,7 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    match load_keychain_vault_api_key_values(vault_db_path) {
+    match crate::status_ops::status_health::load_keychain_vault_api_key_values(vault_db_path) {
         Ok(secrets) => {
             let loaded = llm.set_provider_secrets(secrets);
             if loaded > 0 {
@@ -78,7 +78,14 @@ pub(super) async fn run_backfill_vectors(
             Ok(vecs) => {
                 for (i, (id, _, _, revision)) in chunk.iter().enumerate() {
                     if i < vecs.len() {
-                        match store.update_enrichment_fields(id, None, Some(&vecs[i]), *revision) {
+                        match store.update_enrichment_fields(
+                            id,
+                            None,
+                            Some(&vecs[i]),
+                            None,
+                            None,
+                            *revision,
+                        ) {
                             Ok(true) => {}
                             Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
                             Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
@@ -103,67 +110,6 @@ pub(super) async fn run_backfill_vectors(
     let (total, final_vec) = store.vector_stats()?;
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
-}
-
-fn load_keychain_vault_api_key_values(
-    vault_db_path: &PathBuf,
-) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
-    let output = std::process::Command::new("security")
-        .args([
-            "find-generic-password",
-            "-s",
-            "tachi-vault",
-            "-a",
-            "default",
-            "-w",
-        ])
-        .output()?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    let password = String::from_utf8(output.stdout)?.trim().to_string();
-    if password.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let vault_db_str = vault_db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "Vault DB path contains invalid UTF-8: {}",
-                vault_db_path.display()
-            ),
-        )
-    })?;
-    let store = MemoryStore::open_read_only(vault_db_str)?;
-    let Some(config) = store.vault_get_config()? else {
-        return Ok(Vec::new());
-    };
-
-    let salt = B64.decode(&config.salt)?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
-        return Ok(Vec::new());
-    }
-
-    let mut out = Vec::new();
-    for entry in store.vault_list_entries()? {
-        if entry.secret_type != "api_key"
-            || !entry.name.ends_with("_API_KEY")
-            || entry.allowed_agents.is_some()
-        {
-            continue;
-        }
-        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)?;
-        if !value.trim().is_empty() {
-            out.push((entry.name, value));
-        }
-    }
-    Ok(out)
 }
 
 /// Backfill missing summaries for a given DB.
@@ -213,7 +159,7 @@ pub(super) async fn run_backfill_summaries(
         let input: String = text.chars().take(8000).collect();
         let summary = llm.generate_summary(&input).await?;
 
-        match store.update_enrichment_fields(id, Some(&summary), None, *revision) {
+        match store.update_enrichment_fields(id, Some(&summary), None, None, None, *revision) {
             Ok(true) => {
                 processed += 1;
                 println!("  [{processed}/{missing}] ✓ {id}");
@@ -226,6 +172,96 @@ pub(super) async fn run_backfill_summaries(
     let final_missing = store.entries_missing_summaries()?.len();
     let final_with_summary = total.saturating_sub(final_missing as u64);
     println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    Ok(())
+}
+
+/// Backfill missing keywords/entities using the configured extract LLM.
+pub(super) async fn run_backfill_metadata(
+    db_path: &PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::llm::LlmClient;
+
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_metadata) = store.metadata_stats()?;
+    let entries = store.entries_missing_metadata()?;
+    let missing = entries.len();
+
+    println!("DB:       {}", db_path.display());
+    println!("Total:    {total}");
+    println!("Metadata: {with_metadata}");
+    println!("Missing:  {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have keywords and entities!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+
+    println!("\nBackfilling metadata for {missing} entries...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+    let mut processed = 0usize;
+
+    for (id, text, _summary, revision) in &entries {
+        let input: String = text.chars().take(8000).collect();
+        let (keywords, entities) = llm.extract_metadata(&input).await?;
+        let (heur_keywords, heur_entities) =
+            memory_core::scorer::heuristic_metadata_from_text(&input);
+        let mut keywords = keywords;
+        let mut entities = entities;
+        for kw in heur_keywords {
+            if !keywords.iter().any(|k| k == &kw) {
+                keywords.push(kw);
+            }
+        }
+        for ent in heur_entities {
+            if !entities.iter().any(|e| e == &ent) {
+                entities.push(ent);
+            }
+        }
+
+        match store.update_enrichment_fields(
+            id,
+            None,
+            None,
+            if keywords.is_empty() {
+                None
+            } else {
+                Some(&keywords)
+            },
+            if entities.is_empty() {
+                None
+            } else {
+                Some(&entities)
+            },
+            *revision,
+        ) {
+            Ok(true) => {
+                processed += 1;
+                println!("  [{processed}/{missing}] ✓ {id}");
+            }
+            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+        }
+    }
+
+    let (_, final_with_metadata) = store.metadata_stats()?;
+    println!("\n✅ Done! Metadata coverage: {with_metadata} → {final_with_metadata} / {total}");
     Ok(())
 }
 

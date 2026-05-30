@@ -5,7 +5,7 @@
 
 use crate::types::{HybridScore, MemoryEntry};
 use chrono::{NaiveDate, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
 const HALF_LIFE_DAYS: f64 = 30.0;
@@ -163,6 +163,9 @@ pub fn local_pagerank(edges: &[crate::types::MemoryEdge], damping: f64) -> HashM
             nodes.iter().map(|id| (id.clone(), base)).collect();
 
         for (source, targets) in &outgoing {
+            if targets.is_empty() {
+                continue;
+            }
             let source_score = scores.get(*source).copied().unwrap_or(0.0);
             let share = source_score / targets.len() as f64;
             for target in targets {
@@ -200,21 +203,21 @@ pub fn surprise_score(
     contradiction_count: u32,
     total_same_topic: u32,
 ) -> f64 {
-    // Component 1: Importance surprise — how much does this entry deviate from average?
-    let importance_surprise = (entry.importance - avg_importance).abs();
+    // Component 1: Importance surprise — normalized to [0, 1] via clamping
+    let importance_surprise = (entry.importance - avg_importance).abs().clamp(0.0, 1.0);
 
-    // Component 2: Contradiction signal — contradictions are inherently surprising
+    // Component 2: Contradiction signal — normalized to [0, 1] via log1p / cap
     let contradiction_surprise = if contradiction_count > 0 {
-        (1.0 + contradiction_count as f64).ln() / 3.0 // logarithmic scale, max ~0.7
+        (1.0 + contradiction_count as f64).ln_1p() / 4.0 // cap at ~1.0 at ~50 contradictions
     } else {
         0.0
     };
 
-    // Component 3: Topic novelty — rare topics are more surprising
+    // Component 3: Topic novelty — already in [0, 1]
     let topic_novelty = if total_same_topic <= 1 {
-        0.5 // New/unique topic
+        0.5
     } else {
-        1.0 / (total_same_topic as f64) // Diminishing novelty
+        1.0 / (total_same_topic as f64)
     };
 
     // Component 4: Low-access high-importance = overlooked valuable memory
@@ -224,7 +227,7 @@ pub fn surprise_score(
         0.0
     };
 
-    // Weighted combination
+    // Weighted combination — each component now independently in [0, 1]
     let raw = 0.25 * importance_surprise
         + 0.30 * contradiction_surprise
         + 0.25 * topic_novelty
@@ -257,12 +260,135 @@ impl Default for HybridWeights {
 
 fn rank_map(scores: &HashMap<String, f64>) -> HashMap<String, usize> {
     let mut ranked = scores.iter().collect::<Vec<_>>();
-    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(a.1));
     ranked
         .into_iter()
         .enumerate()
         .map(|(idx, (id, _))| (id.clone(), idx + 1))
         .collect()
+}
+
+fn blend_rrf_with_vector_signal(
+    id: &str,
+    rrf_score: f64,
+    vec_scores: &HashMap<String, f64>,
+    vec_weight: f64,
+) -> f64 {
+    let Some(cosine) = vec_scores.get(id).copied().map(normalize) else {
+        return rrf_score;
+    };
+
+    rrf_score * (1.0 + 0.15 * vec_weight.clamp(0.0, 1.0) * cosine)
+}
+
+fn retrieval_rrf_weight(weight: f64, total: f64) -> f64 {
+    if !weight.is_finite() || weight <= 0.0 || total <= 0.0 {
+        0.0
+    } else {
+        weight / total
+    }
+}
+
+pub fn graph_relation_activation_weight(relation: &str) -> f64 {
+    match relation {
+        "supports" => 0.90,
+        "elaborates" => 0.85,
+        "causes" | "fixed_by" => 0.80,
+        "reinforces" => 0.75,
+        "follows" | "references" | "distilled_from" | "derived_from" => 0.70,
+        "similar_to" | "related_to" | "merge_hint" => 0.55,
+        "supersedes" => 0.40,
+        "contradicts" | "rejected_because" => 0.30,
+        _ => 0.50,
+    }
+}
+
+pub fn graph_spreading_activation(
+    seed_ids: &[String],
+    edges: &[crate::types::MemoryEdge],
+    max_hops: u32,
+    decay: f64,
+) -> HashMap<String, f64> {
+    let capped_hops = max_hops.min(4);
+    let seed_weights = seed_ids
+        .iter()
+        .map(|id| (id.clone(), 1.0))
+        .collect::<HashMap<_, _>>();
+    graph_spreading_activation_with_seed_weights(&seed_weights, edges, capped_hops, decay)
+}
+
+pub fn graph_spreading_activation_with_seed_weights(
+    seed_weights: &HashMap<String, f64>,
+    edges: &[crate::types::MemoryEdge],
+    max_hops: u32,
+    decay: f64,
+) -> HashMap<String, f64> {
+    if seed_weights.is_empty() || max_hops == 0 {
+        return HashMap::new();
+    }
+
+    let seeds: HashSet<&String> = seed_weights.keys().collect();
+    let mut activation: HashMap<String, f64> = seed_weights
+        .iter()
+        .filter_map(|(id, weight)| {
+            let weight = if weight.is_finite() { *weight } else { 0.0 }.clamp(0.0, 1.0);
+            (weight > 0.0).then(|| (id.clone(), weight))
+        })
+        .collect();
+    if activation.is_empty() {
+        return HashMap::new();
+    }
+    let mut frontier = activation.clone();
+
+    for _ in 0..max_hops {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut propagated_by_target = HashMap::<String, f64>::new();
+        for edge in edges {
+            for (source, target) in [
+                (&edge.source_id, &edge.target_id),
+                (&edge.target_id, &edge.source_id),
+            ] {
+                let Some(parent_activation) = frontier.get(source).copied() else {
+                    continue;
+                };
+                if seeds.contains(target) {
+                    continue;
+                }
+                let propagated = parent_activation
+                    * edge.weight.clamp(0.0, 1.0)
+                    * decay
+                    * graph_relation_activation_weight(&edge.relation);
+                if propagated <= 0.0 {
+                    continue;
+                }
+                propagated_by_target
+                    .entry(target.clone())
+                    .and_modify(|acc| *acc = 1.0 - (1.0 - *acc) * (1.0 - propagated))
+                    .or_insert(propagated);
+            }
+        }
+
+        frontier = HashMap::new();
+        for (id, propagated) in propagated_by_target {
+            let propagated = propagated.clamp(0.0, 1.0);
+            if propagated <= 0.0 {
+                continue;
+            }
+            let current = activation.get(&id).copied().unwrap_or(0.0);
+            // Converging graph paths should reinforce each other without letting
+            // dense local clusters exceed a normalized activation ceiling.
+            let combined = 1.0 - (1.0 - current) * (1.0 - propagated);
+            if combined > current {
+                activation.insert(id.clone(), combined);
+                frontier.insert(id, propagated);
+            }
+        }
+    }
+
+    activation.retain(|id, _| !seeds.contains(id));
+    activation
 }
 
 /// Merge several scored lists into a single HybridScore per doc-id.
@@ -306,22 +432,31 @@ pub fn hybrid_score(
             // Reciprocal Rank Fusion: rewards agreement across channels
             // without overtrusting raw score calibration differences.
             let rrf_k = 60.0;
+            let retrieval_weight_total =
+                (weights.semantic + weights.fts + weights.symbolic).max(0.0);
+            let vec_weight = retrieval_rrf_weight(weights.semantic, retrieval_weight_total);
+            let fts_weight = retrieval_rrf_weight(weights.fts, retrieval_weight_total);
+            let symbolic_weight = retrieval_rrf_weight(weights.symbolic, retrieval_weight_total);
             let vec_part = vec_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .map(|rank| vec_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let fts_part = fts_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 1.0 / (rrf_k + *rank as f64))
+                .map(|rank| fts_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
             let symbolic_part = symbolic_ranks
                 .as_ref()
                 .and_then(|ranks| ranks.get(id))
-                .map(|rank| 0.5 / (rrf_k + *rank as f64))
+                .map(|rank| symbolic_weight / (rrf_k + *rank as f64))
                 .unwrap_or(0.0);
-            vec_part + fts_part + symbolic_part
+            let rrf_score = vec_part + fts_part + symbolic_part;
+            let blended = blend_rrf_with_vector_signal(id, rrf_score, vec_scores, vec_weight);
+            // Decay re-injected as a proportional bonus so recency still
+            // influences ranking in RRF mode (scaled to the RRF score range).
+            blended + weights.decay * ds / rrf_k
         } else {
             weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds
         };
@@ -379,27 +514,174 @@ pub fn tokenize(s: &str) -> Vec<String> {
 
 // Re-use is_cjk from noise module (single source of truth)
 use crate::noise::is_cjk;
+use regex::Regex;
+use std::sync::OnceLock;
 
-/// Compute a normalised token-overlap (Jaccard-like) score [0, 1].
-pub fn symbolic_score(query: &str, entry_text: &str, keywords: &[String]) -> f64 {
-    let query_tokens: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
+/// Shared compiled regex for A-share 6-digit stock codes.
+static STOCK_CODE_RE: OnceLock<Regex> = OnceLock::new();
+fn stock_code_re() -> &'static Regex {
+    STOCK_CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap())
+}
+
+/// Compute a normalised query-token recall score [0, 1].
+/// Measures what fraction of query tokens appear in the entry's text/keywords/entities.
+pub fn symbolic_score(
+    query: &str,
+    entry_text: &str,
+    keywords: &[String],
+    entities: &[String],
+) -> f64 {
+    let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
     if query_tokens.is_empty() {
         return 0.0;
     }
 
-    let mut text_tokens: std::collections::HashSet<String> =
-        tokenize(entry_text).into_iter().collect();
+    let mut text_tokens: HashSet<String> = tokenize(entry_text).into_iter().collect();
     for kw in keywords {
         text_tokens.extend(tokenize(kw));
     }
+    for ent in entities {
+        let trimmed = ent.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        text_tokens.extend(tokenize(trimmed));
+        text_tokens.insert(trimmed.to_ascii_lowercase());
+    }
 
     let overlap = query_tokens.intersection(&text_tokens).count();
-    (overlap as f64) / (query_tokens.len() as f64)
+    (overlap as f64) / (query_tokens.len().max(1) as f64)
+}
+
+/// Extract A-share style 6-digit stock codes from a query.
+pub fn extract_stock_codes(query: &str) -> Vec<String> {
+    let re = stock_code_re();
+    re.find_iter(query)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
+    let code = code.trim();
+    if code.is_empty() {
+        return false;
+    }
+    entry.entities.iter().any(|e| e.trim() == code)
+        || entry.keywords.iter().any(|k| k.contains(code))
+        || entry.text.contains(code)
+        || entry.summary.contains(code)
+        || entry.path.contains(code)
+}
+
+/// Strong multiplier for exact ticker / trading-term precision matches.
+///
+/// Rationale: A-share 6-digit codes (e.g. "688981") are extremely common
+/// numeric strings. Without boosting, FTS/symbolic channels dilute exact
+/// matches across thousands of unrelated entries. The 12.0x factor ensures
+/// an exact ticker match dominates hybrid ranking.
+///
+/// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
+/// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
+const TICKER_EXACT_MATCH_BOOST: f64 = 12.0;
+const IRON_RULE_BOOST: f64 = 5.0;
+const STOP_LOSS_BOOST: f64 = 4.0;
+pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
+    for code in extract_stock_codes(query) {
+        if entry_has_stock_code(entry, &code) {
+            return TICKER_EXACT_MATCH_BOOST;
+        }
+    }
+
+    let q = query.to_ascii_lowercase();
+    let path = entry.path.to_ascii_lowercase();
+
+    let mut mult: f64 = 1.0;
+    let needs_bundle = ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
+        || q.contains("stop loss")
+        || q.contains("stop-loss")
+        || query.contains("止损");
+
+    if !needs_bundle {
+        // Fast path: query doesn't contain any precision terms, skip expensive bundle construction
+        return mult;
+    }
+
+    let bundle = format!(
+        "{} {} {} {} {}",
+        entry.text.to_ascii_lowercase(),
+        entry.summary.to_ascii_lowercase(),
+        entry.keywords.join(" ").to_ascii_lowercase(),
+        entry.entities.join(" ").to_ascii_lowercase(),
+        entry.topic.to_ascii_lowercase(),
+    );
+
+    if ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
+        && (path.contains("iron_rule")
+            || bundle.contains("iron rule")
+            || bundle.contains("iron_rules")
+            || bundle.contains("iron rules"))
+    {
+        mult = mult.max(IRON_RULE_BOOST);
+    }
+    if (q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损"))
+        && (bundle.contains("stop loss")
+            || bundle.contains("止损")
+            || path.contains("iron_rule")
+            || path.contains("principles"))
+    {
+        mult = mult.max(STOP_LOSS_BOOST);
+    }
+    mult
+}
+
+/// Deterministic ticker/entity hints from memory text (no LLM).
+pub fn heuristic_metadata_from_text(text: &str) -> (Vec<String>, Vec<String>) {
+    let re = stock_code_re();
+    let mut entities = Vec::new();
+    let mut keywords = Vec::new();
+    for m in re.find_iter(text) {
+        let code = m.as_str().to_string();
+        if !entities.iter().any(|e| e == &code) {
+            entities.push(code.clone());
+            keywords.push(format!("ticker:{code}"));
+        }
+    }
+    (entities, keywords)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn test_entry(id: &str) -> crate::types::MemoryEntry {
+        crate::types::MemoryEntry {
+            id: id.into(),
+            path: "/test".into(),
+            summary: String::new(),
+            text: String::new(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "general".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            retention_policy: None,
+            domain: None,
+            vector: None,
+        }
+    }
 
     #[test]
     fn cosine_identity() {
@@ -416,8 +698,112 @@ mod tests {
 
     #[test]
     fn symbolic_exact_match() {
-        let score = symbolic_score("hello world", "hello world", &[]);
+        let score = symbolic_score("hello world", "hello world", &[], &[]);
         assert!(score > 0.9, "score={score}");
+    }
+
+    #[test]
+    fn symbolic_exact_query_match_is_not_diluted_by_long_text() {
+        let long_text = format!(
+            "{} mcp handshake {}",
+            "filler ".repeat(200),
+            "extra ".repeat(200)
+        );
+        let score = symbolic_score("mcp handshake", &long_text, &[], &[]);
+        assert!(score > 0.9, "score={score}");
+    }
+
+    #[test]
+    fn symbolic_uses_entities_for_stock_codes() {
+        let entities = vec!["688981".to_string()];
+        let score = symbolic_score("688981", "无关正文", &[], &entities);
+        assert!(score > 0.9, "score={score}");
+        assert!(score <= 1.0, "score={score}");
+    }
+
+    #[test]
+    fn rrf_respects_channel_weights() {
+        let a = test_entry("a");
+        let b = test_entry("b");
+        let entries = HashMap::from([("a".to_string(), &a), ("b".to_string(), &b)]);
+        let vec_scores = HashMap::from([("a".to_string(), 0.9), ("b".to_string(), 0.8)]);
+        let fts_scores = HashMap::from([("a".to_string(), 0.1), ("b".to_string(), 0.9)]);
+        let symbolic_scores = HashMap::new();
+        let access_times = HashMap::new();
+
+        let vector_heavy = HybridWeights {
+            semantic: 0.9,
+            fts: 0.1,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: true,
+        };
+        let vector_ranked = hybrid_score(
+            &entries,
+            &vec_scores,
+            &fts_scores,
+            &symbolic_scores,
+            &vector_heavy,
+            &access_times,
+        );
+        assert!(
+            vector_ranked["a"].final_score > vector_ranked["b"].final_score,
+            "vector-heavy RRF should prefer vector rank"
+        );
+
+        let fts_heavy = HybridWeights {
+            semantic: 0.1,
+            fts: 0.9,
+            symbolic: 0.0,
+            decay: 0.0,
+            use_rrf: true,
+        };
+        let fts_ranked = hybrid_score(
+            &entries,
+            &vec_scores,
+            &fts_scores,
+            &symbolic_scores,
+            &fts_heavy,
+            &access_times,
+        );
+        assert!(
+            fts_ranked["b"].final_score > fts_ranked["a"].final_score,
+            "fts-heavy RRF should prefer FTS rank"
+        );
+    }
+
+    #[test]
+    fn precision_multiplier_for_exact_ticker() {
+        use chrono::Utc;
+        let mut entry = crate::types::MemoryEntry {
+            id: "t".into(),
+            path: "/trading/journal".into(),
+            summary: "journal".into(),
+            text: "trade note".into(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec!["688981".into()],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "project".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            retention_policy: None,
+            domain: None,
+            vector: None,
+        };
+        assert!(precision_query_multiplier("688981 止损", &entry) >= 10.0);
+        entry.entities.clear();
+        assert!(precision_query_multiplier("688981 止损", &entry) <= 1.0);
     }
 
     #[test]
@@ -430,6 +816,8 @@ mod tests {
             text: "".into(),
             importance: 0.7,
             timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],
@@ -467,6 +855,8 @@ mod tests {
             text: "".into(),
             importance: 0.7,
             timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: vec![],
@@ -491,5 +881,114 @@ mod tests {
 
         assert!(old >= never, "old={old}, never={never}");
         assert!(recent > old, "recent={recent}, old={old}");
+    }
+
+    #[test]
+    fn rrf_blend_rewards_absolute_vector_similarity_without_penalizing_missing_vector() {
+        let vec_scores = HashMap::from([
+            ("a".to_string(), 0.99),
+            ("b".to_string(), 0.98),
+            ("c".to_string(), 0.97),
+        ]);
+        let base = 0.02;
+
+        let blended = blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, 1.0);
+        assert!(blended > base, "blended={blended}, base={base}");
+
+        let missing = blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, 1.0);
+        assert_eq!(missing, base);
+    }
+
+    #[test]
+    fn graph_spreading_activation_decays_by_hop_and_relation_type() {
+        use crate::types::MemoryEdge;
+
+        let seeds = vec!["a".to_string()];
+        let edges = vec![
+            MemoryEdge {
+                source_id: "a".to_string(),
+                target_id: "b".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "b".to_string(),
+                target_id: "c".to_string(),
+                relation: "causes".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "a".to_string(),
+                target_id: "d".to_string(),
+                relation: "contradicts".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        ];
+
+        let activation = graph_spreading_activation(&seeds, &edges, 2, 0.5);
+        assert!(!activation.contains_key("a"));
+        assert!(activation["b"] > activation["c"]);
+        assert!(activation["b"] > activation["d"]);
+        assert!(activation["c"] > 0.0);
+    }
+
+    #[test]
+    fn graph_spreading_activation_uses_weighted_seeds_and_converging_paths() {
+        use crate::types::MemoryEdge;
+
+        let mut seed_weights = HashMap::new();
+        seed_weights.insert("strong".to_string(), 1.0);
+        seed_weights.insert("weak".to_string(), 0.25);
+        let edges = vec![
+            MemoryEdge {
+                source_id: "strong".to_string(),
+                target_id: "shared".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "weak".to_string(),
+                target_id: "shared".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+            MemoryEdge {
+                source_id: "weak".to_string(),
+                target_id: "weak-only".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        ];
+
+        let activation =
+            graph_spreading_activation_with_seed_weights(&seed_weights, &edges, 1, 0.5);
+        assert!(!activation.contains_key("strong"));
+        assert!(!activation.contains_key("weak"));
+        assert!(activation["shared"] > activation["weak-only"]);
+        assert!(activation["shared"] > 0.45);
     }
 }

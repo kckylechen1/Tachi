@@ -22,6 +22,7 @@
 
 - [Overview](#-overview)
 - [Why Tachi?](#-why-tachi)
+- [How Tachi Compares](#-how-tachi-compares)
 - [Quick Start: Coding Agents (MCP)](#-quick-start-coding-agents-mcp)
 - [Quick Start: Frameworks (OpenClaw)](#-quick-start-frameworks-openclaw)
 - [Key Features](#-key-features)
@@ -62,6 +63,25 @@ Long-running autonomous operations require extreme hygiene to prevent hallucinat
 
 5. **Skill Slots: On-Demand "Neural Extensions"**
 Tachi isn't just about routing tools; it's about standardizing complex workflows. Through "Skill Slots" (`Skill-as-a-Tool`), developers can encapsulate prompt chains, SOPs, and domain-specific knowledge into simple markdown files. Tachi automatically compiles these into Native MCP tools. Agents are no longer weighed down by massive system prompts—they simply "plug into" Tachi to instantly acquire on-demand professional skills.
+
+---
+
+## ⚡ How Tachi Compares
+
+|  | **Tachi** | Mem0 | ChromaDB | MemGPT / Letta |
+|--|-----------|------|----------|----------------|
+| Storage backend | SQLite (embedded) | Vector store | Vector store | PostgreSQL |
+| Fully local, zero cloud deps | ✅ | ✅ v2 | ✅ | ✅ |
+| CJK full-text search | ✅ FTS5 + libsimple | ❌ | ❌ | ❌ |
+| Graph causal edges + traversal | ✅ | ❌ | ❌ | ✅ entity graph |
+| Bitemporal queries (`as_of`) | ✅ | ❌ | ❌ | ❌ |
+| Automatic contradiction detection | ✅ LLM-verified | ✅ LLM-based | ❌ | ✅ LLM-based |
+| Native MCP server | ✅ 148+ tools | ❌ | ❌ | Partial |
+| Multi-MCP hub & skill proxy | ✅ | ❌ | ❌ | ❌ |
+| Multi-agent pub/sub & kanban | ✅ | ❌ | ❌ | Partial |
+| Encrypted local secret vault | ✅ Argon2id + AES-256-GCM | ❌ | ❌ | ❌ |
+| Skill slots (SOPs-as-tools) | ✅ | ❌ | ❌ | ❌ |
+| P95 retrieval (Rust core) | **< 1.2 ms** | — | — | — |
 
 ---
 
@@ -170,10 +190,12 @@ Operational notes:
 
 - **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Python (`PyO3`). The legacy Node.js (`NAPI-RS`) bridge was removed in v1.0.0, and plugins like OpenClaw now communicate exclusively via the stable cross-platform MCP stdio protocol. Built-in tools plus registered proxy/skill tools are exposed dynamically.
 - **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
-- **🔍 3-Channel Hybrid Search Engine**:
-  - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
-  - **Lexical**: Native CJK-optimized full-text search utilizing `libsimple` and `FTS5`.
-  - **Decay**: Temporal relevance degradation inspired by the ACT-R cognitive architecture.
+- **🔍 5-Channel Hybrid Search Engine**: retrieval combines five signals, fused via RRF with optional vector-score blending:
+  - **Semantic**: built-in KNN vector search via `sqlite-vec` (Voyage-4 embeddings).
+  - **Lexical**: CJK-optimized FTS5 via `libsimple`, with automatic query expansion (synonyms, acronyms, phrase variants) to improve sparse-corpus recall.
+  - **Temporal decay**: relevance degradation modelled on the ACT-R cognitive architecture.
+  - **Graph spreading activation**: activation propagates along causal and entity edges from per-seed initial weights; noisy-OR within each hop prevents cluster over-amplification.
+  - **RRF fusion**: Reciprocal Rank Fusion blends all channels; cosine similarity from the vector channel is additionally weighted into the final score to reduce rank inversions on highly semantic queries.
 - **🔒 Hard State Engine**: Introduced a deterministic Key-Value store independent of vector memory. Useful for tracking trading watchlists or rigid state.
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution Deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
@@ -206,6 +228,13 @@ Operational notes:
 - **🔌 OpenClaw Manifest Bridge**: OpenClaw now routes through `~/.tachi/manifest.json`, raises default capture floor to 200 chars, and tolerates noisy MCP JSON (BOM, whitespace, bracket recovery).
 - **🎭 Tool Surface v2 (Facade & Delegation)**: Provides compact, task-focused unified tools (`tachi_search`, `tachi_web_search`, `tachi_save`, etc.) along with advanced delegation and evaluation capabilities (`tachi_dispatch`, `approve_merge`, `tachi_complete`) for cross-agent orchestration.
 - **📚 Wiki System**: Built-in, durable knowledge base system (`tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`) optimized for multi-agent knowledge sharing.
+- **🕰️ Bitemporal Memory**: each `MemoryEntry` carries `valid_from` / `valid_until` timestamps; `search_memory` accepts an `as_of` parameter for point-in-time retrieval. A startup migration normalises existing rows — no manual data migration required.
+- **⚔️ Automatic Contradiction Detection**: `apply_auto_contradiction_detection` identifies semantically conflicting memories via entity overlap, numeric mismatch, and vector similarity. An LLM verifies candidates and the result is persisted as typed contradiction edges in the memory graph.
+- **🔎 Query Expansion**: `search_fts_with_expansion` generates synonym, acronym, and phrase variants at query time, raising recall on sparse or jargon-heavy corpora without any change to the stored index.
+- **🌊 Spreading Activation**: graph traversal propagates influence from per-seed initial weights (rather than a flat floor), then applies noisy-OR accumulation within each hop to prevent high-density clusters from dominating results.
+- **💡 Memory Insight Inference**: `infer_memory_insight` scores memories against a surprise composite (importance delta × rarity × contradiction count) and emits structured `memory_insight` signals for downstream neighbourhood jobs.
+- **🧩 Synthesis Thinking Scaffold**: `build_thinking_scaffold` composes a layered evidence brief for synthesis queries — sources ranked by relevance with gap-analysis annotations — giving LLM synthesis calls a richer, structured context to reason against.
+- **📈 Confidence Reinforcement**: memories that pass the similarity threshold but fall short of supersession have their confidence score incremented rather than triggering a full supersession write, extending the useful lifetime of soft-corroborated facts.
 
 ---
 

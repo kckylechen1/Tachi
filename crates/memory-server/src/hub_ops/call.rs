@@ -183,6 +183,8 @@ pub(crate) async fn handle_distill_trajectory(
         text: distilled_markdown.clone(),
         importance,
         timestamp: timestamp.clone(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "decision".to_string(),
         topic: sanitize_safe_path_name(params.skill_path.trim_matches('/')),
         keywords: vec![
@@ -482,8 +484,7 @@ pub(crate) async fn handle_hub_disconnect(
 
     // Also clear discovered tools cache
     {
-        let mut tools = server.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
-        tools.remove(server_name);
+        lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").remove(server_name);
     }
 
     serde_json::to_string(&json!({

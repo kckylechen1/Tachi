@@ -106,11 +106,6 @@ impl DaemonLock {
             }
         }
     }
-
-    /// Return the PID file path the lock was acquired against.
-    pub fn pid_path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for DaemonLock {

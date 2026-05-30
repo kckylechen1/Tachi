@@ -98,7 +98,10 @@ pub(crate) struct DistillTrajectoryParams {
     pub skill_id: Option<String>,
 
     /// Optional base importance for the permanent snapshot memory
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Optional domain. Defaults to TACHI_DOMAIN when present.
@@ -199,7 +202,10 @@ pub(crate) struct HubFeedbackParams {
     /// Whether the invocation was successful
     pub success: bool,
     /// Optional user rating (0.0 - 5.0)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub rating: Option<f64>,
 }
 
@@ -299,7 +305,10 @@ pub(crate) struct VirtualCapabilityBindParams {
     #[serde(default = "default_virtual_binding_priority")]
     pub priority: i32,
     /// Optional version pin. If set, target version must match during resolve.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub version_pin: Option<u32>,
     /// Whether this binding is active.
     #[serde(default = "default_true")]

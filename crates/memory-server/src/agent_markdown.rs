@@ -1,47 +1,25 @@
 //! Human-readable Markdown formatting for agent-facing MCP tools.
 
-use crate::db_context::{diagnostics_footer, format_db_context_markdown, DbContext};
 use serde_json::Value;
 
-pub(crate) fn format_memory_rows(title: &str, ctx: &DbContext, rows: &Value) -> String {
-    let mut out = vec![format!("## {title}\n"), format_db_context_markdown(ctx)];
-    let Some(items) = rows.as_array() else {
-        out.push("\n_No results._".to_string());
-        return out.join("\n");
-    };
-    if items.is_empty() {
-        out.push("\n_No results._".to_string());
-        return out.join("\n");
+/// Escape characters that have special meaning in Markdown bold/code contexts.
+fn md_escape(s: &str) -> String {
+    s.replace('*', "\\*")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('_', "\\_")
+}
+
+fn compact_text(s: &str, limit: usize) -> String {
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= limit {
+        one_line
+    } else {
+        format!("{}...", one_line.chars().take(limit).collect::<String>())
     }
-    out.push(format!("\n### Results ({})", items.len()));
-    for (idx, row) in items.iter().enumerate() {
-        let topic = row
-            .get("topic")
-            .and_then(Value::as_str)
-            .unwrap_or("untitled");
-        let db = row.get("db").and_then(Value::as_str).unwrap_or("?");
-        let relevance = row
-            .get("relevance")
-            .or_else(|| row.get("score"))
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string());
-        let summary = row
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or("(no summary)");
-        let path = row
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("/");
-        out.push(format!(
-            "\n{}. **{topic}** ({db}, relevance {relevance})\n   - {summary}\n   - Path: `{path}`"
-        , idx + 1));
-    }
-    out.join("\n")
 }
 
 pub(crate) fn format_briefing(
-    ctx: &DbContext,
     query: &str,
     memories: &Value,
     wiki: &Value,
@@ -49,11 +27,7 @@ pub(crate) fn format_briefing(
     kanban: &Value,
     checkpoints: &Value,
 ) -> String {
-    let mut out = vec![
-        "## Tachi briefing".to_string(),
-        format!("**Query:** {query}\n"),
-        format_db_context_markdown(ctx),
-    ];
+    let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
 
     out.push("\n### Memories".to_string());
     out.push(format_section_rows(memories, 12));
@@ -76,13 +50,18 @@ pub(crate) fn format_briefing(
                 }
             }
         }
-        let wiki_h = health_summary.get("wiki");
-        if wiki_h.is_some() {
+        if let Some(wiki_h) = health_summary.get("wiki") {
             out.push(format!(
                 "- Wiki hygiene: {} orphan(s), {} stale, {} duplicate(s)",
-                wiki_h.and_then(|v| v.get("orphans")).and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.and_then(|v| v.get("stale_nodes")).and_then(Value::as_u64).unwrap_or(0),
-                wiki_h.and_then(|v| v.get("duplicates")).and_then(Value::as_u64).unwrap_or(0),
+                wiki_h.get("orphans").and_then(Value::as_u64).unwrap_or(0),
+                wiki_h
+                    .get("stale_nodes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                wiki_h
+                    .get("duplicates")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
             ));
         }
     }
@@ -118,16 +97,11 @@ pub(crate) fn format_briefing(
         }
     }
 
-    out.push(diagnostics_footer().to_string());
     out.join("\n")
 }
 
-pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &Value) -> String {
-    let mut out = vec![
-        "## Tachi alerts".to_string(),
-        format_db_context_markdown(ctx),
-        "\n### Warnings".to_string(),
-    ];
+pub(crate) fn format_alerts(warnings: &[String], wiki_counts: &Value) -> String {
+    let mut out = vec!["## Tachi alerts".to_string(), "\n### Warnings".to_string()];
     if warnings.is_empty() {
         out.push("- No active warnings".to_string());
     } else {
@@ -136,7 +110,10 @@ pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &
         }
     }
 
-    let orphans = wiki_counts.get("orphans").and_then(Value::as_u64).unwrap_or(0);
+    let orphans = wiki_counts
+        .get("orphans")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let stale = wiki_counts
         .get("stale_nodes")
         .and_then(Value::as_u64)
@@ -151,26 +128,19 @@ pub(crate) fn format_alerts(ctx: &DbContext, warnings: &[String], wiki_counts: &
         ));
     }
 
-    out.push(diagnostics_footer().to_string());
     out.join("\n")
 }
 
-pub(crate) fn format_wiki_search(
-    ctx: &DbContext,
-    query: &str,
-    count: usize,
-    results: &Value,
-) -> String {
+pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {
     let mut out = vec![
         format!("## Wiki search: \"{query}\""),
-        format_db_context_markdown(ctx),
-        format!("\n### Results ({count})"),
+        format!("Results: {count}"),
     ];
-    let rows = results
+    let rows: &[Value] = results
         .as_array()
         .or_else(|| results.get("results").and_then(Value::as_array))
-        .cloned()
-        .unwrap_or_default();
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     if rows.is_empty() {
         out.push("_No wiki entries matched._".to_string());
     } else {
@@ -179,28 +149,23 @@ pub(crate) fn format_wiki_search(
                 .get("summary")
                 .and_then(Value::as_str)
                 .unwrap_or("(no summary)");
-            let path = row
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or("/wiki");
+            let path = row.get("path").and_then(Value::as_str).unwrap_or("/wiki");
             let relevance = row
                 .get("relevance")
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             out.push(format!(
-                "\n{}. `{path}` (relevance {relevance})\n   {summary}",
-                idx + 1
+                "{}. {relevance} `{path}` - {}",
+                idx + 1,
+                md_escape(&compact_text(summary, 120)),
             ));
         }
     }
     out.join("\n")
 }
 
-pub(crate) fn format_search_sections(ctx: &DbContext, query: &str, sections: &[(String, Value)]) -> String {
-    let mut out = vec![
-        format!("## Tachi search: \"{query}\""),
-        format_db_context_markdown(ctx),
-    ];
+pub(crate) fn format_search_sections(query: &str, sections: &[(String, Value)]) -> String {
+    let mut out = vec![format!("## Tachi search: \"{query}\"")];
     for (heading, rows) in sections {
         out.push(format!("\n### {heading}"));
         if let Some(text) = rows.as_str() {
@@ -209,6 +174,103 @@ pub(crate) fn format_search_sections(ctx: &DbContext, query: &str, sections: &[(
             out.push(format_section_rows(rows, 12));
         }
     }
+    out.join("\n")
+}
+
+pub(crate) fn format_wiki_browse_stats(total: usize, categories: &[(String, usize)]) -> String {
+    let mut out = vec!["## Wiki browse".to_string()];
+    if categories.is_empty() {
+        out.push("\n_No wiki categories found._".to_string());
+        return out.join("\n");
+    }
+    out.push(format!(
+        "\n**{total}** entries across **{}** categories:\n",
+        categories.len()
+    ));
+    for (path, count) in categories {
+        out.push(format!("- `{path}` ({count})"));
+    }
+    out.join("\n")
+}
+
+pub(crate) fn format_wiki_browse_category(path: &str, entries: &[Value]) -> String {
+    let mut out = vec![format!("## Wiki browse: `{path}`")];
+    if entries.is_empty() {
+        out.push("\n_No entries in this category._".to_string());
+        return out.join("\n");
+    }
+    out.push(format!("\n**{}** entries:\n", entries.len()));
+    for (idx, entry) in entries.iter().enumerate() {
+        let summary = entry
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("(no summary)");
+        let entry_path = entry.get("path").and_then(Value::as_str).unwrap_or(path);
+        let importance = entry
+            .get("importance")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        out.push(format!(
+            "{}. **`{entry_path}`** (importance {importance})\n   {}",
+            idx + 1,
+            md_escape(summary),
+        ));
+    }
+    out.join("\n")
+}
+
+pub(crate) fn format_wiki_read(entry: &Value) -> String {
+    let path = entry
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)");
+    let text = entry
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("(empty)");
+    let summary = entry.get("summary").and_then(Value::as_str).unwrap_or("");
+    let importance = entry
+        .get("importance")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let keywords = entry
+        .get("keywords")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let entities = entry
+        .get("entities")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+
+    let mut out = vec![format!("## Wiki: `{path}`")];
+    if !summary.is_empty() {
+        out.push(format!("\n> {summary}"));
+    }
+    out.push(format!(
+        "\n**importance:** {importance}{}",
+        if keywords.is_empty() {
+            String::new()
+        } else {
+            format!(" | **keywords:** {keywords}")
+        }
+    ));
+    if !entities.is_empty() {
+        out.push(format!("**entities:** {entities}"));
+    }
+    out.push("\n---\n".to_string());
+    out.push(text.to_string());
     out.join("\n")
 }
 
@@ -221,18 +283,12 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
     }
     let mut out = Vec::new();
     for (idx, row) in items.iter().take(limit).enumerate() {
-        let topic = row
-            .get("topic")
-            .and_then(Value::as_str)
-            .unwrap_or("entry");
+        let topic = row.get("topic").and_then(Value::as_str).unwrap_or("entry");
         let summary = row
             .get("summary")
             .and_then(Value::as_str)
             .unwrap_or("(no summary)");
-        let path = row
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("/");
+        let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         let id = row.get("id").and_then(Value::as_str);
         let relevance = row
             .get("relevance")
@@ -242,8 +298,10 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             .unwrap_or_else(|| "?".to_string());
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{topic}**{id_suffix} (relevance {relevance})\n   - {summary}\n   - `{path}`",
-            idx + 1
+            "{}. **{}**{id_suffix} {relevance} `{path}` - {}",
+            idx + 1,
+            md_escape(topic),
+            md_escape(&compact_text(summary, 120)),
         ));
     }
     out.join("\n")

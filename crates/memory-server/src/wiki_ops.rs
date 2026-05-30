@@ -613,13 +613,15 @@ pub(crate) async fn handle_wiki_ingest(
         text: content.clone(),
         importance: 0.8,
         timestamp: timestamp.clone(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "experience".to_string(),
         topic: topic.clone(),
         keywords,
         persons: Vec::new(),
         entities: entities.clone(),
         location: String::new(),
-        source: "mcp".to_string(),
+        source: "wiki".to_string(),
         scope: "general".to_string(),
         archived: false,
         access_count: 0,
@@ -637,9 +639,40 @@ pub(crate) async fn handle_wiki_ingest(
     };
 
     server.with_named_project_store("wiki", |store| {
+        let old_id = {
+            let mut stmt = store
+                .connection()
+                .prepare(
+                    "SELECT id FROM memories 
+                     WHERE (path = ?1 OR (domain = 'wiki' AND topic = ?2)) 
+                       AND archived = 0 
+                       AND superseded_by IS NULL 
+                     LIMIT 1",
+                )
+                .map_err(|e| format!("prepare wiki duplicate query failed: {e}"))?;
+            let mut rows = stmt
+                .query_map((&path, &topic), |row| row.get::<_, String>(0))
+                .map_err(|e| format!("query wiki duplicate failed: {e}"))?;
+            if let Some(row) = rows.next() {
+                Some(row.map_err(|e| format!("read wiki duplicate row failed: {e}"))?)
+            } else {
+                None
+            }
+        };
+
         store
             .upsert(&entry)
-            .map_err(|e| format!("wiki ingest save: {e}"))
+            .map_err(|e| format!("wiki ingest save: {e}"))?;
+
+        if let Some(old_id) = old_id {
+            store
+                .supersede_memory(&old_id, &id)
+                .map_err(|e| format!("supersede old wiki failed: {e}"))?;
+            store
+                .archive_memory(&old_id)
+                .map_err(|e| format!("archive old wiki failed: {e}"))?;
+        }
+        Ok(())
     })?;
 
     let mut related = Vec::new();
@@ -670,20 +703,17 @@ pub(crate) async fn handle_wiki_ingest(
         }
     }
 
-    server.enqueue_enrichment(super::EnrichmentItem {
-        id: id.clone(),
-        text: entry.text.clone(),
-        summary: entry.summary.clone(),
-        keywords: entry.keywords.clone(),
-        needs_embedding: true,
-        needs_summary: false,
-        target_db: DbScope::Project,
-        named_project: Some("wiki".to_string()),
-        db_path: None,
-        foundry_agent_id: None,
-        foundry_path_prefix: None,
-        revision: 1,
-    });
+    server.enqueue_enrichment(crate::enrichment::build_enrichment_item(
+        &entry,
+        true,
+        false,
+        DbScope::Project,
+        Some("wiki".to_string()),
+        None,
+        None,
+        None,
+        1,
+    ));
 
     append_wiki_log(
         server,
@@ -789,6 +819,8 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
         text: log_line.clone(),
         importance: 0.3,
         timestamp: now,
+        valid_from: String::new(),
+        valid_until: None,
         category: "other".to_string(),
         topic: "wiki_log".to_string(),
         keywords: vec!["wiki".to_string(), "log".to_string()],
@@ -1150,12 +1182,6 @@ pub(crate) async fn handle_wiki_search(
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let ctx = crate::db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
-
     let rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -1183,6 +1209,7 @@ pub(crate) async fn handle_wiki_search(
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -1194,7 +1221,6 @@ pub(crate) async fn handle_wiki_search(
     );
 
     Ok(crate::agent_markdown::format_wiki_search(
-        &ctx,
         &params.query,
         rows.len(),
         &serde_json::Value::Array(rows),
@@ -1209,7 +1235,6 @@ pub(crate) fn handle_wiki_browse(
 
     match params.category.as_deref() {
         None | Some("") => {
-            // Return category stats (counts per category)
             let mut categories = Vec::new();
             let mut total = 0usize;
             let all_entries =
@@ -1222,10 +1247,7 @@ pub(crate) fn handle_wiki_browse(
                     .filter(|entry| entry.path == cat_path || entry.path.starts_with(&cat_prefix))
                     .count();
                 if count > 0 {
-                    categories.push(json!({
-                        "path": cat_path,
-                        "count": count,
-                    }));
+                    categories.push((cat_path.to_string(), count));
                     total += count;
                 }
             }
@@ -1236,59 +1258,29 @@ pub(crate) fn handle_wiki_browse(
                 &format!("stats | {} categor(ies), {} total", categories.len(), total),
             );
 
-            serde_json::to_string(&json!({
-                "status": "completed",
-                "mode": "stats",
-                "total_entries": total,
-                "categories": categories,
-            }))
-            .map_err(|e| format!("serialize wiki_browse: {e}"))
+            Ok(crate::agent_markdown::format_wiki_browse_stats(
+                total,
+                &categories,
+            ))
         }
         Some(category) => {
-            // Browse a specific category
             let resolved_path = resolve_wiki_category(category);
             let limit = params.limit.max(1).min(500);
 
             let (entries, _) = list_wiki_entries(server, &project_name, 5000)?;
             let resolved_prefix = format!("{resolved_path}/");
-            let entries = entries
+            let slim_entries: Vec<Value> = entries
                 .into_iter()
                 .filter(|entry| {
                     entry.path == resolved_path || entry.path.starts_with(&resolved_prefix)
                 })
                 .take(limit)
-                .collect::<Vec<_>>();
-
-            let include_related = limit <= 20;
-            let slim_entries: Vec<Value> = entries
-                .iter()
                 .map(|entry| {
-                    let mut value = json!({
-                        "id": entry.id,
+                    json!({
                         "path": entry.path,
                         "summary": entry.summary,
-                        "topic": entry.topic,
                         "importance": entry.importance,
-                        "keywords": entry.keywords,
-                        "entities": entry.entities,
-                        "timestamp": entry.timestamp,
-                        "related_entries": [],
-                    });
-                    if include_related {
-                        if let Some(obj) = value.as_object_mut() {
-                            obj.insert(
-                                "related_entries".to_string(),
-                                json!(find_related_by_entities(
-                                    server,
-                                    &project_name,
-                                    &entry.entities,
-                                    &entry.id,
-                                    5,
-                                )),
-                            );
-                        }
-                    }
-                    value
+                    })
                 })
                 .collect();
 
@@ -1298,22 +1290,66 @@ pub(crate) fn handle_wiki_browse(
                 &format!("{} | {} entry(s)", resolved_path, slim_entries.len()),
             );
 
-            serde_json::to_string(&json!({
-                "status": "completed",
-                "mode": "browse",
-                "path": resolved_path,
-                "count": slim_entries.len(),
-                "entries": slim_entries,
-            }))
-            .map_err(|e| format!("serialize wiki_browse: {e}"))
+            Ok(crate::agent_markdown::format_wiki_browse_category(
+                &resolved_path,
+                &slim_entries,
+            ))
         }
+    }
+}
+
+// ─── Wiki Read ──────────────────────────────────────────────────────────────
+
+pub(crate) fn handle_wiki_read(
+    server: &MemoryServer,
+    path: &str,
+    project: &str,
+) -> Result<String, String> {
+    let resolved = if path.trim().starts_with('/') {
+        let trimmed = path.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Err(
+                "Wiki path cannot be root '/' — specify a concrete path like /wiki/my-topic"
+                    .to_string(),
+            );
+        }
+        trimmed.to_string()
+    } else {
+        resolve_wiki_category(path)
+    };
+
+    let (entries, _) = list_wiki_entries(server, project, 5000)?;
+    let entry = entries.iter().find(|e| e.path == resolved).or_else(|| {
+        let prefix = format!("{resolved}/");
+        entries.iter().find(|e| e.path.starts_with(&prefix))
+    });
+
+    match entry {
+        Some(entry) => {
+            append_wiki_log(server, "read", &resolved);
+            Ok(crate::agent_markdown::format_wiki_read(&json!({
+                "path": entry.path,
+                "text": entry.text,
+                "summary": entry.summary,
+                "importance": entry.importance,
+                "keywords": entry.keywords,
+                "entities": entry.entities,
+                "topic": entry.topic,
+                "timestamp": entry.timestamp,
+            })))
+        }
+        None => Ok(format!(
+            "## Wiki read\n\n_No entry found at `{resolved}`._\n\nUse `tachi_wiki(action=\"search\")` or `tachi_wiki(action=\"browse\")` to find entries."
+        )),
     }
 }
 
 // ─── Wiki Lint ──────────────────────────────────────────────────────────────
 
 /// Count-only wiki hygiene for agent alerts/briefing — never runs skill-quality guards.
-pub(crate) async fn wiki_hygiene_counts(server: &MemoryServer) -> Result<serde_json::Value, String> {
+pub(crate) async fn wiki_hygiene_counts(
+    server: &MemoryServer,
+) -> Result<serde_json::Value, String> {
     let lint = handle_wiki_lint(
         server,
         WikiLintParams {
@@ -1331,8 +1367,7 @@ pub(crate) async fn wiki_hygiene_counts(server: &MemoryServer) -> Result<serde_j
         },
     )
     .await?;
-    let parsed: serde_json::Value =
-        serde_json::from_str(&lint).unwrap_or_else(|_| json!({}));
+    let parsed: serde_json::Value = serde_json::from_str(&lint).unwrap_or_else(|_| json!({}));
     Ok(json!({
         "orphans": parsed.get("orphans").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
         "stale_nodes": parsed.get("stale_nodes").and_then(|v| v.as_array()).map(|rows| rows.len()).unwrap_or(0),
@@ -1443,11 +1478,16 @@ pub(crate) async fn handle_wiki_lint(
         .iter()
         .any(|check| check == "contradictions" || check == "missing_edges" || check == "duplicates")
     {
-        for i in 0..nodes.len() {
-            for j in (i + 1)..nodes.len() {
-                let left = &nodes[i].0;
-                let right = &nodes[j].0;
-                if nodes[i].1 != nodes[j].1 {
+        // Cap pairwise comparison to avoid O(n²) blowup on large wikis.
+        // At 500 nodes the nested loop produces ≤124,750 pairs, which is
+        // fast enough for an interactive lint call.
+        const PAIRWISE_NODE_CAP: usize = 500;
+        let nodes_for_pairwise = &nodes[..nodes.len().min(PAIRWISE_NODE_CAP)];
+        for i in 0..nodes_for_pairwise.len() {
+            for j in (i + 1)..nodes_for_pairwise.len() {
+                let left = &nodes_for_pairwise[i].0;
+                let right = &nodes_for_pairwise[j].0;
+                if nodes_for_pairwise[i].1 != nodes_for_pairwise[j].1 {
                     continue;
                 }
                 let similarity = token_cosine_similarity(&left.text, &right.text);
@@ -1461,7 +1501,7 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes[i].1.as_str(),
+                        "db": nodes_for_pairwise[i].1.as_str(),
                     }));
                 }
                 if checks.iter().any(|check| check == "duplicates") && similarity > 0.95 {
@@ -1471,7 +1511,7 @@ pub(crate) async fn handle_wiki_lint(
                         "left_path": left.path,
                         "right_path": right.path,
                         "similarity": similarity,
-                        "db": nodes[i].1.as_str(),
+                        "db": nodes_for_pairwise[i].1.as_str(),
                     }));
                 }
                 if checks.iter().any(|check| check == "contradictions") {
@@ -1483,7 +1523,7 @@ pub(crate) async fn handle_wiki_lint(
                             "left_path": left.path,
                             "right_path": right.path,
                             "score": contradiction,
-                            "db": nodes[i].1.as_str(),
+                            "db": nodes_for_pairwise[i].1.as_str(),
                         }));
                     }
                 }

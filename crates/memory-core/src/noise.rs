@@ -157,7 +157,10 @@ pub fn should_skip_query(query: &str) -> bool {
     let char_count = trimmed.chars().count();
 
     // Force retrieve if query has memory-related intent (checked FIRST)
-    if force_retrieve_patterns().iter().any(|p| p.is_match(trimmed)) {
+    if force_retrieve_patterns()
+        .iter()
+        .any(|p| p.is_match(trimmed))
+    {
         return false;
     }
 
@@ -203,6 +206,15 @@ pub fn should_skip_query(query: &str) -> bool {
 
     // Default: do retrieve
     false
+}
+
+/// Remove `<think>...</think>` tags from a text block.
+pub fn scrub_think_tags(text: &str) -> String {
+    static THINK_BLOCK_RE: OnceLock<Regex> = OnceLock::new();
+    let re = THINK_BLOCK_RE.get_or_init(|| {
+        Regex::new(r"(?is)<think\b[^>]*>.*?</think>").expect("valid think-tag regex")
+    });
+    re.replace_all(text, "").trim().to_string()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

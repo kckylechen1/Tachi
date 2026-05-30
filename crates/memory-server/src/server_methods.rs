@@ -9,11 +9,11 @@ pub(super) struct ResolvedCallTarget {
 
 impl MemoryServer {
     pub(super) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
-        *write_or_recover(&self.tool_profile, "tool_profile") = profile;
+        self.agent_runtime_write().tool_profile = profile;
     }
 
     pub(super) fn active_tool_profile(&self) -> Option<ToolProfile> {
-        *read_or_recover(&self.tool_profile, "tool_profile")
+        self.agent_runtime_read().tool_profile.clone()
     }
 
     pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {
@@ -45,11 +45,13 @@ impl MemoryServer {
             eprintln!("[foundry] failed to persist job {}: {err}", item.job.id);
         }
 
-        self.foundry_stats
+        self.foundry_lock()
+            .foundry_stats
             .queued
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.foundry_tx.try_send(item).is_err() {
-            self.foundry_stats
+        if self.foundry_lock().foundry_tx.try_send(item).is_err() {
+            self.foundry_lock()
+                .foundry_stats
                 .queued
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             return Err("foundry maintenance worker unavailable".to_string());
@@ -256,6 +258,15 @@ impl MemoryServer {
 
     /// Resolve a named project's DB path: `~/.tachi/projects/{name}/memory.db`
     pub(super) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
+        // Guard: reject names that could escape the projects/ directory.
+        if project_name.is_empty()
+            || project_name.contains('/')
+            || project_name.contains('\\')
+            || project_name.contains("..")
+            || project_name.starts_with('.')
+        {
+            return Err(format!("Invalid project name '{project_name}'"));
+        }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let app_home = std::env::var("TACHI_HOME")
             .map(|v| {
@@ -582,7 +593,10 @@ impl MemoryServer {
                 None,
             )
         })?;
-        Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
+        Ok(resolve_mcp_tool_exposure(
+            &def,
+            self.tool_discovery.mcp_tool_exposure_mode,
+        ))
     }
 
     pub(super) fn get_sandbox_policy_for_capability(&self, capability_id: &str) -> Option<Value> {
@@ -678,27 +692,29 @@ impl MemoryServer {
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
-        lock_or_recover(&self.skill_tools, "skill_tools").insert(tool_name.clone(), cap.id.clone());
-        lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").insert(tool_name.clone(), tool);
+        {
+            lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
+                .insert(tool_name.clone(), cap.id.clone());
+            lock_or_recover(&self.tool_discovery.skill_tool_defs, "skill_tool_defs")
+                .insert(tool_name.clone(), tool);
+        }
         Ok(tool_name)
     }
 
     pub(super) fn unregister_skill_tool(&self, skill_id: &str) -> Result<Option<String>, String> {
         let removed_tool_name = {
-            let mut map = lock_or_recover(&self.skill_tools, "skill_tools");
-            let tool_name = map
+            let mut skill_tools = lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools");
+            let tool_name = skill_tools
                 .iter()
                 .find(|(_, id)| id.as_str() == skill_id)
                 .map(|(name, _)| name.clone());
             if let Some(ref name) = tool_name {
-                map.remove(name);
+                skill_tools.remove(name);
+                lock_or_recover(&self.tool_discovery.skill_tool_defs, "skill_tool_defs")
+                    .remove(name);
             }
             tool_name
         };
-
-        if let Some(ref name) = removed_tool_name {
-            lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").remove(name);
-        }
 
         Ok(removed_tool_name)
     }
@@ -708,13 +724,7 @@ impl MemoryServer {
         tool_name: &str,
         arguments: Option<rmcp::model::JsonObject>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let skill_id = self
-            .skill_tools
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
-                e.into_inner()
-            })
+        let skill_id = lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
@@ -793,14 +803,7 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
 
-        if self
-            .skill_tools
-            .lock()
-            .unwrap_or_else(|e| {
-                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
-                e.into_inner()
-            })
-            .contains_key(tool_name)
+        if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools").contains_key(tool_name)
         {
             return self.call_skill_tool(tool_name, args_obj).await;
         }
@@ -853,24 +856,25 @@ impl MemoryServer {
     ) -> Result<Option<String>, rmcp::ErrorData> {
         let now = Instant::now();
 
-        // Read agent profile overrides (if registered)
-        let (effective_rpm, effective_burst) = {
-            let profile = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
-            match profile.as_ref() {
-                Some(p) => (
-                    p.rate_limit_rpm.unwrap_or(self.rate_limit_rpm),
-                    p.rate_limit_burst.unwrap_or(self.rate_limit_burst),
-                ),
-                None => (self.rate_limit_rpm, self.rate_limit_burst),
-            }
+        let overrides = {
+            let rt = self.agent_runtime_read();
+            rt.agent_profile
+                .as_ref()
+                .map(|p| (p.rate_limit_rpm, p.rate_limit_burst))
+        };
+
+        let mut rl = self.rate_limiter_lock();
+        let (effective_rpm, effective_burst) = match overrides {
+            Some((rpm_override, burst_override)) => (
+                rpm_override.unwrap_or(rl.rpm),
+                burst_override.unwrap_or(rl.burst),
+            ),
+            None => (rl.rpm, rl.burst),
         };
 
         // ── RPM check ────────────────────────────────────────────────────
         if effective_rpm > 0 {
-            let mut windows = self
-                .rate_limit_windows
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let windows = &mut rl.windows;
 
             // Evict stale sessions when map exceeds cap
             if windows.len() > RATE_LIMIT_MAX_SESSIONS {
@@ -914,10 +918,7 @@ impl MemoryServer {
         let mut soft_warning: Option<String> = None;
         if effective_burst > 0 {
             let burst_key = format!("{}:{}:{}", session_id, tool_name, args_hash);
-            let mut bursts = self
-                .rate_limit_bursts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let bursts = &mut rl.bursts;
 
             // Evict stale burst keys when map exceeds cap
             if bursts.len() > RATE_LIMIT_MAX_BURST_KEYS {

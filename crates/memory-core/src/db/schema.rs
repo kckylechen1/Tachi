@@ -1,7 +1,9 @@
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 use crate::error::MemoryError;
+
+use super::common::normalize_utc_iso;
 
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     init_schema_inner(conn)
@@ -54,6 +56,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             text         TEXT NOT NULL DEFAULT '',
             importance   REAL NOT NULL DEFAULT 0.7,
             timestamp    TEXT NOT NULL,
+            valid_from   TEXT NOT NULL DEFAULT '',
+            valid_until  TEXT,
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
@@ -404,6 +408,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "created_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "updated_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "revision", "INTEGER NOT NULL DEFAULT 1")?;
+    ensure_column(conn, "memories", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "valid_until", "TEXT")?;
 
     // Retention policy and domain columns for Issue #38 and #32
     ensure_column(conn, "memories", "retention_policy", "TEXT")?;
@@ -476,6 +482,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         r#"
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_valid_time  ON memories(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_derived_source       ON derived_items(source);
         CREATE INDEX IF NOT EXISTS idx_derived_path         ON derived_items(path);
         CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
@@ -500,6 +507,9 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         "UPDATE memories SET revision = 1 WHERE revision IS NULL OR revision <= 0",
         [],
     )?;
+    normalize_memory_validity_columns(conn)?;
+
+    bridge_hypertachi_memory_columns(conn)?;
 
     ensure_fts_backfilled(conn)?;
 
@@ -508,6 +518,111 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+/// Align HyperTachi-shaped legacy DBs (`indexed_tags`, `domain_key`) with Sigil's
+/// canonical columns before enum/CHECK migrations run.
+fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError> {
+    ensure_column(conn, "memories", "persons", "TEXT NOT NULL DEFAULT '[]'")?;
+    ensure_column(conn, "memories", "location", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "domain", "TEXT")?;
+
+    if has_column(conn, "memories", "indexed_tags")? {
+        conn.execute(
+            "UPDATE memories
+             SET keywords = indexed_tags
+             WHERE (keywords IS NULL OR trim(keywords) IN ('', '[]'))
+               AND indexed_tags IS NOT NULL
+               AND trim(indexed_tags) NOT IN ('', '[]')",
+            [],
+        )?;
+    }
+
+    if has_column(conn, "memories", "domain_key")? {
+        conn.execute(
+            "UPDATE memories
+             SET domain = domain_key
+             WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
+               AND domain_key IS NOT NULL
+               AND trim(domain_key) <> ''",
+            [],
+        )?;
+    }
+
+    // Undo mistaken v1 bridge that copied domain_key into location.
+    conn.execute(
+        "UPDATE memories
+         SET domain = location, location = ''
+         WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
+           AND trim(location) <> ''
+           AND location NOT GLOB '/*'
+           AND location NOT LIKE '%/%'
+           AND location NOT LIKE '% %'",
+        [],
+    )?;
+
+    Ok(())
+}
+
+fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryError> {
+    let rows = {
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, valid_from, valid_until FROM memories \
+             WHERE valid_from = '' OR valid_from IS NULL",
+        )?;
+        let mapped = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row?);
+        }
+        rows
+    };
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<(), MemoryError> {
+        for (id, timestamp, valid_from, valid_until) in rows {
+            let valid_from_raw = valid_from
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(timestamp.trim());
+            let normalized_from =
+                normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
+            let normalized_until = valid_until
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
+            if valid_from.as_deref() == Some(normalized_from.as_str())
+                && valid_until == normalized_until
+            {
+                continue;
+            }
+            conn.execute(
+                "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
+                params![id, normalized_from, normalized_until],
+            )?;
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Idempotent migration that:
@@ -728,6 +843,8 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             text         TEXT NOT NULL DEFAULT '',
             importance   REAL NOT NULL DEFAULT 0.7,
             timestamp    TEXT NOT NULL,
+            valid_from   TEXT NOT NULL DEFAULT '',
+            valid_until  TEXT,
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
@@ -756,13 +873,14 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         );
 
         INSERT INTO memories_new
-            (id, path, summary, text, importance, timestamp, category, topic,
-             keywords, persons, entities, location, source, scope, archived,
+            (id, path, summary, text, importance, timestamp, valid_from, valid_until,
+             category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by)
         SELECT
-             id, path, summary, text, importance, timestamp, category, topic,
-             keywords, persons, entities, location, source, scope, archived,
+             id, path, summary, text, importance, timestamp,
+             COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
+             category, topic, keywords, persons, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by
         FROM memories;
@@ -775,6 +893,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_valid_time  ON memories(valid_from, valid_until);
         CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
         CREATE INDEX IF NOT EXISTS idx_memories_domain      ON memories(domain);
         CREATE INDEX IF NOT EXISTS idx_memories_superseded  ON memories(superseded_by);
@@ -899,32 +1018,32 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Memo
 }
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
+    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
+
     let memories_count: i64 =
         conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
     if memories_count == 0 {
         return Ok(());
     }
 
-    let fts_count: i64 =
-        conn.query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))?;
-    if fts_count > 0 {
-        return Ok(());
-    }
+    conn.execute(
+        "DELETE FROM memories_fts WHERE id NOT IN (SELECT id FROM memories)",
+        [],
+    )?;
 
     conn.execute(
         r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
            SELECT
-             id,
-             path,
-             summary,
-             text,
-             trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-             trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
-           FROM memories"#,
+             m.id,
+             m.path,
+             m.summary,
+             m.text,
+             trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
+             trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
+           FROM memories m
+           WHERE NOT EXISTS (SELECT 1 FROM memories_fts f WHERE f.id = m.id)"#,
         [],
     )?;
-
-    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
 
     Ok(())
 }
@@ -993,6 +1112,137 @@ mod migration_tests {
         )
         .unwrap();
         conn
+    }
+
+    fn open_with_hypertachi_shape() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id           TEXT PRIMARY KEY,
+                path         TEXT NOT NULL DEFAULT '/',
+                summary      TEXT NOT NULL DEFAULT '',
+                text         TEXT NOT NULL DEFAULT '',
+                importance   REAL NOT NULL DEFAULT 0.7,
+                timestamp    TEXT NOT NULL,
+                valid_from   TEXT NOT NULL DEFAULT '',
+                valid_until  TEXT,
+                category     TEXT NOT NULL DEFAULT 'fact',
+                topic        TEXT NOT NULL DEFAULT '',
+                keywords     TEXT NOT NULL DEFAULT '[]',
+                indexed_tags TEXT NOT NULL DEFAULT '[]',
+                entities     TEXT NOT NULL DEFAULT '[]',
+                domain_key   TEXT NOT NULL DEFAULT '',
+                source       TEXT NOT NULL DEFAULT 'manual',
+                scope        TEXT NOT NULL DEFAULT 'general',
+                archived     INTEGER NOT NULL DEFAULT 0,
+                created_at   TEXT NOT NULL DEFAULT '',
+                updated_at   TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access  TEXT,
+                revision     INTEGER NOT NULL DEFAULT 1,
+                metadata     TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain       TEXT,
+                superseded_by  TEXT
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"INSERT INTO memories
+                (id, path, text, importance, timestamp, indexed_tags, domain_key)
+               VALUES ('hypertachi-1', '/wiki/test', 'hypertachi bridge row', 0.7,
+                       '2026-04-30T00:00:00Z', '["alice"]', 'finance')"#,
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn bridge_repairs_mistaken_domain_in_location() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL DEFAULT '/',
+                summary TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                importance REAL NOT NULL DEFAULT 0.7,
+                timestamp TEXT NOT NULL,
+                valid_from TEXT NOT NULL DEFAULT '',
+                valid_until TEXT,
+                category TEXT NOT NULL DEFAULT 'fact',
+                topic TEXT NOT NULL DEFAULT '',
+                keywords TEXT NOT NULL DEFAULT '[]',
+                persons TEXT NOT NULL DEFAULT '[]',
+                entities TEXT NOT NULL DEFAULT '[]',
+                location TEXT NOT NULL DEFAULT 'finance',
+                source TEXT NOT NULL DEFAULT 'manual',
+                scope TEXT NOT NULL DEFAULT 'general',
+                archived INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                last_access TEXT,
+                revision INTEGER NOT NULL DEFAULT 1,
+                metadata TEXT NOT NULL DEFAULT '{}',
+                retention_policy TEXT,
+                domain TEXT,
+                superseded_by TEXT,
+                CHECK (source IN ('manual','extraction','migration','auto','foundry_distill',
+                    'foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
+                    OR source LIKE 'external:%'),
+                CHECK (category IN ('fact','decision','experience','preference','entity',
+                    'other','kanban','handoff','ghost','wiki','guide')),
+                CHECK (scope IN ('user','project','general'))
+            );
+            CREATE VIRTUAL TABLE memories_fts USING fts5(
+                id UNINDEXED, path, summary, text, keywords, entities,
+                tokenize = 'unicode61'
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, text, importance, timestamp)
+             VALUES ('repair-1', '/trading', 'row', 0.7, '2026-04-30T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        init_schema(&conn).expect("bridge should move mistaken domain out of location");
+        let (location, domain): (String, Option<String>) = conn
+            .query_row(
+                "SELECT location, domain FROM memories WHERE id='repair-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(location, "");
+        assert_eq!(domain.as_deref(), Some("finance"));
+    }
+
+    #[test]
+    fn bridge_hypertachi_columns_before_enum_migration() {
+        let conn = open_with_hypertachi_shape();
+        init_schema(&conn).expect("init_schema should bridge hypertachi columns");
+        let (persons, keywords, location, domain): (String, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT persons, keywords, location, domain FROM memories WHERE id='hypertachi-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(persons, "[]");
+        assert_eq!(keywords, r#"["alice"]"#);
+        assert_eq!(location, "");
+        assert_eq!(domain.as_deref(), Some("finance"));
     }
 
     #[test]
@@ -1206,5 +1456,56 @@ mod migration_tests {
             .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
             .unwrap();
         assert!(cnt >= 1);
+    }
+
+    #[test]
+    fn migration_repairs_partial_fts_drift() {
+        libsimple::enable_auto_extension().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO memories
+                (id, path, summary, text, importance, timestamp, category, topic,
+                 keywords, persons, entities, location, source, scope, archived,
+                 created_at, updated_at, access_count, revision, metadata)
+            VALUES
+                ('row1', '/notes/a', '', 'alpha', 0.5, '2026-04-30T00:00:00Z',
+                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}'),
+                ('row2', '/notes/b', '', 'bravo', 0.5, '2026-04-30T00:00:00Z',
+                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}');
+            INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+            VALUES
+                ('row1', '/notes/a', '', 'alpha', '', ''),
+                ('ghost', '/notes/ghost', '', 'ghost', '', '');
+            "#,
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |r| r.get(0))
+            .unwrap();
+        let orphan_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts f LEFT JOIN memories m ON m.id=f.id WHERE m.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let missing_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories m LEFT JOIN memories_fts f ON f.id=m.id WHERE f.id IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(fts_count, 2);
+        assert_eq!(orphan_count, 0);
+        assert_eq!(missing_count, 0);
     }
 }

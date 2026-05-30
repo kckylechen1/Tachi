@@ -112,12 +112,14 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_path = workspace_dir.join("plan.md");
     // V1 writes the assembled prompt as a placeholder plan.md (legacy);
     // V2 will overwrite this with the real LLM-generated plan below.
-    std::fs::write(&plan_path, &base_prompt)
+    tokio::fs::write(&plan_path, &base_prompt)
+        .await
         .map_err(|e| format!("Failed to write plan file: {e}"))?;
 
     // Write prompt.md (full assembled prompt for tracked run)
     let prompt_md_path = workspace_dir.join("prompt.md");
-    std::fs::write(&prompt_md_path, &base_prompt)
+    tokio::fs::write(&prompt_md_path, &base_prompt)
+        .await
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
 
     // Write context.md (summary of injected context/skills — for MVP, same as prompt)
@@ -136,7 +138,8 @@ pub(crate) async fn handle_tachi_dispatch(
         sections.push(base_prompt.clone());
         sections.join("\n\n")
     };
-    std::fs::write(&context_md_path, &context_summary)
+    tokio::fs::write(&context_md_path, &context_summary)
+        .await
         .map_err(|e| format!("Failed to write context.md: {e}"))?;
 
     // Write trajectory.jsonl — initial dispatch_started event
@@ -152,10 +155,12 @@ pub(crate) async fn handle_tachi_dispatch(
         });
         let line = serde_json::to_string(&started_event)
             .map_err(|e| format!("Failed to serialize started event: {e}"))?;
-        std::fs::write(&trajectory_path, format!("{}\n", line))
+        tokio::fs::write(&trajectory_path, format!("{}\n", line))
+            .await
             .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
         let progress_path = workspace_dir.join("progress.jsonl");
-        std::fs::write(&progress_path, format!("{}\n", line))
+        tokio::fs::write(&progress_path, format!("{}\n", line))
+            .await
             .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
     }
 
@@ -299,7 +304,9 @@ pub(crate) async fn handle_tachi_dispatch(
                 "trajectory_file": trajectory_path.to_string_lossy(),
                 "run_dir": workspace_dir.to_string_lossy(),
             });
-            return serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"));
+            return Ok(
+                serde_json::to_string(&response).unwrap_or_else(|e| format!("serialize: {e}"))
+            );
         }
 
         // Auto-approve: rewrite the prompt fed to the executing agent so
@@ -431,9 +438,25 @@ pub(crate) async fn handle_tachi_dispatch(
         }
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
-        tokio::time::sleep(Duration::from_secs(2)).await; // grace period for tachi_complete to propagate
-
-        let kanban_state = get_kanban_state(&server_clone, &d_id).await;
+        // Poll for kanban state instead of a fixed sleep to avoid race conditions
+        let mut kanban_state = None;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let state = get_kanban_state(&server_clone, &d_id).await;
+            if let Some(ref s) = state {
+                if matches!(
+                    s.as_str(),
+                    "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+                ) {
+                    kanban_state = state;
+                    break;
+                }
+            }
+        }
+        let kanban_state = match kanban_state {
+            Some(s) => Some(s),
+            None => get_kanban_state(&server_clone, &d_id).await,
+        };
         let is_closed = matches!(
             kanban_state.as_deref(),
             Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
@@ -520,6 +543,8 @@ pub(crate) async fn handle_tachi_dispatch(
                     retention_policy: Some("durable".to_string()),
                     domain: Some("system".to_string()),
                     timestamp: None,
+                    valid_from: None,
+                    valid_until: None,
                     metadata: Some(metadata),
                 };
                 let _ =

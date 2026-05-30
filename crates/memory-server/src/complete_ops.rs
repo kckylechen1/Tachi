@@ -147,6 +147,8 @@ pub(crate) async fn handle_tachi_complete(
         retention_policy: None,
         domain: None,
         timestamp: None,
+        valid_from: None,
+        valid_until: None,
         metadata: Some(serde_json::Value::Object(metadata_map)),
     };
 
@@ -375,6 +377,8 @@ pub(crate) async fn handle_tachi_complete(
                         retention_policy: Some("durable".to_string()),
                         domain: None,
                         timestamp: None,
+                        valid_from: None,
+                        valid_until: None,
                         metadata: Some(json!({
                             "lesson": true,
                             "dispatch_id": params.dispatch_id,

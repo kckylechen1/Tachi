@@ -45,8 +45,8 @@ fn is_lazy_source(source: &str) -> bool {
     matches!(source, "extraction" | "auto" | "ingest_event")
 }
 
-fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
-    entry.importance >= 0.5 || entry.vector.is_some()
+fn should_enqueue_enrichment(_entry: &MemoryEntry) -> bool {
+    true
 }
 
 fn days_since(timestamp: &str) -> f64 {
@@ -175,6 +175,8 @@ fn build_ingest_entry(
         text,
         importance,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: topic_from_path(&path),
         keywords: Vec::new(),
@@ -211,10 +213,7 @@ fn enqueue_dead_letter(
         max_retries: 3,
         status: "pending".to_string(),
     };
-    let mut dlq = server
-        .dead_letters
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut dlq = server.dead_letters_lock();
     dlq.push_back(dl);
     while dlq.len() > DLQ_MAX_ENTRIES {
         dlq.pop_front();
@@ -613,20 +612,21 @@ async fn ingest_structured_event(
     }
 
     if should_enqueue_enrichment(&entry) {
-        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
-            id: entry_id.clone(),
-            text: entry.text.clone(),
-            summary: entry.summary.clone(),
-            keywords: entry.keywords.clone(),
-            needs_embedding: true,
-            needs_summary: true,
-            target_db,
-            named_project: named_project.clone(),
-            db_path: None,
-            foundry_agent_id: None,
-            foundry_path_prefix: None,
-            revision: 1,
-        });
+        let _ =
+            server
+                .enrichment_lock()
+                .enrich_tx
+                .try_send(crate::enrichment::build_enrichment_item(
+                    &entry,
+                    true,
+                    true,
+                    target_db,
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    1,
+                ));
     }
 
     insert_ingest_audit(server, "ingest_event", &event_hash);
@@ -675,6 +675,7 @@ pub(crate) async fn handle_extract_facts(
     }
 
     let count = facts.len();
+    let mut saved_facts = Vec::new();
     let saved = server
         .with_store_for_scope(target_db, |store| {
             let mut saved = 0;
@@ -690,14 +691,23 @@ pub(crate) async fn handle_extract_facts(
                         "extract_source": source.clone(),
                     }),
                 );
+                // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                 let Some(mut entry) = fact_to_entry(fact, "extraction", metadata) else {
                     continue;
                 };
                 if is_lazy_source(&entry.source) && entry.importance < 0.5 {
                     entry.retention_policy = Some("ephemeral".to_string());
                 }
+                let fact_summary = serde_json::json!({
+                    "id": entry.id.clone(),
+                    "path": entry.path.clone(),
+                    "topic": entry.topic.clone(),
+                    "summary": entry.summary.clone(),
+                    "importance": entry.importance,
+                });
                 if store.upsert(&entry).is_ok() {
                     saved += 1;
+                    saved_facts.push(fact_summary);
                 }
             }
             Ok(saved)
@@ -708,7 +718,8 @@ pub(crate) async fn handle_extract_facts(
         "status": "completed",
         "source": source,
         "facts_extracted": count,
-        "facts_saved": saved
+        "facts_saved": saved,
+        "facts": saved_facts,
     }))
 }
 
@@ -858,6 +869,7 @@ pub(crate) async fn handle_ingest_event(
                                     "domain": domain.clone(),
                                 }),
                             );
+                            // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                             let Some(mut entry) = fact_to_entry(
                                 fact,
                                 &format!("conversation:{conversation_id}"),
@@ -894,6 +906,7 @@ pub(crate) async fn handle_ingest_event(
                                     "domain": domain.clone(),
                                 }),
                             );
+                            // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
                             let Some(mut entry) = fact_to_entry(
                                 fact,
                                 &format!("conversation:{conversation_id}"),
@@ -1118,20 +1131,19 @@ pub(crate) async fn handle_ingest_source(
 
     for entry in &saved_entries {
         if should_enqueue_enrichment(entry) {
-            let _ = server.enrich_tx.try_send(super::EnrichmentItem {
-                id: entry.id.clone(),
-                text: entry.text.clone(),
-                summary: entry.summary.clone(),
-                keywords: entry.keywords.clone(),
-                needs_embedding: true,
-                needs_summary: params.auto_summarize,
-                target_db,
-                named_project: named_project.clone(),
-                db_path: None,
-                foundry_agent_id: None,
-                foundry_path_prefix: None,
-                revision: 1,
-            });
+            let _ = server.enrichment_lock().enrich_tx.try_send(
+                crate::enrichment::build_enrichment_item(
+                    entry,
+                    true,
+                    params.auto_summarize,
+                    target_db,
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    1,
+                ),
+            );
         }
     }
 
@@ -1200,33 +1212,26 @@ pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         }
     }
 
-    let cache_size = server
-        .tool_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .len();
-    let hits = server.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
-    let misses = server
-        .cache_misses
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let cache_size = server.tool_cache_lock().len();
 
     let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
-        let dlq = server
-            .dead_letters
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let dlq = server.dead_letters_lock();
         let total = dlq.len();
         let pending = dlq.iter().filter(|d| d.status == "pending").count();
         let resolved = dlq.iter().filter(|d| d.status == "resolved").count();
         let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
         (total, pending, resolved, abandoned)
     };
+    let hits = server.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+    let misses = server
+        .cache_misses
+        .load(std::sync::atomic::Ordering::Relaxed);
     let foundry = json!({
-        "queued": server.foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
-        "running": server.foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),
-        "completed": server.foundry_stats.completed.load(std::sync::atomic::Ordering::Relaxed),
-        "failed": server.foundry_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
-        "skipped": server.foundry_stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
+        "queued": server.foundry_lock().foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
+        "running": server.foundry_lock().foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),
+        "completed": server.foundry_lock().foundry_stats.completed.load(std::sync::atomic::Ordering::Relaxed),
+        "failed": server.foundry_lock().foundry_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+        "skipped": server.foundry_lock().foundry_stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
     });
 
     serde_json::to_string(&json!({

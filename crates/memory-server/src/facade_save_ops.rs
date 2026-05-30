@@ -50,7 +50,7 @@ pub(crate) async fn handle_tachi_save(
             "wiki"
         } else if path_looks_like_db_path {
             "memory"
-        } else if params.text.len() < 200 {
+        } else if params.text.chars().count() < 200 {
             "note"
         } else {
             "memory"
@@ -127,6 +127,8 @@ pub(crate) async fn handle_tachi_save(
                     .retention_policy
                     .clone()
                     .or_else(|| Some("durable".to_string())),
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
                 force: params.force,
             };
             let mut result_str = handle_remember(server, remember_params).await?;
@@ -158,7 +160,7 @@ pub(crate) async fn handle_tachi_save(
                     .unwrap_or_else(|| "fact".to_string()),
                 topic: params.topic.clone().unwrap_or_default(),
                 keywords: params.keywords.clone(),
-                persons: Vec::new(),
+                persons: Vec::new(), // legacy DB column; MCP uses entities for people
                 entities: params.entities.clone(),
                 location: String::new(),
                 scope: params
@@ -173,6 +175,8 @@ pub(crate) async fn handle_tachi_save(
                 retention_policy: params.retention_policy.clone(),
                 domain: params.domain.clone(),
                 timestamp: None,
+                valid_from: params.valid_from.clone(),
+                valid_until: params.valid_until.clone(),
                 metadata: None,
             };
             handle_save_memory(server, mem_params).await

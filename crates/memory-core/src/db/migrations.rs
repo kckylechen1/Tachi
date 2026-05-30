@@ -9,6 +9,9 @@
 //! - v2: H4 scope normalization (defense-in-depth on top of PR-1's enum migration)
 //! - v3: H6 handoff path standardization
 //! - v4: B4/B11 cross-DB pollution quarantine
+//! - v5: drop HyperTachi legacy columns (`indexed_tags`, `domain_key`) after bridge
+//! - v6: fold non-empty `persons` JSON into `entities`, then clear `persons`
+//! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `persons`/`location`)
 
 use std::path::Path;
 
@@ -29,6 +32,9 @@ pub struct MigrationReport {
     pub handoff_paths_standardized: usize,
     pub quarantined: usize,
     pub quarantine_skipped_sanity_guard: bool,
+    pub hypertachi_legacy_columns_dropped: usize,
+    pub persons_folded_into_entities: usize,
+    pub legacy_columns_reconciled: usize,
 }
 
 /// Run all data-fix migrations in order. Idempotent.
@@ -68,7 +74,153 @@ pub fn run_data_migrations(
         mark_run(conn, "v4_quarantine_cross_db_rows")?;
     }
 
+    if !was_run(conn, "v5_drop_hypertachi_legacy_columns")? {
+        report.hypertachi_legacy_columns_dropped = migrate_v5_drop_hypertachi_legacy_columns(conn)?;
+        mark_run(conn, "v5_drop_hypertachi_legacy_columns")?;
+    }
+
+    if !was_run(conn, "v6_fold_persons_into_entities")? {
+        report.persons_folded_into_entities = migrate_v6_fold_persons_into_entities(conn)?;
+        mark_run(conn, "v6_fold_persons_into_entities")?;
+    }
+
+    if !was_run(conn, "v7_reconcile_legacy_memory_columns")? {
+        report.legacy_columns_reconciled = migrate_v7_reconcile_legacy_memory_columns(conn)?;
+        mark_run(conn, "v7_reconcile_legacy_memory_columns")?;
+    }
+
     Ok(report)
+}
+
+// ─── v6: fold persons → entities ─────────────────────────────────────────────
+
+fn migrate_v6_fold_persons_into_entities(conn: &Connection) -> Result<usize, MemoryError> {
+    if !table_has_column(conn, "memories", "persons")?
+        || !table_has_column(conn, "memories", "entities")?
+    {
+        return Ok(0);
+    }
+
+    let mut stmt = conn.prepare("SELECT id, persons, entities FROM memories")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, persons_raw, entities_raw) = row?;
+        let persons: Vec<String> = serde_json::from_str(&persons_raw).unwrap_or_default();
+        if persons.is_empty() {
+            continue;
+        }
+        let mut entities: Vec<String> = serde_json::from_str(&entities_raw).unwrap_or_default();
+        crate::types::fold_person_names_into_entities(&mut entities, persons);
+        updates.push((id, serde_json::to_string(&entities).unwrap_or_default()));
+    }
+
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<(), MemoryError> {
+        for (id, entities_json) in &updates {
+            conn.execute(
+                "UPDATE memories SET persons = '[]', entities = ?2 WHERE id = ?1",
+                params![id, entities_json],
+            )?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(updates.len())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+// ─── v7: reconcile legacy physical columns (idempotent even if v5 already ran) ─
+
+fn migrate_v7_reconcile_legacy_memory_columns(conn: &Connection) -> Result<usize, MemoryError> {
+    let mut actions = 0usize;
+
+    if table_has_column(conn, "memories", "indexed_tags")? {
+        conn.execute(
+            "UPDATE memories
+             SET keywords = indexed_tags
+             WHERE (keywords IS NULL OR trim(keywords) IN ('', '[]'))
+               AND indexed_tags IS NOT NULL
+               AND trim(indexed_tags) NOT IN ('', '[]')",
+            [],
+        )?;
+        actions += 1;
+    }
+
+    if table_has_column(conn, "memories", "domain_key")? {
+        conn.execute(
+            "UPDATE memories
+             SET domain = domain_key
+             WHERE (domain IS NULL OR trim(COALESCE(domain, '')) = '')
+               AND domain_key IS NOT NULL
+               AND trim(domain_key) <> ''",
+            [],
+        )?;
+        actions += 1;
+    }
+
+    actions += migrate_v6_fold_persons_into_entities(conn)?;
+
+    for (column, definition) in [
+        ("persons", "TEXT NOT NULL DEFAULT '[]'"),
+        ("location", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !table_has_column(conn, "memories", column)? {
+            let sql = format!("ALTER TABLE memories ADD COLUMN {column} {definition}");
+            conn.execute(&sql, [])?;
+            actions += 1;
+        }
+    }
+
+    if !table_has_column(conn, "memories", "domain")? {
+        conn.execute("ALTER TABLE memories ADD COLUMN domain TEXT", [])?;
+        actions += 1;
+    }
+
+    for column in ["indexed_tags", "domain_key"] {
+        if table_has_column(conn, "memories", column)? {
+            conn.execute(&format!("ALTER TABLE memories DROP COLUMN {column}"), [])?;
+            actions += 1;
+        }
+    }
+
+    Ok(actions)
+}
+
+// ─── v5: drop HyperTachi legacy columns ───────────────────────────────────────
+
+fn migrate_v5_drop_hypertachi_legacy_columns(conn: &Connection) -> Result<usize, MemoryError> {
+    let mut dropped = 0usize;
+    for column in ["indexed_tags", "domain_key"] {
+        if table_has_column(conn, "memories", column)? {
+            conn.execute(&format!("ALTER TABLE memories DROP COLUMN {column}"), [])?;
+            dropped += 1;
+        }
+    }
+    Ok(dropped)
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MemoryError> {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1");
+    let exists = conn.query_row(&sql, [column], |_| Ok(())).is_ok();
+    Ok(exists)
 }
 
 // ─── v1: normalize paths ──────────────────────────────────────────────────────
@@ -461,5 +613,117 @@ mod tests {
         assert!(report.quarantine_skipped_sanity_guard);
         // Migration is still marked run so we don't retry every startup.
         assert!(was_run(&conn, "v4_quarantine_cross_db_rows").unwrap());
+    }
+
+    #[test]
+    fn v7_reconciles_indexed_tags_after_v5_sentinel() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                indexed_tags TEXT NOT NULL DEFAULT '[]',
+                entities TEXT NOT NULL DEFAULT '[]',
+                domain TEXT,
+                domain_key TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE hard_state (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, keywords, indexed_tags, entities) VALUES ('m1', '[]', '[\"rust\"]', '[]')",
+            [],
+        )
+        .unwrap();
+        mark_run(&conn, "v5_drop_hypertachi_legacy_columns").unwrap();
+
+        let actions = migrate_v7_reconcile_legacy_memory_columns(&conn).unwrap();
+        assert!(actions > 0);
+        assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
+        assert!(table_has_column(&conn, "memories", "persons").unwrap());
+
+        let keywords: String = conn
+            .query_row("SELECT keywords FROM memories WHERE id='m1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(keywords.contains("rust"));
+    }
+
+    #[test]
+    fn v6_folds_persons_into_entities() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                persons TEXT NOT NULL DEFAULT '[]',
+                entities TEXT NOT NULL DEFAULT '[]'
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, persons, entities) VALUES (?1, ?2, ?3)",
+            params!["m1", r#"["Kyle"]"#, r#"["Sigil"]"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, persons, entities) VALUES ('m2', '[]', '[]')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, persons, entities) VALUES (?1, ?2, ?3)",
+            params!["m3", r#"["sigil"]"#, r#"["Sigil"]"#],
+        )
+        .unwrap();
+
+        let folded = migrate_v6_fold_persons_into_entities(&conn).unwrap();
+        assert_eq!(folded, 2);
+
+        let (persons, entities): (String, String) = conn
+            .query_row(
+                "SELECT persons, entities FROM memories WHERE id='m1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(persons, "[]");
+        let ents: Vec<String> = serde_json::from_str(&entities).unwrap();
+        assert!(ents.iter().any(|e| e == "Kyle"));
+        assert!(ents.iter().any(|e| e == "user"));
+        assert!(ents.iter().any(|e| e == "Sigil"));
+
+        let duplicate_persons: String = conn
+            .query_row("SELECT persons FROM memories WHERE id='m3'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(duplicate_persons, "[]");
+    }
+
+    #[test]
+    fn v5_drops_hypertachi_legacy_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                indexed_tags TEXT NOT NULL DEFAULT '[]',
+                domain_key TEXT NOT NULL DEFAULT ''
+            );",
+        )
+        .unwrap();
+        let dropped = migrate_v5_drop_hypertachi_legacy_columns(&conn).unwrap();
+        assert_eq!(dropped, 2);
+        assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
+        assert!(!table_has_column(&conn, "memories", "domain_key").unwrap());
+        assert_eq!(migrate_v5_drop_hypertachi_legacy_columns(&conn).unwrap(), 0);
     }
 }

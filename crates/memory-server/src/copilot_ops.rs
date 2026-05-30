@@ -107,6 +107,12 @@ fn default_named_project_available(server: &MemoryServer, project_name: &str) ->
     server.global_db_path.starts_with(app_home)
 }
 
+/// Identify and supersede wiki entries that duplicate the newly written entry.
+///
+/// Candidates are loaded via `list_by_path("/wiki")` and filtered in-memory.
+/// A future optimization could push the path-prefix or topic filter into SQL
+/// (`WHERE path LIKE '/wiki/%' AND (path = ? OR topic = ?)`) to avoid loading
+/// the full wiki set when it grows large.
 fn supersede_wiki_duplicates(
     store: &mut MemoryStore,
     canonical_id: &str,
@@ -124,12 +130,19 @@ fn supersede_wiki_duplicates(
         if candidate.id == canonical_id {
             continue;
         }
-        let same_subject = candidate.path == path
-            || target_subject
-                .as_ref()
-                .is_some_and(|token| wiki_subject_token(&candidate.topic).as_ref() == Some(token))
-            || wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
+        // Dedup criteria (OR-combined, but single-token topic match requires path prefix overlap)
+        let same_path = candidate.path == path;
+        let same_topic = target_subject.as_ref().is_some_and(|token| {
+            let cand_token = wiki_subject_token(&candidate.topic);
+            cand_token.as_ref() == Some(token)
+                // Single-token topics require path prefix overlap to avoid over-broad matching
+                && (token.len() > 1
+                    || candidate.path.rsplit_once('/').map(|(parent, _)| parent) == path.rsplit_once('/').map(|(parent, _)| parent))
+        });
+        let similar_text =
+            wiki_text_jaccard_sets(&target_text_tokens, &wiki_text_tokens(&candidate.text))
                 >= WIKI_DUP_JACCARD_THRESHOLD;
+        let same_subject = same_path || same_topic || similar_text;
         if !same_subject {
             continue;
         }
@@ -427,6 +440,8 @@ pub(crate) async fn handle_tachi_wiki_write(
             retention_policy: Some(params.retention_policy),
             domain: params.domain.or_else(|| Some("wiki".to_string())),
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: Some(wiki_metadata),
         },
     )
@@ -517,11 +532,6 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
-    let ctx = crate::db_context::describe_db_context(
-        server,
-        params.project.as_deref(),
-        params.domain.as_deref(),
-    );
     let rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -549,6 +559,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -560,7 +571,6 @@ pub(crate) async fn handle_tachi_wiki_search(
     );
 
     Ok(crate::agent_markdown::format_wiki_search(
-        &ctx,
         &params.query,
         rows.len(),
         &serde_json::Value::Array(rows),
@@ -591,6 +601,7 @@ pub(crate) async fn handle_tachi_task_brief(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -613,6 +624,7 @@ pub(crate) async fn handle_tachi_task_brief(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -690,6 +702,7 @@ pub(crate) async fn handle_tachi_progress_check(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await?;
@@ -806,6 +819,7 @@ async fn build_route_recommendation(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await

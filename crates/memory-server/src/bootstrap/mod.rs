@@ -11,6 +11,8 @@ mod serve;
 mod setup;
 mod setup_wizard;
 mod tidy;
+
+pub(crate) use setup_wizard::mcp_server_instructions;
 mod vault_cli;
 
 // Re-exports preserving the legacy public surface so external callers

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use rusqlite::{params, Connection};
 use tempfile::TempDir;
 
+use super::domain::DomainRepair;
 use super::edges::OrphanRefs;
 use super::fts::FtsRebuild;
 use super::integrity::IntegrityCheck;
@@ -486,6 +487,47 @@ fn r7_orphan_edges_detected_and_purged() {
 }
 
 #[test]
+fn r7_orphan_vectors_and_superseded_refs_detected_and_purged() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "vectors.db");
+    memory_core::db::try_load_sqlite_vec(&conn);
+    insert_memory(&conn, "m1", "/a", "x", "{}", None, None);
+    conn.execute(
+        "UPDATE memories SET superseded_by = 'ghost' WHERE id = 'm1'",
+        [],
+    )
+    .unwrap();
+    let embedding = memory_core::db::serialize_f32(&vec![0.0; 1024]);
+    conn.execute(
+        "INSERT INTO memories_vec(id, embedding) VALUES ('ghost-vector', ?1)",
+        [embedding],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = OrphanRefs.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry.findings.iter().any(|f| f.kind == "orphans_vectors"),
+        "expected vector orphan finding, got {dry:?}"
+    );
+    assert!(
+        dry.findings
+            .iter()
+            .any(|f| f.kind == "orphans_memories_superseded_by"),
+        "expected broken superseded_by finding, got {dry:?}"
+    );
+
+    let app = OrphanRefs.apply(&mut ctx).unwrap();
+    assert!(app.applied >= 2, "expected at least 2 fixes, got {app:?}");
+    let dry2 = OrphanRefs.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry2.findings.is_empty(),
+        "post-purge should be clean: {dry2:?}"
+    );
+}
+
+#[test]
 fn r3_cross_db_restore_all_moves_row() {
     use crate::manifest::{DbEntry, DbRole, Manifest};
     let dir = TempDir::new().unwrap();
@@ -577,6 +619,63 @@ fn r3_cross_db_restore_all_moves_row() {
     assert!(
         v.get("quarantine").is_none(),
         "destination metadata should not contain quarantine block: {dst_meta}"
+    );
+}
+
+#[test]
+fn r9_domain_backfill_repairs_missing_and_path_like_values() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "domains.db");
+    insert_memory(&conn, "m1", "/wiki/agent/tachi", "wiki", "{}", None, None);
+    insert_memory(&conn, "m2", "/scratch/repro", "scratch", "{}", None, None);
+    insert_memory(
+        &conn,
+        "m3",
+        "/trading/equity/positions",
+        "trade",
+        "{}",
+        None,
+        None,
+    );
+    conn.execute(
+        "UPDATE memories SET domain = '/scratch/sigil' WHERE id = 'm2'",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE memories SET domain = 'Hyperion' WHERE id = 'm3'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = DomainRepair.dry_run(&mut ctx).unwrap();
+    assert!(
+        dry.findings.iter().any(|f| f.kind == "domain_repaired"),
+        "expected domain repair finding, got {dry:?}"
+    );
+
+    let app = DomainRepair.apply(&mut ctx).unwrap();
+    assert_eq!(app.applied, 3);
+
+    let conn = Connection::open(&path).unwrap();
+    let domains: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, domain FROM memories ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        domains,
+        vec![
+            ("m1".to_string(), "wiki".to_string()),
+            ("m2".to_string(), "scratch".to_string()),
+            ("m3".to_string(), "hyperion".to_string()),
+        ]
     );
 }
 

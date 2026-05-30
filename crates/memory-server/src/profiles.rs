@@ -362,6 +362,7 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "skill_evolve",
     "tachi_audit_log",
     "tachi_init_project_db",
+    "tachi_wiki_organize",
     "vault_get",
     "vault_init",
     "vault_list",

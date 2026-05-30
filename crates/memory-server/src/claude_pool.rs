@@ -154,11 +154,15 @@ impl ClaudePool {
     }
 
     async fn run_claude_cli(&self, prompt: &str) -> Result<String, String> {
-        let mut child = Command::new(&self.binary)
-            .arg("-p")
-            .arg("--output-format")
-            .arg("json")
-            .arg("--dangerously-skip-permissions")
+        let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-p").arg("--output-format").arg("json");
+        if skip_perms {
+            cmd.arg("--dangerously-skip-permissions");
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

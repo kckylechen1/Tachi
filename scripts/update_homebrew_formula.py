@@ -89,72 +89,52 @@ def update_bottle_block(text: str, bottle_block: str) -> str:
 
 
 def ensure_tachi_hub_install(text: str) -> str:
-    build_pattern = (
-        r'system "cargo", "build", "--release", "--locked", "-p", "memory-server",\n'
-        r'\s+"--target-dir", buildpath/"target"'
-    )
-    build_replacement = (
-        'system "cargo", "build", "--release", "--locked", "-p", "memory-server",\n'
-        '           "--bins",\n'
-        '           "--target-dir", buildpath/"target"'
-    )
-    updated, build_count = re.subn(build_pattern, build_replacement, text, count=1)
-    if build_count != 1 and '"--bins"' not in text:
-        raise ValueError("Could not update cargo build step for tachi-hub")
-    text = updated
+    """Install a `tachi-hub` shim that forwards to `tachi hub` (no second Rust binary)."""
+    shim_src = 'buildpath/"scripts/tachi-hub-compat.sh"'
+    shim_install = f'    bin.install {shim_src}, :rename => "tachi-hub"'
 
     text = text.replace(
         'bin.install buildpath/"target/release/tachi_hub" => "tachi-hub"',
+        shim_install,
+    )
+    text = text.replace(
         'bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"',
+        shim_install,
     )
 
-    if 'bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"' not in text:
+    if shim_install not in text:
         install_line = '    bin.install buildpath/"target/release/memory-server" => "tachi"'
-        replacement = (
-            install_line
-            + '\n'
-            + '    bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"'
-        )
+        replacement = install_line + "\n" + shim_install
         text = replace_or_fail(
             r'^\s*bin\.install buildpath/"target/release/memory-server" => "tachi"$',
             replacement,
             text,
-            "tachi-hub bin install",
+            "tachi-hub compat shim install",
         )
 
-    if 'shell_output("#{bin}/tachi-hub --help")' not in text:
+    if 'shell_output("#{bin}/tachi hub --help")' not in text:
         hook = '    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")'
         replacement = (
             hook
             + '\n'
-            + '    assert_match version.to_s, shell_output("#{bin}/tachi-hub --version")\n'
-            + '    assert_match "Inspect Tachi Hub registry", shell_output("#{bin}/tachi-hub --help")'
+            + '    assert_match version.to_s, shell_output("#{bin}/tachi --version")\n'
+            + '    assert_match "Hub registry", shell_output("#{bin}/tachi hub --help")'
         )
         text = replace_or_fail(
             r'^\s*assert_match "memory \+ Hub MCP server", shell_output\("#\{bin\}/tachi --help"\)$',
             replacement,
             text,
-            "tachi-hub formula test",
+            "tachi hub formula test",
         )
 
-    if '#{opt_bin}/tachi-hub' not in text:
-        hook = '        #{opt_bin}/tachi'
-        replacement = hook + '\n        #{opt_bin}/tachi-hub'
-        text = replace_or_fail(
-            r'^\s*#\{opt_bin\}/tachi$',
-            replacement,
-            text,
-            "tachi-hub caveat path",
-        )
-
-    if 'tachi-hub stats' not in text:
+    if 'tachi hub stats' not in text:
         hook = '        tachi --no-project-db stats'
-        replacement = hook + '\n        tachi-hub stats'
+        replacement = hook + '\n        tachi hub stats'
         text = replace_or_fail(
             r'^\s*tachi --no-project-db stats$',
             replacement,
             text,
-            "tachi-hub caveat smoke test",
+            "tachi hub caveat smoke test",
         )
 
     return text

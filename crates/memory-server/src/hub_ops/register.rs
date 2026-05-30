@@ -25,7 +25,8 @@ pub(crate) async fn handle_hub_register(
         let mut def: serde_json::Value = serde_json::from_str(&params.definition)
             .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
         let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
-        let tool_exposure_mode = resolve_mcp_tool_exposure(&def, server.mcp_tool_exposure_mode);
+        let tool_exposure_mode =
+            resolve_mcp_tool_exposure(&def, server.tool_discovery.mcp_tool_exposure_mode);
         exposure_mode = tool_exposure_mode.as_str().to_string();
         def["tool_exposure"] = json!(tool_exposure_mode.as_str());
         resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));

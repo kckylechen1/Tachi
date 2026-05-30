@@ -103,7 +103,10 @@ pub(crate) struct RecallContextParams {
     pub exclude_topics: Vec<String>,
 
     /// Optional minimum score threshold after ranking
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub min_score: Option<f64>,
 
     /// Optional agent role for sandbox filtering

@@ -111,6 +111,8 @@ async fn cli_client_in_process_remember_round_trips_through_handler() {
             category: None,
             domain: None,
             retention_policy: None,
+            valid_from: None,
+            valid_until: None,
             force: true, // bypass noise filter for the deterministic test string
         },
     )
@@ -146,6 +148,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: Some("Implemented status diagnostics; next run cargo test.".to_string()),
@@ -161,6 +164,8 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             id: None,
             force: false,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: None,
             event: None,
             state: None,
@@ -174,6 +179,77 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
     let parsed: Value = serde_json::from_str(&body).expect("checkpoint JSON");
     assert!(parsed["id"].as_str().is_some());
     assert_eq!(parsed["status"], json!("saved (enrichment pending)"));
+}
+
+#[tokio::test]
+async fn tachi_memory_save_persists_programming_agent_fields() {
+    let server = make_server();
+    let mem_id = "mcp-agent-fields-001";
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        TachiMemoryParams {
+            action: "save".to_string(),
+            query: None,
+            scope: Some("project".to_string()),
+            top_k: 6,
+            path_prefix: None,
+            file_context: None,
+            error_context: None,
+            category: Some("fact".to_string()),
+            include_archived: false,
+            enable_rerank: false,
+            as_of: None,
+            synthesize: false,
+            model: None,
+            text: Some("Refactored MCP save path for coding agents.".to_string()),
+            title: None,
+            summary: Some("MCP agent fields".to_string()),
+            topic: Some("mcp".to_string()),
+            keywords: vec!["rust".to_string(), "mcp".to_string()],
+            entities: vec!["memory-server".to_string(), "sigil".to_string()],
+            importance: Some(0.75),
+            retention_policy: None,
+            kind: Some("memory".to_string()),
+            path: Some("/project/sigil/mcp".to_string()),
+            id: Some(mem_id.to_string()),
+            force: true,
+            source: None,
+            valid_from: None,
+            valid_until: None,
+            flow_id: None,
+            event: None,
+            state: None,
+            project: None,
+            domain: Some("rust".to_string()),
+        },
+    )
+    .await
+    .expect("save should succeed");
+
+    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
+    assert!(parsed.get("error").is_none(), "save error: {body}");
+
+    let db_path = server.global_db_path_buf();
+    let conn = rusqlite::Connection::open(db_path).expect("open test db");
+    let (keywords, entities, persons, domain, path): (
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT keywords, entities, persons, domain, path FROM memories WHERE id=?1",
+            [mem_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .expect("row exists");
+    assert_eq!(keywords, r#"["rust","mcp"]"#);
+    assert_eq!(entities, r#"["memory-server","sigil"]"#);
+    assert_eq!(persons, "[]");
+    assert_eq!(domain.as_deref(), Some("rust"));
+    assert_eq!(path, "/project/sigil/mcp");
 }
 
 #[tokio::test]
@@ -193,6 +269,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: None,
@@ -208,6 +285,8 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             id: None,
             force: false,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: None,
             event: None,
             state: None,
@@ -221,6 +300,9 @@ async fn tachi_memory_ask_returns_evidence_contract() {
     let parsed: Value = serde_json::from_str(&body).expect("ask JSON");
     assert_eq!(parsed["mode"], json!("ask"));
     assert!(parsed["evidence"].is_array());
+    assert_eq!(parsed["thinking"]["mode"], json!("ask"));
+    assert!(parsed["thinking"]["evidence_count"].as_u64().is_some());
+    assert!(parsed["thinking"]["key_evidence"].is_array());
 }
 
 #[tokio::test]
@@ -246,6 +328,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: Some("step completed with api_key=test-secret-value-1234567890".to_string()),
@@ -261,6 +344,8 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             id: None,
             force: false,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: Some("flow_progress_test".to_string()),
             event: Some("validation".to_string()),
             state: Some("running".to_string()),
@@ -302,6 +387,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: None,
@@ -317,6 +403,8 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             id: None,
             force: false,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: None,
             event: None,
             state: None,
@@ -328,9 +416,8 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     .expect("briefing should succeed");
 
     assert!(body.starts_with("## Tachi briefing"));
-    assert!(body.contains("### Database context"));
     assert!(body.contains("### Memories"));
-    assert!(body.contains("tachi_status"));
+    assert!(body.contains("### Health snapshot"));
     assert!(!body.contains("merge_hints"));
     assert!(!body.contains("skill_quality"));
 }
@@ -419,8 +506,7 @@ async fn tachi_status_marks_config_env_only_key_as_configured() {
     let config_env = temp_home.temp_home.join(".tachi/config.env");
     std::fs::create_dir_all(config_env.parent().expect("config env parent"))
         .expect("create config env dir");
-    std::fs::write(&config_env, "VOYAGE_API_KEY=config-only-value\n")
-        .expect("write config env");
+    std::fs::write(&config_env, "VOYAGE_API_KEY=config-only-value\n").expect("write config env");
 
     let original_voyage = std::env::var_os("VOYAGE_API_KEY");
     std::env::remove_var("VOYAGE_API_KEY");
@@ -451,8 +537,7 @@ async fn tachi_status_marks_config_env_alias_key_as_configured() {
     let config_env = temp_home.temp_home.join(".tachi/config.env");
     std::fs::create_dir_all(config_env.parent().expect("config env parent"))
         .expect("create config env dir");
-    std::fs::write(&config_env, "BIGMODEL_API_KEY=alias-config-value\n")
-        .expect("write config env");
+    std::fs::write(&config_env, "BIGMODEL_API_KEY=alias-config-value\n").expect("write config env");
 
     let original_reasoning = std::env::var_os("REASONING_API_KEY");
     let original_zai = std::env::var_os("ZAI_API_KEY");

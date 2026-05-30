@@ -370,12 +370,14 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
             .gc_tables(&GcConfig::default())
             .map_err(|e| format!("GC failed on global DB: {}", e))?;
         let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+        let handoff_deleted = crate::handoff_ops::gc_expired_handoff_memories(store, 30)?;
         // Branch #5: GC foundry jobs in terminal state >= 30 days old
         // (was 7d, see project owner's lifecycle spec).
         let foundry_deleted = memory_core::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+            object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
         }
         Ok(gc)
     })?;
@@ -387,10 +389,12 @@ pub(crate) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
                 .gc_tables(&GcConfig::default())
                 .map_err(|e| format!("GC failed on project DB: {}", e))?;
             let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+            let handoff_deleted = crate::handoff_ops::gc_expired_handoff_memories(store, 30)?;
             let foundry_deleted = memory_core::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
             if let Some(object) = gc.as_object_mut() {
                 object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                 object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+                object.insert("handoff_memories_pruned".into(), json!(handoff_deleted));
             }
             Ok(gc)
         })?;

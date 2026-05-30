@@ -559,6 +559,9 @@ fn scope_hint_for(path: &Path) -> String {
     if n.contains("/.gemini/antigravity/") {
         return "antigravity".to_string();
     }
+    if n.contains("/.gemini/") {
+        return "gemini-global".to_string();
+    }
     if n.contains("/.tachi/") {
         return "tachi-other".to_string();
     }

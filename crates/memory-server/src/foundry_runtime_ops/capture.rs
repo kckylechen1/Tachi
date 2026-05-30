@@ -114,8 +114,17 @@ pub(super) fn merge_capture_entries(
         },
         summary: merged_summary,
         text: merged_text,
-        importance: existing.importance.max(incoming.importance),
+        importance: existing.importance * 0.6 + incoming.importance * 0.4,
         timestamp,
+        valid_from: if existing.valid_from.trim().is_empty() {
+            incoming.valid_from.clone()
+        } else {
+            existing.valid_from.clone()
+        },
+        valid_until: existing
+            .valid_until
+            .clone()
+            .or_else(|| incoming.valid_until.clone()),
         category: merge_category(&existing.category, &incoming.category),
         topic: if existing.topic.trim().is_empty() {
             incoming.topic.clone()
@@ -130,20 +139,15 @@ pub(super) fn merge_capture_entries(
                 .chain(incoming.keywords.iter().cloned())
                 .collect(),
         ),
-        persons: dedup_strings(
-            existing
-                .persons
-                .iter()
-                .cloned()
-                .chain(incoming.persons.iter().cloned())
-                .collect(),
-        ),
+        persons: Vec::new(),
         entities: dedup_strings(
             existing
                 .entities
                 .iter()
                 .cloned()
                 .chain(incoming.entities.iter().cloned())
+                .chain(incoming.persons.iter().cloned())
+                .chain(existing.persons.iter().cloned())
                 .collect(),
         ),
         location: if incoming.location.trim().is_empty() {
@@ -189,6 +193,7 @@ pub(super) fn capture_search_options(
         mmr_threshold: None,
         graph_expand_hops: 0,
         graph_relation_filter: None,
+        as_of: None,
         vec_available,
         weights: HybridWeights {
             semantic: 1.0,
@@ -305,18 +310,18 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
-    let _ = server.enrich_tx.try_send(EnrichmentItem {
-        id: entry.id.clone(),
-        text: entry.text.clone(),
-        summary: entry.summary.clone(),
-        keywords: entry.keywords.clone(),
-        needs_embedding: true,
-        needs_summary,
-        target_db,
-        named_project,
-        db_path,
-        foundry_agent_id: agent_id.map(ToString::to_string),
-        foundry_path_prefix: path_prefix.map(ToString::to_string),
-        revision: entry.revision,
-    });
+    let _ = server
+        .enrichment_lock()
+        .enrich_tx
+        .try_send(crate::enrichment::build_enrichment_item(
+            entry,
+            true,
+            needs_summary,
+            target_db,
+            named_project,
+            db_path,
+            agent_id.map(ToString::to_string),
+            path_prefix.map(ToString::to_string),
+            entry.revision,
+        ));
 }

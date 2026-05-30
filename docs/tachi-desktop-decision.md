@@ -1,7 +1,7 @@
 # Tachi Desktop — Electron Frontend
 
 **Date**: 2026-03-25
-**Status**: In Progress
+**Status**: Deferred — priority shifted to memory-server + dispatch hardening; revisit when core is stable
 **Branch**: `main`
 
 ## Decision

@@ -30,6 +30,17 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
             entry.retention_policy = Some(d.to_string());
         }
     }
+    entry.fold_persons_into_entities();
+}
+
+/// Serialize `entities` (with legacy `persons` folded in) and always persist `persons` as `[]`.
+fn canonical_persons_entities_json(entry: &MemoryEntry) -> Result<(String, String), MemoryError> {
+    let mut entities = entry.entities.clone();
+    crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
+    Ok((
+        serde_json::to_string(&Vec::<String>::new())?,
+        serde_json::to_string(&entities)?,
+    ))
 }
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
@@ -57,7 +68,27 @@ pub fn upsert(
         .clone()
         .or_else(|| default_retention_for(&path, &source).map(str::to_string));
 
+    let clean_text = crate::noise::scrub_think_tags(&entry.text);
+    let clean_summary = crate::noise::scrub_think_tags(&entry.summary);
+    let force = entry
+        .metadata
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let importance = crate::types::normalize_importance(entry.importance, category, force);
+
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
+    let valid_from_utc = if entry.valid_from.trim().is_empty() {
+        timestamp_utc.clone()
+    } else {
+        normalize_utc_iso(&entry.valid_from)?
+    };
+    let valid_until_utc = entry
+        .valid_until
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(normalize_utc_iso)
+        .transpose()?;
     let last_access_utc = entry
         .last_access
         .as_deref()
@@ -67,8 +98,7 @@ pub fn upsert(
 
     let metadata_json = serde_json::to_string(&entry.metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
-    let p_json = serde_json::to_string(&entry.persons)?;
-    let e_json = serde_json::to_string(&entry.entities)?;
+    let (p_json, e_json) = canonical_persons_entities_json(entry)?;
 
     // All writes for one upsert must be atomic across main table + FTS + vec.
     let tx = conn.transaction()?;
@@ -77,17 +107,19 @@ pub fn upsert(
     tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
-               timestamp, category, topic, keywords, persons, entities,
+               timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
                location, source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
                retention_policy, domain)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
                text         = excluded.text,
                importance   = excluded.importance,
                timestamp    = excluded.timestamp,
+               valid_from   = excluded.valid_from,
+               valid_until  = excluded.valid_until,
                category     = excluded.category,
                topic        = excluded.topic,
                keywords     = excluded.keywords,
@@ -108,10 +140,12 @@ pub fn upsert(
         params![
             entry.id,
             &path,
-            entry.summary,
-            entry.text,
-            entry.importance,
+            &clean_summary,
+            &clean_text,
+            importance,
             timestamp_utc,
+            valid_from_utc,
+            valid_until_utc,
             category,
             entry.topic,
             kws_json,
@@ -139,7 +173,7 @@ pub fn upsert(
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
-        params![entry.id, &path, entry.summary, entry.text, kws, ents],
+        params![entry.id, &path, &clean_summary, &clean_text, kws, ents],
     )?;
 
     if let Some(vec) = &entry.vector {
@@ -239,13 +273,16 @@ pub fn update_with_revision(
     let new_source = MemorySource::parse_or_external(new_source);
     let tx = conn.transaction()?;
 
+    let clean_text = crate::noise::scrub_think_tags(new_text);
+    let clean_summary = crate::noise::scrub_think_tags(new_summary);
+
     tx.execute(
         "UPDATE memories
          SET text = ?1, summary = ?2, source = ?3, metadata = ?4, updated_at = ?5, revision = ?6
          WHERE id = ?7 AND revision = ?8",
         params![
-            new_text,
-            new_summary,
+            &clean_text,
+            &clean_summary,
             new_source,
             new_metadata,
             &now,
@@ -284,36 +321,67 @@ pub fn update_with_revision(
     Ok(updated)
 }
 
-/// Update only the enrichment fields (summary + embedding) if the revision
-/// hasn't changed since the enrichment was queued. This prevents stale
-/// background enrichment from overwriting concurrent updates.
+/// Update only the enrichment fields (summary, embedding, keywords, entities) if
+/// the revision hasn't changed since the enrichment was queued. This prevents
+/// stale background enrichment from overwriting concurrent updates.
 pub fn update_enrichment_fields(
     conn: &mut Connection,
     id: &str,
     new_summary: Option<&str>,
     new_vec: Option<&[u8]>,
+    new_keywords: Option<&[String]>,
+    new_entities: Option<&[String]>,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
-    if new_summary.is_none() && new_vec.is_none() {
+    if new_summary.is_none()
+        && new_vec.is_none()
+        && new_keywords.is_none()
+        && new_entities.is_none()
+    {
         return Ok(true); // nothing to do
     }
 
     let now = now_utc_iso();
     let tx = conn.transaction()?;
+    let clean_summary = new_summary.map(crate::noise::scrub_think_tags);
+    let keywords_json = new_keywords.map(serde_json::to_string).transpose()?;
+    let entities_json = new_entities.map(serde_json::to_string).transpose()?;
 
     // Always check revision first, regardless of which fields are being updated.
     // This prevents stale enrichment from overwriting concurrent edits.
-    let rows_affected = if let Some(summary) = new_summary {
-        tx.execute(
+    let rows_affected = match (&clean_summary, &keywords_json, &entities_json) {
+        (Some(summary), Some(keywords), Some(entities)) => tx.execute(
+            "UPDATE memories SET summary = ?1, keywords = ?2, entities = ?3, updated_at = ?4 WHERE id = ?5 AND revision = ?6",
+            params![summary, keywords, entities, &now, id, expected_revision],
+        )?,
+        (Some(summary), Some(keywords), None) => tx.execute(
+            "UPDATE memories SET summary = ?1, keywords = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![summary, keywords, &now, id, expected_revision],
+        )?,
+        (Some(summary), None, Some(entities)) => tx.execute(
+            "UPDATE memories SET summary = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![summary, entities, &now, id, expected_revision],
+        )?,
+        (Some(summary), None, None) => tx.execute(
             "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
             params![summary, &now, id, expected_revision],
-        )?
-    } else {
-        // No summary to update — still verify revision by touching updated_at
-        tx.execute(
+        )?,
+        (None, Some(keywords), Some(entities)) => tx.execute(
+            "UPDATE memories SET keywords = ?1, entities = ?2, updated_at = ?3 WHERE id = ?4 AND revision = ?5",
+            params![keywords, entities, &now, id, expected_revision],
+        )?,
+        (None, Some(keywords), None) => tx.execute(
+            "UPDATE memories SET keywords = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
+            params![keywords, &now, id, expected_revision],
+        )?,
+        (None, None, Some(entities)) => tx.execute(
+            "UPDATE memories SET entities = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
+            params![entities, &now, id, expected_revision],
+        )?,
+        (None, None, None) => tx.execute(
             "UPDATE memories SET updated_at = ?1 WHERE id = ?2 AND revision = ?3",
             params![&now, id, expected_revision],
-        )?
+        )?,
     };
 
     if rows_affected == 0 {
@@ -324,8 +392,8 @@ pub fn update_enrichment_fields(
         return Ok(false);
     }
 
-    // Refresh FTS if summary was updated
-    if new_summary.is_some() {
+    // Refresh FTS when any searchable text field changed.
+    if new_summary.is_some() || new_keywords.is_some() || new_entities.is_some() {
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
         tx.execute(
             r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
@@ -349,12 +417,19 @@ pub fn update_enrichment_fields(
         )?;
     }
 
-    let status = if new_vec.is_some() && new_summary.is_some() {
-        "embedded+summarized"
-    } else if new_vec.is_some() {
-        "embedded"
-    } else {
-        "summarized"
+    let status = match (
+        new_vec.is_some(),
+        new_summary.is_some(),
+        new_keywords.is_some() || new_entities.is_some(),
+    ) {
+        (true, true, true) => "embedded+summarized+metadata",
+        (true, true, false) => "embedded+summarized",
+        (true, false, true) => "embedded+metadata",
+        (true, false, false) => "embedded",
+        (false, true, true) => "summarized+metadata",
+        (false, true, false) => "summarized",
+        (false, false, true) => "metadata",
+        (false, false, false) => "touched",
     };
     tx.execute(
         r#"UPDATE memories
@@ -408,9 +483,11 @@ pub fn search_vec(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
+    as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let mut stmt = conn.prepare(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -418,9 +495,10 @@ pub fn search_vec(
            WHERE v.embedding MATCH ?1
               AND k = ?3
               AND (?2 = 1 OR m.archived = 0)
-              AND (?4 = 1 OR m.superseded_by IS NULL)
-              AND (?5 IS NULL OR m.path LIKE ?5)
-            ORDER BY v.distance"#,
+               AND (?4 = 1 OR m.superseded_by IS NULL)
+               AND (?5 IS NULL OR m.path LIKE ?5)
+               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+             ORDER BY v.distance"#,
     )?;
 
     let rows = stmt.query_map(
@@ -429,7 +507,8 @@ pub fn search_vec(
             include_archived as i64,
             top_k as i64,
             include_superseded as i64,
-            path_like
+            path_like,
+            as_of_utc.as_deref()
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -460,7 +539,9 @@ pub fn search_fts(
     include_archived: bool,
     include_superseded: bool,
     path_prefix: Option<&str>,
+    as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
@@ -480,10 +561,11 @@ pub fn search_fts(
            FROM memories_fts
            JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH simple_query(?1)
-             AND (?2 = 1 OR m.archived = 0)
-             AND (?4 = 1 OR m.superseded_by IS NULL)
-             AND (?5 IS NULL OR m.path LIKE ?5)
-            ORDER BY bm25(memories_fts)
+              AND (?2 = 1 OR m.archived = 0)
+              AND (?4 = 1 OR m.superseded_by IS NULL)
+              AND (?5 IS NULL OR m.path LIKE ?5)
+              AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
+             ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
     )?;
 
@@ -493,7 +575,8 @@ pub fn search_fts(
             include_archived as i64,
             limit as i64,
             include_superseded as i64,
-            path_like
+            path_like,
+            as_of_utc.as_deref()
         ],
         |row| {
             let id: String = row.get(0)?;
@@ -547,7 +630,7 @@ pub fn fetch_by_ids(
             .collect::<Vec<_>>()
             .join(",");
         let mut sql = format!(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
              FROM memories WHERE id IN ({})",
             placeholders
         );
@@ -602,10 +685,10 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories ORDER BY timestamp DESC LIMIT ?"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -642,13 +725,13 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC
@@ -671,7 +754,7 @@ pub fn find_active_wiki_entry_by_path_or_topic(
     topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        r#"SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        r#"SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL

@@ -51,6 +51,18 @@
 - **划疆而治（Domain Management）**：新增疆域之治（`register_domain`、`list_domains` 等），各域互不侵扰，更可定独立之生灭轮回（GC 阈值）。
 - **洗尽铅华（架构归宗）**：OpenClaw 旁支法脉（JS Bridge）尽数斩断归元，今后天上地下皆以 MCP 纯血大阵为宗。百余法器尽数收归 `tools.rs` 统一调拨。
 
+### 即将问世（未发布）
+
+- **时间双印**：每条记忆今携 `valid_from` / `valid_until` 印记；`search_memory` 附 `as_of` 可点时还原，不动一兵一卒（PR #123）。
+- **矛盾鉴定**：以实体重叠、数值偏差、向量相近三法锁定矛盾者，借大模型验明正身，永刻有型矛盾缘线于图谱（PR #122）。
+- **词海扩张**：FTS 检索时自动生成同义、缩写与短语变体，稀疏语料亦有迹可寻，向量库分毫未动（PR #124）。
+- **激活蔓延**：图谱搜索从各点种子权重出发扩散，同跳内以 Noisy-OR 累积，密集节点不再专美（PR #125）。
+- **洞见涌现**：`infer_memory_insight` 以惊喜复合分（重要度差 × 稀有度 × 矛盾数）为尺，标注高价值记忆并推送邻域作业（PR #126）。
+- **合成思架**：`build_thinking_scaffold` 为综合问答构建多层佐证简报，按相关度排序并附缺口分析（PR #127）。
+- **信念累积**：近似但未达超越门限之记忆，置信度递增而非立刻被覆写，软佐证延寿有据（PR #121）。
+- **五脉搜魂**：向量余弦相似度融入 RRF 最终得分，减少高语义查询之排名倒置（PR #120）。
+- **玄铁化心**：VaultState、RateLimiter、ToolDiscovery、AgentRuntime、EnrichmentRuntime、FoundryRuntime 各立门户；shell_ops.rs 与 status_ops.rs 各拆为细分子文件；主服务仅余协调之任（PRs #114–#119）。
+
 ### 近次修补（v1.2.0）
 
 - **版牒归一**：Rust crates、`@chaoxlabs/tachi-node`、OpenClaw 插件与安装脚本统一至 `1.2.0`。
@@ -224,10 +236,12 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 
 - **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Python (`PyO3`) 以应变千万。至于 Node.js (`NAPI-RS`) 之旁支皮囊已于 v1.0.0 尽数褪去，OpenClaw 等分舵今后皆奉纯血 MCP 通讯管道直连 Tachi 真身。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
 - **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
-- **🔍 三分天下（多系搜魂）**：
-  - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥。
-  - **太阳（词法）**：由 `libsimple` 借 `FTS5` 成势之中原文字（CJK）索骥全书。
+- **🔍 五脉归元（多系搜魂）**：五路灵力以 RRF 融合出奇，向量余弦亦纳入最终权衡，减少高语义查询之排名倒置：
+  - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥（KNN 向量检索）。
+  - **太阳（词法）**：由 `libsimple` 借 `FTS5` 成势，CJK 全文索骥，检索前自动扩张词海（同义、缩写、短语变体）以强化稀疏语料之召回。
   - **少阳（忘机）**：顺应天地盈虚之理（ACT-R），旧事随风，光阴荏苒。
+  - **经脉扩散（激活蔓延）**：图谱沿因果与实体缘线，从各点种子权重出发蔓延传导；同跳以 Noisy-OR 累积，密集节点不再专美。
+  - **五行归一（RRF 融合）**：互惠排名融合汇聚四脉，向量余弦再加权为最终结果压舱石。
 - **🔒 千金一诺（金石铁律）**：辟 `hard_state` 幽地以藏刚性卷宗，如兵甲仓储，点滴不漏，绝无虚妄（幻觉）之忧。
 - **🧠 三花聚顶（自适应上下文）**：录入之时即炼为三转：`L0`（浮光掠影）, `L1`（骨肉梗概）, 及 `L2`（大千界体）。由主将择轻重以借之，免费真元。
 - **🔄 两阶演化（记忆去重）**：首创 `HARD_SKIP` 与 `EVOLVE` 双阶去尘，以算数（数学相似度）为矩，免去过妄之弊。
@@ -259,6 +273,13 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🧠 能力推荐**：`recommend_capability`、`recommend_skill`、`recommend_toolchain`、`prepare_capability_bundle`——藏经阁可为任务择选最优法器组合，点石成金。
 - **🎭 千机化相与令旗（Facade & Delegation）**：新制精悍法器十数（`tachi_search`、`tachi_save` 等）以供日常轻取，更添统御令旗（`tachi_dispatch`、`approve_merge`、`tachi_complete`），助主尊灵核调遣偏师，平息跨域战事。
 - **📚 维基万象阵（Wiki System）**：新辟传世典籍之所，纳 `tachi_wiki_write`、`tachi_wiki_search`、`wiki_browse` 等经籍刻印之法，并以 `wiki_lint` 巡阅经史，专为群仙共参、薪火相传而设。
+- **🕰️ 时间双印（Bitemporal Memory）**：每条记忆今携 `valid_from` / `valid_until` 印记；`search_memory` 可附 `as_of` 点时查询，回溯历史之知一念即达。启动时自动为旧录补齐时间戳，不费一兵一卒。
+- **⚔️ 矛盾鉴定（Contradiction Detection）**：`apply_auto_contradiction_detection` 以实体重叠、数值偏差与向量相近三法锁定矛盾者，借大模型一一验明正身，最终以有型矛盾缘线永刻于记忆图谱。
+- **🔎 词海扩张（Query Expansion）**：FTS 检索时自动生成同义、缩写与短语变体，稀疏或行话语料亦有迹可寻，无需动改已存索引。
+- **🌊 激活蔓延（Spreading Activation）**：图谱搜索从各点种子权重出发扩散（非匀底），同跳以 Noisy-OR 累积，密集节点不再截流后来。
+- **💡 洞见涌现（Memory Insight）**：`infer_memory_insight` 以惊喜复合分（重要度差 × 稀有度 × 矛盾数）为尺，标注高价值记忆并推送邻域作业。
+- **🧩 合成思架（Synthesis Scaffold）**：`build_thinking_scaffold` 为综合问答构建多层佐证简报，按相关度排序并附缺口分析，大模型从此有案可查。
+- **📈 信念累积（Confidence Reinforcement）**：近似但未达超越门限之记忆，置信度递增而非立刻被覆写，软佐证延寿有据。
 
 ---
 

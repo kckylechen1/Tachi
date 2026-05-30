@@ -431,11 +431,10 @@ pub(super) async fn run_tidy_command(
 
     // --execute: fragment-DB consolidation pipeline.
     if execute {
-        // Refuse if a live daemon holds the singleton lock — concurrent writes
-        // to the same DB would corrupt the migration. A stale lock file from a
-        // crashed process is ignored because DaemonLock probes the PID.
+        // Acquire and hold the daemon lock for the entire migration to prevent
+        // concurrent writes from a live daemon, which would corrupt the DB.
         let lock_path = app_home.join("daemon.lock");
-        match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
+        let _lock = match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
             Err(crate::daemon_lock::DaemonLockError::AlreadyRunning { pid }) => {
                 return Err(format!(
                     "refusing to run tachi tidy --execute while tachi daemon is running (pid {pid}); stop it first"
@@ -445,8 +444,8 @@ pub(super) async fn run_tidy_command(
             Err(e) => {
                 return Err(format!("daemon lock probe failed: {e}").into());
             }
-            Ok(lock) => drop(lock),
-        }
+            Ok(lock) => lock,
+        };
 
         let target_db = target_db_override
             .clone()
@@ -466,6 +465,7 @@ pub(super) async fn run_tidy_command(
         };
 
         let summary = execute_tidy_migrations(&plan, &cfg)?;
+        drop(_lock); // explicitly release after migrations complete
 
         if json_output {
             return print_pretty_json(&json!({
@@ -730,9 +730,10 @@ fn migrate_single_db(
     let target_path = cfg.target_db.clone();
 
     let source_store = open_cli_store_read_only(&source_path)?;
-    let source_count: usize = source_store
-        .connection()
-        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+    let source_count: usize =
+        source_store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
 
     if cfg.dry_run {
         return Ok(TidyMigrationOutcome {
@@ -833,11 +834,13 @@ fn migrate_single_db(
         let sidecar = PathBuf::from(format!("{}{ext}", source_path.display()));
         if sidecar.exists() {
             let dst = PathBuf::from(format!("{}{ext}", archive_path.display()));
-            let _ = std::fs::rename(&sidecar, &dst).or_else(|_| {
+            if let Err(e) = std::fs::rename(&sidecar, &dst).or_else(|_| {
                 std::fs::copy(&sidecar, &dst)
                     .map(|_| ())
                     .and_then(|_| std::fs::remove_file(&sidecar))
-            });
+            }) {
+                tracing::warn!("tidy: failed to move sidecar {}: {e}", sidecar.display());
+            }
         }
     }
 

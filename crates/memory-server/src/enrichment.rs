@@ -9,14 +9,49 @@ pub(super) struct EnrichmentItem {
     pub(super) text: String,
     pub(super) summary: String,
     pub(super) keywords: Vec<String>,
+    pub(super) entities: Vec<String>,
     pub(super) needs_embedding: bool,
     pub(super) needs_summary: bool,
+    pub(super) needs_metadata: bool,
     pub(super) target_db: DbScope,
     pub(super) named_project: Option<String>,
     pub(super) db_path: Option<PathBuf>,
     pub(super) foundry_agent_id: Option<String>,
     pub(super) foundry_path_prefix: Option<String>,
     pub(super) revision: i64,
+}
+
+pub(super) fn needs_metadata_enrichment(keywords: &[String], entities: &[String]) -> bool {
+    keywords.is_empty() || entities.is_empty()
+}
+
+pub(super) fn build_enrichment_item(
+    entry: &MemoryEntry,
+    needs_embedding: bool,
+    needs_summary: bool,
+    target_db: DbScope,
+    named_project: Option<String>,
+    db_path: Option<PathBuf>,
+    foundry_agent_id: Option<String>,
+    foundry_path_prefix: Option<String>,
+    revision: i64,
+) -> EnrichmentItem {
+    EnrichmentItem {
+        id: entry.id.clone(),
+        text: entry.text.clone(),
+        summary: entry.summary.clone(),
+        keywords: entry.keywords.clone(),
+        entities: entry.entities.clone(),
+        needs_embedding,
+        needs_summary,
+        needs_metadata: needs_metadata_enrichment(&entry.keywords, &entry.entities),
+        target_db,
+        named_project,
+        db_path,
+        foundry_agent_id,
+        foundry_path_prefix,
+        revision,
+    }
 }
 
 fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&str>) -> String {
@@ -29,7 +64,10 @@ fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&st
         .unwrap_or(item.summary.as_str())
         .trim();
     let keywords = item.keywords.join(", ");
-    let condensed = format!("{summary}\n{keywords}").trim().to_string();
+    let entities = item.entities.join(", ");
+    let condensed = format!("{summary}\n{keywords}\n{entities}")
+        .trim()
+        .to_string();
     if condensed.is_empty() {
         item.text.clone()
     } else {
@@ -43,8 +81,8 @@ pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
 impl MemoryServer {
     pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
-        if let Err(err) = self.enrich_tx.try_send(item) {
-            eprintln!("[enrichment-batcher] failed to queue enrichment item: {err}");
+        if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
+            tracing::warn!("[enrichment-batcher] failed to queue enrichment item: {err}");
         }
     }
 
@@ -93,14 +131,14 @@ impl MemoryServer {
             }
         }
 
-        eprintln!("[enrichment-batcher] channel closed, worker exiting");
+        tracing::debug!("[enrichment-batcher] channel closed, worker exiting");
     }
 
     /// Flush a batch: batch-embed all texts needing embedding, then update DB.
     pub(super) async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
         let items: Vec<EnrichmentItem> = std::mem::take(batch);
         let batch_size = items.len();
-        eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
+        tracing::info!("[enrichment-batcher] flushing batch of {batch_size} items");
 
         // 1. Generate summaries first so long-memory embeddings use condensed
         // semantic text instead of noisy full sessions.
@@ -123,7 +161,7 @@ impl MemoryServer {
             match result {
                 Ok(s) => summaries[idx] = Some(s),
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "[enrichment-batcher] summary failed for {}: {e}",
                         items[idx].id
                     );
@@ -132,7 +170,88 @@ impl MemoryServer {
             }
         }
 
-        // 2. Batch embedding for items that need it
+        // 2. Extract keywords + entities for items missing structured metadata.
+        let metadata_futures: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_metadata)
+            .map(|(i, item)| {
+                let llm = self.llm.clone();
+                let text = item.text.clone();
+                async move { (i, llm.extract_metadata(&text).await) }
+            })
+            .collect();
+
+        let metadata_results: Vec<(usize, Result<(Vec<String>, Vec<String>), String>)> =
+            futures::future::join_all(metadata_futures).await;
+
+        let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        let mut entities_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
+        for (idx, result) in metadata_results {
+            match result {
+                Ok((keywords, entities)) => {
+                    if items[idx].keywords.is_empty() && !keywords.is_empty() {
+                        keywords_out[idx] = Some(keywords);
+                    }
+                    if items[idx].entities.is_empty() && !entities.is_empty() {
+                        entities_out[idx] = Some(entities);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[enrichment-batcher] metadata failed for {}: {e}",
+                        items[idx].id
+                    );
+                    record_enrichment_failure(self, &items[idx], "metadata", &e);
+                }
+            }
+        }
+
+        for (idx, item) in items.iter().enumerate() {
+            if !item.needs_metadata {
+                continue;
+            }
+            let (heur_keywords, heur_entities) =
+                memory_core::scorer::heuristic_metadata_from_text(&item.text);
+            if heur_entities.is_empty() && heur_keywords.is_empty() {
+                continue;
+            }
+            let mut entities = if item.entities.is_empty() {
+                Vec::new()
+            } else {
+                item.entities.clone()
+            };
+            if let Some(existing) = entities_out[idx].take() {
+                entities = existing;
+            }
+            for entity in heur_entities {
+                if !entities.iter().any(|e| e == &entity) {
+                    entities.push(entity);
+                }
+            }
+            if !entities.is_empty() {
+                entities_out[idx] = Some(entities);
+            }
+
+            let mut keywords = if item.keywords.is_empty() {
+                Vec::new()
+            } else {
+                item.keywords.clone()
+            };
+            if let Some(existing) = keywords_out[idx].take() {
+                keywords = existing;
+            }
+            for keyword in heur_keywords {
+                if !keywords.iter().any(|k| k == &keyword) {
+                    keywords.push(keyword);
+                }
+            }
+            if !keywords.is_empty() {
+                keywords_out[idx] = Some(keywords);
+            }
+        }
+
+        // 3. Batch embedding for items that need it
         let embed_indices: Vec<usize> = items
             .iter()
             .enumerate()
@@ -142,7 +261,17 @@ impl MemoryServer {
 
         let embed_texts: Vec<String> = embed_indices
             .iter()
-            .map(|&i| embedding_input_for_item(&items[i], summaries[i].as_deref()))
+            .map(|&i| {
+                let generated_summary = summaries[i].as_deref();
+                let mut item = items[i].clone();
+                if let Some(kws) = keywords_out[i].as_ref() {
+                    item.keywords = kws.clone();
+                }
+                if let Some(ents) = entities_out[i].as_ref() {
+                    item.entities = ents.clone();
+                }
+                embedding_input_for_item(&item, generated_summary)
+            })
             .collect();
 
         let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
@@ -155,13 +284,13 @@ impl MemoryServer {
                             embed_results[item_idx] = Some(vecs[vec_idx].clone());
                         }
                     }
-                    eprintln!(
+                    tracing::info!(
                         "[enrichment-batcher] batch embedded {} texts in 1 API call",
                         embed_texts.len()
                     );
                 }
                 Err(e) => {
-                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
+                    tracing::warn!("[enrichment-batcher] batch embedding failed: {e}");
                     for &item_idx in &embed_indices {
                         record_enrichment_failure(self, &items[item_idx], "embedding", &e);
                     }
@@ -169,16 +298,47 @@ impl MemoryServer {
             }
         }
 
-        // 3. Write results back to DB
+        // 4. Write results back to DB
         for (i, item) in items.iter().enumerate() {
             let new_vec = embed_results[i].as_deref();
             let new_summary = summaries[i].as_deref();
+            let new_keywords = keywords_out[i].as_deref();
+            let new_entities = entities_out[i].as_deref();
 
-            if new_vec.is_some() || new_summary.is_some() {
+            if new_vec.is_some()
+                || new_summary.is_some()
+                || new_keywords.is_some()
+                || new_entities.is_some()
+            {
                 let update_action = |store: &mut MemoryStore| {
-                    store
-                        .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
-                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
+                    let updated = store
+                        .update_enrichment_fields(
+                            &item.id,
+                            new_summary,
+                            new_vec,
+                            new_keywords,
+                            new_entities,
+                            item.revision,
+                        )
+                        .map_err(|e| format!("Failed to update enriched entry: {e}"))?;
+                    if updated && new_vec.is_some() {
+                        if let Some(entry) = store
+                            .get(&item.id)
+                            .map_err(|e| format!("load enriched entry: {e}"))?
+                        {
+                            if let Err(err) =
+                                crate::memory_search_ops::apply_confidence_reinforcement_links(
+                                    store, &entry,
+                                )
+                            {
+                                tracing::warn!(
+                                    "[enrichment-batcher] confidence reinforcement failed for {}: {err}",
+                                    item.id
+                                );
+                            }
+                        }
+                    }
+                    Ok(updated)
                 };
 
                 let res = if let Some(ref project_name) = item.named_project {
@@ -192,34 +352,34 @@ impl MemoryServer {
                 match res {
                     Ok(true) => {
                         if new_vec.is_some() {
-                            // PR-4: always-on save_memory enrichment.
-                            //
-                            // Previously the foundry maintenance enqueue only
-                            // fired when both `foundry_agent_id` and
-                            // `foundry_path_prefix` were set by the caller.
-                            // The `handle_save_memory` path (and several
-                            // pipeline call sites) passed None for both,
-                            // which meant memories saved via save_memory
-                            // never reached the foundry pipeline (no
-                            // distill, no rerank). We now fall back to:
-                            //   - agent_id: the server's current agent
-                            //     profile id, else "system"
-                            //   - path_prefix: derived from the entry's
-                            //     stored path (parent directory), or "/"
-                            //     when the path has no parent
-                            // so every embedded memory becomes a
-                            // foundry candidate. The dedup gate inside
-                            // try_claim_event still suppresses no-op
-                            // double-enqueues.
+                            let contradiction_server = self.clone();
+                            let contradiction_id = item.id.clone();
+                            let contradiction_db = item.target_db;
+                            let contradiction_project = item.named_project.clone();
+                            let contradiction_path = item.db_path.clone();
+                            tokio::spawn(async move {
+                                if let Err(err) =
+                                    crate::memory_search_ops::apply_auto_contradiction_detection(
+                                        &contradiction_server,
+                                        &contradiction_id,
+                                        contradiction_db,
+                                        contradiction_project.as_deref(),
+                                        contradiction_path.as_ref(),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "[enrichment-batcher] auto contradiction detection failed for {contradiction_id}: {err}"
+                                    );
+                                }
+                            });
+
                             let agent_id_owned = item
                                 .foundry_agent_id
                                 .clone()
                                 .or_else(|| {
-                                    let guard = self
-                                        .agent_profile
-                                        .read()
-                                        .unwrap_or_else(|e| e.into_inner());
-                                    guard.as_ref().map(|p| p.agent_id.clone())
+                                    let guard = self.agent_runtime_read();
+                                    guard.agent_profile.as_ref().map(|p| p.agent_id.clone())
                                 })
                                 .unwrap_or_else(|| "system".to_string());
 
@@ -238,26 +398,29 @@ impl MemoryServer {
                                 &path_prefix_owned,
                                 &[item.id.clone()],
                             ) {
-                                eprintln!(
+                                tracing::warn!(
                                     "[enrichment-batcher] failed to enqueue foundry maintenance for {}: {err}",
                                     item.id
                                 );
                             }
                         }
                     }
-                    Ok(false) => eprintln!(
+                    Ok(false) => tracing::debug!(
                         "[enrichment-batcher] discarded {} (revision changed)",
                         item.id
                     ),
                     Err(e) => {
-                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id);
+                        tracing::warn!(
+                            "[enrichment-batcher] DB update failed for {}: {e}",
+                            item.id
+                        );
                         record_enrichment_failure(self, item, "db_update", &e);
                     }
                 }
             }
         }
 
-        eprintln!("[enrichment-batcher] batch of {batch_size} complete");
+        tracing::info!("[enrichment-batcher] batch of {batch_size} complete");
     }
 }
 
@@ -280,7 +443,7 @@ fn record_enrichment_failure(
         server.with_store_for_scope(item.target_db, action)
     };
     if let Err(err) = res {
-        eprintln!(
+        tracing::warn!(
             "[enrichment-batcher] failed to record enrichment failure for {}: {err}",
             item.id
         );

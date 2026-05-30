@@ -65,6 +65,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await
@@ -116,6 +117,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            as_of: None,
         },
     )
     .await
@@ -154,5 +156,18 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     // 6. Task itself
     parts.push(format!("## Task\n{}", params.task));
 
-    parts.join("\n\n")
+    let prompt = parts.join("\n\n");
+
+    // Token budget check: warn if prompt exceeds 50K characters (~12.5K tokens)
+    // This is a conservative limit to avoid exceeding model context windows
+    const MAX_PROMPT_CHARS: usize = 50000;
+    if prompt.len() > MAX_PROMPT_CHARS {
+        tracing::warn!(
+            "Generated prompt exceeds budget ({} chars > {} chars). Consider reducing context_query or task length.",
+            prompt.len(),
+            MAX_PROMPT_CHARS
+        );
+    }
+
+    prompt
 }

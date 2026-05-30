@@ -4,6 +4,7 @@
 // Optional graph expansion augments results with memory-graph neighbors.
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 
@@ -13,9 +14,16 @@ use crate::{
         search_fts, search_vec,
     },
     error::MemoryError,
-    scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
+    scorer::{
+        cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize,
+        HybridWeights,
+    },
     types::{MemoryEntry, SearchResult},
 };
+
+const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
+const MAX_EXPANDED_FTS_QUERIES: usize = 6;
+const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -48,6 +56,9 @@ pub struct SearchOptions {
     /// Optional filter for graph edges: "causes", "follows", "related_to", etc.
     /// None = traverse all relation types.
     pub graph_relation_filter: Option<String>,
+    /// Point-in-time validity filter. When set, only memories valid at this ISO
+    /// timestamp are returned.
+    pub as_of: Option<String>,
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -73,8 +84,50 @@ impl Default for SearchOptions {
             mmr_threshold: Some(0.85),
             graph_expand_hops: 0,
             graph_relation_filter: None,
+            as_of: None,
         }
     }
+}
+
+fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+    let raw = ts.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|_| raw.parse::<DateTime<Utc>>())
+        .ok()
+}
+
+fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
+    let Some(as_of) = as_of else {
+        return true;
+    };
+    let valid_from = if entry.valid_from.trim().is_empty() {
+        entry.timestamp.as_str()
+    } else {
+        entry.valid_from.as_str()
+    };
+    let Some(as_of_dt) = parse_utc_timestamp(as_of) else {
+        return false;
+    };
+
+    let starts_before_as_of = parse_utc_timestamp(valid_from)
+        .map(|valid_from_dt| valid_from_dt <= as_of_dt)
+        .unwrap_or_else(|| valid_from <= as_of);
+    let ends_after_as_of = entry
+        .valid_until
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|until| {
+            parse_utc_timestamp(until)
+                .map(|until_dt| until_dt > as_of_dt)
+                .unwrap_or_else(|| until > as_of)
+        })
+        .unwrap_or(true);
+
+    starts_before_as_of && ends_after_as_of
 }
 
 fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
@@ -113,6 +166,171 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     } else {
         HybridWeights::default()
     }
+}
+
+fn push_unique(out: &mut Vec<String>, term: &str) {
+    let term = term.trim().to_ascii_lowercase();
+    if term.is_empty() || out.iter().any(|existing| existing == &term) {
+        return;
+    }
+    out.push(term);
+}
+
+fn token_expansion_variants(token: &str) -> &'static [&'static [&'static str]] {
+    match token {
+        "mcp" => &[&["model", "context", "protocol"]],
+        "llm" => &[&["language", "model"]],
+        "rag" => &[&["retrieval", "augmented", "generation"]],
+        "fts" => &[&["full", "text", "search"]],
+        "rrf" => &[&["reciprocal", "rank", "fusion"]],
+        "mmr" => &[&["maximal", "marginal", "relevance"], &["diversity"]],
+        "ci" => &[&["workflow"], &["checks"], &["github", "actions"]],
+        "pr" => &[&["pull", "request"]],
+        "db" => &[&["database"], &["sqlite"]],
+        "auth" => &[&["authentication"], &["authorization"]],
+        "api" => &[&["endpoint"], &["interface"]],
+        "cli" => &[&["command"], &["terminal"]],
+        "repo" => &[&["repository"]],
+        "vec" | "vector" => &[&["embedding"], &["semantic"]],
+        "embedding" | "embeddings" => &[&["vector"], &["semantic"]],
+        "semantic" => &[&["embedding"], &["vector"]],
+        "recall" => &[&["retrieval"], &["search"]],
+        "retrieval" => &[&["recall"], &["search"]],
+        "bug" => &[&["error"], &["failure"], &["crash"]],
+        "error" => &[&["bug"], &["failure"]],
+        "failure" => &[&["error"], &["bug"]],
+        "crash" => &[&["failure"], &["panic"]],
+        "panic" => &[&["crash"], &["failure"]],
+        _ => &[],
+    }
+}
+
+fn phrase_expansion_variants(tokens: &[String]) -> Vec<String> {
+    const PHRASES: &[(&[&str], &[&str])] = &[
+        (&["model", "context", "protocol"], &["mcp"]),
+        (&["language", "model"], &["llm"]),
+        (&["retrieval", "augmented", "generation"], &["rag"]),
+        (&["full", "text", "search"], &["fts"]),
+        (&["reciprocal", "rank", "fusion"], &["rrf"]),
+        (&["pull", "request"], &["pr"]),
+        (&["github", "actions"], &["ci"]),
+    ];
+
+    let mut variants = Vec::new();
+    for (phrase, replacement) in PHRASES {
+        if phrase.len() > tokens.len() {
+            continue;
+        }
+        for start in 0..=tokens.len() - phrase.len() {
+            if phrase
+                .iter()
+                .enumerate()
+                .all(|(idx, part)| tokens[start + idx] == *part)
+            {
+                let mut expanded =
+                    Vec::with_capacity(tokens.len() - phrase.len() + replacement.len());
+                expanded.extend(tokens[..start].iter().cloned());
+                expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+                expanded.extend(tokens[start + phrase.len()..].iter().cloned());
+                variants.push(expanded.join(" "));
+            }
+        }
+    }
+    variants
+}
+
+fn expanded_fts_queries(query: &str) -> Vec<String> {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queries = Vec::new();
+    push_unique(&mut queries, query.trim());
+    for (idx, token) in tokens.iter().enumerate() {
+        for replacement in token_expansion_variants(token) {
+            let mut expanded = Vec::with_capacity(tokens.len() + replacement.len());
+            expanded.extend(tokens[..idx].iter().cloned());
+            expanded.extend(replacement.iter().map(|part| (*part).to_string()));
+            expanded.extend(tokens[idx + 1..].iter().cloned());
+            push_unique(&mut queries, &expanded.join(" "));
+            if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+                return queries;
+            }
+        }
+    }
+
+    for variant in phrase_expansion_variants(&tokens) {
+        push_unique(&mut queries, &variant);
+        if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+            break;
+        }
+    }
+
+    queries
+}
+
+fn symbolic_query_with_expansion(query: &str) -> String {
+    let tokens = tokenize(query);
+    if tokens.is_empty() {
+        return query.to_string();
+    }
+
+    let mut terms = tokens.clone();
+    for token in &tokens {
+        for replacement in token_expansion_variants(token) {
+            for part in *replacement {
+                push_unique(&mut terms, part);
+                if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                    return terms.join(" ");
+                }
+            }
+        }
+    }
+    for variant in phrase_expansion_variants(&tokens) {
+        for part in tokenize(&variant) {
+            push_unique(&mut terms, &part);
+            if terms.len() >= tokens.len() + MAX_SYMBOLIC_EXPANSION_TERMS {
+                return terms.join(" ");
+            }
+        }
+    }
+    terms.join(" ")
+}
+
+fn search_fts_with_expansion(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let mut merged = HashMap::new();
+    for (idx, fts_query) in expanded_fts_queries(query).into_iter().enumerate() {
+        let factor = if idx == 0 {
+            1.0
+        } else {
+            EXPANDED_FTS_SCORE_FACTOR
+        };
+        for (id, score) in search_fts(
+            conn,
+            &fts_query,
+            limit,
+            include_archived,
+            include_superseded,
+            path_prefix,
+            as_of,
+        )? {
+            let adjusted = score * factor;
+            merged
+                .entry(id)
+                .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
+                .or_insert(adjusted);
+        }
+    }
+    Ok(merged)
 }
 
 /// MMR-inspired diversity filter: greedily select results that are both
@@ -213,6 +431,8 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
         || entry
             .source
             .eq_ignore_ascii_case("foundry_recall_rerank_cache")
+        || entry.id.starts_with("foundry:recall-cache:")
+        || entry.path.starts_with("/agent/checkpoints/recall-cache/")
         || (!kanban_scoped
             && (entry.path.starts_with("/kanban/")
                 || entry.category.eq_ignore_ascii_case("kanban")))
@@ -222,25 +442,44 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {
-    if entry.source.eq_ignore_ascii_case("foundry_distill") {
-        return 0.75;
+    let base = if entry.is_foundry_distill() {
+        0.75
+    } else if entry.is_wiki() {
+        1.15
+    } else if entry.is_guide() {
+        1.12
+    } else if entry.is_kanban() || entry.is_handoff() {
+        0.65
+    } else {
+        1.0
+    };
+    // High-importance entries get a floor of 1.0 so they aren't suppressed,
+    // but foundry_distill entries stay penalized regardless of importance
+    if entry.importance >= 0.9 && base < 1.0 && !entry.is_foundry_distill() {
+        1.0
+    } else {
+        base
     }
-    if metadata_bool(entry, "wiki")
-        || entry.domain.as_deref() == Some("wiki")
-        || entry.category.eq_ignore_ascii_case("wiki")
-    {
-        return 1.15;
-    }
-    if entry.is_guide() {
-        return 1.12;
-    }
-    if matches!(entry.category.as_str(), "kanban" | "handoff")
-        || entry.path.starts_with("/kanban/")
-        || entry.path.starts_with("/handoff/")
-    {
-        return 0.65;
-    }
-    1.0
+}
+
+fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<String, f64> {
+    let max_score = results
+        .iter()
+        .map(|result| result.score.final_score)
+        .filter(|score| score.is_finite() && *score > 0.0)
+        .fold(0.0_f64, f64::max);
+
+    results
+        .iter()
+        .map(|result| {
+            let weight = if max_score > 0.0 {
+                result.score.final_score / max_score
+            } else {
+                1.0
+            };
+            (result.entry.id.clone(), weight.clamp(0.05, 1.0))
+        })
+        .collect()
 }
 
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
@@ -257,6 +496,11 @@ pub fn hybrid_search(
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
     let n = opts.candidates_per_channel;
+    let as_of_utc = opts
+        .as_of
+        .as_deref()
+        .map(crate::db::normalize_utc_iso)
+        .transpose()?;
     let include_superseded =
         opts.include_superseded || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED");
 
@@ -270,6 +514,7 @@ pub fn hybrid_search(
                 opts.include_archived,
                 include_superseded,
                 opts.path_prefix.as_deref(),
+                as_of_utc.as_deref(),
             )?
         } else {
             HashMap::new()
@@ -279,13 +524,14 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(
+    let fts_scores = search_fts_with_expansion(
         conn,
         query,
         n,
         opts.include_archived,
         include_superseded,
         opts.path_prefix.as_deref(),
+        as_of_utc.as_deref(),
     )?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
@@ -305,10 +551,16 @@ pub fn hybrid_search(
     let entries_map = fetch_by_ids(conn, &candidate_ids, opts.include_archived)?;
 
     // ── Channel 3: Symbolic ───────────────────────────────────────────────────
+    let symbolic_query = symbolic_query_with_expansion(query);
     let symbolic_scores: HashMap<String, f64> = entries_map
         .iter()
         .map(|(id, entry)| {
-            let score = symbolic_score(query, &entry.text, &entry.keywords);
+            let score = symbolic_score(
+                &symbolic_query,
+                &entry.text,
+                &entry.keywords,
+                &entry.entities,
+            );
             (id.clone(), score)
         })
         .collect();
@@ -320,6 +572,9 @@ pub fn hybrid_search(
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
         .filter(|(id, e)| {
+            if !valid_at(e, as_of_utc.as_deref()) {
+                return false;
+            }
             if !include_superseded && superseded_ids.contains(*id) {
                 return false;
             }
@@ -371,11 +626,31 @@ pub fn hybrid_search(
         }
     }
 
+    // Precision boosts for exact tickers and high-signal trading terms.
+    // In non-RRF mode, cap the multiplier so it amplifies but doesn't overwhelm.
+    for (id, entry) in &entries_ref {
+        let mut multiplier = precision_query_multiplier(query, entry);
+        if multiplier > 1.0 {
+            if !weights.use_rrf {
+                multiplier = multiplier.clamp(1.0, 3.0);
+            }
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= multiplier;
+                if multiplier >= 10.0 {
+                    score.symbolic = 1.0;
+                }
+            }
+        }
+    }
+
     let top_pre_quality_score = scores
         .values()
         .map(|score| score.final_score)
         .filter(|score| score.is_finite())
         .fold(0.0_f64, f64::max);
+    // Quality boosts are only applied to entries already scoring above the 85th
+    // percentile floor. This prevents low-relevance wiki/guide entries from being
+    // boosted into the top results purely on type. Penalties apply unconditionally.
     let quality_boost_floor = top_pre_quality_score * 0.85;
     for (id, entry) in &entries_ref {
         let multiplier = quality_multiplier(entry);
@@ -385,6 +660,16 @@ pub fn hybrid_search(
                     continue;
                 }
                 score.final_score *= multiplier;
+            }
+        }
+    }
+
+    // Frequently recalled memories get a modest relevance boost (access feedback).
+    for (id, entry) in &entries_ref {
+        if entry.access_count >= 2 {
+            let boost = 1.0 + (entry.access_count as f64).ln_1p() * 0.03;
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= boost.min(1.25);
             }
         }
     }
@@ -403,7 +688,7 @@ pub fn hybrid_search(
         .filter(|(id, _)| entries_ref.contains_key(*id))
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // ── MMR diversity: defer near-duplicate entries to end ─────────────────────
     let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
@@ -431,6 +716,7 @@ pub fn hybrid_search(
         let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         let rel_filter = opts.graph_relation_filter.as_deref();
 
+        // Graph expansion is a best-effort enrichment; failures are non-fatal.
         if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
         {
             let existing_ids: std::collections::HashSet<String> =
@@ -441,27 +727,44 @@ pub fn hybrid_search(
                 .map(|r| r.score.final_score * 0.5)
                 .unwrap_or(0.1);
 
-            // Compute local PageRank on the expanded subgraph
-            let pr_scores = crate::scorer::local_pagerank(&expand_result.edges, 0.85);
+            let seed_weights = normalized_seed_weights(&results);
+            let activations = crate::scorer::graph_spreading_activation_with_seed_weights(
+                &seed_weights,
+                &expand_result.edges,
+                opts.graph_expand_hops,
+                0.5,
+            );
 
-            let new_entries: Vec<SearchResult> = expand_result
+            let expanded_entries: Vec<MemoryEntry> = expand_result
                 .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
+                .filter(|entry| valid_at(entry, as_of_utc.as_deref()))
                 .filter(|entry| !is_search_noise_entry(entry, opts.path_prefix.as_deref()))
+                .collect();
+            let expanded_ids: Vec<String> = expanded_entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect();
+            let expanded_superseded_ids = if include_superseded {
+                HashSet::new()
+            } else {
+                get_superseded_ids(conn, &expanded_ids).unwrap_or_default()
+            };
+
+            let mut new_entries: Vec<SearchResult> = expanded_entries
+                .into_iter()
                 .filter(|entry| {
                     if include_superseded {
                         return true;
                     }
-                    !get_superseded_ids(conn, std::slice::from_ref(&entry.id))
-                        .map(|ids| ids.contains(&entry.id))
-                        .unwrap_or(false)
+                    !expanded_superseded_ids.contains(&entry.id)
                 })
                 .map(|entry| {
                     let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
-                    let pr = pr_scores.get(&entry.id).copied().unwrap_or(0.0);
-                    // Combine distance decay with PageRank: important hub nodes score higher
-                    let graph_boost = min_score * (0.5 / (distance as f64 + 1.0) + 0.5 * pr);
+                    let activation = activations.get(&entry.id).copied().unwrap_or(0.0);
+                    let graph_boost = min_score
+                        * (0.4 / (distance as f64 + 1.0) + 0.6 * activation).clamp(0.0, 1.0);
                     SearchResult {
                         entry,
                         score: crate::types::HybridScore {
@@ -474,6 +777,12 @@ pub fn hybrid_search(
                     }
                 })
                 .collect();
+            new_entries.sort_by(|a, b| {
+                b.score
+                    .final_score
+                    .total_cmp(&a.score.final_score)
+                    .then_with(|| a.entry.id.cmp(&b.entry.id))
+            });
 
             results.extend(new_entries);
         }
@@ -494,8 +803,8 @@ pub fn hybrid_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
-    use crate::types::MemoryEntry;
+    use crate::db::{add_edge, init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
+    use crate::types::{MemoryEdge, MemoryEntry};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -522,6 +831,8 @@ mod tests {
             text: text.into(),
             importance: 0.7,
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".into(),
             topic: "".into(),
             keywords: keywords.iter().map(|s| s.to_string()).collect(),
@@ -593,6 +904,69 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_expands_acronym_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "expanded"));
+    }
+
+    #[test]
+    fn hybrid_expands_phrase_queries_for_fts() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "acronym",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "model context protocol handshake", &opts).unwrap();
+        assert!(results.iter().any(|result| result.entry.id == "acronym"));
+    }
+
+    #[test]
+    fn hybrid_keeps_exact_fts_match_above_expanded_match() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "exact",
+            "MCP handshake serialization checklist",
+            &["mcp"],
+        );
+        insert(
+            &mut conn,
+            "expanded",
+            "Model Context Protocol handshake serialization checklist",
+            &["protocol"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "mcp handshake", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "exact");
+    }
+
+    #[test]
     fn empty_query_returns_empty() {
         let mut conn = setup();
         insert(&mut conn, "x", "some text", &[]);
@@ -616,6 +990,16 @@ mod tests {
         assert_eq!(weights.symbolic, 0.28);
         assert_eq!(weights.decay, 0.02);
         assert!(weights.use_rrf);
+    }
+
+    #[test]
+    fn valid_at_compares_offset_timestamps_by_instant() {
+        let mut entry = memory_entry("offset", "Offset timestamp memory", &[]);
+        entry.valid_from = "2026-01-01T08:00:00+08:00".to_string();
+        entry.valid_until = Some("2026-01-02T08:00:00+08:00".to_string());
+
+        assert!(valid_at(&entry, Some("2026-01-01T00:00:00Z")));
+        assert!(!valid_at(&entry, Some("2026-01-02T00:00:00Z")));
     }
 
     #[test]
@@ -650,6 +1034,53 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_search_respects_as_of_validity_window() {
+        let mut conn = setup();
+        let mut old = memory_entry("temporal-old", "TemporalHybridNeedle old memory", &[]);
+        old.valid_from = "2026-01-01T00:00:00Z".to_string();
+        old.valid_until = Some("2026-02-01T00:00:00Z".to_string());
+        upsert(&mut conn, &old, false).unwrap();
+
+        let mut new = memory_entry("temporal-new", "TemporalHybridNeedle new memory", &[]);
+        new.valid_from = "2026-02-01T00:00:00Z".to_string();
+        upsert(&mut conn, &new, false).unwrap();
+
+        let january = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-01-15T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(january.contains(&"temporal-old".to_string()));
+        assert!(!january.contains(&"temporal-new".to_string()));
+
+        let march = hybrid_search(
+            &conn,
+            "TemporalHybridNeedle",
+            &SearchOptions {
+                top_k: 5,
+                record_access: false,
+                as_of: Some("2026-03-01T00:00:00.000Z".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .map(|result| result.entry.id)
+        .collect::<Vec<_>>();
+        assert!(!march.contains(&"temporal-old".to_string()));
+        assert!(march.contains(&"temporal-new".to_string()));
+    }
+
+    #[test]
     fn hybrid_hides_operation_logs() {
         let mut conn = setup();
         insert(
@@ -678,5 +1109,70 @@ mod tests {
         assert!(!results
             .iter()
             .any(|result| result.entry.id == "wiki-operation-log"));
+    }
+
+    #[test]
+    fn graph_expansion_orders_neighbors_by_spreading_activation() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "seed",
+            "TrendLock durable decision rule",
+            &["trendlock"],
+        );
+        insert(
+            &mut conn,
+            "support",
+            "Support note only reachable by graph",
+            &["support"],
+        );
+        insert(
+            &mut conn,
+            "related",
+            "Related note only reachable by graph",
+            &["related"],
+        );
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "related".to_string(),
+                relation: "related_to".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "seed".to_string(),
+                target_id: "support".to_string(),
+                relation: "supports".to_string(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+
+        let opts = SearchOptions {
+            top_k: 1,
+            record_access: false,
+            graph_expand_hops: 1,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "TrendLock", &opts).unwrap();
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["seed", "support", "related"]);
+        assert!(results[1].score.final_score > results[2].score.final_score);
     }
 }

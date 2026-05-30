@@ -105,6 +105,8 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             force: true,
             topic: Some("notes-test".to_string()),
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await
         .expect("tachi_save note should succeed");
@@ -157,6 +159,8 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 force: true,
                 topic: None,
                 source: None,
+                valid_from: None,
+                valid_until: None,
             }))
             .await
             .expect_err("invalid note path should be rejected");
@@ -183,6 +187,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             category: Some("fact".to_string()),
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
             synthesize: false,
             model: None,
             text: Some("A one-line memory fact with a title should not become wiki.".to_string()),
@@ -198,6 +203,8 @@ async fn tachi_memory_save_with_title_stays_memory() {
             id: None,
             force: true,
             source: None,
+            valid_from: None,
+            valid_until: None,
             flow_id: None,
             event: None,
             state: None,
@@ -257,6 +264,7 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
             category: None,
             include_archived: false,
             enable_rerank: false,
+            as_of: None,
         }))
         .await
         .expect("memory scoped search");
@@ -309,6 +317,7 @@ async fn search_memory_boosts_guide_rows_by_context() {
             file_context: Some("crates/memory-server/src/tools.rs".to_string()),
             error_context: Some("linker error: could not find native static library".to_string()),
             enable_rerank: false,
+            as_of: None,
         }))
         .await
         .expect("search memory with guide context");
@@ -370,6 +379,8 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             force: true,
             topic: None,
             source: None,
+            valid_from: None,
+            valid_until: None,
         }))
         .await
         .expect_err("symlink note leaf should be rejected");
@@ -420,6 +431,8 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -756,6 +769,8 @@ async fn save_memory_clamps_importance_into_valid_range() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -802,6 +817,8 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await
@@ -825,6 +842,96 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
     assert!(!text.contains("secret_token_value_abcdefghijklmnopqrstuvwxyz"));
 }
 
+#[tokio::test]
+async fn save_memory_scrubs_think_tags_from_text_and_summary() {
+    let server = make_server();
+
+    let saved = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "Keep this.\n<think>private reasoning\nwith details</think>\nAnd this."
+                .to_string(),
+            summary: "Summary <think>hidden</think> visible".to_string(),
+            path: "/scratch/tests/think-scrub".to_string(),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: "testing".to_string(),
+            keywords: vec!["think-scrub".to_string()],
+            persons: vec![],
+            entities: vec!["memory-server".to_string()],
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            retention_policy: None,
+            domain: None,
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: None,
+        }))
+        .await
+        .expect("save_memory should succeed");
+
+    let saved_json: Value = serde_json::from_str(&saved).expect("save JSON");
+    let id = saved_json["id"].as_str().expect("saved id");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: id.to_string(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched_json: Value = serde_json::from_str(&fetched).expect("get JSON");
+    let text = fetched_json["text"].as_str().unwrap_or_default();
+    let summary = fetched_json["summary"].as_str().unwrap_or_default();
+    assert!(text.contains("Keep this."));
+    assert!(text.contains("And this."));
+    assert!(!text.contains("<think>"));
+    assert!(!text.contains("private reasoning"));
+    assert_eq!(summary, "Summary  visible");
+}
+
+#[tokio::test]
+async fn save_memory_noise_rejection_returns_structured_json() {
+    let server = make_server();
+
+    let response = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "hello".to_string(),
+            summary: String::new(),
+            path: "/scratch/tests/noise".to_string(),
+            importance: 0.7,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: false,
+            auto_link: false,
+            project: None,
+            retention_policy: None,
+            domain: None,
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: None,
+        }))
+        .await
+        .expect("noise rejection should be a normal JSON response");
+
+    let json: Value = serde_json::from_str(&response).expect("noise JSON");
+    assert_eq!(json["saved"], json!(false));
+    assert_eq!(json["noise"], json!(true));
+}
+
 #[test]
 fn strip_code_fence_uses_last_closing_fence() {
     let raw = "```json\n{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}\n```";
@@ -836,9 +943,9 @@ fn strip_code_fence_uses_last_closing_fence() {
 }
 
 #[test]
-fn fact_to_entry_preserves_persons_and_entities() {
+fn fact_to_entry_merges_legacy_persons_into_entities() {
     let fact = json!({
-        "text": "Kyle migrated Sigil search",
+        "text": "Kyle migrated Sigil search completely and successfully.",
         "topic": "migration",
         "keywords": ["sigil", "search"],
         "persons": ["Kyle", ""],
@@ -849,10 +956,15 @@ fn fact_to_entry_preserves_persons_and_entities() {
 
     let entry = crate::tool_params::fact_to_entry(&fact, "extraction", json!({}))
         .expect("fact_to_entry should build an entry");
-    assert_eq!(entry.persons, vec!["Kyle".to_string()]);
+    assert!(entry.persons.is_empty());
     assert_eq!(
         entry.entities,
-        vec!["Sigil".to_string(), "memory-server".to_string()]
+        vec![
+            "Sigil".to_string(),
+            "memory-server".to_string(),
+            "Kyle".to_string(),
+            "user".to_string()
+        ]
     );
 }
 
@@ -920,6 +1032,8 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             retention_policy: None,
             domain: None,
             timestamp: None,
+            valid_from: None,
+            valid_until: None,
             metadata: None,
         }))
         .await

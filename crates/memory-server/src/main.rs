@@ -47,6 +47,7 @@ mod daily_pipeline;
 mod db_context;
 mod dispatch_ops;
 mod dlq_ops;
+pub(crate) mod docs_ops;
 mod doctor;
 mod doctor_ops;
 mod enrichment;
@@ -60,6 +61,7 @@ mod gh_ops;
 mod gh_safe_merge;
 mod graph_state_ops;
 mod handoff_ops;
+mod hub_cli;
 mod hub_helpers;
 mod hub_ops;
 mod kanban;
@@ -166,6 +168,29 @@ impl DbScope {
             DbScope::Project => "project",
         }
     }
+}
+
+// ─── Subsystems ────────────────────────────────────────────────────────────────
+
+struct VaultState {
+    key: Option<[u8; 32]>,
+    unlock_time: Option<Instant>,
+    failed_attempts: (u32, Option<Instant>),
+    auto_lock_after_secs: u64,
+}
+
+struct RateLimiter {
+    windows: HashMap<String, VecDeque<Instant>>,
+    bursts: HashMap<String, VecDeque<Instant>>,
+    rpm: u64,
+    burst: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct AgentRuntime {
+    pub(crate) agent_profile: Option<AgentProfile>,
+    pub(crate) tool_profile: Option<ToolProfile>,
+    pub(crate) handoff_memos: Vec<HandoffMemo>,
 }
 
 // ─── Server State ─────────────────────────────────────────────────────────────
@@ -295,7 +320,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_shell",
 ];
 
-struct CachedResult {
+pub(crate) struct CachedResult {
     result: rmcp::model::CallToolResult,
     created_at: Instant,
 }
@@ -307,6 +332,16 @@ impl Clone for CachedResult {
             created_at: self.created_at,
         }
     }
+}
+
+pub(crate) struct ToolDiscovery {
+    pub(crate) proxy_tools: StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>,
+    pub(crate) skill_tools: StdMutex<HashMap<String, String>>,
+    pub(crate) skill_tool_defs: StdMutex<HashMap<String, rmcp::model::Tool>>,
+    pub(crate) tool_cache: StdMutex<HashMap<String, CachedResult>>,
+    pub(crate) dead_letters: StdMutex<VecDeque<DeadLetter>>,
+    pub(crate) mcp_discovery_timeout: Duration,
+    pub(crate) mcp_tool_exposure_mode: McpToolExposureMode,
 }
 
 #[derive(Clone)]
@@ -344,6 +379,17 @@ struct HandoffMemo {
 }
 
 #[derive(Clone)]
+pub(crate) struct EnrichmentRuntime {
+    pub(crate) enrich_tx: mpsc::Sender<EnrichmentItem>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FoundryRuntime {
+    pub(crate) foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
+    pub(crate) foundry_stats: Arc<FoundryWorkerStats>,
+}
+
+#[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
@@ -367,46 +413,23 @@ struct MemoryServer {
     pub(crate) claude_pool: Arc<claude_pool::ClaudePool>,
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
-    proxy_tools: Arc<StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>>,
-    skill_tools: Arc<StdMutex<HashMap<String, String>>>,
-    skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
+    tool_discovery: Arc<ToolDiscovery>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
-    // ─── Phantom Tools (result caching) ──────────────────────────────────────
-    tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
+    // ─── Phantom Tools (result caching — lock-free counters) ──────────────
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
-    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
-    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
-    mcp_discovery_timeout: Duration,
-    mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
-    enrich_tx: mpsc::Sender<EnrichmentItem>,
+    enrichment: EnrichmentRuntime,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
-    foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
-    foundry_stats: Arc<FoundryWorkerStats>,
+    foundry: FoundryRuntime,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
-    vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
-    vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
-    vault_failed_attempts: Arc<StdMutex<(u32, Option<Instant>)>>,
-    vault_auto_lock_after_secs: u64,
+    vault: Arc<StdRwLock<VaultState>>,
     // ─── Rate Limiter ────────────────────────────────────────────────────────
-    /// Sliding window: tool call timestamps per session. Key = session_id (or "default").
-    rate_limit_windows: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
-    /// Burst detection: (tool_name + args_hash) → timestamps
-    rate_limit_bursts: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
-    /// Configured RPM limit (0 = unlimited)
-    rate_limit_rpm: u64,
-    /// Configured burst limit (0 = unlimited)
-    rate_limit_burst: u64,
-    // ─── Agent Profile ───────────────────────────────────────────────────────
-    /// Per-session agent profile (set via agent_register tool).
-    agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
-    /// Default host-facing tool surface bundle selection for this server instance.
-    tool_profile: Arc<StdRwLock<Option<ToolProfile>>>,
-    // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
-    /// Pending handoff memos from previous agent sessions.
-    handoff_memos: Arc<StdMutex<Vec<HandoffMemo>>>,
+    rate_limiter: Arc<StdMutex<RateLimiter>>,
+    // ─── Agent Runtime ───────────────────────────────────────────────────────
+    /// Agent profile, tool profile, and handoff memos grouped together.
+    agent_runtime: Arc<StdRwLock<AgentRuntime>>,
 }
 
 // MCP client pool types are in mcp_pool.rs
@@ -523,33 +546,41 @@ impl MemoryServer {
             llm: llm.clone(),
             claude_pool,
             pipeline_enabled,
-            proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tools: Arc::new(StdMutex::new(HashMap::new())),
-            skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
+            tool_discovery: Arc::new(ToolDiscovery {
+                proxy_tools: StdMutex::new(HashMap::new()),
+                skill_tools: StdMutex::new(HashMap::new()),
+                skill_tool_defs: StdMutex::new(HashMap::new()),
+                tool_cache: StdMutex::new(HashMap::new()),
+                dead_letters: StdMutex::new(VecDeque::new()),
+                mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
+                mcp_tool_exposure_mode,
+            }),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
-            tool_cache: Arc::new(StdMutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
-            mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
-            mcp_tool_exposure_mode,
-            enrich_tx,
-            foundry_tx,
-            foundry_stats,
-            vault_key: Arc::new(StdRwLock::new(None)),
-            vault_unlock_time: Arc::new(StdRwLock::new(None)),
-            vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
-            vault_auto_lock_after_secs: 1800,
-            rate_limit_windows: Arc::new(StdMutex::new(HashMap::new())),
-            rate_limit_bursts: Arc::new(StdMutex::new(HashMap::new())),
-            rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
-            rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
-            agent_profile: Arc::new(StdRwLock::new(None)),
-            tool_profile: Arc::new(StdRwLock::new(
-                Some(crate::profiles::default_tool_profile()),
-            )),
-            handoff_memos: Arc::new(StdMutex::new(Vec::new())),
+            enrichment: EnrichmentRuntime { enrich_tx },
+            foundry: FoundryRuntime {
+                foundry_tx,
+                foundry_stats,
+            },
+            vault: Arc::new(StdRwLock::new(VaultState {
+                key: None,
+                unlock_time: None,
+                failed_attempts: (0, None),
+                auto_lock_after_secs: 1800,
+            })),
+            rate_limiter: Arc::new(StdMutex::new(RateLimiter {
+                windows: HashMap::new(),
+                bursts: HashMap::new(),
+                rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
+                burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
+            })),
+            agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
+                agent_profile: None,
+                tool_profile: Some(crate::profiles::default_tool_profile()),
+                handoff_memos: Vec::new(),
+            })),
         };
 
         // Spawn the enrichment batcher worker
@@ -587,7 +618,12 @@ impl MemoryServer {
                             path_prefix: job.path_prefix,
                             memory_ids: job.memory_ids,
                         };
-                        if replay_server.foundry_tx.try_send(item).is_ok() {
+                        if replay_server
+                            .foundry_lock()
+                            .foundry_tx
+                            .try_send(item)
+                            .is_ok()
+                        {
                             count += 1;
                         }
                     }
@@ -622,6 +658,16 @@ impl MemoryServer {
         Ok(server)
     }
 
+    pub(crate) fn tool_cache_lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, CachedResult>> {
+        lock_or_recover(&self.tool_discovery.tool_cache, "tool_cache")
+    }
+
+    pub(crate) fn dead_letters_lock(&self) -> std::sync::MutexGuard<'_, VecDeque<DeadLetter>> {
+        lock_or_recover(&self.tool_discovery.dead_letters, "dead_letters")
+    }
+
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
         self.llm.clear_provider_secrets();
         let secrets = load_unlocked_api_key_secrets(self)?;
@@ -637,8 +683,28 @@ impl MemoryServer {
     /// Clone the foundry maintenance sender so external supervisors
     /// (e.g. the multi-DB FoundryScheduler) can re-inject jobs into the
     /// same in-process worker that handles enrichment-driven enqueues.
+    pub(crate) fn enrichment_lock(&self) -> &EnrichmentRuntime {
+        &self.enrichment
+    }
+
+    pub(crate) fn foundry_lock(&self) -> &FoundryRuntime {
+        &self.foundry
+    }
+
     pub(crate) fn foundry_tx_clone(&self) -> mpsc::Sender<FoundryMaintenanceItem> {
-        self.foundry_tx.clone()
+        self.foundry_lock().foundry_tx.clone()
+    }
+
+    pub(crate) fn vault_read(&self) -> std::sync::RwLockReadGuard<'_, VaultState> {
+        self.vault.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn vault_write(&self) -> std::sync::RwLockWriteGuard<'_, VaultState> {
+        self.vault.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn rate_limiter_lock(&self) -> std::sync::MutexGuard<'_, RateLimiter> {
+        self.rate_limiter.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Path to this server's global memory DB (canonicalized at boot).
@@ -649,6 +715,14 @@ impl MemoryServer {
     /// Path to this server's project memory DB, when one is bound.
     pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
         self.project_db_path.as_ref().map(|p| (**p).clone())
+    }
+
+    pub(crate) fn agent_runtime_read(&self) -> std::sync::RwLockReadGuard<'_, AgentRuntime> {
+        read_or_recover(&self.agent_runtime, "agent_runtime")
+    }
+
+    pub(crate) fn agent_runtime_write(&self) -> std::sync::RwLockWriteGuard<'_, AgentRuntime> {
+        write_or_recover(&self.agent_runtime, "agent_runtime")
     }
 }
 

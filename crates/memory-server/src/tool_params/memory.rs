@@ -174,12 +174,12 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub topic: String,
 
-    /// Keyword tags
-    #[serde(default)]
+    /// Tags for recall/FTS (wire alias: `indexed_tags`)
+    #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Person names mentioned
-    #[serde(default)]
+    /// Legacy DB column; programming-agent saves use `entities` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persons: Vec<String>,
 
     /// Entity names mentioned
@@ -220,14 +220,22 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub retention_policy: Option<String>,
 
-    /// Domain this memory belongs to (e.g. "finance", "code-review").
-    /// NULL means no domain scoping.
-    #[serde(default)]
+    /// Domain this memory belongs to (e.g. "code-review", "sigil").
+    /// Legacy wire alias: `domain_key`.
+    #[serde(default, alias = "domain_key")]
     pub domain: Option<String>,
 
     /// Optional timestamp override.
     #[serde(default)]
     pub timestamp: Option<String>,
+
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
@@ -261,7 +269,10 @@ pub(crate) struct RememberParams {
 
     /// Importance score 0.0–1.0. Defaults to 0.6 (slightly below save_memory's
     /// 0.7) since `remember` is intended for casual notes.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Scope: "user" | "project" | "general". Defaults to "project".
@@ -287,6 +298,14 @@ pub(crate) struct RememberParams {
     /// Optional retention policy.
     #[serde(default)]
     pub retention_policy: Option<String>,
+
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 
     /// Bypass noise filter (forwarded to save_memory). Defaults to false.
     #[serde(default)]
@@ -342,7 +361,10 @@ pub(crate) struct SearchMemoryParams {
     pub candidates_per_channel: usize,
 
     /// MMR diversity threshold (0.0-1.0), set to null to disable
-    #[serde(default = "default_mmr_threshold")]
+    #[serde(
+        default = "default_mmr_threshold",
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub mmr_threshold: Option<f64>,
 
     /// Graph expand hops (0 = disabled, default = 1)
@@ -382,6 +404,10 @@ pub(crate) struct SearchMemoryParams {
     /// Enable adaptive Voyage reranking when top hybrid scores are close.
     #[serde(default)]
     pub enable_rerank: bool,
+
+    /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 impl SearchMemoryParams {
@@ -411,6 +437,7 @@ impl SearchMemoryParams {
             // Keep search path read-only so multiple search requests can run concurrently.
             record_access: false,
             domain: self.domain.clone(),
+            as_of: self.as_of.clone(),
             ..Default::default()
         }
     }
@@ -641,7 +668,10 @@ pub(crate) struct IngestEventParams {
     pub path_prefix: Option<String>,
 
     /// Optional write importance for structured event writes
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Target scope for writes
@@ -812,7 +842,10 @@ pub(crate) struct RegisterDomainParams {
     pub description: Option<String>,
 
     /// GC stale-days threshold for memories in this domain (default: 90)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub gc_threshold_days: Option<u32>,
 
     /// Default retention policy for memories saved to this domain
@@ -1025,6 +1058,8 @@ pub(crate) struct TachiWikiIngestParams {
     pub update_related: bool,
 }
 
+pub(crate) const MIN_FACT_CHAR_COUNT: usize = 30;
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
 pub(crate) fn fact_to_entry(
     fact: &serde_json::Value,
@@ -1049,11 +1084,37 @@ pub(crate) fn fact_to_entry(
     if text.is_empty() {
         return None;
     }
+    let force = metadata
+        .get("force")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !force {
+        let char_count = text.chars().count();
+        if char_count < MIN_FACT_CHAR_COUNT {
+            tracing::warn!(
+                "[capture_gate] Fact rejected: text too short ({} < {} chars). Text: {:?}",
+                char_count,
+                MIN_FACT_CHAR_COUNT,
+                text
+            );
+            return None;
+        }
+        if memory_core::is_noise_text(&text) {
+            tracing::warn!(
+                "[capture_gate] Fact rejected: noise assessment failed. Text: {:?}",
+                text
+            );
+            return None;
+        }
+    }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords = string_list(&fact["keywords"]);
-    let persons = string_list(&fact["persons"]);
-    let entities = string_list(&fact["entities"]);
+    let mut entities = string_list(&fact["entities"]);
+    memory_core::types::fold_person_names_into_entities(
+        &mut entities,
+        string_list(&fact["persons"]),
+    );
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
         "user" | "project" | "general" => scope_raw.to_string(),
@@ -1067,10 +1128,12 @@ pub(crate) fn fact_to_entry(
         text,
         importance,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic,
         keywords,
-        persons,
+        persons: Vec::new(),
         entities,
         location: String::new(),
         source: source.to_string(),
@@ -1084,4 +1147,10 @@ pub(crate) fn fact_to_entry(
         retention_policy: None,
         domain: None,
     })
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWikiOrganizeParams {
+    /// Absolute path to the docs directory to organize.
+    pub dir_path: String,
 }

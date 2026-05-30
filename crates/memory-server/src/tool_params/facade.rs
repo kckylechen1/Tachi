@@ -30,12 +30,16 @@ pub(crate) struct TachiSearchParams {
 
     /// Optional named project DB
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB.")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, search/save targets ONLY that library (not the daemon-bound workspace DB). Omit to use global + daemon-bound project DB."
+    )]
     pub project: Option<String>,
 
     /// Optional domain filter
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter (e.g. equity_trading, agent). Does not select the DB — combine with project for explicit library targeting.")]
+    #[schemars(
+        description = "Optional area tag filter (e.g. rust, mcp). Does not select the DB — use project for library targeting."
+    )]
     pub domain: Option<String>,
 
     #[serde(default)]
@@ -55,6 +59,10 @@ pub(crate) struct TachiSearchParams {
     /// Enable adaptive Voyage reranking for close top results in memory search.
     #[serde(default)]
     pub enable_rerank: bool,
+
+    /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────
@@ -120,19 +128,24 @@ pub(crate) struct TachiSaveParams {
     pub path: Option<String>,
 
     /// 0.0–1.0 importance score
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
 
     /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
     #[serde(default)]
     pub category: Option<String>,
 
-    /// Keyword tags
-    #[serde(default)]
+    /// Tags for recall and FTS (modules, crates, topics)
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
     pub keywords: Vec<String>,
 
-    /// Entity names mentioned
+    /// People, repos, services, tools (used for auto-link)
     #[serde(default)]
+    #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
 
     /// Scope: "user" | "project" | "general"
@@ -143,7 +156,7 @@ pub(crate) struct TachiSaveParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Optional domain
+    /// Optional codebase area tag (does not select DB)
     #[serde(default)]
     pub domain: Option<String>,
 
@@ -162,6 +175,13 @@ pub(crate) struct TachiSaveParams {
     /// Source identifier (used when kind="facts" or kind="extract_facts")
     #[serde(default)]
     pub source: Option<String>,
+    /// When this memory became true/effective. Defaults to timestamp.
+    #[serde(default)]
+    pub valid_from: Option<String>,
+
+    /// When this memory stopped being true/effective. None = still valid.
+    #[serde(default)]
+    pub valid_until: Option<String>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -195,6 +215,8 @@ pub(crate) struct TachiMemoryParams {
     pub include_archived: bool,
     #[serde(default)]
     pub enable_rerank: bool,
+    #[serde(default)]
+    pub as_of: Option<String>,
     /// When action="ask" or action="consolidate", optionally call the configured LLM to synthesize from evidence.
     #[serde(default)]
     pub synthesize: bool,
@@ -211,17 +233,25 @@ pub(crate) struct TachiMemoryParams {
     pub summary: Option<String>,
     #[serde(default)]
     pub topic: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
     pub keywords: Vec<String>,
     #[serde(default)]
+    #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
     #[serde(default)]
     pub retention_policy: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Hierarchical path, e.g. /notes/2026-05-29 or /project/sigil/search."
+    )]
     pub path: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
@@ -229,6 +259,10 @@ pub(crate) struct TachiMemoryParams {
     pub force: bool,
     #[serde(default)]
     pub source: Option<String>,
+    #[serde(default)]
+    pub valid_from: Option<String>,
+    #[serde(default)]
+    pub valid_until: Option<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]
@@ -240,10 +274,14 @@ pub(crate) struct TachiMemoryParams {
 
     // --- shared ---
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response).")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
+    )]
     pub project: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter. Does not select the DB — combine with project for explicit library targeting.")]
+    #[schemars(
+        description = "Optional area tag (e.g. rust, ci, mcp). Filter on search; stored on save. Does not select the DB — use project for that."
+    )]
     pub domain: Option<String>,
 }
 
@@ -355,7 +393,10 @@ pub(crate) struct TachiDispatchParams {
     pub allowed_tools: Vec<String>,
 
     /// Maximum conversation turns for the dispatched agent (prevents infinite loops).
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub max_turns: Option<u32>,
 
     /// Sandbox mode for codex: "workspace-write" | "danger-full-access" | "read-only"
@@ -432,7 +473,10 @@ pub(crate) struct TachiCompleteParams {
     pub outcome: String,
 
     /// Execution duration in milliseconds
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub duration_ms: Option<u64>,
 
     /// Skills used during execution (capability IDs)
@@ -440,15 +484,24 @@ pub(crate) struct TachiCompleteParams {
     pub skills_used: Vec<String>,
 
     /// Cost in tokens (total across all turns)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub cost_tokens: Option<u64>,
 
     /// Cost in USD (if known)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub cost_usd: Option<f64>,
 
     /// Quality score 0.0–1.0 (self-reported or computed later)
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub quality_score: Option<f64>,
 
     /// Free-form notes / summary of what was done
@@ -485,7 +538,7 @@ pub(crate) struct TachiCompleteParams {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiWikiParams {
-    /// Action: "search", "browse", or "write"
+    /// Action: "search", "browse", "read", or "write"
     pub action: String,
     #[serde(default)]
     pub query: Option<String>,
@@ -505,19 +558,26 @@ pub(crate) struct TachiWikiParams {
     pub topic: Option<String>,
     #[serde(default)]
     pub summary: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "indexed_tags")]
+    #[schemars(description = "Wiki tags for recall/FTS.")]
     pub keywords: Vec<String>,
     #[serde(default)]
+    #[schemars(description = "Related repos, tools, or people.")]
     pub entities: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
     pub importance: Option<f64>,
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library.")]
+    #[schemars(
+        description = "Named project library under ~/.tachi/projects/<name>/memory.db. When set, wiki recall targets ONLY that library."
+    )]
     pub project: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional domain tag filter for wiki entries.")]
+    #[schemars(description = "Optional area tag on the wiki entry.")]
     pub domain: Option<String>,
     #[serde(default)]
     pub force: bool,
@@ -573,13 +633,19 @@ pub(crate) struct TachiTaskParams {
     pub context_query: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub permission_profile: Option<String>,
     #[serde(default)]
     pub allowed_tools: Vec<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub sandbox: Option<String>,

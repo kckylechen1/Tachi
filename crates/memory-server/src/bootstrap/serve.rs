@@ -355,6 +355,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         return super::backfill::run_backfill_summaries(&target_path, *dry_run).await;
     }
 
+    if let Commands::BackfillMetadata { db, dry_run } = &command {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return super::backfill::run_backfill_metadata(&target_path, *dry_run).await;
+    }
+
     if let Commands::BackfillFts { db, full, dry_run } = &command {
         let target_path = if let Some(p) = db {
             expand_user_path(p.to_string_lossy().as_ref())
@@ -423,11 +432,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                     .to_string()
             })?;
         if !target_project.exists() {
-            return Err(format!(
-                "project DB not found: {}",
-                target_project.display()
-            )
-            .into());
+            return Err(format!("project DB not found: {}", target_project.display()).into());
         }
         let server = MemoryServer::new(global_db_path.clone(), Some(target_project.clone()))?;
         let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
@@ -556,7 +561,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         probe_keys,
     } = &command
     {
-        return crate::status_ops::run_status(
+        return crate::status_ops::status_cli::run_status(
             *watch,
             *json,
             *hide_orphans,
@@ -569,15 +574,25 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Daemon { action } = &command {
-        return crate::status_ops::run_daemon(action.clone(), &app_home).await;
+        return crate::status_ops::status_cli::run_daemon(action.clone(), &app_home).await;
     }
 
     if let Commands::Watcher { action } = &command {
-        return crate::status_ops::run_watcher(action.clone(), &global_db_path, project_db_path.clone()).await;
+        return crate::status_ops::status_cli::run_watcher(
+            action.clone(),
+            &global_db_path,
+            project_db_path.clone(),
+        )
+        .await;
     }
 
     if let Commands::Foundry { action } = &command {
-        return crate::status_ops::run_foundry(action.clone(), &app_home, &global_db_path).await;
+        return crate::status_ops::status_cli::run_foundry(
+            action.clone(),
+            &app_home,
+            &global_db_path,
+        )
+        .await;
     }
 
     if let Commands::Repair {
@@ -699,9 +714,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 return Err("keychain password doesn't match vault".into());
             }
 
-            *crate::write_or_recover(&server.vault_key, "vault_key") = Some(key);
-            *crate::write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
-                Some(std::time::Instant::now());
+            {
+                let mut v = server.vault_write();
+                v.key = Some(key);
+                v.unlock_time = Some(std::time::Instant::now());
+            }
             let loaded = server.refresh_llm_provider_secrets_from_vault()?;
             eprintln!("[vault] loaded {loaded} provider key(s) from unlocked vault");
             Ok(true)
@@ -915,7 +932,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         Ok(tools) => {
                             let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
                             let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-                            lock_or_recover(&server.proxy_tools, "proxy_tools")
+                            lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools")
                                 .insert(server_name.to_string(), filtered_tools);
                         }
                         Err(e) => {
@@ -1222,13 +1239,39 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                             .stderr(std::process::Stdio::null())
                             .spawn()
                         {
-                            Ok(child) => {
+                            Ok(mut child) => {
                                 eprintln!(
                                     "[auto-daemon] spawned tachi daemon (pid={})",
                                     child.id()
                                 );
-                                // Give daemon time to acquire lock and bind port
-                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                // Reap child in background to avoid zombie processes on Unix
+                                tokio::spawn(async move {
+                                    let _ = child.wait();
+                                });
+                                // Wait for daemon to become ready by polling the health endpoint
+                                let port_val = cli.port;
+                                let ready = tokio::time::timeout(Duration::from_secs(5), async {
+                                    for _ in 0..25 {
+                                        tokio::time::sleep(Duration::from_millis(200)).await;
+                                        if let Ok(resp) = reqwest::get(format!(
+                                            "http://127.0.0.1:{port_val}/health"
+                                        ))
+                                        .await
+                                        {
+                                            if resp.status().is_success() {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    false
+                                })
+                                .await
+                                .unwrap_or(false);
+                                if !ready {
+                                    tracing::warn!(
+                                        "[auto-daemon] daemon did not become ready within 5s"
+                                    );
+                                }
                             }
                             Err(e) => {
                                 eprintln!("[auto-daemon] failed to spawn daemon: {e}");

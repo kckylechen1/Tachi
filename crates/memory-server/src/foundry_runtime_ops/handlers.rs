@@ -3,8 +3,55 @@ use super::helpers::*;
 use super::maintenance::enqueue_capture_maintenance_jobs;
 use super::recall::*;
 use super::*;
-use regex::Regex;
+use std::path::PathBuf;
+
+fn tachi_home_root() -> PathBuf {
+    if let Ok(raw) = std::env::var("TACHI_HOME") {
+        if raw == "~" {
+            return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        }
+        if let Some(rest) = raw.strip_prefix("~/") {
+            return dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(rest);
+        }
+        if !raw.trim().is_empty() {
+            return PathBuf::from(raw);
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tachi")
+}
+
+pub(super) fn resolve_capture_target(
+    server: &MemoryServer,
+    requested_scope: &str,
+    explicit_project: Option<&str>,
+    agent_id: &str,
+) -> (DbScope, Option<String>, Option<PathBuf>, Option<String>) {
+    if let Some(project) = explicit_project {
+        return (DbScope::Project, Some(project.to_string()), None, None);
+    }
+
+    let manifest_path = tachi_home_root().join("manifest.json");
+    let manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    if let Some(db_path) = manifest.resolve_agent_db_path(agent_id) {
+        return (
+            DbScope::Project,
+            None,
+            Some(db_path),
+            Some(format!(
+                "agent capture pinned to manifest DB for {agent_id}"
+            )),
+        );
+    }
+
+    let (target_db, warning) = server.resolve_write_scope(requested_scope);
+    (target_db, None, None, warning)
+}
 use crate::utils::stable_hash;
+use regex::Regex;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
@@ -237,6 +284,7 @@ fn persist_compact_session_import_edges(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
+    db_path: Option<&PathBuf>,
     entries: &[MemoryEntry],
 ) -> Result<usize, String> {
     let created_at = Utc::now().to_rfc3339();
@@ -254,6 +302,8 @@ fn persist_compact_session_import_edges(
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, save_edges)
+    } else if let Some(db_path) = db_path {
+        server.with_path_store(db_path, save_edges)
     } else {
         server.with_store_for_scope(target_db, save_edges)
     }
@@ -276,12 +326,12 @@ pub(crate) async fn handle_compact_session_memory(
     }
 
     let requested_scope = normalize_scope(&params.scope, "project");
-    let named_project = params.project.clone();
-    let (target_db, warning) = if named_project.is_some() {
-        (DbScope::Project, None)
-    } else {
-        server.resolve_write_scope(&requested_scope)
-    };
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        server,
+        &requested_scope,
+        params.project.as_deref(),
+        &params.agent_id,
+    );
     let base_path = params
         .path_prefix
         .clone()
@@ -335,6 +385,8 @@ pub(crate) async fn handle_compact_session_memory(
             text: compacted_text.clone(),
             importance: params.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "experience".to_string(),
             topic,
             keywords: salient_topics.clone(),
@@ -405,6 +457,8 @@ pub(crate) async fn handle_compact_session_memory(
             text: signal_text.to_string(),
             importance: params.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: "fact".to_string(),
             topic,
             keywords: salient_topics.clone(),
@@ -431,7 +485,9 @@ pub(crate) async fn handle_compact_session_memory(
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
-            eprintln!("[compact_session_memory] embedding failed, deferring enrichment: {err}");
+            tracing::warn!(
+                "[compact_session_memory] embedding failed, deferring enrichment: {err}"
+            );
             None
         }
     };
@@ -443,13 +499,19 @@ pub(crate) async fn handle_compact_session_memory(
 
     let mut saved_ids = Vec::new();
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
+        persist_capture_entry(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            entry,
+        )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
-                None,
+                db_path.clone(),
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -463,6 +525,7 @@ pub(crate) async fn handle_compact_session_memory(
         server,
         target_db,
         named_project.as_deref(),
+        db_path.as_ref(),
         &entries,
     )?;
     let saved_ids = dedup_strings(saved_ids);
@@ -471,7 +534,7 @@ pub(crate) async fn handle_compact_session_memory(
             server,
             target_db,
             named_project.clone(),
-            None,
+            db_path.clone(),
             &params.agent_id,
             &base_path,
             &saved_ids,
@@ -651,6 +714,7 @@ pub(crate) async fn handle_recall_context(
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await?;
@@ -696,7 +760,7 @@ pub(crate) async fn handle_recall_context(
     let (reranked, rerank_outcome) =
         rerank_rows_with_outcome(server, &params.query, filtered, params.top_k.max(1)).await;
     if rerank_outcome == super::RerankOutcome::Fallback {
-        eprintln!(
+        tracing::warn!(
             "[recall_context] rerank fail-open: query_hash={} top_k={}",
             stable_hash(&params.query),
             params.top_k.max(1)
@@ -730,6 +794,7 @@ pub(crate) async fn handle_recall_context(
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                as_of: None,
             },
         )
         .await
@@ -740,7 +805,7 @@ pub(crate) async fn handle_recall_context(
             }
             Ok(_) => (vec![], String::new()),
             Err(err) => {
-                eprintln!("[recall_context] wiki search failed, skipping: {err}");
+                tracing::warn!("[recall_context] wiki search failed, skipping: {err}");
                 (vec![], String::new())
             }
         }
@@ -778,7 +843,10 @@ pub(super) struct BracketSelfEvolutionNote {
 
 fn bracket_note_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)").expect("bracket_note_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)")
+            .expect("bracket_note_regex is a valid compile-time regex")
+    })
 }
 
 fn bracket_strategy_regexes() -> &'static [Regex] {
@@ -796,7 +864,9 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
                 r"策略失败|无效",
             ]
             .into_iter()
-            .map(|pattern| Regex::new(pattern).expect("bracket_strategy regex is a valid compile-time pattern"))
+            .map(|pattern| {
+                Regex::new(pattern).expect("bracket_strategy regex is a valid compile-time pattern")
+            })
             .collect()
         })
         .as_slice()
@@ -804,12 +874,18 @@ fn bracket_strategy_regexes() -> &'static [Regex] {
 
 fn bracket_decision_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"记住了|下次我要|下次我会|以后").expect("bracket_decision_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"记住了|下次我要|下次我会|以后")
+            .expect("bracket_decision_regex is a valid compile-time regex")
+    })
 }
 
 fn bracket_preference_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃").expect("bracket_preference_regex is a valid compile-time regex"))
+    REGEX.get_or_init(|| {
+        Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃")
+            .expect("bracket_preference_regex is a valid compile-time regex")
+    })
 }
 
 pub(super) fn build_bracket_self_evolution_id(agent_id: &str, note_text: &str) -> String {
@@ -905,22 +981,23 @@ pub(crate) async fn handle_capture_session(
     }
 
     let requested_scope = normalize_scope(&params.scope, "project");
-    let named_project = params.project.clone();
-    let (target_db, warning) = if named_project.is_some() {
-        (DbScope::Project, None)
-    } else {
-        server.resolve_write_scope(&requested_scope)
-    };
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        server,
+        &requested_scope,
+        params.project.as_deref(),
+        &params.agent_id,
+    );
 
-    let base_path = params.path_prefix.clone().unwrap_or_else(|| {
-        format!(
-            "/openclaw/agent-{}",
-            sanitize_safe_path_name(&params.agent_id)
-        )
-    });
+    let base_path = params
+        .path_prefix
+        .clone()
+        .unwrap_or_else(|| super::helpers::build_openclaw_agent_root(&params.agent_id));
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
-    let attach_kyle_person = params.agent_id.to_ascii_lowercase().contains("jayne");
+    // User-preference scoping: agents with "user_memory" in their profile get
+    // preference notes scoped to "user" instead of the requested scope.
+    let is_user_memory_agent = params.agent_id.to_ascii_lowercase().contains("user-memory")
+        || params.agent_id.to_ascii_lowercase().contains("jayne");
 
     let mut entries = Vec::<MemoryEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
@@ -949,9 +1026,14 @@ pub(crate) async fn handle_capture_session(
             }),
         );
         let strategy_keyword = if note.category == "preference" {
-            "kyle-preference".to_string()
+            "user-preference".to_string()
         } else {
             "strategy".to_string()
+        };
+        let entry_scope = if is_user_memory_agent && note.category == "preference" {
+            "user".to_string()
+        } else {
+            requested_scope.clone()
         };
 
         entries.push(MemoryEntry {
@@ -959,8 +1041,10 @@ pub(crate) async fn handle_capture_session(
             path: self_evolution_path.clone(),
             summary: note.text.chars().take(100).collect(),
             text: note.text,
-            importance: 0.88,
+            importance: 0.70,
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: note.category,
             topic: "self_evolution".to_string(),
             keywords: dedup_strings(vec![
@@ -968,15 +1052,15 @@ pub(crate) async fn handle_capture_session(
                 "bracket-note".to_string(),
                 strategy_keyword,
             ]),
-            persons: if attach_kyle_person {
-                vec!["Kyle".to_string()]
+            persons: Vec::new(),
+            entities: if is_user_memory_agent {
+                vec!["user".to_string(), params.agent_id.clone()]
             } else {
                 Vec::new()
             },
-            entities: Vec::new(),
             location: String::new(),
             source: "bracket_self_evolution".to_string(),
-            scope: requested_scope.clone(),
+            scope: entry_scope,
             archived: false,
             access_count: 0,
             last_access: None,
@@ -1091,11 +1175,19 @@ pub(crate) async fn handle_capture_session(
             text: draft.text.trim().to_string(),
             importance: draft.importance.clamp(0.0, 1.0),
             timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
             category: normalize_category(&draft.category),
             topic,
             keywords: dedup_strings(draft.keywords),
-            persons: dedup_strings(draft.persons),
-            entities: dedup_strings(draft.entities),
+            persons: Vec::new(),
+            entities: {
+                let mut entities = dedup_strings(draft.entities);
+                for name in draft.persons {
+                    memory_core::types::push_entity_name(&mut entities, &name);
+                }
+                entities
+            },
             location: draft.location.trim().to_string(),
             source: "capture_session".to_string(),
             scope,
@@ -1117,7 +1209,7 @@ pub(crate) async fn handle_capture_session(
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {
-            eprintln!("[capture_session] embedding failed, deferring enrichment: {err}");
+            tracing::warn!("[capture_session] embedding failed, deferring enrichment: {err}");
             None
         }
     };
@@ -1130,13 +1222,19 @@ pub(crate) async fn handle_capture_session(
     let mut saved_ids = Vec::new();
 
     for entry in &entries {
-        persist_capture_entry(server, target_db, named_project.as_deref(), None, entry)?;
+        persist_capture_entry(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            entry,
+        )?;
         if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
-                None,
+                db_path.clone(),
                 entry,
                 false,
                 Some(&params.agent_id),
@@ -1151,7 +1249,7 @@ pub(crate) async fn handle_capture_session(
         server,
         target_db,
         named_project.clone(),
-        None,
+        db_path.clone(),
         &params.agent_id,
         &base_path,
         &saved_ids,

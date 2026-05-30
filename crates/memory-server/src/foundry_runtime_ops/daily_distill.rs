@@ -80,6 +80,11 @@ pub fn resolve_batch_size() -> usize {
 /// scheduler's threshold so we don't stitch tiny noisy groups.
 const MIN_BUCKET_SIZE: usize = 3;
 
+/// Max characters of the batch user payload before dispatching. If the
+/// serialized JSON exceeds this, groups are dropped from the tail to stay
+/// within the limit and avoid token overflow on the model side.
+const MAX_BATCH_PAYLOAD_CHARS: usize = 60_000;
+
 /// System prompt for the batch distill mega-call. Mirrors the design doc
 /// (Phase 1 mega-prompt) — instructs the model to return a JSON array
 /// with one object per input group.
@@ -268,8 +273,9 @@ async fn process_api_batch(
     manifest: &mut Vec<SourceManifestEntry>,
     batch_run_id: &str,
 ) {
-    let mut pending: Vec<&[CandidateGroup]> = vec![chunk];
-    while let Some(batch) = pending.pop() {
+    let mut pending: Vec<(&[CandidateGroup], usize)> = vec![(chunk, 0)];
+    let max_depth = 8;
+    while let Some((batch, depth)) = pending.pop() {
         if batch.is_empty() {
             continue;
         }
@@ -289,14 +295,14 @@ async fn process_api_batch(
                     )
                     .await;
                 }
-                Err(err) if batch.len() > 1 => {
+                Err(err) if batch.len() > 1 && depth < max_depth => {
                     report.errors.push(format!(
                         "parse api batch {chunk_idx} ({} groups): {err}; splitting",
                         batch.len()
                     ));
                     let mid = batch.len() / 2;
-                    pending.push(&batch[mid..]);
-                    pending.push(&batch[..mid]);
+                    pending.push((&batch[mid..], depth + 1));
+                    pending.push((&batch[..mid], depth + 1));
                 }
                 Err(err) => {
                     report
@@ -307,19 +313,17 @@ async fn process_api_batch(
                     }
                 }
             },
-            Err(err) if batch.len() > 1 => {
+            Err(err) if batch.len() > 1 && depth < max_depth => {
                 report.errors.push(format!(
                     "api batch {chunk_idx} ({} groups): {err}; splitting",
                     batch.len()
                 ));
                 let mid = batch.len() / 2;
-                pending.push(&batch[mid..]);
-                pending.push(&batch[..mid]);
+                pending.push((&batch[mid..], depth + 1));
+                pending.push((&batch[..mid], depth + 1));
             }
             Err(err) => {
-                report
-                    .errors
-                    .push(format!("api batch {chunk_idx}: {err}"));
+                report.errors.push(format!("api batch {chunk_idx}: {err}"));
                 for group in batch {
                     fallback_one_group(server, group, batch_run_id, report, manifest).await;
                 }
@@ -405,14 +409,8 @@ async fn call_api_batch_distill(
 ) -> Result<String, String> {
     let user = build_batch_user_payload(groups);
     let max_tokens = batch_max_tokens(groups.len());
-    llm.call_distill_llm(
-        DISTILL_DAILY_SYSTEM_PROMPT,
-        &user,
-        None,
-        0.3,
-        max_tokens,
-    )
-    .await
+    llm.call_distill_llm(DISTILL_DAILY_SYSTEM_PROMPT, &user, None, 0.3, max_tokens)
+        .await
 }
 
 fn batch_max_tokens(group_count: usize) -> u32 {
@@ -624,10 +622,28 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
         }));
     }
     let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
+    // If payload exceeds token budget, drop groups from the tail to stay within limits.
+    let (groups_json, actual_count) = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
+        let mut trimmed = payload;
+        while trimmed.len() > 1
+            && serde_json::to_string_pretty(&trimmed)
+                .unwrap_or_default()
+                .len()
+                > MAX_BATCH_PAYLOAD_CHARS
+        {
+            trimmed.pop();
+        }
+        let count = trimmed.len();
+        (
+            serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string()),
+            count,
+        )
+    } else {
+        (groups_json, groups.len())
+    };
     format!(
         "Here are {} groups to distill:\n\n{}",
-        groups.len(),
-        groups_json
+        actual_count, groups_json
     )
 }
 
@@ -709,10 +725,24 @@ async fn fallback_distill(llm: &LlmClient, group: &CandidateGroup) -> Result<Gro
         return Err("fallback llm returned empty text".to_string());
     }
     let summary: String = trimmed.chars().take(120).collect();
+    // Extract keywords from the distilled text and source group metadata
+    let mut keywords: Vec<String> = Vec::new();
+    for entry in &group.entries {
+        keywords.extend(
+            entry
+                .keywords
+                .iter()
+                .filter(|k| !k.trim().is_empty())
+                .cloned(),
+        );
+    }
+    keywords.sort();
+    keywords.dedup();
+    keywords.truncate(12);
     Ok(GroupPayload {
         summary,
         text: trimmed,
-        keywords: Vec::new(),
+        keywords,
         skip_reason: None,
     })
 }
@@ -752,7 +782,9 @@ fn persist_distill_memory(
     backend: &str,
     fallback_used: bool,
 ) -> Result<String, String> {
-    let agent_id = read_or_recover(&server.agent_profile, "agent_profile")
+    let agent_id = server
+        .agent_runtime_read()
+        .agent_profile
         .as_ref()
         .map(|p| p.agent_id.clone())
         .unwrap_or_else(|| "tachi_scheduler".to_string());
@@ -814,6 +846,8 @@ fn persist_distill_memory(
         text: payload.text.clone(),
         importance: 0.75,
         timestamp,
+        valid_from: String::new(),
+        valid_until: None,
         category: "other".to_string(),
         topic: "foundry_distill".to_string(),
         keywords,

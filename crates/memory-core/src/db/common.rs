@@ -39,6 +39,17 @@ pub fn normalize_utc_iso_or_now(ts: &str) -> String {
     normalize_utc_iso(ts).unwrap_or_else(|_| now_utc_iso())
 }
 
+fn json_string_array_column(row: &rusqlite::Row<'_>, column: &str) -> Vec<String> {
+    row.get::<_, String>(column)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn optional_text_column(row: &rusqlite::Row<'_>, column: &str) -> String {
+    row.get::<_, String>(column).unwrap_or_default()
+}
+
 pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
     let metadata_str: String = row.get("metadata")?;
     let metadata: serde_json::Value =
@@ -53,12 +64,20 @@ pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         text: row.get("text")?,
         importance: row.get("importance")?,
         timestamp: row.get("timestamp")?,
+        valid_from: {
+            let vf: Option<String> = row.get("valid_from").unwrap_or(None);
+            match vf {
+                Some(s) if !s.trim().is_empty() => s,
+                _ => row.get("timestamp").unwrap_or_default(),
+            }
+        },
+        valid_until: row.get("valid_until").unwrap_or(None),
         category: row.get("category")?,
         topic: row.get("topic")?,
-        keywords: serde_json::from_str(&row.get::<_, String>("keywords")?).unwrap_or_default(),
-        persons: serde_json::from_str(&row.get::<_, String>("persons")?).unwrap_or_default(),
-        entities: serde_json::from_str(&row.get::<_, String>("entities")?).unwrap_or_default(),
-        location: row.get("location")?,
+        keywords: json_string_array_column(row, "keywords"),
+        persons: json_string_array_column(row, "persons"),
+        entities: json_string_array_column(row, "entities"),
+        location: optional_text_column(row, "location"),
         source: row.get("source")?,
         scope: row.get("scope")?,
         archived: row.get("archived")?,

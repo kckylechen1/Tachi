@@ -134,6 +134,18 @@ impl LlmClient {
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
+        // Warn when foundry lanes collapse to the same model/endpoint as extract.
+        // This is expected when dedicated DISTILL_*/REASONING_* env vars are unset,
+        // but the user should know so they can configure separation if needed.
+        if distill.base_url == extract.base_url && distill.model == extract.model {
+            tracing::info!(
+                "LLM distill lane collapsed to extract endpoint ({}/{}). \
+                 Set DISTILL_API_KEY / DISTILL_BASE_URL to separate.",
+                extract.base_url,
+                extract.model,
+            );
+        }
+
         Ok(Self {
             http,
             extract,
@@ -242,6 +254,27 @@ impl LlmClient {
     }
 
     fn should_disable_thinking(base_url: &str, model: &str) -> bool {
+        // Check environment variable for explicit override
+        if let Ok(env_val) = std::env::var("TACHI_DISABLE_THINKING_MODELS") {
+            let env_lower = env_val.to_ascii_lowercase();
+            if env_lower == "all" || env_lower == "1" || env_lower == "true" {
+                return true;
+            }
+            if env_lower == "none" || env_lower == "0" || env_lower == "false" {
+                return false;
+            }
+            // Treat as comma-separated model name patterns
+            let model_lower = model.to_ascii_lowercase();
+            for pattern in env_lower.split(',') {
+                if model_lower.contains(pattern.trim()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Legacy heuristic: disable for specific provider/model combinations
+        // This is kept as a fallback for backwards compatibility
         if !base_url.to_ascii_lowercase().contains("siliconflow") {
             return false;
         }
@@ -494,16 +527,21 @@ impl LlmClient {
 
         let prompt = format!("<system>\n{system}\n</system>\n\n{user}");
 
-        let output = Command::new("claude")
-            .arg("-p")
-            .arg("--output-format")
-            .arg("text")
-            .arg("--max-turns")
-            .arg("1")
-            .arg(&prompt)
-            .output()
-            .await
-            .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+        // Add timeout protection (5 minutes) to prevent indefinite blocking
+        let output = tokio::time::timeout(
+            Duration::from_secs(300),
+            Command::new("claude")
+                .arg("-p")
+                .arg("--output-format")
+                .arg("text")
+                .arg("--max-turns")
+                .arg("1")
+                .arg(&prompt)
+                .output(),
+        )
+        .await
+        .map_err(|_| "claude cli timeout after 5 minutes".to_string())?
+        .map_err(|e| format!("claude cli spawn failed: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -598,6 +636,11 @@ impl LlmClient {
             };
 
             let status = resp.status();
+            let retry_after = resp
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             let resp_text = resp
                 .text()
                 .await
@@ -607,12 +650,18 @@ impl LlmClient {
             if status.as_u16() == 429 || status.is_server_error() {
                 last_err = format!("API error {status}: {resp_text}");
                 if attempt < Self::MAX_ATTEMPTS {
+                    let delay = if let Some(secs) = retry_after {
+                        Duration::from_secs(secs)
+                    } else {
+                        Self::retry_delay(attempt)
+                    };
                     eprintln!(
-                        "[llm] API error {status} (attempt {}/{}); retrying",
+                        "[llm] API error {status} (attempt {}/{}); retrying after {}ms",
                         attempt,
-                        Self::MAX_ATTEMPTS
+                        Self::MAX_ATTEMPTS,
+                        delay.as_millis()
                     );
-                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(last_err);
@@ -720,6 +769,53 @@ impl LlmClient {
             );
         }
         Ok(trimmed.to_string())
+    }
+
+    /// Extract keywords + entities for search enrichment.
+    pub async fn extract_metadata(&self, text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+        let response = self
+            .call_extract_llm(
+                crate::prompts::METADATA_EXTRACTION_PROMPT,
+                text,
+                None,
+                0.2,
+                400,
+            )
+            .await?;
+        let json_str = Self::extract_json_payload(&response)?;
+        let parsed: Value = serde_json::from_str(json_str).map_err(|e| {
+            format!(
+                "Failed to parse metadata JSON: {} - response was: {}",
+                e, json_str
+            )
+        })?;
+        let keywords = parsed
+            .get("keywords")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let entities = parsed
+            .get("entities")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok((keywords, entities))
     }
 
     /// Extract structured facts from text using EXTRACTION_PROMPT

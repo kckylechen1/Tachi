@@ -125,6 +125,8 @@ fn make_entry(id: &str) -> MemoryEntry {
         text: "test memory".to_string(),
         importance: 0.7,
         timestamp: Utc::now().to_rfc3339(),
+        valid_from: String::new(),
+        valid_until: None,
         category: "fact".to_string(),
         topic: "".to_string(),
         keywords: Vec::new(),
@@ -275,6 +277,7 @@ fn make_skill_capability(
 
 mod bootstrap_tests;
 mod dispatch_tests;
+mod docs_tests;
 mod facade_tests;
 mod handoff_tests;
 mod hub_tests;
