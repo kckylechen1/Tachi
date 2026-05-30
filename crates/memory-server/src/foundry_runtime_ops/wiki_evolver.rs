@@ -1,23 +1,25 @@
-//! REM Wiki Evolver — weekly synthesis of `tier IN ('consolidated','pattern')` memories into
-//! wiki entries and LATEST_TRUTHS.
+//! REM Wiki Evolver — weekly synthesis of `tier=pattern` memories into
+//! draft wiki entries.
 //!
 //! ## What this does
-//! 1. Collects `tier IN ('consolidated','pattern')` memories from the last 7 days across
+//! 1. Collects `tier=pattern` memories from the last 7 days across
 //!    global + project DBs.
 //! 2. Clusters them by topic/keyword overlap (lightweight; no embeddings).
-//! 3. For each cluster with ≥ 2 members, calls the REM LLM to synthesize a
-//!    structured wiki entry.
-//! 4. Writes each entry directly to `/wiki/<domain>/<slug>` (no drafts/review).
-//! 5. Updates LATEST_TRUTHS at `/wiki/truths/<domain>` (merge with existing).
-//! 6. Writes the synthesis back as a new `tier=pattern` memory for next cycle.
+//! 3. For each cluster with ≥ 2 members, calls an LLM to synthesize a
+//!    structured draft wiki entry.
+//! 4. Writes each draft to the wiki project DB at `path=/wiki/drafts/<slug>`
+//!    with `review_status=pending` in metadata.
 //!
 //! ## What this does NOT do
-//! - Modify existing wiki entries (except LATEST_TRUTHS which are merged).
+//! - Auto-activate: all output is `review_status=pending`. Humans (or a
+//!   future gate step) must explicitly promote drafts to `/wiki/<slug>`.
+//! - Modify existing wiki entries: drafts are always new entries.
 //! - Run during daily pipeline: called once per week (Sunday 05:00 Shanghai).
 //!
 //! ## Safety
 //! The LLM synthesis step uses low temperature and produces *pattern
-//! summaries*, NOT causal inference claims.
+//! summaries*, NOT causal inference claims. The module never writes to
+//! the "active" wiki path space (`/wiki/` without `drafts/` prefix).
 
 use std::collections::HashMap;
 
@@ -42,6 +44,9 @@ const MAX_ENTRIES_PER_CLUSTER: usize = 8;
 
 /// Minimum text length after noise scrubbing to include in synthesis.
 const MIN_TEXT_LEN: usize = 60;
+
+/// Importance assigned to pending draft entries (below "active" wiki threshold).
+const DRAFT_IMPORTANCE: f64 = 0.65;
 
 /// System prompt for wiki synthesis.
 const WIKI_SYNTHESIS_SYSTEM: &str = r#"You are synthesizing programming session patterns into a structured wiki reference entry.
@@ -147,7 +152,7 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<MemoryEntry>, S
                         recall_count,query_diversity,tier
                  FROM memories
                  WHERE archived = 0
-                   AND tier IN ('consolidated', 'pattern')
+                   AND tier = 'pattern'
                    AND created_at > datetime('now', '-7 day')
                    AND (json_extract(metadata, '$.rem.processed') IS NULL
                         OR json_extract(metadata, '$.rem.processed') = 0)
@@ -231,18 +236,7 @@ async fn synthesize_and_save(
     members: &[&MemoryEntry],
 ) -> Result<(), String> {
     let draft = synthesize_wiki_draft(server, topic, members).await?;
-    let domain = draft.domain.clone();
-    let body_for_truths = draft.body.clone();
-    let title = draft.title.clone();
-    let summary = draft.summary.clone();
-    let keywords = draft.keywords.clone();
-    let entities = draft.entities.clone();
-    let draft_domain = draft.domain.clone();
-    save_wiki_entry(server, topic, draft).await?;
-    // Write LATEST_TRUTHS for the domain
-    update_latest_truths(server, &domain, &body_for_truths).await?;
-    // REM writeback: persist synthesis as a pattern memory for next cycle
-    rem_writeback_pattern(server, topic, &title, &summary, &keywords, &entities, &draft_domain, &body_for_truths).await
+    save_wiki_draft(server, topic, draft).await
 }
 
 async fn synthesize_wiki_draft(
@@ -280,7 +274,7 @@ async fn synthesize_wiki_draft(
 
     let raw = server
         .llm
-        .call_rem_llm(WIKI_SYNTHESIS_SYSTEM, &user_payload, None, 0.2, 4096)
+        .call_distill_llm(WIKI_SYNTHESIS_SYSTEM, &user_payload, None, 0.2, 1200)
         .await
         .map_err(|e| format!("wiki synthesis LLM call: {e}"))?;
 
@@ -332,7 +326,7 @@ fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-async fn save_wiki_entry(
+async fn save_wiki_draft(
     server: &MemoryServer,
     topic: &str,
     draft: WikiDraft,
@@ -358,12 +352,18 @@ async fn save_wiki_entry(
         slug
     };
 
-    let path = format!("/wiki/{}/{}", draft.domain, slug);
+    let path = format!("/wiki/drafts/{slug}");
 
-    let full_text = draft.body.clone();
+    // Build the text with a pending-review header so readers know the status.
+    let full_text = format!(
+        "<!-- review_status: pending | generated: {} -->\n\n{}",
+        Utc::now().format("%Y-%m-%d"),
+        draft.body,
+    );
 
     let mut kw = draft.keywords;
-    kw.push("rem-wiki".to_string());
+    kw.push("rem-draft".to_string());
+    kw.push("pending-review".to_string());
     kw.dedup();
 
     let result = server
@@ -374,13 +374,13 @@ async fn save_wiki_entry(
             title: Some(draft.title.clone()),
             summary: Some(draft.summary),
             path: Some(path.clone()),
-            importance: Some(0.85),
+            importance: Some(DRAFT_IMPORTANCE),
             category: Some("experience".to_string()),
             keywords: kw,
             entities: draft.entities,
             scope: Some("global".to_string()),
-            project: None,
-            domain: Some(draft.domain.clone()),
+            project: Some("wiki".to_string()),
+            domain: Some(draft.domain),
             retention_policy: Some("durable".to_string()),
             force: true,
             topic: Some(topic.to_string()),
@@ -391,140 +391,32 @@ async fn save_wiki_entry(
         .await;
 
     match result {
-        Ok(_) => Ok(()),
-        Err(e) => Err(format!("tachi_save wiki entry '{}': {e}", draft.title)),
-    }
-}
-
-/// Update the LATEST_TRUTHS wiki entry for a given domain.
-///
-/// Reads any existing truths entry at `/wiki/truths/{domain}`, merges new
-/// insights into it, and writes back via `tachi_save` with `force=true`.
-/// Scope is determined by whether the domain contains project-specific keywords.
-async fn update_latest_truths(
-    server: &MemoryServer,
-    domain: &str,
-    new_insights: &str,
-) -> Result<(), String> {
-    let path = format!("/wiki/truths/{domain}");
-
-    // Determine scope: project-specific domains → project, else → global.
-    let project_keywords = ["project", "app", "client", "frontend", "backend", "repo"];
-    let scope = if project_keywords.iter().any(|kw| domain.to_ascii_lowercase().contains(kw)) {
-        "project"
-    } else {
-        "global"
-    };
-
-    // Try to read existing truths entry from both stores
-    let existing = server.with_global_store_read(|store| {
-        memory_core::db::find_active_wiki_entry_by_path_or_topic(
-            store.connection(), &path, &path,
-        ).map_err(|e| format!("find existing truths: {e}"))
-    }).ok().flatten()
-    .or_else(|| {
-        if server.has_project_db() {
-            server.with_project_store_read(|store| {
-                memory_core::db::find_active_wiki_entry_by_path_or_topic(
-                    store.connection(), &path, &path,
-                ).map_err(|e| format!("find existing truths (project): {e}"))
-            }).ok().flatten()
-        } else {
-            None
+        Ok(_) => {
+            // Patch metadata to set review_status=pending. The tachi_save route
+            // does not expose a metadata field, so we update directly after save.
+            let now = Utc::now().to_rfc3339();
+            if let Err(e) = server.with_named_project_store("wiki", |store| {
+                store
+                    .connection()
+                    .execute(
+                        r#"UPDATE memories
+                           SET metadata = json_set(
+                                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                                 '$.review_status', 'pending',
+                                 '$.rem.generated_at', ?1
+                               )
+                           WHERE path = ?2
+                             AND (json_extract(metadata, '$.review_status') IS NULL)"#,
+                        rusqlite::params![now, path],
+                    )
+                    .map_err(|e| format!("patch review_status: {e}"))
+            }) {
+                eprintln!("[wiki_evolver] warn: could not patch review_status on draft '{path}': {e}");
+            }
+            Ok(())
         }
-    });
-
-    let merged_text = if let Some(existing) = existing {
-        // Append new insights to existing, keeping previous content
-        format!(
-            "{}\n\n## Updated {}\n\n{}",
-            existing.text.trim(),
-            Utc::now().format("%Y-%m-%d"),
-            new_insights,
-        )
-    } else {
-        format!(
-            "# Latest Truths: {}\n\nGenerated: {}\n\n{}",
-            domain,
-            Utc::now().format("%Y-%m-%d"),
-            new_insights,
-        )
-    };
-
-    let title = format!("Latest Truths: {domain}");
-    server
-        .tachi_save(Parameters(TachiSaveParams {
-            text: merged_text,
-            id: None,
-            kind: Some("wiki".to_string()),
-            title: Some(title),
-            summary: Some(format!("Core truths for domain: {domain}")),
-            path: Some(path.clone()),
-            importance: Some(0.90),
-            category: Some("experience".to_string()),
-            keywords: vec!["latest-truths".to_string(), domain.to_string()],
-            entities: Vec::new(),
-            scope: Some(scope.to_string()),
-            project: None,
-            domain: Some(domain.to_string()),
-            retention_policy: Some("permanent".to_string()),
-            force: true,
-            topic: Some(format!("truths-{domain}")),
-            source: Some("rem_wiki_evolver".to_string()),
-            valid_from: None,
-            valid_until: None,
-        }))
-        .await
-        .map_err(|e| format!("tachi_save truths '{path}': {e}"))?;
-
-    eprintln!("[wiki_evolver] updated LATEST_TRUTHS for domain '{domain}' at {path}");
-    Ok(())
-}
-
-/// REM writeback: persist the synthesized wiki insights as a new pattern memory
-/// so that the next weekly cycle can build upon it.
-async fn rem_writeback_pattern(
-    server: &MemoryServer,
-    topic: &str,
-    title: &str,
-    summary: &str,
-    keywords: &[String],
-    entities: &[String],
-    domain: &str,
-    body: &str,
-) -> Result<(), String> {
-    let text = format!(
-        "# {}\n\n{}",
-        title,
-        body.chars().take(1200).collect::<String>()
-    );
-
-    server
-        .tachi_save(Parameters(TachiSaveParams {
-            text,
-            id: None,
-            kind: None,
-            title: Some(title.to_string()),
-            summary: Some(summary.to_string()),
-            path: None,
-            importance: Some(0.80),
-            category: Some("experience".to_string()),
-            keywords: keywords.to_vec(),
-            entities: entities.to_vec(),
-            scope: Some("global".to_string()),
-            project: None,
-            domain: Some(domain.to_string()),
-            retention_policy: Some("durable".to_string()),
-            force: false,
-            topic: Some(topic.to_string()),
-            source: Some("rem_wiki_evolver".to_string()),
-            valid_from: None,
-            valid_until: None,
-        }))
-        .await
-        .map_err(|e| format!("rem writeback pattern: {e}"))?;
-
-    Ok(())
+        Err(e) => Err(format!("tachi_save draft '{}': {e}", draft.title)),
+    }
 }
 
 fn mark_rem_processed<'a>(

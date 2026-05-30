@@ -1290,7 +1290,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // stdio mode (default) — auto-spawn daemon if not running
         {
             let daemon_running = crate::cli_client::detect_daemon(&app_home).await.is_some();
-            if !daemon_running {
+            let auto_daemon_disabled = std::env::var("TACHI_DISABLE_AUTO_DAEMON")
+                .map(|value| {
+                    let value = value.trim();
+                    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+                })
+                .unwrap_or(false);
+            if !daemon_running && !auto_daemon_disabled {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         let port_str = cli.port.to_string();
@@ -1344,6 +1350,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         eprintln!("[auto-daemon] cannot determine binary path: {e}");
                     }
                 }
+            } else if !daemon_running {
+                eprintln!("[auto-daemon] disabled by TACHI_DISABLE_AUTO_DAEMON");
             }
         }
 

@@ -28,7 +28,6 @@ enum ChatLane {
     Distill,
     Reasoning,
     Summary,
-    Rem,
 }
 
 /// LLM and embedding client using Voyage API for embeddings
@@ -40,7 +39,6 @@ pub struct LlmClient {
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
-    rem: ChatLaneConfig,
     provider_secrets: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -131,33 +129,6 @@ impl LlmClient {
             &reasoning.model,
         )?;
 
-        // ── REM LLM layer — weekly wiki evolution, deep synthesis ──
-        // Falls back to Reasoning/Distill/Extract chains when dedicated REM_* vars unset.
-        let rem = Self::load_lane(
-            &[
-                "REM_API_KEY",
-                "REASONING_API_KEY",
-                "ZAI_API_KEY",
-                "BIGMODEL_API_KEY",
-                "DISTILL_API_KEY",
-                "EXTRACT_API_KEY",
-                "SILICONFLOW_API_KEY",
-            ],
-            &[
-                "REM_BASE_URL",
-                "REASONING_BASE_URL",
-                "DISTILL_BASE_URL",
-                "EXTRACT_BASE_URL",
-                "SILICONFLOW_BASE_URL",
-            ],
-            &[
-                "REM_MODEL",
-                "REASONING_MODEL",
-                "DISTILL_MODEL",
-            ],
-            &reasoning.model,
-        )?;
-
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -181,7 +152,6 @@ impl LlmClient {
             distill,
             reasoning,
             summary,
-            rem,
             provider_secrets: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -218,7 +188,6 @@ impl LlmClient {
             ChatLane::Distill => &self.distill,
             ChatLane::Reasoning => &self.reasoning,
             ChatLane::Summary => &self.summary,
-            ChatLane::Rem => &self.rem,
         }
     }
 
@@ -512,27 +481,6 @@ impl LlmClient {
     ) -> Result<String, String> {
         self.call_lane_llm(
             ChatLane::Distill,
-            system,
-            user,
-            model,
-            temperature,
-            max_tokens,
-        )
-        .await
-    }
-
-    /// REM LLM lane for weekly wiki evolution and deep cross-domain synthesis.
-    /// Uses REM_* env vars with fallback to Reasoning/Distill/Extract chain.
-    pub async fn call_rem_llm(
-        &self,
-        system: &str,
-        user: &str,
-        model: Option<&str>,
-        temperature: f32,
-        max_tokens: u32,
-    ) -> Result<String, String> {
-        self.call_lane_llm(
-            ChatLane::Rem,
             system,
             user,
             model,
