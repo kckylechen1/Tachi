@@ -44,6 +44,7 @@ mod complete_ops;
 mod copilot_ops;
 mod daemon_lock;
 mod daily_pipeline;
+mod db_context;
 mod dispatch_ops;
 mod dlq_ops;
 pub(crate) mod docs_ops;
