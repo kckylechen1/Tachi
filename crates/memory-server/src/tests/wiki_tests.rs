@@ -418,7 +418,7 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
             (
                 "pattern-b",
                 "Pending review draft gate",
-                "Weekly REM synthesis should write wiki entries as durable references. This fixture covers direct wiki routing and LATEST_TRUTHS updates.",
+                "Weekly REM synthesis should write drafts as pending review wiki notes. This fixture covers draft routing and review metadata safety.",
             ),
         ] {
             let mut entry = make_entry(id);
@@ -447,30 +447,14 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         .await
         .expect("wiki evolution");
     assert_eq!(report.drafts_written, 1);
-
-    // Verify the wiki entry was written to /wiki/<domain>/<slug> (not /wiki/drafts/...)
-    // Note: source is set by the wiki write pipeline, not directly from TachiSaveParams.
-    // The wiki entry path is determined by normalize_wiki_path which may use the domain.
-    let wiki_paths: Vec<String> = server.with_global_store_read(|store| -> Result<Vec<String>, String> {
-        let mut stmt = store.connection().prepare("SELECT path FROM memories WHERE path LIKE '/wiki/%' AND path NOT LIKE '/wiki/truths/%'").map_err(|e| e.to_string())?;
-        let paths: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect();
-        Ok(paths)
-    }).unwrap_or_default();
-    assert!(!wiki_paths.is_empty(), "at least one wiki entry should be written at /wiki/<domain>/<slug>");
-    let wiki_entry_path = &wiki_paths[0];
-    assert!(wiki_entry_path.starts_with("/wiki/"), "wiki entry should be at /wiki/<domain>/<slug>, got: {wiki_entry_path}");
-    // Should NOT be under /wiki/drafts/ anymore
-    assert!(!wiki_entry_path.contains("/drafts/"), "wiki entry should NOT be under /wiki/drafts/, got: {wiki_entry_path}");
-
-    // Verify LATEST_TRUTHS was written
-    let truths_found = server.with_global_store_read(|store| -> Result<bool, String> {
-        Ok(store.connection().query_row(
-            "SELECT COUNT(*) FROM memories WHERE path = '/wiki/truths/memory'",
+    let review_status = server.with_named_project_store_read("wiki", |store| {
+        store.connection().query_row(
+            "SELECT json_extract(metadata, '$.review_status') FROM memories WHERE path LIKE '/wiki/drafts/%' LIMIT 1",
             [],
-            |row| row.get::<_, i64>(0),
-        ).unwrap_or(0) > 0)
-    }).unwrap_or(false);
-    assert!(truths_found, "LATEST_TRUTHS should be written at /wiki/truths/memory");
+            |row| row.get::<_, Option<String>>(0),
+        ).map_err(|e| e.to_string())
+    }).expect("read wiki draft metadata");
+    assert_eq!(review_status.as_deref(), Some("pending"));
 
     server_task.abort();
     if let Some(value) = original_home { std::env::set_var("HOME", value); } else { std::env::remove_var("HOME"); }
