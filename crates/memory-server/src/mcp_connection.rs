@@ -543,6 +543,7 @@ fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

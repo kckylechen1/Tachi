@@ -8,6 +8,8 @@ use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemorySco
 use super::common::{normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
 
+const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain";
+
 // ─── Normalization ────────────────────────────────────────────────────────────
 
 /// Coerce caller-provided enum-like fields to the canonical vocabulary
@@ -33,14 +35,11 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
     entry.fold_persons_into_entities();
 }
 
-/// Serialize `entities` (with legacy `persons` folded in) and always persist `persons` as `[]`.
-fn canonical_persons_entities_json(entry: &MemoryEntry) -> Result<(String, String), MemoryError> {
+/// Serialize `entities` with legacy `persons` folded in.
+fn canonical_entities_json(entry: &MemoryEntry) -> Result<String, MemoryError> {
     let mut entities = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
-    Ok((
-        serde_json::to_string(&Vec::<String>::new())?,
-        serde_json::to_string(&entities)?,
-    ))
+    Ok(serde_json::to_string(&entities)?)
 }
 
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
@@ -98,7 +97,7 @@ pub fn upsert(
 
     let metadata_json = serde_json::to_string(&entry.metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
-    let (p_json, e_json) = canonical_persons_entities_json(entry)?;
+    let e_json = canonical_entities_json(entry)?;
 
     // All writes for one upsert must be atomic across main table + FTS + vec.
     let tx = conn.transaction()?;
@@ -107,11 +106,11 @@ pub fn upsert(
     tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
-               timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
+               timestamp, valid_from, valid_until, category, topic, keywords, entities,
                location, source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
                retention_policy, domain)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -123,7 +122,6 @@ pub fn upsert(
                category     = excluded.category,
                topic        = excluded.topic,
                keywords     = excluded.keywords,
-               persons      = excluded.persons,
                entities     = excluded.entities,
                location     = excluded.location,
                source       = excluded.source,
@@ -149,7 +147,6 @@ pub fn upsert(
             category,
             entry.topic,
             kws_json,
-            p_json,
             e_json,
             entry.location,
             &source,
@@ -630,8 +627,7 @@ pub fn fetch_by_ids(
             .collect::<Vec<_>>()
             .join(",");
         let mut sql = format!(
-            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-             FROM memories WHERE id IN ({})",
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE id IN ({})",
             placeholders
         );
         if !include_archived {
@@ -685,13 +681,13 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-         FROM memories ORDER BY timestamp DESC LIMIT ?"
+        format!("SELECT {MEMORY_SELECT_COLUMNS} FROM memories ORDER BY timestamp DESC LIMIT ?")
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
-         FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
+        format!(
+            "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
+        )
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit], row_to_entry)?;
 
     let mut out = Vec::new();
@@ -725,20 +721,24 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        format!(
+            "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
+        )
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+        format!(
+            "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
+        )
     };
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![normalized, like_prefix, limit], row_to_entry)?;
     let mut out = Vec::new();
     for r in rows {
@@ -753,15 +753,16 @@ pub fn find_active_wiki_entry_by_path_or_topic(
     path: &str,
     topic: &str,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
-    let mut stmt = conn.prepare(
-        r#"SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+    let sql = format!(
+        r#"SELECT {MEMORY_SELECT_COLUMNS}
            FROM memories
            WHERE archived = 0
              AND superseded_by IS NULL
              AND (path = ?1 OR (topic = ?2 AND path LIKE '/wiki/%'))
            ORDER BY CASE WHEN path = ?1 THEN 0 ELSE 1 END, timestamp DESC
-           LIMIT 1"#,
-    )?;
+           LIMIT 1"#
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(params![path, topic], row_to_entry)?;
     match rows.next() {
         Some(row) => Ok(Some(row?)),

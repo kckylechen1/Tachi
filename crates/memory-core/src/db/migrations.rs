@@ -11,7 +11,8 @@
 //! - v4: B4/B11 cross-DB pollution quarantine
 //! - v5: drop HyperTachi legacy columns (`indexed_tags`, `domain_key`) after bridge
 //! - v6: fold non-empty `persons` JSON into `entities`, then clear `persons`
-//! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `persons`/`location`)
+//! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `location`)
+//! - v8: drop the legacy physical `persons` column after folding it into `entities`
 
 use std::path::Path;
 
@@ -35,6 +36,7 @@ pub struct MigrationReport {
     pub hypertachi_legacy_columns_dropped: usize,
     pub persons_folded_into_entities: usize,
     pub legacy_columns_reconciled: usize,
+    pub persons_columns_dropped: usize,
 }
 
 /// Run all data-fix migrations in order. Idempotent.
@@ -87,6 +89,11 @@ pub fn run_data_migrations(
     if !was_run(conn, "v7_reconcile_legacy_memory_columns")? {
         report.legacy_columns_reconciled = migrate_v7_reconcile_legacy_memory_columns(conn)?;
         mark_run(conn, "v7_reconcile_legacy_memory_columns")?;
+    }
+
+    if !was_run(conn, "v8_drop_legacy_persons_column")? {
+        report.persons_columns_dropped = fold_and_drop_legacy_persons_column(conn)?;
+        mark_run(conn, "v8_drop_legacy_persons_column")?;
     }
 
     Ok(report)
@@ -178,15 +185,12 @@ fn migrate_v7_reconcile_legacy_memory_columns(conn: &Connection) -> Result<usize
 
     actions += migrate_v6_fold_persons_into_entities(conn)?;
 
-    for (column, definition) in [
-        ("persons", "TEXT NOT NULL DEFAULT '[]'"),
-        ("location", "TEXT NOT NULL DEFAULT ''"),
-    ] {
-        if !table_has_column(conn, "memories", column)? {
-            let sql = format!("ALTER TABLE memories ADD COLUMN {column} {definition}");
-            conn.execute(&sql, [])?;
-            actions += 1;
-        }
+    if !table_has_column(conn, "memories", "location")? {
+        conn.execute(
+            "ALTER TABLE memories ADD COLUMN location TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+        actions += 1;
     }
 
     if !table_has_column(conn, "memories", "domain")? {
@@ -202,6 +206,15 @@ fn migrate_v7_reconcile_legacy_memory_columns(conn: &Connection) -> Result<usize
     }
 
     Ok(actions)
+}
+
+pub fn fold_and_drop_legacy_persons_column(conn: &Connection) -> Result<usize, MemoryError> {
+    if !table_has_column(conn, "memories", "persons")? {
+        return Ok(0);
+    }
+    let folded = migrate_v6_fold_persons_into_entities(conn)?;
+    conn.execute("ALTER TABLE memories DROP COLUMN persons", [])?;
+    Ok(folded + 1)
 }
 
 // ─── v5: drop HyperTachi legacy columns ───────────────────────────────────────
@@ -495,11 +508,11 @@ mod tests {
         conn.execute(
             "INSERT INTO memories
               (id, path, summary, text, importance, timestamp, category, topic,
-               keywords, persons, entities, location, source, scope, archived,
+               keywords, entities, location, source, scope, archived,
                created_at, updated_at, access_count, last_access, revision,
                metadata, retention_policy, domain)
              VALUES (?1, ?2, '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
-                     '[]', '[]', '[]', '', 'manual', ?3, 0,
+                     '[]', '[]', '', 'manual', ?3, 0,
                      '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
                      ?4, NULL, NULL)",
             params![id, path, scope, metadata],
@@ -648,7 +661,7 @@ mod tests {
         let actions = migrate_v7_reconcile_legacy_memory_columns(&conn).unwrap();
         assert!(actions > 0);
         assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
-        assert!(table_has_column(&conn, "memories", "persons").unwrap());
+        assert!(!table_has_column(&conn, "memories", "persons").unwrap());
 
         let keywords: String = conn
             .query_row("SELECT keywords FROM memories WHERE id='m1'", [], |r| {

@@ -20,8 +20,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  memory-server-tests:
-    name: memory-server tests
+  rust:
+    name: Rust workspace
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -31,5 +31,38 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
-      - name: Run memory-server tests
-        run: cargo test -p memory-server --locked
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+  node:
+    name: Node packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - packages/tachi-cli
+          - apps/tachi-desktop
+          - integrations/openclaw
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ matrix.package }}
+        run: npm run build

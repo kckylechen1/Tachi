@@ -88,7 +88,7 @@ pub(super) fn build_prepend_context(rows: &[Value]) -> String {
             let summary = value_summary(row);
             let text = value_text(row);
             let keywords = value_string_array(row, "keywords").join(", ");
-            let persons = value_string_array(row, "persons").join(", ");
+            let entities = value_string_array(row, "entities").join(", ");
 
             [
                 format!(
@@ -106,7 +106,7 @@ pub(super) fn build_prepend_context(rows: &[Value]) -> String {
                         summary
                     }
                 ),
-                format!("Keywords: {} | Persons: {}", keywords, persons),
+                format!("Keywords: {} | Entities: {}", keywords, entities),
             ]
             .join("\n")
         })

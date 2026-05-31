@@ -200,34 +200,6 @@ fn redact_inline_secret_markers(input: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn redact_sensitive_value_redacts_secret_keys_and_url_params() {
-        let mut value = json!({
-            "definition": {
-                "url": "https://example.test/mcp?tavilyApiKey=abc123&safe=ok",
-                "headers": {
-                    "Authorization": "Bearer secret-token"
-                }
-            }
-        });
-
-        redact_sensitive_value(&mut value);
-
-        assert_eq!(
-            value["definition"]["url"],
-            json!("https://example.test/mcp?tavilyApiKey=[REDACTED]&safe=ok")
-        );
-        assert_eq!(
-            value["definition"]["headers"]["Authorization"],
-            json!("[REDACTED]")
-        );
-    }
-}
-
 /// Stable hash function (FNV-1a). Deterministic across Rust toolchain versions,
 /// unlike DefaultHasher which uses SipHash with randomized keys.
 pub(super) fn stable_hash(input: &str) -> String {
@@ -301,5 +273,33 @@ pub(super) fn write_or_recover<'a, T>(
             eprintln!("WARNING: rwlock poisoned (write): {label}; recovering with inner state");
             poisoned.into_inner()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_sensitive_value_redacts_secret_keys_and_url_params() {
+        let mut value = json!({
+            "definition": {
+                "url": "https://example.test/mcp?tavilyApiKey=abc123&safe=ok",
+                "headers": {
+                    "Authorization": "Bearer secret-token"
+                }
+            }
+        });
+
+        redact_sensitive_value(&mut value);
+
+        assert_eq!(
+            value["definition"]["url"],
+            json!("https://example.test/mcp?tavilyApiKey=[REDACTED]&safe=ok")
+        );
+        assert_eq!(
+            value["definition"]["headers"]["Authorization"],
+            json!("[REDACTED]")
+        );
     }
 }

@@ -44,10 +44,10 @@
     "*.node"
   ],
   "optionalDependencies": {
-    "@chaoxlabs/tachi-node-win32-x64-msvc": "1.2.0",
-    "@chaoxlabs/tachi-node-darwin-x64": "1.2.0",
-    "@chaoxlabs/tachi-node-darwin-arm64": "1.2.0",
-    "@chaoxlabs/tachi-node-linux-x64-gnu": "1.2.0",
-    "@chaoxlabs/tachi-node-linux-arm64-gnu": "1.2.0"
+    "@chaoxlabs/tachi-node-win32-x64-msvc": "1.3.0",
+    "@chaoxlabs/tachi-node-darwin-x64": "1.3.0",
+    "@chaoxlabs/tachi-node-darwin-arm64": "1.3.0",
+    "@chaoxlabs/tachi-node-linux-x64-gnu": "1.3.0",
+    "@chaoxlabs/tachi-node-linux-arm64-gnu": "1.3.0"
   }
 }

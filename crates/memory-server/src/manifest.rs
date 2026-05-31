@@ -85,6 +85,7 @@ pub fn canonicalize_db_path(p: &Path) -> PathBuf {
 ///   * filename matches `*.test.db` or `*.fixture.db`
 ///   * filename is `feature-daemon-global.db` AND path contains `vitejs` or
 ///     `zread` (belt-and-suspenders for the vite zread fixture pattern)
+///
 /// Path-based archival/backup heuristics. Complements filename rules in
 /// [`crate::doctor::is_backup_filename`]: run snapshots, tidy archives, and
 /// explicit backup directories should never enter the manifest.
@@ -1037,9 +1038,9 @@ mod tests {
             .iter()
             .map(|e| (e.path.clone(), e.allow_write))
             .collect();
-        assert_eq!(by_path["/u/a.db"], true);
-        assert_eq!(by_path["/u/b.db"], true, "WalOrphan must be writable");
-        assert_eq!(by_path["/u/c.db"], false);
+        assert!(by_path["/u/a.db"]);
+        assert!(by_path["/u/b.db"], "WalOrphan must be writable");
+        assert!(!by_path["/u/c.db"]);
     }
 
     #[test]

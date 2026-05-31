@@ -160,7 +160,7 @@ pub(crate) async fn handle_tachi_save(
                     .unwrap_or_else(|| "fact".to_string()),
                 topic: params.topic.clone().unwrap_or_default(),
                 keywords: params.keywords.clone(),
-                persons: Vec::new(), // legacy DB column; MCP uses entities for people
+                persons: Vec::new(), // legacy wire field; MCP uses entities for people
                 entities: params.entities.clone(),
                 location: String::new(),
                 scope: params

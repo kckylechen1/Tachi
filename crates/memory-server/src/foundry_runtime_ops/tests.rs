@@ -372,7 +372,7 @@ fn infer_memory_insight_keeps_routine_memory_low_priority() {
 
 #[test]
 fn forget_sweep_keeps_newest_distill_entries() {
-    let mut entries = vec![
+    let mut entries = [
         MemoryEntry {
             id: "old".to_string(),
             path: "/foundry/agents/main/distilled/20260402T000000".to_string(),

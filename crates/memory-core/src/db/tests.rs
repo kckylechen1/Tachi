@@ -44,21 +44,27 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
 }
 
 #[test]
-fn upsert_folds_persons_into_entities_and_persists_empty_persons() {
+fn upsert_folds_persons_into_entities_without_persisting_persons_column() {
     let mut conn = make_conn();
     let mut e = make_entry("pers-1", "Kyle prefers concise handoffs");
     e.persons = vec!["Kyle".to_string()];
     e.entities = vec!["Sigil".to_string()];
     upsert(&mut conn, &e, false).unwrap();
 
-    let (persons, entities): (String, String) = conn
+    let has_persons_column: bool = conn
         .query_row(
-            "SELECT persons, entities FROM memories WHERE id='pers-1'",
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |_| Ok(true),
         )
+        .unwrap_or(false);
+    assert!(!has_persons_column);
+
+    let entities: String = conn
+        .query_row("SELECT entities FROM memories WHERE id='pers-1'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(persons, "[]");
     let ents: Vec<String> = serde_json::from_str(&entities).unwrap();
     assert!(ents.iter().any(|e| e == "Kyle"));
     assert!(ents.iter().any(|e| e == "user"));
@@ -119,7 +125,6 @@ fn init_schema_backfills_valid_from_for_legacy_rows() {
             category TEXT NOT NULL DEFAULT 'fact',
             topic TEXT NOT NULL DEFAULT '',
             keywords TEXT NOT NULL DEFAULT '[]',
-            persons TEXT NOT NULL DEFAULT '[]',
             entities TEXT NOT NULL DEFAULT '[]',
             location TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT 'manual',
@@ -136,9 +141,9 @@ fn init_schema_backfills_valid_from_for_legacy_rows() {
             superseded_by TEXT
         );
         INSERT INTO memories
-            (id, text, timestamp, keywords, persons, entities, metadata)
+            (id, text, timestamp, keywords, entities, metadata)
         VALUES
-            ('legacy-valid-from', 'legacy temporal row', '2026-02-03T04:05:06Z', '[]', '[]', '[]', '{}');
+            ('legacy-valid-from', 'legacy temporal row', '2026-02-03T04:05:06Z', '[]', '[]', '{}');
         "#,
     )
     .unwrap();
@@ -533,7 +538,7 @@ fn delete_cascades_access_history_and_known_state() {
     let e = make_entry("del-cascade", "delete target");
     upsert(&mut conn, &e, false).unwrap();
 
-    record_access(&mut conn, &["del-cascade".to_string()]).unwrap();
+    record_access(&conn, &["del-cascade".to_string()]).unwrap();
     update_agent_known_state(
         &conn,
         "agent-delete-test",

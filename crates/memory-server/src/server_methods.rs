@@ -13,7 +13,7 @@ impl MemoryServer {
     }
 
     pub(super) fn active_tool_profile(&self) -> Option<ToolProfile> {
-        self.agent_runtime_read().tool_profile.clone()
+        self.agent_runtime_read().tool_profile
     }
 
     pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {

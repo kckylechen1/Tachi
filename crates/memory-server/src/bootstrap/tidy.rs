@@ -768,11 +768,11 @@ fn migrate_single_db(
     {
         let conn = source_store.connection();
         let mut stmt = conn.prepare(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
              FROM memories",
         )?;
-        let mut rows = stmt.query_map([], memory_core::row_to_entry)?;
-        while let Some(row) = rows.next() {
+        let rows = stmt.query_map([], memory_core::row_to_entry)?;
+        for row in rows {
             let entry = row?;
             let existed_before = existing_target_ids.contains(&entry.id);
             match target_store.upsert(&entry) {

@@ -892,10 +892,10 @@ mod tests {
         ]);
         let base = 0.02;
 
-        let blended = blend_rrf_with_vector_signal(&"c".to_string(), base, &vec_scores, 1.0);
+        let blended = blend_rrf_with_vector_signal("c", base, &vec_scores, 1.0);
         assert!(blended > base, "blended={blended}, base={base}");
 
-        let missing = blend_rrf_with_vector_signal(&"x".to_string(), base, &vec_scores, 1.0);
+        let missing = blend_rrf_with_vector_signal("x", base, &vec_scores, 1.0);
         assert_eq!(missing, base);
     }
 

@@ -284,18 +284,15 @@ struct VectorHealth {
     enrichment_failed_recent: usize,
 }
 
-fn probe_db(
-    path: &Path,
-) -> Result<
-    (
-        JobStatusHistogram,
-        usize,
-        VectorHealth,
-        Option<LatestFoundryJob>,
-        Option<LatestFailedJob>,
-    ),
-    String,
-> {
+type ProbeDbResult = (
+    JobStatusHistogram,
+    usize,
+    VectorHealth,
+    Option<LatestFoundryJob>,
+    Option<LatestFailedJob>,
+);
+
+fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;

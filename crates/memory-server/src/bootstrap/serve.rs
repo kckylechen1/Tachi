@@ -839,49 +839,6 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         eprintln!("Background GC disabled");
     }
 
-    // ─── Clawdoctor: OpenClaw health monitor ─────────────────────────────────
-    {
-        let clawdoctor_enabled = cli
-            .clawdoctor
-            .or_else(|| parse_env_bool("CLAWDOCTOR_ENABLED"))
-            .unwrap_or(false);
-
-        if clawdoctor_enabled {
-            let cd_url = cli
-                .clawdoctor_url
-                .clone()
-                .or_else(|| std::env::var("CLAWDOCTOR_URL").ok())
-                .unwrap_or_else(|| "http://127.0.0.1:18789".to_string());
-
-            let cd_interval = cli
-                .clawdoctor_interval_secs
-                .or_else(|| parse_env_u64("CLAWDOCTOR_INTERVAL_SECS"))
-                .unwrap_or(crate::clawdoctor::DEFAULT_CLAWDOCTOR_INTERVAL_SECS);
-
-            let cd_threshold = cli
-                .clawdoctor_fail_threshold
-                .or_else(|| {
-                    std::env::var("CLAWDOCTOR_FAIL_THRESHOLD")
-                        .ok()
-                        .and_then(|v| v.parse::<u32>().ok())
-                })
-                .unwrap_or(crate::clawdoctor::DEFAULT_CLAWDOCTOR_FAIL_THRESHOLD);
-
-            eprintln!(
-                "Clawdoctor enabled (url={}, interval={}s, threshold={})",
-                cd_url, cd_interval, cd_threshold
-            );
-
-            let cd_server = server.clone();
-            tokio::spawn(async move {
-                crate::clawdoctor::run_clawdoctor(cd_server, cd_url, cd_interval, cd_threshold)
-                    .await;
-            });
-        } else {
-            eprintln!("Clawdoctor disabled (set CLAWDOCTOR_ENABLED=true to enable)");
-        }
-    }
-
     // Integrity check on global DB
     server
         .with_global_store(|store| {

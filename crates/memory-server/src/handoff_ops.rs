@@ -1020,6 +1020,7 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn promote_handoff_issue_updates_memory_and_flow_artifacts() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1155,6 +1156,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn promote_dedup_returns_already_promoted_without_force() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -1226,6 +1228,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(run_root);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn promote_force_creates_new_issue_even_if_already_promoted() {
         let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());

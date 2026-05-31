@@ -12,6 +12,7 @@ Run:  python3 scripts/migrate_antigravity_split.py [--dry-run]
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -23,6 +24,31 @@ TACHI_ROOT = Path.home() / ".tachi"
 SOURCE_DB = TACHI_ROOT / "projects" / "antigravity" / "memory.db"
 GLOBAL_DB = TACHI_ROOT / "global" / "memory.db"
 PROJECTS_DIR = TACHI_ROOT / "projects"
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def json_list(raw) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def entities_with_legacy_persons(rec: dict) -> str:
+    entities = json_list(rec.get("entities"))
+    seen = {entity.casefold() for entity in entities}
+    for person in json_list(rec.get("persons")):
+        key = person.casefold()
+        if key not in seen:
+            entities.append(person)
+            seen.add(key)
+    return json.dumps(entities, ensure_ascii=False)
 
 
 def classify(path: str, text: str) -> str:
@@ -87,9 +113,11 @@ def classify(path: str, text: str) -> str:
 
 
 def fetch_rows(conn: sqlite3.Connection):
+    cols = table_columns(conn, "memories")
+    persons_expr = "persons" if "persons" in cols else "'[]' AS persons"
     cur = conn.execute(
         "SELECT id, path, summary, text, importance, timestamp, category, topic, "
-        "keywords, persons, entities, location, source, scope, archived, "
+        f"keywords, {persons_expr}, entities, location, source, scope, archived, "
         "created_at, updated_at, access_count, last_access, revision, metadata, "
         "retention_policy, domain FROM memories"
     )
@@ -121,14 +149,14 @@ def insert_record(conn: sqlite3.Connection, rec: dict):
     conn.execute(
         """INSERT OR REPLACE INTO memories (
             id, path, summary, text, importance, timestamp, category, topic,
-            keywords, persons, entities, location, source, scope, archived,
+            keywords, entities, location, source, scope, archived,
             created_at, updated_at, access_count, last_access, revision, metadata,
             retention_policy, domain
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             rec["id"], rec["path"], rec["summary"], rec["text"], rec["importance"],
             rec["timestamp"], rec["category"], rec["topic"], rec["keywords"],
-            rec["persons"], rec["entities"], rec["location"], rec["source"],
+            entities_with_legacy_persons(rec), rec["location"], rec["source"],
             rec["scope"], rec["archived"], rec["created_at"], rec["updated_at"],
             rec["access_count"], rec["last_access"], rec["revision"], rec["metadata"],
             rec["retention_policy"], rec["domain"],

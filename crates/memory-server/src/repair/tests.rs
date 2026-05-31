@@ -47,10 +47,10 @@ fn insert_memory(
     conn.execute(
         "INSERT INTO memories (
             id, path, summary, text, importance, timestamp, category, topic,
-            keywords, persons, entities, location, source, scope, archived,
+            keywords, entities, location, source, scope, archived,
             created_at, updated_at, access_count, revision, metadata, retention_policy
          ) VALUES (?1, ?2, '', ?3, 0.5, ?4, 'fact', '',
-                   '[]', '[]', '[]', '', ?5, 'project', 0,
+                   '[]', '[]', '', ?5, 'project', 0,
                    ?4, ?4, 0, 1, ?6, ?7)",
         params![
             id,

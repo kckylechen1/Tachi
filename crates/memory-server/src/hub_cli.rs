@@ -42,9 +42,7 @@ pub(crate) fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Res
             all,
             json: false,
         } => cmd_list(db_path, cap_type.as_deref(), *all).map_err(|e| e.to_string()),
-        HubAction::List { json: true, .. } => {
-            Err("JSON hub list is handled in cli_tool".into())
-        }
+        HubAction::List { json: true, .. } => Err("JSON hub list is handled in cli_tool".into()),
         HubAction::Show { id } => cmd_show(db_path, id).map_err(|e| e.to_string()),
         HubAction::Packs { all } => cmd_packs(db_path, *all).map_err(|e| e.to_string()),
         HubAction::Bindings => cmd_bindings(db_path).map_err(|e| e.to_string()),
@@ -53,9 +51,7 @@ pub(crate) fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Res
         HubAction::Register { .. }
         | HubAction::Enable { .. }
         | HubAction::Disable { .. }
-        | HubAction::Stats { json: true } => {
-            Err("handled by MemoryStore in cli_tool".into())
-        }
+        | HubAction::Stats { json: true } => Err("handled by MemoryStore in cli_tool".into()),
     }
 }
 
@@ -73,6 +69,18 @@ fn truncate(s: &str, n: usize) -> String {
         out
     }
 }
+
+type CapabilityRow = (
+    String,
+    String,
+    String,
+    i64,
+    String,
+    i32,
+    String,
+    String,
+    i64,
+);
 
 fn cmd_list(
     db: &PathBuf,
@@ -93,17 +101,7 @@ fn cmd_list(
     sql.push_str(" ORDER BY type, name");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        i64,
-        String,
-        i32,
-        String,
-        String,
-        i64,
-    )> = if let Some(t) = type_filter {
+    let rows: Vec<CapabilityRow> = if let Some(t) = type_filter {
         stmt.query_map([t], |r| {
             Ok((
                 r.get(0)?,
@@ -281,8 +279,8 @@ fn cmd_packs(db: &PathBuf, show_all: bool) -> Result<(), Box<dyn std::error::Err
     }
 
     println!(
-        "{:<28} {:<24} {:<14} {:>6}  {}",
-        "id", "name", "version", "skills", "source"
+        "{:<28} {:<24} {:<14} {:>6}  source",
+        "id", "name", "version", "skills"
     );
     println!("{}", "─".repeat(110));
     for (id, name, src, ver, count, enabled, _at) in &rows {
@@ -323,8 +321,8 @@ fn cmd_bindings(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     println!(
-        "{:<32} → {:<32} {:>5} {:<8} {}",
-        "vc_id", "capability_id", "prio", "enabled", "created_at"
+        "{:<32} → {:<32} {:>5} {:<8} created_at",
+        "vc_id", "capability_id", "prio", "enabled"
     );
     println!("{}", "─".repeat(110));
     for (vc, cap, prio, enabled, created) in rows {

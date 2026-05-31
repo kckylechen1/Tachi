@@ -285,6 +285,7 @@ async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
     // This test spawns `npx -y @modelcontextprotocol/server-everything` for

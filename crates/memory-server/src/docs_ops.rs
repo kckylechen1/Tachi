@@ -495,7 +495,7 @@ async fn classify_and_extract_metadata(
     #[cfg(test)]
     {
         let _ = server;
-        return get_test_fallback_metadata(source_path, content);
+        get_test_fallback_metadata(source_path, content)
     }
 
     #[cfg(not(test))]

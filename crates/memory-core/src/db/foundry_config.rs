@@ -147,8 +147,10 @@ mod tests {
     fn set_twice_updates_in_place() {
         let conn = open_test_db();
         set_foundry_config(&conn, &PerDbConfig::default(), "first").unwrap();
-        let mut cfg = PerDbConfig::default();
-        cfg.max_jobs_per_minute = 99;
+        let cfg = PerDbConfig {
+            max_jobs_per_minute: 99,
+            ..Default::default()
+        };
         set_foundry_config(&conn, &cfg, "second").unwrap();
 
         let read = get_foundry_config(&conn).unwrap();
