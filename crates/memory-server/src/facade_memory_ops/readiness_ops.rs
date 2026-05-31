@@ -222,10 +222,10 @@ pub(crate) async fn handle_memory_readiness(
                 "runtime",
                 runtime
                     .get("runtime")
-                    .and_then(|r: &serde_json::Value| {
+                    .map(|r: &serde_json::Value| {
                         let name = r.get("name").and_then(Value::as_str).unwrap_or("tachi");
                         let ver = r.get("version").and_then(Value::as_str).unwrap_or("?");
-                        Some(format!("{name} v{ver}"))
+                        format!("{name} v{ver}")
                     })
                     .unwrap_or_else(|| "available".to_string()),
             ),

@@ -3,7 +3,7 @@
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
-use super::evidence_format::{format_agent_status, parse_json_or_empty};
+use super::evidence_format::format_agent_status;
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};

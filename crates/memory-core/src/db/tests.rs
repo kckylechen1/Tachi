@@ -541,7 +541,7 @@ fn delete_cascades_access_history_and_known_state() {
     let e = make_entry("del-cascade", "delete target");
     upsert(&mut conn, &e, false).unwrap();
 
-    record_access(&mut conn, &["del-cascade".to_string()], &[], None).unwrap();
+    record_access(&conn, &["del-cascade".to_string()], &[], None).unwrap();
     update_agent_known_state(
         &conn,
         "agent-delete-test",
@@ -1120,9 +1120,27 @@ fn record_access_promotion_gate_raw_to_consolidated() {
     // Need: recall_count >= 3 AND query_diversity >= 3
     // Call 3 times with distinct queries and id in fts_hits each time
     let id = "tier-promo-1".to_string();
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("q-alpha")).unwrap();
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("q-beta")).unwrap();
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("q-gamma")).unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("q-alpha"),
+    )
+    .unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("q-beta"),
+    )
+    .unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("q-gamma"),
+    )
+    .unwrap();
 
     let tier: String = conn.query_row(
         "SELECT tier FROM memories WHERE id = ?1",
@@ -1140,9 +1158,27 @@ fn record_access_no_promotion_without_diversity() {
 
     let id = "tier-no-promo".to_string();
     // Same query hash every time → diversity stays 1
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("same-query")).unwrap();
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("same-query")).unwrap();
-    record_access(&conn, &[id.clone()], &[id.clone()], Some("same-query")).unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("same-query"),
+    )
+    .unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("same-query"),
+    )
+    .unwrap();
+    record_access(
+        &conn,
+        std::slice::from_ref(&id),
+        std::slice::from_ref(&id),
+        Some("same-query"),
+    )
+    .unwrap();
 
     let (tier, rc, qd): (String, i64, i64) = conn.query_row(
         "SELECT tier, recall_count, query_diversity FROM memories WHERE id = ?1",

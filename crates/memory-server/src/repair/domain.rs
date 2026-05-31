@@ -18,20 +18,11 @@ fn normalize_domain_label(raw: &str) -> Option<String> {
         let mapped = if ch.is_ascii_alphanumeric() {
             last_was_sep = false;
             Some(ch.to_ascii_lowercase())
-        } else if matches!(ch, '_' | '-' | ' ' | '.') {
-            if last_was_sep || out.is_empty() {
-                None
-            } else {
-                last_was_sep = true;
-                Some('_')
-            }
+        } else if last_was_sep || out.is_empty() {
+            None
         } else {
-            if last_was_sep || out.is_empty() {
-                None
-            } else {
-                last_was_sep = true;
-                Some('_')
-            }
+            last_was_sep = true;
+            Some('_')
         };
         if let Some(mapped) = mapped {
             out.push(mapped);

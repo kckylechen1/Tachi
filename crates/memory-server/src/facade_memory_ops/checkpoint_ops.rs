@@ -4,9 +4,7 @@ use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
-use super::evidence_format::{
-    checkpoint_message, checkpoint_saved_payload, merge_keywords, parse_json_or_empty,
-};
+use super::evidence_format::{checkpoint_message, checkpoint_saved_payload, merge_keywords};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

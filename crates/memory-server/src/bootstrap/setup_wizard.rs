@@ -386,6 +386,7 @@ alwaysApply: true\n\
     )
 }
 
+#[cfg(target_os = "macos")]
 fn windsurf_rule_markdown(block: &str) -> String {
     format!(
         "---\n\

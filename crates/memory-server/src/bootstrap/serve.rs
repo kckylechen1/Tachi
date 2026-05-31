@@ -439,7 +439,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 // Do not create symlink if target is already inside ~/.tachi/projects/
                 if !db_path.starts_with(&projects_root) {
                     let global_project_dir = projects_root.join(project_name);
-                    if let Ok(_) = std::fs::create_dir_all(&global_project_dir) {
+                    if std::fs::create_dir_all(&global_project_dir).is_ok() {
                         let global_link = global_project_dir.join("memory.db");
                         let link_is_correct = if global_link.is_symlink() || global_link.exists() {
                             match std::fs::read_link(&global_link) {
