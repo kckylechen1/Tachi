@@ -192,17 +192,17 @@ pub fn upsert(
                     tx.execute(
                         r#"INSERT INTO memories
                               (id, path, summary, text, importance,
-                               timestamp, valid_from, valid_until, category, topic, keywords, persons, entities,
+                               timestamp, valid_from, valid_until, category, topic, keywords, entities,
                                location, source, scope, archived, created_at, updated_at,
                                access_count, last_access, revision, metadata,
                                retention_policy, domain, recall_count, query_diversity, tier,
                                superseded_by)
-                           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
+                           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
                            ON CONFLICT(id) DO NOTHING"#,
                         params![
                             entry.id, &path, &clean_summary, &clean_text, importance,
                             timestamp_utc, valid_from_utc, valid_until_utc, category, entry.topic,
-                            kws_json, p_json, e_json, entry.location, &source, scope,
+                            kws_json, e_json, entry.location, &source, scope,
                             entry.archived, &write_time_utc, &write_time_utc,
                             entry.access_count, last_access_utc, entry.revision.max(1),
                             metadata_json, &retention_policy, entry.domain,
@@ -225,7 +225,7 @@ pub fn upsert(
                location, source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
                retention_policy, domain, recall_count, query_diversity, tier)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,

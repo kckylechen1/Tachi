@@ -216,10 +216,15 @@ async fn tachi_memory_save_with_title_stays_memory() {
         }))
         .await
         .expect("tachi_memory save should succeed");
-    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
-    assert!(saved_json.get("wiki_path").is_none());
-
-    let id = saved_json["id"].as_str().expect("memory id").to_string();
+    assert!(saved.contains("Saved ->"));
+    assert!(saved.contains("/facts/memory-boundary"));
+    let id = saved
+        .split("id: `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("save markdown id")
+        .to_string();
+    assert!(!id.is_empty());
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
             id,
