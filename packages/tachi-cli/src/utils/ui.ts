@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { TACHI_CLI_VERSION } from '../version.js';
 
 export const banner = `
 ${chalk.cyan('╔═══════════════════════════════════════════════════════════════╗')}
@@ -11,7 +12,7 @@ ${chalk.cyan('║')}       ${chalk.bold.white('██║   ██║  ██║�
 ${chalk.cyan('║')}       ${chalk.bold.white('╚═╝   ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝')}                     ${chalk.cyan('║')}
 ${chalk.cyan('║')}                                                               ${chalk.cyan('║')}
 ${chalk.cyan('║')}              ${chalk.gray('Memory \u0026 Capability Orchestrator')}                 ${chalk.cyan('║')}
-${chalk.cyan('║')}                       ${chalk.gray('v0.11.0')}                                 ${chalk.cyan('║')}
+${chalk.cyan('║')}                       ${chalk.gray(`v${TACHI_CLI_VERSION}`)}                                 ${chalk.cyan('║')}
 ${chalk.cyan('╚═══════════════════════════════════════════════════════════════╝')}
 `;
 

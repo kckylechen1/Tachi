@@ -68,6 +68,17 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
         [],
     )?;
 
+    // Reconcile query_diversity after pruning access_history rows.
+    let diversity_updated: usize = tx.execute(
+        "UPDATE memories
+         SET query_diversity = (
+             SELECT COUNT(DISTINCT query_hash)
+             FROM access_history
+             WHERE memory_id = memories.id AND query_hash != ''
+         )",
+        [],
+    )?;
+
     // 6. Orphaned agent_known_state (memory was deleted but known-state remained)
     let orphan_aks_deleted: usize = tx.execute(
         "DELETE FROM agent_known_state WHERE memory_id NOT IN (SELECT id FROM memories)",
@@ -78,6 +89,7 @@ pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Va
 
     Ok(serde_json::json!({
         "access_history_pruned": ah_deleted,
+        "query_diversity_reconciled": diversity_updated,
         "processed_events_pruned": pe_deleted,
         "audit_log_pruned": al_deleted + al_cap_deleted,
         "agent_known_state_pruned": aks_deleted,

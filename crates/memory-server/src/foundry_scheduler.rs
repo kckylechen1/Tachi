@@ -651,12 +651,22 @@ mod tests {
 
     #[test]
     fn classify_route_recognizes_named_project() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", "/tmp/sched-tachi-home");
         let global = PathBuf::from("/tmp/sched-test/global.db");
-        let np = PathBuf::from("/home/u/.tachi/projects/sigil/memory.db");
+        let np = PathBuf::from("/tmp/sched-tachi-home/projects/sigil/memory.db");
         let r = classify_route(&entry(DbRole::Project, ""), &np, &global, None);
         match r {
             Route::NamedProject(n) => assert_eq!(n, "sigil"),
             other => panic!("expected NamedProject(sigil), got {other:?}"),
+        }
+        if let Some(v) = saved {
+            std::env::set_var("TACHI_HOME", v);
+        } else {
+            std::env::remove_var("TACHI_HOME");
         }
     }
 
@@ -695,8 +705,21 @@ mod tests {
 
     #[test]
     fn named_project_extracted_from_canonical_layout() {
-        let p = PathBuf::from("/home/u/.tachi/projects/myproj/memory.db");
-        assert_eq!(crate::path_utils::named_project_from_path(&p).as_deref(), Some("myproj"));
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", "/tmp/sched-tachi-home");
+        let p = PathBuf::from("/tmp/sched-tachi-home/projects/myproj/memory.db");
+        assert_eq!(
+            crate::path_utils::named_project_from_path(&p).as_deref(),
+            Some("myproj")
+        );
+        if let Some(v) = saved {
+            std::env::set_var("TACHI_HOME", v);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
     }
 
     #[test]

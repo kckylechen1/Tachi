@@ -19,11 +19,7 @@ pub(crate) async fn handle_tachi_init_project_db(
     }
 
     let rel = PathBuf::from(&params.db_relpath);
-    if rel.is_absolute() {
-        return Err("db_relpath must be relative to project_root".to_string());
-    }
-
-    let db_path = project_root.join(&rel);
+    let db_path = crate::path_utils::resolve_project_db_path(&project_root, &rel)?;
     let existed = db_path.exists();
     if let Some(parent) = db_path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -35,45 +31,24 @@ pub(crate) async fn handle_tachi_init_project_db(
     let was_new_activation = server.activate_project_db(db_path.clone())?;
 
     let mut plan_c_note: Option<String> = None;
-    // Plan C: ~/.tachi/projects/<safe-name>/memory.db -> project-local DB (Unix only).
-    if let Some(project_name_os) = project_root.file_name() {
-        if let Some(project_name) = project_name_os.to_str() {
-            let safe_name = crate::utils::sanitize_safe_path_name(project_name);
-            let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
-            let app_home = std::env::var("TACHI_HOME")
-                .map(|v| {
-                    if v.starts_with("~/") {
-                        home.join(&v[2..])
-                    } else {
-                        PathBuf::from(v)
-                    }
-                })
-                .unwrap_or_else(|_| home.join(".tachi"));
-            let global_project_dir = app_home.join("projects").join(&safe_name);
-            tokio::fs::create_dir_all(&global_project_dir)
-                .await
-                .map_err(|e| format!("create global project dir: {e}"))?;
-            let global_link = global_project_dir.join("memory.db");
-            if global_link.exists() || global_link.is_symlink() {
-                let _ = tokio::fs::remove_file(&global_link).await;
-            }
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&db_path, &global_link)
-                    .map_err(|e| format!("create project symlink: {e}"))?;
-                plan_c_note = Some(format!(
-                    "Global symlink: {} -> {}",
-                    global_link.display(),
-                    db_path.display()
-                ));
-            }
-            #[cfg(not(unix))]
-            {
-                plan_c_note = Some(
-                    "Plan C global symlink skipped on non-Unix hosts; use db_path directly."
-                        .to_string(),
-                );
-            }
+    if let Some(safe_name) = crate::path_utils::plan_c_dir_name_from_root(&project_root) {
+        let global_link = crate::path_utils::plan_c_global_db_path(&safe_name);
+        #[cfg(unix)]
+        {
+            crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root);
+            plan_c_note = Some(format!(
+                "Global symlink: {} -> {}",
+                global_link.display(),
+                db_path.display()
+            ));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = safe_name;
+            plan_c_note = Some(
+                "Plan C global symlink skipped on non-Unix hosts; use db_path directly."
+                    .to_string(),
+            );
         }
     }
 

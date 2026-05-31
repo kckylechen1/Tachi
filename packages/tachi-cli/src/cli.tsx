@@ -3,13 +3,14 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { MainMenu } from './components/MainMenu.js';
 import { initConfig } from './utils/config.js';
+import { TACHI_CLI_VERSION } from './version.js';
 
 const program = new Command();
 
 program
   .name('tachi')
   .description('Tachi CLI - Memory and Capability Orchestrator')
-  .version('0.11.0');
+  .version(TACHI_CLI_VERSION);
 
 program
   .command('menu', { isDefault: true })

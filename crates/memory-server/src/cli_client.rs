@@ -37,6 +37,7 @@ pub(crate) struct DaemonInfo {
     #[allow(dead_code)]
     pub port: u16,
     pub global_db: Option<String>,
+    pub version: Option<String>,
 }
 
 /// Look up `~/.tachi/daemon.pid` and verify the daemon is actually listening.
@@ -66,6 +67,10 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
             port,
             global_db: parsed
                 .get("global_db")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            version: parsed
+                .get("version")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
         }),
@@ -136,11 +141,11 @@ pub(crate) fn is_daemon_process() -> bool {
 
 /// Resolve `~/.tachi` (or `TACHI_HOME`) from the canonical global DB path.
 pub(crate) fn app_home_from_global_db(global_db_path: &Path) -> PathBuf {
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
+    if std::env::var("TACHI_HOME").is_ok()
+        || std::env::var("SIGIL_HOME").is_ok()
+        || std::env::var("TACHI_APP_HOME").is_ok()
+    {
+        return crate::path_utils::tachi_home();
     }
     if let Some(global_dir) = global_db_path.parent() {
         if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
@@ -149,9 +154,14 @@ pub(crate) fn app_home_from_global_db(global_db_path: &Path) -> PathBuf {
             }
         }
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".tachi")
+    crate::path_utils::tachi_home()
+}
+
+fn daemon_version_matches(info: &DaemonInfo) -> bool {
+    match info.version.as_deref() {
+        Some(v) => v == env!("CARGO_PKG_VERSION"),
+        None => false,
+    }
 }
 
 fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
@@ -216,6 +226,14 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
         .and_then(|value| value.as_object().cloned())?;
     let app_home = app_home_from_global_db(global_db_path);
     let info = detect_daemon(&app_home).await?;
+    if !daemon_version_matches(&info) {
+        eprintln!(
+            "[mcp] daemon version mismatch (daemon {:?}, binary {}); executing in-process",
+            info.version,
+            env!("CARGO_PKG_VERSION")
+        );
+        return None;
+    }
     if !daemon_global_db_matches(&info, global_db_path) {
         return None;
     }

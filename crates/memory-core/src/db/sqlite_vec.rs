@@ -1,4 +1,5 @@
 use rusqlite::{Connection, Result as SqlResult};
+use std::ffi::c_char;
 use std::sync::Once;
 
 static SQLITE_VEC_AUTO_EXT_ONCE: Once = Once::new();
@@ -14,7 +15,7 @@ pub fn register_sqlite_vec() {
             *const (),
             unsafe extern "C" fn(
                 *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
+                *mut *mut c_char,
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
         >(sqlite_vec::sqlite3_vec_init as *const ());

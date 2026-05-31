@@ -202,7 +202,15 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        // Try static project store first
+        // Hot-activated DB (e.g. tachi_init_project_db) overrides the boot-time store.
+        if self
+            .hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return self.with_hot_project_store(f);
+        }
         if let Some(ref store_arc) = self.project_store {
             let gate = self
                 .project_rw_gate
@@ -212,15 +220,21 @@ impl MemoryServer {
             let mut store = lock_or_recover(store_arc, "project_store");
             return f(&mut store);
         }
-        // Fall back to hot-swapped project DB
-        self.with_hot_project_store(f)
+        Err("No project database available".to_string())
     }
 
     pub(super) fn with_project_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        // Try static project store first
+        if self
+            .hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return self.with_hot_project_store_read(f);
+        }
         if let Some(ref db_path) = self.project_db_path {
             let gate = self
                 .project_rw_gate
@@ -230,8 +244,7 @@ impl MemoryServer {
             let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
             return f(&mut store);
         }
-        // Fall back to hot-swapped project DB
-        self.with_hot_project_store_read(f)
+        Err("No project database available".to_string())
     }
 
     pub(super) fn with_store_for_scope<T>(
@@ -267,20 +280,8 @@ impl MemoryServer {
         {
             return Err(format!("Invalid project name '{project_name}'"));
         }
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let app_home = std::env::var("TACHI_HOME")
-            .map(|v| {
-                if v.starts_with("~/") {
-                    home.join(&v[2..])
-                } else {
-                    PathBuf::from(v)
-                }
-            })
-            .unwrap_or_else(|_| home.join(".tachi"));
-        let db_path = app_home
-            .join("projects")
-            .join(project_name)
-            .join("memory.db");
+        let safe_name = crate::utils::sanitize_safe_path_name(project_name);
+        let db_path = crate::path_utils::plan_c_global_db_path(&safe_name);
         if !db_path.exists() {
             if db_path.is_symlink() {
                 let target_str = match std::fs::read_link(&db_path) {

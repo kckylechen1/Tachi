@@ -1,3 +1,5 @@
+import { TACHI_CLI_VERSION } from '../version.js';
+
 export type Language = 'en' | 'zh';
 
 interface Translations {
@@ -8,7 +10,7 @@ const en: Translations = {
   app: {
     name: 'Tachi',
     tagline: 'Memory \u0026 Capability Orchestrator',
-    version: 'v0.11.0',
+    version: `v${TACHI_CLI_VERSION}`,
   },
   menu: {
     title: 'Main Menu',
@@ -90,7 +92,7 @@ const zh: Translations = {
   app: {
     name: 'Tachi',
     tagline: '记忆与能力编排器',
-    version: 'v0.11.0',
+    version: `v${TACHI_CLI_VERSION}`,
   },
   menu: {
     title: '主菜单',

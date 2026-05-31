@@ -4,6 +4,7 @@ import { t } from '../utils/i18n.js';
 import { colors } from '../utils/ui.js';
 import { getMcpServers, loadMcpConfig, type McpServer } from '../utils/mcp.js';
 import { loadConfig } from '../utils/config.js';
+import { TACHI_CLI_VERSION } from '../version.js';
 
 interface McpToolsDiscoveryProps {
   onBack: () => void;
@@ -47,7 +48,7 @@ export function McpToolsDiscovery({ onBack }: McpToolsDiscoveryProps) {
           params: {
             protocolVersion: '2024-11-05',
             capabilities: {},
-            clientInfo: { name: 'tachi-cli', version: '0.11.0' },
+            clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
           },
         }),
       });

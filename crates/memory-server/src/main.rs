@@ -713,6 +713,14 @@ impl MemoryServer {
 
     /// Path to this server's project memory DB, when one is bound.
     pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
+        if let Some(state) = self
+            .hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            return Some(state.db_path.as_ref().clone());
+        }
         self.project_db_path.as_ref().map(|p| (**p).clone())
     }
 

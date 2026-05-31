@@ -63,7 +63,11 @@ async fn tachi_init_project_db_creates_expected_path() {
     let json: serde_json::Value =
         serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
 
-    let db_path = root.join(".tachi/memory.db");
+    let db_path = crate::path_utils::resolve_project_db_path(
+        &root,
+        std::path::Path::new(".tachi/memory.db"),
+    )
+    .expect("resolve project db path");
     assert_eq!(json["created"], json!(true));
     assert_eq!(json["db_path"], json!(db_path.display().to_string()));
     assert!(db_path.exists(), "project db should be created on disk");
@@ -78,6 +82,28 @@ async fn tachi_init_project_db_creates_expected_path() {
     let json_second: serde_json::Value = serde_json::from_str(&response_second)
         .expect("second tachi_init_project_db response should be JSON");
     assert_eq!(json_second["created"], json!(false));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn tachi_init_project_db_rejects_path_traversal() {
+    let server = make_server();
+    let root = std::env::temp_dir().join(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+
+    let err = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: "../outside.db".to_string(),
+        }))
+        .await
+        .expect_err("path traversal db_relpath should be rejected");
+
+    assert!(
+        err.contains("db_relpath"),
+        "unexpected error: {err}"
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

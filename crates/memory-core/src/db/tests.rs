@@ -727,6 +727,45 @@ fn gc_tables_prunes_retention_and_orphans() {
 }
 
 #[test]
+fn gc_tables_reconciles_query_diversity_after_prune() {
+    let mut conn = make_conn();
+    let e = make_entry("gc-qd", "diversity target");
+    upsert(&mut conn, &e, false).unwrap();
+
+    for i in 0..5 {
+        let hash = format!("hash-{i}");
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+            params!["gc-qd", now_utc_iso(), hash],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "UPDATE memories SET query_diversity = 99 WHERE id = ?1",
+        params!["gc-qd"],
+    )
+    .unwrap();
+
+    let cfg = GcConfig {
+        access_history_keep_per_memory: 2,
+        ..GcConfig::default()
+    };
+    gc_tables(&mut conn, &cfg).unwrap();
+
+    let qd: i64 = conn
+        .query_row(
+            "SELECT query_diversity FROM memories WHERE id = ?1",
+            params!["gc-qd"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        qd, 2,
+        "query_diversity should match distinct query hashes kept after GC"
+    );
+}
+
+#[test]
 fn sandbox_policy_crud_roundtrip() {
     let conn = make_conn();
 

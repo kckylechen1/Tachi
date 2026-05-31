@@ -1,6 +1,6 @@
 [package]
 name = "memory-core"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2021"
 description = "Core memory storage and search engine for OpenClaw/Antigravity"
 license = "AGPL-3.0-only"

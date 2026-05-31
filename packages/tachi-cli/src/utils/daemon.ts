@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import getPort from 'get-port';
 import { getBinaryPath, getDataDir, loadConfig } from './config.js';
+import { TACHI_CLI_VERSION } from '../version.js';
 
 let daemonProcess: ChildProcess | null = null;
 
@@ -113,7 +114,7 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
         params: {
           protocolVersion: '2024-11-05',
           capabilities: {},
-          clientInfo: { name: 'tachi-cli', version: '0.11.0' },
+          clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
         },
       }),
     });
@@ -165,7 +166,7 @@ async function checkDaemonHealth(port: number): Promise<boolean> {
         params: {
           protocolVersion: '2024-11-05',
           capabilities: {},
-          clientInfo: { name: 'tachi-cli', version: '0.11.0' },
+          clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
         },
       }),
     });

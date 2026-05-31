@@ -197,7 +197,15 @@ pub fn upsert(
                             |r| r.get(0)
                         ).unwrap_or_else(|_| "[]".to_string());
                         let mut ents: Vec<String> = serde_json::from_str(&cand_ents_json).unwrap_or_default();
-                        for e in &entry.entities { if !ents.contains(e) { ents.push(e.clone()); } }
+                        for e in &entry.entities {
+                            if !ents.contains(e) {
+                                ents.push(e.clone());
+                            }
+                        }
+                        crate::types::fold_person_names_into_entities(
+                            &mut ents,
+                            entry.persons.clone(),
+                        );
                         serde_json::to_string(&ents).unwrap_or_else(|_| "[]".to_string())
                     };
                     tx.execute(
@@ -205,7 +213,7 @@ pub fn upsert(
                          importance = MAX(importance, ?3), updated_at = ?4
                          WHERE id = ?5",
                         params![merge_kws, merge_ents, importance, &write_time_utc, cand_id],
-                    ).ok();
+                    )?;
                     if let Ok((cand_path, cand_summary, cand_text)) = tx.query_row(
                         "SELECT path, summary, text FROM memories WHERE id = ?1",
                         params![cand_id],
@@ -322,7 +330,9 @@ pub fn upsert(
     )?;
 
     let kws = entry.keywords.join(" ");
-    let ents = entry.entities.join(" ");
+    let mut ents_vec = entry.entities.clone();
+    crate::types::fold_person_names_into_entities(&mut ents_vec, entry.persons.clone());
+    let ents = ents_vec.join(" ");
     sync_memories_fts(
         &tx,
         &entry.id,

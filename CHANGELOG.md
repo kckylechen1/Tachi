@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-06-01
+
+Patch release: post-1.4.0 hardening for Plan C, daemon safety, GC, and Linux release builds.
+
+### Fixed
+
+- Reject `db_relpath` path traversal (`..`) and paths that escape `project_root`.
+- Unify Plan C symlink directory naming (`sanitize_safe_path_name`) across init, serve, and named-project resolution; honor `TACHI_HOME` / `SIGIL_HOME` / `TACHI_APP_HOME`.
+- Hot-activated project DB (`tachi_init_project_db`) overrides the boot-time project store; `project_db_path_buf` reports the active path.
+- CLI daemon forward requires matching `version` in `daemon.pid` (avoids stale daemon after upgrade).
+- `sqlite_vec` auto-extension uses `c_char` for `aarch64-unknown-linux-gnu` release builds.
+- GC reconciles `query_diversity` after `access_history` pruning; Jaccard dedup propagates SQL errors and folds `persons` into FTS entities.
+- `tachi-cli` UI/MCP client version strings aligned to package version.
+
+### Changed
+
+- `tachi_memory` facade actions (`save`, `checkpoint`, `ask`, `consolidate`, `readiness`, `progress`, `extract_facts`) return Markdown for human/LLM reading; `tachi_save` / `save_memory` / `remember` still return JSON. Programmatic clients must not assume JSON on those facade actions.
+
 ## [1.4.0] - 2026-06-01
 
 Plan C project DB, memory lifecycle / SFT factory, and facade module split.

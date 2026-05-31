@@ -1,4 +1,5 @@
 import { loadConfig } from './config.js';
+import { TACHI_CLI_VERSION } from '../version.js';
 
 const DEFAULT_DAEMON_PORT = 6919;
 
@@ -29,7 +30,7 @@ export async function searchMemory(query: string, topK = 10): Promise<MemoryEntr
         params: {
           protocolVersion: '2024-11-05',
           capabilities: {},
-          clientInfo: { name: 'tachi-cli', version: '0.11.0' },
+          clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
         },
       }),
     });
@@ -101,7 +102,7 @@ export async function listMemories(pathPrefix?: string, limit = 50): Promise<Mem
         params: {
           protocolVersion: '2024-11-05',
           capabilities: {},
-          clientInfo: { name: 'tachi-cli', version: '0.11.0' },
+          clientInfo: { name: 'tachi-cli', version: TACHI_CLI_VERSION },
         },
       }),
     });
