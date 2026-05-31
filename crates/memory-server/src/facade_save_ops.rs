@@ -177,7 +177,7 @@ pub(crate) async fn handle_tachi_save(
                 timestamp: None,
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
-                metadata: None,
+                metadata: params.metadata.clone(),
             };
             handle_save_memory(server, mem_params).await
         }

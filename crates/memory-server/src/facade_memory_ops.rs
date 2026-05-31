@@ -97,6 +97,7 @@ pub(crate) async fn handle_tachi_memory(
                 source: params.source.clone(),
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
+                metadata: params.metadata.clone(),
             };
             handle_tachi_save(server, save_params).await
         }
@@ -135,6 +136,7 @@ pub(crate) async fn handle_tachi_memory(
                 source: params.source.clone(),
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
+                metadata: params.metadata.clone(),
             };
             handle_tachi_save(server, save_params).await
         }
@@ -339,6 +341,7 @@ async fn handle_memory_checkpoint(
             .or_else(|| Some("tachi_checkpoint".to_string())),
         valid_from: params.valid_from.take(),
         valid_until: params.valid_until.take(),
+        metadata: params.metadata.take(),
     };
     handle_tachi_save(server, save_params).await
 }
@@ -395,6 +398,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         state: None,
         project: None,
         domain: Some("agent".to_string()),
+        metadata: None,
     };
     let saved = handle_memory_checkpoint(server, params).await?;
     Ok(Some(json!({

@@ -1248,6 +1248,7 @@ impl MemoryServer {
             state: None,
             project: None,
             domain: None,
+            metadata: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

@@ -182,6 +182,10 @@ pub(crate) struct TachiSaveParams {
     /// When this memory stopped being true/effective. None = still valid.
     #[serde(default)]
     pub valid_until: Option<String>,
+
+    /// Arbitrary metadata payload merged before provenance injection.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -263,6 +267,8 @@ pub(crate) struct TachiMemoryParams {
     pub valid_from: Option<String>,
     #[serde(default)]
     pub valid_until: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]

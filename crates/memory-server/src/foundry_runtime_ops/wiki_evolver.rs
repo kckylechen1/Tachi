@@ -387,6 +387,7 @@ async fn save_wiki_draft(
             source: Some("rem_wiki_evolver".to_string()),
             valid_from: None,
             valid_until: None,
+            metadata: None,
         }))
         .await;
 

@@ -453,6 +453,7 @@ pub(crate) async fn run_watcher(
                 state: None,
                 project: None,
                 domain: None,
+                metadata: None,
             };
             let body = crate::facade_memory_ops::handle_tachi_memory(&server, params).await?;
             let value: serde_json::Value = serde_json::from_str(&body)?;

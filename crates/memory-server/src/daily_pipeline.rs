@@ -1171,6 +1171,7 @@ async fn save_daily_health_wiki(
             source: None,
             valid_from: None,
             valid_until: None,
+            metadata: None,
         }))
         .await?;
     Ok(())
