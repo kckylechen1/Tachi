@@ -12,6 +12,7 @@ use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -914,8 +915,9 @@ fn claude_jsonl_passive_watcher_status() -> Value {
         home.join(".config").join("claude").join("projects"),
     ];
     let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut visited = HashSet::new();
     for root in candidates {
-        visit_jsonl_files(&root, &mut newest, 0);
+        visit_jsonl_files(&root, &mut newest, 0, &mut visited);
     }
     match newest {
         Some((path, modified)) => {
@@ -941,8 +943,13 @@ fn visit_jsonl_files(
     root: &Path,
     newest: &mut Option<(PathBuf, std::time::SystemTime)>,
     depth: usize,
+    visited: &mut HashSet<PathBuf>,
 ) {
     if depth > 4 || !root.exists() {
+        return;
+    }
+    let canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    if !visited.insert(canonical) {
         return;
     }
     let Ok(entries) = std::fs::read_dir(root) else {
@@ -950,33 +957,44 @@ fn visit_jsonl_files(
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        // Use symlink_metadata to detect and skip symlinks
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
-        if file_type.is_symlink() {
+        if file_type.is_dir() {
+            visit_jsonl_files(&path, newest, depth + 1, visited);
             continue;
         }
-        if file_type.is_dir() {
-            visit_jsonl_files(&path, newest, depth + 1);
+        if file_type.is_symlink() {
+            let Ok(link_meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if link_meta.is_dir() {
+                visit_jsonl_files(&path, newest, depth + 1, visited);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                consider_jsonl_file(&path, newest);
+            }
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = meta.modified() else {
-            continue;
-        };
-        let should_replace = newest
-            .as_ref()
-            .map(|(_, current)| modified > *current)
-            .unwrap_or(true);
-        if should_replace {
-            *newest = Some((path, modified));
-        }
+        consider_jsonl_file(&path, newest);
+    }
+}
+
+fn consider_jsonl_file(path: &Path, newest: &mut Option<(PathBuf, std::time::SystemTime)>) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = meta.modified() else {
+        return;
+    };
+    let should_replace = newest
+        .as_ref()
+        .map(|(_, current)| modified > *current)
+        .unwrap_or(true);
+    if should_replace {
+        *newest = Some((path.to_path_buf(), modified));
     }
 }
 

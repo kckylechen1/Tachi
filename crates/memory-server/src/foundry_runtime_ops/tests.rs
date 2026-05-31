@@ -1,6 +1,6 @@
 use super::handlers::{
     build_bracket_self_evolution_id, classify_bracket_self_evolution,
-    extract_bracket_self_evolution_notes, resolve_capture_target,
+    extract_bracket_self_evolution_notes, matches_agent_tag, resolve_capture_target,
 };
 use super::maintenance::{
     build_distill_edges, classify_distill_guide_type, coherence_bucket_key,
@@ -178,6 +178,21 @@ fn parse_session_capture_response_filters_empty_text() {
     let drafts = parse_session_capture_response(raw).unwrap();
     assert_eq!(drafts.len(), 1);
     assert_eq!(drafts[0].text, "valid");
+}
+
+#[test]
+fn matches_agent_tag_handles_hyphenated_agent_ids() {
+    assert!(matches_agent_tag("jayne-main", "jayne"));
+    assert!(matches_agent_tag("openclaw:jayne:main", "jayne"));
+    assert!(!matches_agent_tag("jayneville-bot", "jayne"));
+}
+
+#[test]
+fn matches_agent_tag_handles_user_memory_slugs_without_substring_false_positives() {
+    assert!(matches_agent_tag("user-memory", "user-memory"));
+    assert!(matches_agent_tag("user-memory-v3", "user-memory"));
+    assert!(matches_agent_tag("agent/user-memory", "user-memory"));
+    assert!(!matches_agent_tag("my-user-memory-analyzer", "user-memory"));
 }
 
 #[test]

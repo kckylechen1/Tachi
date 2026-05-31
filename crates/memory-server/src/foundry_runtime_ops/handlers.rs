@@ -938,10 +938,26 @@ pub(super) fn extract_bracket_self_evolution_notes(
     notes
 }
 
-fn matches_agent_tag(agent_id: &str, tag: &str) -> bool {
+pub(super) fn matches_agent_tag(agent_id: &str, tag: &str) -> bool {
+    if tag.is_empty() {
+        return false;
+    }
+    // Single-token tags (e.g. "jayne"): split on non-alphanumeric delimiters.
+    if agent_id
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|part| part.eq_ignore_ascii_case(tag))
+    {
+        return true;
+    }
+    // Hyphenated slugs (e.g. "user-memory", "user-memory-v3"): match path-like
+    // segments without treating interior hyphens as substring false positives.
     agent_id
         .split(|c: char| !c.is_alphanumeric() && c != '-')
-        .any(|part| part.eq_ignore_ascii_case(tag))
+        .filter(|segment| !segment.is_empty())
+        .any(|segment| {
+            segment.eq_ignore_ascii_case(tag)
+                || segment.starts_with(&format!("{tag}-"))
+        })
 }
 
 pub(crate) async fn handle_capture_session(
