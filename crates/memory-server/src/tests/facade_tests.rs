@@ -139,6 +139,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
         &server,
         TachiMemoryParams {
             action: "checkpoint".to_string(),
+            format: None,
             query: None,
             scope: Some("project".to_string()),
             top_k: 6,
@@ -191,6 +192,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
         &server,
         TachiMemoryParams {
             action: "save".to_string(),
+            format: None,
             query: None,
             scope: Some("project".to_string()),
             top_k: 6,
@@ -255,6 +257,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
         &server,
         TachiMemoryParams {
             action: "ask".to_string(),
+            format: None,
             query: Some("what did we implement".to_string()),
             scope: None,
             top_k: 3,
@@ -300,6 +303,49 @@ async fn tachi_memory_ask_returns_evidence_contract() {
     assert!(body.contains("hit(s)"));
 }
 
+#[tokio::test]
+async fn tachi_memory_ask_can_return_compact_json() {
+    let server = make_server();
+    let params: TachiMemoryParams = serde_json::from_value(json!({
+        "action": "ask",
+        "format": "json",
+        "query": "what did we implement",
+        "top_k": 3
+    }))
+    .expect("params deserialize");
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("ask json should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("ask response should be JSON");
+
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["query"], json!("what did we implement"));
+    assert!(parsed["evidence"].is_array());
+    assert!(parsed["thinking"].is_object());
+}
+
+#[tokio::test]
+async fn tachi_memory_readiness_can_return_operational_json() {
+    let server = make_server();
+    let params: TachiMemoryParams = serde_json::from_value(json!({
+        "action": "readiness",
+        "format": "json"
+    }))
+    .expect("params deserialize");
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("readiness json should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("readiness response should be JSON");
+
+    assert_eq!(parsed["status"], json!("completed"));
+    assert!(parsed["runtime"].is_object());
+    assert!(parsed["health"].is_object());
+    assert!(parsed["required_tools"].is_array());
+    assert!(parsed["vector_health"].is_object());
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_memory_progress_writes_append_only_jsonl() {
@@ -315,6 +361,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
         &server,
         TachiMemoryParams {
             action: "progress".to_string(),
+            format: None,
             query: None,
             scope: None,
             top_k: 6,
@@ -375,6 +422,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
         &server,
         TachiMemoryParams {
             action: "briefing".to_string(),
+            format: None,
             query: Some("current work".to_string()),
             scope: None,
             top_k: 3,

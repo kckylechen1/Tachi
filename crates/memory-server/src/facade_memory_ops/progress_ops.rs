@@ -1,9 +1,9 @@
 //! Progress tracking and filesystem utilities for `tachi_memory(action="progress")`.
 
+use super::evidence_format::{format_agent_status, json_string, wants_json};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
-use super::evidence_format::format_agent_status;
 use serde_json::json;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,15 @@ pub(crate) async fn handle_memory_progress(
     });
     append_jsonl(&run_dir.join("progress.jsonl"), &line)?;
     update_progress_status(&run_dir, &line)?;
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "recorded",
+            "flow_id": flow_id,
+            "log": run_dir.join("progress.jsonl").display().to_string(),
+            "secret_redactions": redactions,
+            "event": line,
+        }));
+    }
     Ok(format_agent_status(
         "Tachi progress",
         &[

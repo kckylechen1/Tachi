@@ -419,8 +419,18 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
 
     // Memory lifecycle columns for tier-based decay and SFT factory (Phase 1)
-    ensure_column(conn, "memories", "recall_count", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(conn, "memories", "query_diversity", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        conn,
+        "memories",
+        "recall_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "memories",
+        "query_diversity",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(conn, "memories", "tier", "TEXT NOT NULL DEFAULT 'raw'")?;
     ensure_column(conn, "access_history", "query_hash", "TEXT")?;
 

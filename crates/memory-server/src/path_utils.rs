@@ -214,10 +214,7 @@ mod tests {
             let saved = std::env::var_os("TACHI_HOME");
             std::env::set_var("TACHI_HOME", "/tmp/tachi-test-home");
             let path = PathBuf::from("/tmp/tachi-test-home/projects/sigil/memory.db");
-            assert_eq!(
-                named_project_from_path(&path).as_deref(),
-                Some("sigil")
-            );
+            assert_eq!(named_project_from_path(&path).as_deref(), Some("sigil"));
             restore_env("TACHI_HOME", saved);
         });
     }
@@ -228,10 +225,7 @@ mod tests {
             let saved = std::env::var_os("TACHI_HOME");
             std::env::set_var("TACHI_HOME", "/tmp/custom-tachi-root");
             let path = PathBuf::from("/tmp/custom-tachi-root/projects/my_app/memory.db");
-            assert_eq!(
-                named_project_from_path(&path).as_deref(),
-                Some("my_app")
-            );
+            assert_eq!(named_project_from_path(&path).as_deref(), Some("my_app"));
             restore_env("TACHI_HOME", saved);
         });
     }

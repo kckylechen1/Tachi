@@ -13,17 +13,17 @@ const HALF_LIFE_DAYS: f64 = 30.0;
 
 fn tier_half_life(tier: &str) -> f64 {
     match tier {
-        "pattern"      => 30_000.0, // virtually no decay
-        "consolidated" => 60.0,     // half speed
-        _              => HALF_LIFE_DAYS, // raw default
+        "pattern" => 30_000.0,  // virtually no decay
+        "consolidated" => 60.0, // half speed
+        _ => HALF_LIFE_DAYS,    // raw default
     }
 }
 
 fn tier_actr_d(tier: &str) -> f64 {
     match tier {
-        "pattern"      => 0.01,
+        "pattern" => 0.01,
         "consolidated" => 0.25,
-        _              => 0.5, // raw
+        _ => 0.5, // raw
     }
 }
 

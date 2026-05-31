@@ -164,7 +164,10 @@ pub(crate) fn apply_confidence_reinforcement_links(
     Ok(reinforced)
 }
 
-pub(crate) fn vector_similarity_between(new_entry: &MemoryEntry, old_entry: &MemoryEntry) -> Option<f64> {
+pub(crate) fn vector_similarity_between(
+    new_entry: &MemoryEntry,
+    old_entry: &MemoryEntry,
+) -> Option<f64> {
     let new_vec = new_entry.vector.as_deref()?;
     let old_vec = old_entry.vector.as_deref()?;
     if new_vec.is_empty() || new_vec.len() != old_vec.len() {

@@ -1,13 +1,13 @@
 //! Alert, ask, consolidate, and readiness handlers for `tachi_memory`.
 
+use super::evidence_format::{
+    build_thinking_scaffold, evidence_rows, format_agent_status, json_string, parse_json_or_empty,
+    sections_to_evidence, synthesis_markdown_text, wants_json,
+};
 use crate::agent_markdown;
 use crate::facade_search_ops::collect_tachi_search_sections;
 use crate::tool_params::*;
 use crate::MemoryServer;
-use super::evidence_format::{
-    build_thinking_scaffold, evidence_rows, format_agent_status,
-    parse_json_or_empty, sections_to_evidence, synthesis_markdown_text,
-};
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -16,10 +16,17 @@ use serde_json::{json, Value};
 
 pub(crate) async fn handle_memory_alerts(
     server: &MemoryServer,
-    _params: &TachiMemoryParams,
+    params: &TachiMemoryParams,
 ) -> Result<String, String> {
     let warnings = crate::status_ops::collect_agent_warning_lines(server).await;
     let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "completed",
+            "warnings": warnings,
+            "wiki_counts": wiki_counts,
+        }));
+    }
     Ok(agent_markdown::format_alerts(&warnings, &wiki_counts))
 }
 
@@ -58,6 +65,15 @@ pub(crate) async fn handle_memory_ask(
     } else {
         None
     };
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "completed",
+            "query": query,
+            "evidence": evidence,
+            "thinking": thinking,
+            "synthesis": synthesis,
+        }));
+    }
     let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
     Ok(format_agent_status(
         "Tachi ask",
@@ -129,6 +145,14 @@ pub(crate) async fn handle_memory_consolidate(
     } else {
         None
     };
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "dry_run",
+            "candidates": candidates,
+            "thinking": thinking,
+            "synthesis": synthesis,
+        }));
+    }
     let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
     Ok(format_agent_status(
         "Tachi consolidate",
@@ -158,7 +182,7 @@ pub(crate) async fn handle_memory_consolidate(
 
 pub(crate) async fn handle_memory_readiness(
     server: &MemoryServer,
-    _params: &TachiMemoryParams,
+    params: &TachiMemoryParams,
 ) -> Result<String, String> {
     let status = parse_json_or_empty(crate::status_ops::handle_tachi_status_full(server).await?);
     let runtime = parse_json_or_empty(crate::memory_ops::handle_runtime_info(server).await?);
@@ -187,7 +211,8 @@ pub(crate) async fn handle_memory_readiness(
             })
         })
         .collect::<Vec<_>>();
-    let kanban_count = crate::status_ops::list_recent_kanban_entries(server, 5).len();
+    let recent_kanban = crate::status_ops::list_recent_kanban_entries(server, 5);
+    let kanban_count = recent_kanban.len();
     let health_score = status
         .get("health_score")
         .map(Value::to_string)
@@ -207,6 +232,16 @@ pub(crate) async fn handle_memory_readiness(
         .or_else(|| vector_health.get("missing_vectors"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "completed",
+            "health": status,
+            "runtime": runtime,
+            "required_tools": required_tools,
+            "vector_health": vector_health,
+            "recent_kanban": recent_kanban,
+        }));
+    }
     Ok(format_agent_status(
         "Tachi readiness",
         &[

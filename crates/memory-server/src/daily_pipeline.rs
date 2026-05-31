@@ -105,7 +105,9 @@ pub(crate) async fn run_daily_pipeline(
     }
 
     // ── SFT Factory: generate fine-tuning dialogues from distilled memories ───
-    if let Err(e) = crate::foundry_runtime_ops::sft_factory::run_daily_sft_distillation(server).await {
+    if let Err(e) =
+        crate::foundry_runtime_ops::sft_factory::run_daily_sft_distillation(server).await
+    {
         eprintln!("[daily_pipeline] SFT factory skipped: {e}");
     }
     let agent_stage = run_agent_evolution_stage(server, &app_home).await;
@@ -172,7 +174,11 @@ pub(crate) fn next_weekly_rem_run_time() -> tokio::time::Instant {
     // chrono: weekday().num_days_from_sunday() gives 0 for Sunday.
     let days_until_sunday = {
         let wd = now_local.weekday().num_days_from_sunday() as i64;
-        if wd == 0 { 0i64 } else { 7 - wd }
+        if wd == 0 {
+            0i64
+        } else {
+            7 - wd
+        }
     };
     let candidate_date = now_local.date_naive() + ChronoDuration::days(days_until_sunday);
     let candidate = tz
@@ -317,7 +323,11 @@ async fn run_truth_maintenance_for_target(
 
     // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
     let total_active: i64 = conn
-        .query_row("SELECT COUNT(*) FROM memories WHERE archived = 0", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE archived = 0",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     let consolidated_count: i64 = conn
         .query_row(
@@ -376,8 +386,7 @@ async fn run_truth_maintenance_for_target(
     };
     if !needs_embed_ids.is_empty() {
         let candidates =
-            memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false)
-                .unwrap_or_default();
+            memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false).unwrap_or_default();
         for entry in candidates.values() {
             let _ = server.enrichment_lock().enrich_tx.try_send(
                 crate::enrichment::build_enrichment_item(
@@ -1228,7 +1237,6 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
     let name = manifest_db_name(entry, path);
     name.split(':').next_back().unwrap_or(&name).to_string()
 }
-
 
 fn shanghai_today() -> String {
     Utc::now()

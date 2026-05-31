@@ -571,7 +571,6 @@ fn classify_route(
     Route::Orphan(reason)
 }
 
-
 fn paths_equal(a: &Path, b: &Path) -> bool {
     // Manifest paths are pre-canonicalized by the doctor / manifest
     // pipeline; we compare via std::fs::canonicalize when possible to

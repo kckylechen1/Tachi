@@ -782,10 +782,19 @@ impl Drop for SftEnvGuard {
         }
         restore("TACHI_HOME", self.original_tachi_home.as_deref());
         restore("TACHI_APP_HOME", self.original_tachi_app_home.as_deref());
-        restore("SILICONFLOW_API_KEY", self.original_siliconflow_api_key.as_deref());
+        restore(
+            "SILICONFLOW_API_KEY",
+            self.original_siliconflow_api_key.as_deref(),
+        );
         restore("VOYAGE_API_KEY", self.original_voyage_api_key.as_deref());
-        restore("SILICONFLOW_BASE_URL", self.original_siliconflow_base.as_deref());
-        restore("REASONING_BASE_URL", self.original_reasoning_base.as_deref());
+        restore(
+            "SILICONFLOW_BASE_URL",
+            self.original_siliconflow_base.as_deref(),
+        );
+        restore(
+            "REASONING_BASE_URL",
+            self.original_reasoning_base.as_deref(),
+        );
         restore("CLAUDE_BIN", self.original_claude_bin.as_deref());
     }
 }
@@ -892,7 +901,10 @@ async fn test_run_daily_sft_distillation() {
         .expect("pending SFT dir")
         .filter_map(Result::ok)
         .count();
-    assert_eq!(pending_batches, 3, "expected one durable pending file per export format");
+    assert_eq!(
+        pending_batches, 3,
+        "expected one durable pending file per export format"
+    );
 
     // 6. Verify entry in DB has been updated to processed
     let (is_processed, batch_id) = server.with_project_store_read(|store| {
@@ -905,7 +917,10 @@ async fn test_run_daily_sft_distillation() {
         Ok((row.0.unwrap_or(0) == 1, row.1))
     }).unwrap();
     assert!(is_processed, "entry was not marked as sft.processed");
-    assert!(batch_id.is_some(), "SFT marker should include durable batch id");
+    assert!(
+        batch_id.is_some(),
+        "SFT marker should include durable batch id"
+    );
 
     // 7. Cleanup server task
     server_task.abort();

@@ -199,6 +199,9 @@ fn default_memory_top_k() -> usize {
 pub(crate) struct TachiMemoryParams {
     /// briefing (→ Markdown context block; call at session start) | save (→ entry id; call proactively after any meaningful step, not only at session end) | extract_facts (→ saved count; LLM atomizes raw text into N entries) | checkpoint (→ checkpoint id; mid-task pause or handoff) | alerts (→ warning list; when stuck or failing repeatedly) | search (→ ranked results) | ask (→ synthesized answer, use synthesize=true) | consolidate (→ merged count) | progress (→ status update) | readiness (→ health + tool visibility JSON)
     pub action: String,
+    /// Output format for facade responses: "markdown" (default, compact for agents) or "json" (minified, stable for automation).
+    #[serde(default, alias = "output_format")]
+    pub format: Option<String>,
 
     // --- search fields ---
     #[serde(default)]

@@ -115,7 +115,9 @@ pub(crate) fn collect_contradiction_candidates(
     Ok(candidates)
 }
 
-pub(crate) fn parse_contradiction_verification(raw: &str) -> Result<ContradictionVerification, String> {
+pub(crate) fn parse_contradiction_verification(
+    raw: &str,
+) -> Result<ContradictionVerification, String> {
     let payload = crate::llm::LlmClient::extract_json_payload(raw)?;
     let mut verification: ContradictionVerification = serde_json::from_str(payload)
         .map_err(|e| format!("parse contradiction verification JSON: {e}"))?;

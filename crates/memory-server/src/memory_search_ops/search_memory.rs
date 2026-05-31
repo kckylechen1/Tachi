@@ -1,7 +1,7 @@
 use super::*;
 use crate::memory_search_ops::search_helpers::{
-    apply_guide_context_boosts, dedup_search_results, infer_search_project, normalize_json_relevance,
-    normalize_search_relevance, search_score,
+    apply_guide_context_boosts, dedup_search_results, infer_search_project,
+    normalize_json_relevance, normalize_search_relevance, search_score,
 };
 use std::collections::HashSet;
 

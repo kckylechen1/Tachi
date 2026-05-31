@@ -954,10 +954,7 @@ pub(super) fn matches_agent_tag(agent_id: &str, tag: &str) -> bool {
     agent_id
         .split(|c: char| !c.is_alphanumeric() && c != '-')
         .filter(|segment| !segment.is_empty())
-        .any(|segment| {
-            segment.eq_ignore_ascii_case(tag)
-                || segment.starts_with(&format!("{tag}-"))
-        })
+        .any(|segment| segment.eq_ignore_ascii_case(tag) || segment.starts_with(&format!("{tag}-")))
 }
 
 pub(crate) async fn handle_capture_session(

@@ -13,7 +13,10 @@ mod readiness_ops;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
-use evidence_format::{format_extract_result, format_save_result};
+use evidence_format::{
+    format_extract_result, format_save_result, json_string, parse_json_or_empty, wants_json,
+};
+use serde_json::json;
 
 pub(crate) async fn handle_tachi_memory(
     server: &MemoryServer,
@@ -40,6 +43,22 @@ pub(crate) async fn handle_tachi_memory(
                 enable_rerank: params.enable_rerank,
                 as_of: params.as_of.clone(),
             };
+            if wants_json(params.format.as_deref()) {
+                let (sections, scope_remapped, scope) =
+                    crate::facade_search_ops::collect_tachi_search_sections(server, &search_params)
+                        .await;
+                let sections = sections
+                    .into_iter()
+                    .map(|(name, rows)| json!({ "name": name, "rows": rows }))
+                    .collect::<Vec<_>>();
+                return json_string(&json!({
+                    "status": "completed",
+                    "query": search_params.query,
+                    "scope": scope,
+                    "scope_remapped": scope_remapped,
+                    "sections": sections,
+                }));
+            }
             crate::facade_search_ops::handle_tachi_search(server, search_params).await
         }
         "save" => {
@@ -100,6 +119,9 @@ pub(crate) async fn handle_tachi_memory(
                 metadata: params.metadata.clone(),
             };
             let body = handle_tachi_save(server, save_params).await?;
+            if wants_json(params.format.as_deref()) {
+                return json_string(&parse_json_or_empty(body));
+            }
             Ok(format_save_result(&body, params.path.as_deref()))
         }
         "extract_facts" => {
@@ -140,6 +162,9 @@ pub(crate) async fn handle_tachi_memory(
                 metadata: params.metadata.clone(),
             };
             let body = handle_tachi_save(server, save_params).await?;
+            if wants_json(params.format.as_deref()) {
+                return json_string(&parse_json_or_empty(body));
+            }
             Ok(format_extract_result(&body))
         }
         "briefing" => briefing_ops::handle_memory_briefing(server, &params).await,
@@ -157,4 +182,6 @@ pub(crate) async fn handle_tachi_memory(
 }
 
 // Re-export pub(crate) items that external modules reference.
-pub(crate) use checkpoint_ops::capture_latest_claude_jsonl_checkpoint;
+pub(crate) use checkpoint_ops::{
+    capture_latest_claude_jsonl_checkpoint, claude_jsonl_passive_watcher_status,
+};

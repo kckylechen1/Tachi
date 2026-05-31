@@ -266,14 +266,14 @@ pub(super) async fn process_recall_rerank_cache_job(
             revision: 1,
             metadata,
             vector: None,
-        retention_policy: Some("ephemeral".to_string()),
-        domain: None,
-        recall_count: 0,
-        query_diversity: 0,
-        tier: "raw".to_string(),
-    };
+            retention_policy: Some("ephemeral".to_string()),
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        };
 
-    persist_capture_entry(
+        persist_capture_entry(
             server,
             item.target_db,
             item.named_project.as_deref(),

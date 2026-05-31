@@ -31,7 +31,11 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     }
     let intersection = ta.intersection(&tb).count() as f64;
     let union = ta.union(&tb).count() as f64;
-    if union == 0.0 { 0.0 } else { intersection / union }
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
 }
 
 const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
@@ -148,28 +152,34 @@ pub fn upsert(
 
     // ── Write-time Jaccard deduplication (new entries only) ──────────────────
     // Only for net-new IDs; ON CONFLICT path below handles updates.
-    let is_new: bool = tx.query_row(
-        "SELECT COUNT(*) FROM memories WHERE id = ?1",
-        params![entry.id],
-        |r| r.get::<_, i64>(0),
-    ).unwrap_or(0) == 0;
+    let is_new: bool = tx
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = ?1",
+            params![entry.id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        == 0;
 
     if is_new {
         // Run FTS search for potential overlapping entries
-        let safe_query: String = entry.text
+        let safe_query: String = entry
+            .text
             .split_whitespace()
             .take(12)
             .collect::<Vec<_>>()
             .join(" ");
         if !safe_query.is_empty() {
             let fts_candidates: Vec<(String, String)> = {
-                let mut stmt = tx.prepare(
-                    "SELECT m.id, m.text FROM memories_fts
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT m.id, m.text FROM memories_fts
                      JOIN memories m ON m.id = memories_fts.id
                      WHERE memories_fts MATCH simple_query(?1)
                        AND m.archived = 0 AND m.superseded_by IS NULL
-                     LIMIT 5"
-                ).ok();
+                     LIMIT 5",
+                    )
+                    .ok();
                 if let Some(ref mut s) = stmt {
                     s.query_map(params![safe_query], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -177,26 +187,40 @@ pub fn upsert(
                     .ok()
                     .map(|rows| rows.filter_map(|r| r.ok()).collect())
                     .unwrap_or_default()
-                } else { vec![] }
+                } else {
+                    vec![]
+                }
             };
             for (cand_id, cand_text) in fts_candidates {
                 if jaccard_similarity(&entry.text, &cand_text) > 0.9 {
                     // Merge: update candidate with max importance and merged tags
                     let merge_kws = {
-                        let cand_kws_json: String = tx.query_row(
-                            "SELECT keywords FROM memories WHERE id = ?1", params![cand_id],
-                            |r| r.get(0)
-                        ).unwrap_or_else(|_| "[]".to_string());
-                        let mut kws: Vec<String> = serde_json::from_str(&cand_kws_json).unwrap_or_default();
-                        for k in &entry.keywords { if !kws.contains(k) { kws.push(k.clone()); } }
+                        let cand_kws_json: String = tx
+                            .query_row(
+                                "SELECT keywords FROM memories WHERE id = ?1",
+                                params![cand_id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let mut kws: Vec<String> =
+                            serde_json::from_str(&cand_kws_json).unwrap_or_default();
+                        for k in &entry.keywords {
+                            if !kws.contains(k) {
+                                kws.push(k.clone());
+                            }
+                        }
                         serde_json::to_string(&kws).unwrap_or_else(|_| "[]".to_string())
                     };
                     let merge_ents = {
-                        let cand_ents_json: String = tx.query_row(
-                            "SELECT entities FROM memories WHERE id = ?1", params![cand_id],
-                            |r| r.get(0)
-                        ).unwrap_or_else(|_| "[]".to_string());
-                        let mut ents: Vec<String> = serde_json::from_str(&cand_ents_json).unwrap_or_default();
+                        let cand_ents_json: String = tx
+                            .query_row(
+                                "SELECT entities FROM memories WHERE id = ?1",
+                                params![cand_id],
+                                |r| r.get(0),
+                            )
+                            .unwrap_or_else(|_| "[]".to_string());
+                        let mut ents: Vec<String> =
+                            serde_json::from_str(&cand_ents_json).unwrap_or_default();
                         for e in &entry.entities {
                             if !ents.contains(e) {
                                 ents.push(e.clone());
@@ -217,7 +241,13 @@ pub fn upsert(
                     if let Ok((cand_path, cand_summary, cand_text)) = tx.query_row(
                         "SELECT path, summary, text FROM memories WHERE id = ?1",
                         params![cand_id],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                        |r| {
+                            Ok((
+                                r.get::<_, String>(0)?,
+                                r.get::<_, String>(1)?,
+                                r.get::<_, String>(2)?,
+                            ))
+                        },
                     ) {
                         let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
                             .unwrap_or_default()
@@ -961,8 +991,7 @@ pub fn record_access(
     let tx = conn.unchecked_transaction()?;
 
     // Build a set of FTS hit IDs for O(1) lookup
-    let fts_set: std::collections::HashSet<&str> =
-        fts_hits.iter().map(String::as_str).collect();
+    let fts_set: std::collections::HashSet<&str> = fts_hits.iter().map(String::as_str).collect();
 
     for id in ids {
         // NOTE: do NOT bump `updated_at` or `revision` here — see original comment.
@@ -988,12 +1017,14 @@ pub fn record_access(
 
         // Increment diversity only when this access introduces a new query hash.
         if !query_hash.is_empty() {
-            let hash_count: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM access_history
+            let hash_count: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM access_history
                  WHERE memory_id = ?1 AND query_hash = ?2",
-                params![id, &query_hash],
-                |r| r.get(0),
-            ).unwrap_or(0);
+                    params![id, &query_hash],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
             if hash_count == 1 {
                 tx.execute(
                     "UPDATE memories SET query_diversity = query_diversity + 1 WHERE id = ?1",

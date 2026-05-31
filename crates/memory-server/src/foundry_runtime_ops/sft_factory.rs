@@ -61,15 +61,15 @@ const SFT_MIN_IMPORTANCE: f64 = 0.65;
 /// Run the daily SFT distillation pass.
 /// Scans for consolidated/pattern memories that have not yet been SFT-processed,
 /// generates LLM dialogue pairs, and appends them to the JSONL export files.
-pub(crate) async fn run_daily_sft_distillation(
-    server: &MemoryServer,
-) -> Result<(), String> {
+pub(crate) async fn run_daily_sft_distillation(server: &MemoryServer) -> Result<(), String> {
     let candidates = collect_sft_candidates(server)?;
     if candidates.is_empty() {
         return Ok(());
     }
 
-    let out_dir = crate::path_utils::tachi_home().join("foundry-runs").join("sft");
+    let out_dir = crate::path_utils::tachi_home()
+        .join("foundry-runs")
+        .join("sft");
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| format!("create SFT output dir: {e}"))?;
@@ -100,12 +100,10 @@ pub(crate) async fn run_daily_sft_distillation(
         }
         match generate_sft_pair(server, &text, &entry.summary).await {
             Ok((user_msg, assistant_msg, pair_type)) => {
-                let chat_obj = build_chat_jsonl(
-                    &user_msg, &assistant_msg, &pair_type, SFT_SYSTEM_PROMPT,
-                );
-                let hf_obj = build_hf_jsonl(
-                    &user_msg, &assistant_msg, &pair_type, SFT_SYSTEM_PROMPT,
-                );
+                let chat_obj =
+                    build_chat_jsonl(&user_msg, &assistant_msg, &pair_type, SFT_SYSTEM_PROMPT);
+                let hf_obj =
+                    build_hf_jsonl(&user_msg, &assistant_msg, &pair_type, SFT_SYSTEM_PROMPT);
                 v3_lines.push(serde_json::to_string(&chat_obj).unwrap_or_default());
                 chat_lines.push(serde_json::to_string(&chat_obj).unwrap_or_default());
                 hf_lines.push(serde_json::to_string(&hf_obj).unwrap_or_default());
@@ -137,7 +135,10 @@ pub(crate) async fn run_daily_sft_distillation(
     // Mark processed entries to avoid re-processing
     mark_sft_processed(server, processed_entries.into_iter(), &batch_id)?;
 
-    eprintln!("[sft_factory] exported {processed} SFT pairs → {}", out_dir.display());
+    eprintln!(
+        "[sft_factory] exported {processed} SFT pairs → {}",
+        out_dir.display()
+    );
     Ok(())
 }
 
@@ -180,9 +181,7 @@ async fn generate_sft_pair(
     text: &str,
     summary: &str,
 ) -> Result<(String, String, String), String> {
-    let user_payload = format!(
-        "Summary: {summary}\n\nDistilled memory:\n{text}"
-    );
+    let user_payload = format!("Summary: {summary}\n\nDistilled memory:\n{text}");
     let raw = server
         .llm
         .call_distill_llm(SFT_GENERATION_SYSTEM, &user_payload, None, 0.4, 800)
@@ -217,12 +216,7 @@ async fn generate_sft_pair(
 
 // ─── JSONL builders ───────────────────────────────────────────────────────────
 
-fn build_chat_jsonl(
-    user: &str,
-    assistant: &str,
-    pair_type: &str,
-    system: &str,
-) -> Value {
+fn build_chat_jsonl(user: &str, assistant: &str, pair_type: &str, system: &str) -> Value {
     json!({
         "messages": [
             {"role": "system", "content": system},
@@ -237,12 +231,7 @@ fn build_chat_jsonl(
     })
 }
 
-fn build_hf_jsonl(
-    user: &str,
-    assistant: &str,
-    pair_type: &str,
-    system: &str,
-) -> Value {
+fn build_hf_jsonl(user: &str, assistant: &str, pair_type: &str, system: &str) -> Value {
     json!({
         "conversations": [
             {"from": "system",    "value": system},
@@ -269,11 +258,12 @@ fn mark_sft_processed<'a>(
         return Ok(());
     }
     let now = chrono::Utc::now().to_rfc3339();
-    server.with_project_store(|store| {
-        let conn = store.connection();
-        for id in &ids {
-            conn.execute(
-                r#"UPDATE memories
+    server
+        .with_project_store(|store| {
+            let conn = store.connection();
+            for id in &ids {
+                conn.execute(
+                    r#"UPDATE memories
                    SET metadata = json_set(
                           CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
                           '$.sft.processed', 1,
@@ -281,18 +271,16 @@ fn mark_sft_processed<'a>(
                           '$.sft.batch_id', ?2
                         )
                    WHERE id = ?3"#,
-                rusqlite::params![now, batch_id, id],
-            ).map_err(|e| format!("update SFT marker for {id}: {e}"))?;
-        }
-        Ok(())
-    })
-    .map_err(|e| format!("mark SFT processed: {e}"))
+                    rusqlite::params![now, batch_id, id],
+                )
+                .map_err(|e| format!("update SFT marker for {id}: {e}"))?;
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("mark SFT processed: {e}"))
 }
 
-async fn append_jsonl_lines(
-    path: &Path,
-    lines: &[String],
-) -> Result<(), String> {
+async fn append_jsonl_lines(path: &Path, lines: &[String]) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -313,10 +301,7 @@ async fn append_jsonl_lines(
     Ok(())
 }
 
-async fn write_jsonl_lines(
-    path: &Path,
-    lines: &[String],
-) -> Result<(), String> {
+async fn write_jsonl_lines(path: &Path, lines: &[String]) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .create_new(true)

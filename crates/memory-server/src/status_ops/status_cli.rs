@@ -419,48 +419,7 @@ pub(crate) async fn run_watcher(
     let server = crate::MemoryServer::new(global_db_path.to_path_buf(), project_db_path)?;
     match action {
         WatcherAction::Status { json: json_out } => {
-            let params = crate::tool_params::TachiMemoryParams {
-                action: "briefing".to_string(),
-                query: Some("passive watcher".to_string()),
-                scope: None,
-                top_k: 1,
-                path_prefix: None,
-                file_context: None,
-                error_context: None,
-                category: None,
-                include_archived: false,
-                enable_rerank: false,
-                as_of: None,
-                synthesize: false,
-                model: None,
-                text: None,
-                title: None,
-                summary: None,
-                topic: None,
-                keywords: Vec::new(),
-                entities: Vec::new(),
-                importance: None,
-                retention_policy: None,
-                kind: None,
-                path: None,
-                id: None,
-                force: false,
-                source: None,
-                valid_from: None,
-                valid_until: None,
-                flow_id: None,
-                event: None,
-                state: None,
-                project: None,
-                domain: None,
-                metadata: None,
-            };
-            let body = crate::facade_memory_ops::handle_tachi_memory(&server, params).await?;
-            let value: serde_json::Value = serde_json::from_str(&body)?;
-            let watcher = value
-                .get("passive_watcher")
-                .cloned()
-                .unwrap_or_else(|| json!({"status":"unknown"}));
+            let watcher = crate::facade_memory_ops::claude_jsonl_passive_watcher_status();
             if json_out {
                 println!("{}", serde_json::to_string_pretty(&watcher)?);
             } else {

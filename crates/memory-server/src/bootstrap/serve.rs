@@ -1213,7 +1213,9 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             let auto_daemon_disabled = std::env::var("TACHI_DISABLE_AUTO_DAEMON")
                 .map(|value| {
                     let value = value.trim();
-                    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+                    value == "1"
+                        || value.eq_ignore_ascii_case("true")
+                        || value.eq_ignore_ascii_case("yes")
                 })
                 .unwrap_or(false);
             if !daemon_running && !auto_daemon_disabled {

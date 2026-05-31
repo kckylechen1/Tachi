@@ -1128,32 +1128,54 @@ fn record_access_increments_recall_count_for_fts_hits() {
     upsert(&mut conn, &e, false).unwrap();
 
     // First call: id is in fts_hits → recall_count should be 1
-    record_access(&conn, &["tier-rc-1".to_string()], &["tier-rc-1".to_string()], Some("query-a")).unwrap();
+    record_access(
+        &conn,
+        &["tier-rc-1".to_string()],
+        &["tier-rc-1".to_string()],
+        Some("query-a"),
+    )
+    .unwrap();
 
-    let (rc, qd): (i64, i64) = conn.query_row(
-        "SELECT recall_count, query_diversity FROM memories WHERE id = ?1",
-        rusqlite::params!["tier-rc-1"],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
+    let (rc, qd): (i64, i64) = conn
+        .query_row(
+            "SELECT recall_count, query_diversity FROM memories WHERE id = ?1",
+            rusqlite::params!["tier-rc-1"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(rc, 1, "recall_count should be 1 after one FTS hit");
-    assert_eq!(qd, 1, "query_diversity should be 1 after one distinct query");
+    assert_eq!(
+        qd, 1,
+        "query_diversity should be 1 after one distinct query"
+    );
 
     // Second call with different query and no FTS hit → recall_count stays 1, diversity goes to 2
     record_access(&conn, &["tier-rc-1".to_string()], &[], Some("query-b")).unwrap();
 
-    let (rc2, qd2): (i64, i64) = conn.query_row(
-        "SELECT recall_count, query_diversity FROM memories WHERE id = ?1",
-        rusqlite::params!["tier-rc-1"],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
-    assert_eq!(rc2, 1, "recall_count should still be 1 (no FTS hit in second call)");
-    assert_eq!(qd2, 2, "query_diversity should be 2 after two distinct queries");
+    let (rc2, qd2): (i64, i64) = conn
+        .query_row(
+            "SELECT recall_count, query_diversity FROM memories WHERE id = ?1",
+            rusqlite::params!["tier-rc-1"],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        rc2, 1,
+        "recall_count should still be 1 (no FTS hit in second call)"
+    );
+    assert_eq!(
+        qd2, 2,
+        "query_diversity should be 2 after two distinct queries"
+    );
 }
 
 #[test]
 fn record_access_promotion_gate_raw_to_consolidated() {
     let mut conn = make_conn();
-    let e = make_entry("tier-promo-1", "promotion gate test memory entry for tier lifecycle");
+    let e = make_entry(
+        "tier-promo-1",
+        "promotion gate test memory entry for tier lifecycle",
+    );
     upsert(&mut conn, &e, false).unwrap();
 
     // Need: recall_count >= 3 AND query_diversity >= 3
@@ -1181,18 +1203,26 @@ fn record_access_promotion_gate_raw_to_consolidated() {
     )
     .unwrap();
 
-    let tier: String = conn.query_row(
-        "SELECT tier FROM memories WHERE id = ?1",
-        rusqlite::params!["tier-promo-1"],
-        |r| r.get(0),
-    ).unwrap();
-    assert_eq!(tier, "consolidated", "tier should be promoted to consolidated after 3 FTS recalls with 3 distinct queries");
+    let tier: String = conn
+        .query_row(
+            "SELECT tier FROM memories WHERE id = ?1",
+            rusqlite::params!["tier-promo-1"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        tier, "consolidated",
+        "tier should be promoted to consolidated after 3 FTS recalls with 3 distinct queries"
+    );
 }
 
 #[test]
 fn record_access_no_promotion_without_diversity() {
     let mut conn = make_conn();
-    let e = make_entry("tier-no-promo", "no promotion without diversity memory entry");
+    let e = make_entry(
+        "tier-no-promo",
+        "no promotion without diversity memory entry",
+    );
     upsert(&mut conn, &e, false).unwrap();
 
     let id = "tier-no-promo".to_string();
@@ -1219,12 +1249,17 @@ fn record_access_no_promotion_without_diversity() {
     )
     .unwrap();
 
-    let (tier, rc, qd): (String, i64, i64) = conn.query_row(
-        "SELECT tier, recall_count, query_diversity FROM memories WHERE id = ?1",
-        rusqlite::params!["tier-no-promo"],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).unwrap();
-    assert_eq!(tier, "raw", "tier should NOT be promoted with low query diversity");
+    let (tier, rc, qd): (String, i64, i64) = conn
+        .query_row(
+            "SELECT tier, recall_count, query_diversity FROM memories WHERE id = ?1",
+            rusqlite::params!["tier-no-promo"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        tier, "raw",
+        "tier should NOT be promoted with low query diversity"
+    );
     assert_eq!(rc, 3, "recall_count should be 3");
     assert_eq!(qd, 1, "query_diversity should be 1 (all same query hash)");
 }

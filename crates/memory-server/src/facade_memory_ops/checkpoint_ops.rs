@@ -1,10 +1,13 @@
 //! Checkpoint handler and Claude JSONL passive watcher.
 
+use super::evidence_format::{
+    checkpoint_message, checkpoint_saved_payload, json_string, merge_keywords, parse_json_or_empty,
+    wants_json,
+};
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
-use super::evidence_format::{checkpoint_message, checkpoint_saved_payload, merge_keywords};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,7 +16,11 @@ pub(crate) async fn handle_memory_checkpoint(
     server: &MemoryServer,
     params: TachiMemoryParams,
 ) -> Result<String, String> {
+    let return_json = wants_json(params.format.as_deref());
     let (body, display_path, already_formatted) = save_memory_checkpoint(server, params).await?;
+    if return_json {
+        return json_string(&parse_json_or_empty(body));
+    }
     Ok(checkpoint_message(
         &body,
         display_path.as_deref(),
@@ -117,6 +124,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
     let params = TachiMemoryParams {
         action: "checkpoint".to_string(),
         query: None,
+        format: None,
         scope: Some("project".to_string()),
         top_k: 6,
         path_prefix: None,
@@ -163,7 +171,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
 // Claude JSONL passive watcher helpers
 // ---------------------------------------------------------------------------
 
-fn claude_jsonl_passive_watcher_status() -> Value {
+pub(crate) fn claude_jsonl_passive_watcher_status() -> Value {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let candidates = vec![
         home.join(".claude").join("projects"),

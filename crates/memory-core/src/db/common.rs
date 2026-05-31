@@ -90,6 +90,8 @@ pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         vector: None,
         recall_count: row.get("recall_count").unwrap_or(0),
         query_diversity: row.get("query_diversity").unwrap_or(0),
-        tier: row.get::<_, String>("tier").unwrap_or_else(|_| "raw".to_string()),
+        tier: row
+            .get::<_, String>("tier")
+            .unwrap_or_else(|_| "raw".to_string()),
     })
 }

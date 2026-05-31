@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-06-01
+
+Final format-contract patch for the `tachi_memory` facade.
+
+### Added
+
+- `tachi_memory` now accepts `format="json"` (alias: `output_format`) for stable, minified JSON responses on `search`, `save`, `extract_facts`, `checkpoint`, `alerts`, `ask`, `consolidate`, `progress`, `readiness`, and `briefing`.
+
+### Changed
+
+- Default `tachi_memory` responses remain compact Markdown for human/LLM consumption; programmatic clients should request `format="json"` when they need field-level contracts.
+
+### Fixed
+
+- `tachi watcher status --json` now reads the passive watcher status directly instead of parsing Markdown briefing output.
+
 ## [1.4.1] - 2026-06-01
 
 Patch release: post-1.4.0 hardening for Plan C, daemon safety, GC, and Linux release builds.

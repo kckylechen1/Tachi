@@ -532,7 +532,6 @@ pub struct MemoryEntry {
     pub metadata: serde_json::Value,
 
     // ── Memory Lifecycle fields (tier-based decay & SFT factory) ──────────────
-
     /// How many times this memory has been retrieved via a search hit (FTS).
     #[serde(default)]
     pub recall_count: i64,

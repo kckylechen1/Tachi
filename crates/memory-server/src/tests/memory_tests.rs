@@ -63,11 +63,9 @@ async fn tachi_init_project_db_creates_expected_path() {
     let json: serde_json::Value =
         serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
 
-    let db_path = crate::path_utils::resolve_project_db_path(
-        &root,
-        std::path::Path::new(".tachi/memory.db"),
-    )
-    .expect("resolve project db path");
+    let db_path =
+        crate::path_utils::resolve_project_db_path(&root, std::path::Path::new(".tachi/memory.db"))
+            .expect("resolve project db path");
     assert_eq!(json["created"], json!(true));
     assert_eq!(json["db_path"], json!(db_path.display().to_string()));
     assert!(db_path.exists(), "project db should be created on disk");
@@ -100,10 +98,7 @@ async fn tachi_init_project_db_rejects_path_traversal() {
         .await
         .expect_err("path traversal db_relpath should be rejected");
 
-    assert!(
-        err.contains("db_relpath"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("db_relpath"), "unexpected error: {err}");
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -206,6 +201,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
     let saved = server
         .tachi_memory(Parameters(TachiMemoryParams {
             action: "save".to_string(),
+            format: None,
             query: None,
             scope: None,
             top_k: 6,
@@ -502,7 +498,8 @@ async fn save_memory_allows_curated_tier_metadata() {
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
-            text: "Curated trading lessons should enter the lifecycle as consolidated knowledge.".to_string(),
+            text: "Curated trading lessons should enter the lifecycle as consolidated knowledge."
+                .to_string(),
             summary: "Curated lifecycle tier".to_string(),
             path: "/trading/equity/lessons/tier-test".to_string(),
             importance: 0.85,
@@ -534,7 +531,9 @@ async fn save_memory_allows_curated_tier_metadata() {
         .with_global_store_read(|store| {
             store
                 .connection()
-                .query_row("SELECT tier FROM memories WHERE id = ?1", [&id], |row| row.get::<_, String>(0))
+                .query_row("SELECT tier FROM memories WHERE id = ?1", [&id], |row| {
+                    row.get::<_, String>(0)
+                })
                 .map_err(|e| e.to_string())
         })
         .expect("read tier");

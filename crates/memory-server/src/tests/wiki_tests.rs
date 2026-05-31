@@ -408,8 +408,11 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
 
     let wiki_db = temp_home.join(".tachi/projects/wiki/memory.db");
     MemoryStore::open(wiki_db.to_str().expect("wiki db utf8")).expect("init wiki db");
-    let server = MemoryServer::new(temp_home.join("global.db"), Some(temp_home.join("project.db")))
-        .expect("server");
+    let server = MemoryServer::new(
+        temp_home.join("global.db"),
+        Some(temp_home.join("project.db")),
+    )
+    .expect("server");
     server.with_project_store(|store| {
         for (id, summary, text) in [
             (
@@ -436,14 +439,19 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         }
         Ok(())
     }).expect("seed patterns");
-    let seeded_count: i64 = server.with_project_store_read(|store| {
-        store.connection().query_row(
+    let seeded_count: i64 = server
+        .with_project_store_read(|store| {
+            store.connection().query_row(
             "SELECT COUNT(*) FROM memories WHERE tier = 'pattern' AND topic = 'recall-gate'",
             [],
             |row| row.get(0),
         ).map_err(|e| e.to_string())
-    }).expect("count seeded patterns");
-    assert_eq!(seeded_count, 2, "expected two pattern memories before REM run");
+        })
+        .expect("count seeded patterns");
+    assert_eq!(
+        seeded_count, 2,
+        "expected two pattern memories before REM run"
+    );
 
     let report = crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server)
         .await
@@ -459,12 +467,36 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
     assert_eq!(review_status.as_deref(), Some("pending"));
 
     server_task.abort();
-    if let Some(value) = original_home { std::env::set_var("HOME", value); } else { std::env::remove_var("HOME"); }
-    if let Some(value) = original_tachi_home { std::env::set_var("TACHI_HOME", value); } else { std::env::remove_var("TACHI_HOME"); }
-    if let Some(value) = original_siliconflow_base { std::env::set_var("SILICONFLOW_BASE_URL", value); } else { std::env::remove_var("SILICONFLOW_BASE_URL"); }
-    if let Some(value) = original_reasoning_base { std::env::set_var("REASONING_BASE_URL", value); } else { std::env::remove_var("REASONING_BASE_URL"); }
-    if let Some(value) = original_siliconflow_key { std::env::set_var("SILICONFLOW_API_KEY", value); } else { std::env::remove_var("SILICONFLOW_API_KEY"); }
-    if let Some(value) = original_voyage_key { std::env::set_var("VOYAGE_API_KEY", value); } else { std::env::remove_var("VOYAGE_API_KEY"); }
+    if let Some(value) = original_home {
+        std::env::set_var("HOME", value);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    if let Some(value) = original_tachi_home {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+    if let Some(value) = original_siliconflow_base {
+        std::env::set_var("SILICONFLOW_BASE_URL", value);
+    } else {
+        std::env::remove_var("SILICONFLOW_BASE_URL");
+    }
+    if let Some(value) = original_reasoning_base {
+        std::env::set_var("REASONING_BASE_URL", value);
+    } else {
+        std::env::remove_var("REASONING_BASE_URL");
+    }
+    if let Some(value) = original_siliconflow_key {
+        std::env::set_var("SILICONFLOW_API_KEY", value);
+    } else {
+        std::env::remove_var("SILICONFLOW_API_KEY");
+    }
+    if let Some(value) = original_voyage_key {
+        std::env::set_var("VOYAGE_API_KEY", value);
+    } else {
+        std::env::remove_var("VOYAGE_API_KEY");
+    }
     let _ = std::fs::remove_dir_all(temp_home);
 }
 

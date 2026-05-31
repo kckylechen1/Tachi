@@ -2,6 +2,20 @@
 
 use serde_json::{json, Value};
 
+pub(crate) fn wants_json(format: Option<&str>) -> bool {
+    matches!(
+        format
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("json" | "application/json" | "structured")
+    )
+}
+
+pub(crate) fn json_string(value: &Value) -> Result<String, String> {
+    serde_json::to_string(value).map_err(|e| format!("serialize JSON response: {e}"))
+}
+
 pub(crate) fn parse_json_or_empty(raw: String) -> Value {
     serde_json::from_str(&raw).unwrap_or_else(|_| {
         let preview: String = raw.chars().take(500).collect();
@@ -101,7 +115,11 @@ pub(crate) fn format_extract_result(raw: &str) -> String {
     out.join("\n")
 }
 
-pub(crate) fn checkpoint_message(raw: &str, display_path: Option<&str>, already_formatted: bool) -> String {
+pub(crate) fn checkpoint_message(
+    raw: &str,
+    display_path: Option<&str>,
+    already_formatted: bool,
+) -> String {
     if already_formatted {
         raw.to_string()
     } else {

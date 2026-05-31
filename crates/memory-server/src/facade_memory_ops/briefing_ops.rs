@@ -1,10 +1,13 @@
 //! Briefing handler for `tachi_memory(action="briefing")`.
 
+use super::evidence_format::{
+    json_string, parse_evidence_array, parse_json_or_empty, slim_kanban, slim_memory_rows,
+    wants_json,
+};
 use crate::agent_markdown;
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
-use super::evidence_format::{parse_evidence_array, slim_kanban, slim_memory_rows, parse_json_or_empty};
 use serde_json::json;
 
 pub(crate) async fn handle_memory_briefing(
@@ -115,6 +118,18 @@ pub(crate) async fn handle_memory_briefing(
         "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
         "wiki": wiki_counts,
     });
+
+    if wants_json(params.format.as_deref()) {
+        return json_string(&json!({
+            "status": "completed",
+            "query": query,
+            "memories": memories,
+            "wiki": wiki,
+            "health": health_summary,
+            "kanban": board,
+            "recent_checkpoints": checkpoints,
+        }));
+    }
 
     Ok(agent_markdown::format_briefing(
         &query,

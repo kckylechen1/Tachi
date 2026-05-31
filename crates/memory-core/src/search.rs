@@ -677,7 +677,7 @@ pub fn hybrid_search(
     // ── Tier-based retrieval boosts ───────────────────────────────────────────
     for (id, entry) in &entries_ref {
         let tier_multiplier = match entry.tier.as_str() {
-            "pattern"     => 1.15,
+            "pattern" => 1.15,
             "consolidated" => 1.08,
             _ => 1.0, // raw
         };

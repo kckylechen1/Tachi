@@ -1216,6 +1216,7 @@ impl MemoryServer {
     pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
+            format: None,
             query: None,
             scope: None,
             top_k: 6,

@@ -80,7 +80,9 @@ Return ONLY a single valid JSON object (no markdown, no wrapping):
 /// Called once per week (Sunday 05:00 Asia/Shanghai) from the daemon
 /// bootstrap loop. Safe to call multiple times; dedup is handled via
 /// metadata marker `rem.processed=1` on source entries.
-pub(crate) async fn run_weekly_wiki_evolution(server: &MemoryServer) -> Result<WikiEvolverReport, String> {
+pub(crate) async fn run_weekly_wiki_evolution(
+    server: &MemoryServer,
+) -> Result<WikiEvolverReport, String> {
     let candidates = collect_pattern_memories(server)?;
     if candidates.is_empty() {
         return Ok(WikiEvolverReport {
@@ -285,8 +287,12 @@ fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String
     let stripped = crate::llm::LlmClient::strip_code_fence(raw);
     let start = stripped.find('{').unwrap_or(0);
     let end = stripped.rfind('}').map(|i| i + 1).unwrap_or(stripped.len());
-    let obj: Value = serde_json::from_str(&stripped[start..end])
-        .map_err(|e| format!("parse wiki draft JSON: {e} — raw={}", &raw.chars().take(300).collect::<String>()))?;
+    let obj: Value = serde_json::from_str(&stripped[start..end]).map_err(|e| {
+        format!(
+            "parse wiki draft JSON: {e} — raw={}",
+            &raw.chars().take(300).collect::<String>()
+        )
+    })?;
 
     let title = obj
         .get("title")
@@ -308,12 +314,20 @@ fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String
     let keywords: Vec<String> = obj
         .get("keywords")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let entities: Vec<String> = obj
         .get("entities")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     let domain = obj
         .get("domain")
@@ -321,7 +335,14 @@ fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String
         .unwrap_or("wiki")
         .to_string();
 
-    Ok(WikiDraft { title, body, summary, keywords, entities, domain })
+    Ok(WikiDraft {
+        title,
+        body,
+        summary,
+        keywords,
+        entities,
+        domain,
+    })
 }
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -331,7 +352,6 @@ async fn save_wiki_draft(
     topic: &str,
     draft: WikiDraft,
 ) -> Result<(), String> {
-
     // Slugify: lowercase, spaces → hyphens, strip non-alphanumeric
     let slug = draft
         .title
@@ -412,7 +432,9 @@ async fn save_wiki_draft(
                     )
                     .map_err(|e| format!("patch review_status: {e}"))
             }) {
-                eprintln!("[wiki_evolver] warn: could not patch review_status on draft '{path}': {e}");
+                eprintln!(
+                    "[wiki_evolver] warn: could not patch review_status on draft '{path}': {e}"
+                );
             }
             Ok(())
         }
