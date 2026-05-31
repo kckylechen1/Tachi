@@ -11,7 +11,7 @@
 //!
 //! Called once per daily pipeline run after truth maintenance completes.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -69,7 +69,7 @@ pub(crate) async fn run_daily_sft_distillation(
         return Ok(());
     }
 
-    let out_dir = tachi_app_home().join("foundry-runs").join("sft");
+    let out_dir = crate::path_utils::tachi_home().join("foundry-runs").join("sft");
     tokio::fs::create_dir_all(&out_dir)
         .await
         .map_err(|e| format!("create SFT output dir: {e}"))?;
@@ -356,14 +356,4 @@ fn extract_json_object(raw: &str) -> String {
     } else {
         raw.to_string()
     }
-}
-
-fn tachi_app_home() -> PathBuf {
-    std::env::var("TACHI_APP_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".tachi")
-        })
 }

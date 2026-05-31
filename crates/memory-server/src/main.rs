@@ -74,6 +74,7 @@ mod memory_ops;
 mod memory_search_ops;
 mod notes_ops;
 mod pack_ops;
+mod path_utils;
 mod pipeline_ops;
 mod profiles;
 mod project_db_ops;

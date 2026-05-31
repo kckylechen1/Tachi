@@ -5,25 +5,6 @@ use super::recall::*;
 use super::*;
 use std::path::PathBuf;
 
-fn tachi_home_root() -> PathBuf {
-    if let Ok(raw) = std::env::var("TACHI_HOME") {
-        if raw == "~" {
-            return dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        }
-        if let Some(rest) = raw.strip_prefix("~/") {
-            return dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(rest);
-        }
-        if !raw.trim().is_empty() {
-            return PathBuf::from(raw);
-        }
-    }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tachi")
-}
-
 pub(super) fn resolve_capture_target(
     server: &MemoryServer,
     requested_scope: &str,
@@ -34,7 +15,7 @@ pub(super) fn resolve_capture_target(
         return (DbScope::Project, Some(project.to_string()), None, None);
     }
 
-    let manifest_path = tachi_home_root().join("manifest.json");
+    let manifest_path = crate::path_utils::tachi_home().join("manifest.json");
     let manifest = crate::manifest::Manifest::load_or_empty(&manifest_path);
     if let Some(db_path) = manifest.resolve_agent_db_path(agent_id) {
         return (
@@ -957,6 +938,12 @@ pub(super) fn extract_bracket_self_evolution_notes(
     notes
 }
 
+fn matches_agent_tag(agent_id: &str, tag: &str) -> bool {
+    agent_id
+        .split(|c: char| !c.is_alphanumeric() && c != '-')
+        .any(|part| part.eq_ignore_ascii_case(tag))
+}
+
 pub(crate) async fn handle_capture_session(
     server: &MemoryServer,
     params: CaptureSessionParams,
@@ -1002,8 +989,8 @@ pub(crate) async fn handle_capture_session(
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
     // preference notes scoped to "user" instead of the requested scope.
-    let is_user_memory_agent = params.agent_id.to_ascii_lowercase().contains("user-memory")
-        || params.agent_id.to_ascii_lowercase().contains("jayne");
+    let is_user_memory_agent = matches_agent_tag(&params.agent_id, "user-memory")
+        || matches_agent_tag(&params.agent_id, "jayne");
 
     let mut entries = Vec::<MemoryEntry>::new();
     for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
@@ -1060,7 +1047,7 @@ pub(crate) async fn handle_capture_session(
             ]),
             persons: Vec::new(),
             entities: if is_user_memory_agent {
-                vec!["user".to_string(), params.agent_id.clone()]
+                vec!["user".to_string()]
             } else {
                 Vec::new()
             },

@@ -1,7 +1,6 @@
 use super::*;
 use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DailyPipelineReport {
@@ -98,7 +97,7 @@ pub(crate) async fn run_daily_pipeline(
     server: &MemoryServer,
 ) -> Result<DailyPipelineReport, String> {
     let date = shanghai_today();
-    let app_home = tachi_app_home();
+    let app_home = crate::path_utils::tachi_home();
     let (health_stage, health_json, report_path) =
         run_health_check(server, &app_home, &date).await?;
     if let Err(e) = run_truth_maintenance_stage(server, &app_home).await {
@@ -297,7 +296,7 @@ async fn run_truth_maintenance_for_target(
     let named_project = match (target_db, server.project_db_path_buf()) {
         (DbScope::Project, Some(default_path))
             if default_path != target.path
-                && canonical_named_project_from_path(&target.path).is_some() =>
+                && crate::path_utils::named_project_from_path(&target.path).is_some() =>
         {
             Some(target.label.clone())
         }
@@ -1230,40 +1229,6 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
     name.split(':').next_back().unwrap_or(&name).to_string()
 }
 
-fn canonical_named_project_from_path(db_path: &Path) -> Option<String> {
-    let parent = db_path.parent()?;
-    let name = parent.file_name()?.to_str()?;
-    let grand = parent.parent()?;
-    let grand_name = grand.file_name()?.to_str()?;
-    let root = grand.parent()?;
-    let root_name = root.file_name()?.to_str()?;
-    if grand_name == "projects"
-        && root_name == ".tachi"
-        && db_path.file_name()?.to_str()? == "memory.db"
-    {
-        Some(name.to_string())
-    } else {
-        None
-    }
-}
-
-fn tachi_app_home() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    for key in ["TACHI_HOME", "SIGIL_HOME"] {
-        if let Ok(raw) = std::env::var(key) {
-            if raw == "~" {
-                return home;
-            }
-            if let Some(rest) = raw.strip_prefix("~/") {
-                return home.join(rest);
-            }
-            if !raw.trim().is_empty() {
-                return PathBuf::from(raw);
-            }
-        }
-    }
-    home.join(".tachi")
-}
 
 fn shanghai_today() -> String {
     Utc::now()

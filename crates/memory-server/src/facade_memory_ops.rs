@@ -240,7 +240,7 @@ async fn handle_memory_briefing(
         json!([])
     };
 
-    let (warnings_res, board_res, checkpoints_res) = tokio::join!(
+    let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         crate::status_ops::collect_agent_warning_lines(server),
         crate::dispatch_ops::handle_tachi_board(
             server,
@@ -251,12 +251,12 @@ async fn handle_memory_briefing(
             },
         ),
         async { crate::status_ops::list_recent_checkpoint_entries(server, 3) },
+        crate::wiki_ops::wiki_hygiene_counts(server),
     );
     let warnings = warnings_res;
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
-
-    let wiki_counts = crate::wiki_ops::wiki_hygiene_counts(server).await?;
+    let wiki_counts = wiki_counts_res?;
     let health_summary = json!({
         "health_score": if warnings.is_empty() { 95 } else { 85 },
         "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
