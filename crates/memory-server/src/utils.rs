@@ -94,7 +94,7 @@ pub(super) fn is_trusted_command(cmd: &str) -> bool {
     false
 }
 
-pub(super) fn sanitize_safe_path_name(name: &str) -> String {
+pub(crate) fn sanitize_safe_path_name(name: &str) -> String {
     let sanitized: String = name
         .trim()
         .chars()

@@ -28,6 +28,9 @@ Plan C project DB, memory lifecycle / SFT factory, and facade module split.
 
 - #137: `path_utils` dedup, entity pollution in `capture_session`, word-boundary agent matching.
 - Post-merge upsert SQL and SFT/wiki SELECT without dropped `persons` column; CI clippy (`-D warnings`).
+- Jaccard dedup refreshes candidate `memories_fts` row; `record_access` increments `query_diversity` incrementally.
+- Plan C symlink uses sanitized project dir name; non-Unix hosts get an explicit note in the init response.
+- Align `crates/memory-node/package.json` to 1.4.0 for release version checks.
 
 ## [1.3.1] - 2026-05-31
 

@@ -36,6 +36,24 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 
 const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
 
+fn sync_memories_fts(
+    tx: &rusqlite::Transaction<'_>,
+    id: &str,
+    path: &str,
+    summary: &str,
+    text: &str,
+    keywords_joined: &str,
+    entities_joined: &str,
+) -> Result<(), MemoryError> {
+    tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
+    tx.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         VALUES (?1,?2,?3,?4,?5,?6)",
+        params![id, path, summary, text, keywords_joined, entities_joined],
+    )?;
+    Ok(())
+}
+
 // ─── Normalization ────────────────────────────────────────────────────────────
 
 /// Coerce caller-provided enum-like fields to the canonical vocabulary
@@ -188,6 +206,27 @@ pub fn upsert(
                          WHERE id = ?5",
                         params![merge_kws, merge_ents, importance, &write_time_utc, cand_id],
                     ).ok();
+                    if let Ok((cand_path, cand_summary, cand_text)) = tx.query_row(
+                        "SELECT path, summary, text FROM memories WHERE id = ?1",
+                        params![cand_id],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                    ) {
+                        let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
+                            .unwrap_or_default()
+                            .join(" ");
+                        let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
+                            .unwrap_or_default()
+                            .join(" ");
+                        let _ = sync_memories_fts(
+                            &tx,
+                            &cand_id,
+                            &cand_path,
+                            &cand_summary,
+                            &cand_text,
+                            &kws_joined,
+                            &ents_joined,
+                        );
+                    }
                     // Write this entry as superseded by the candidate
                     tx.execute(
                         r#"INSERT INTO memories
@@ -282,14 +321,16 @@ pub fn upsert(
         ],
     )?;
 
-    // Sync FTS: delete old row (if any) then re-insert
     let kws = entry.keywords.join(" ");
     let ents = entry.entities.join(" ");
-    tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![entry.id])?;
-    tx.execute(
-        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
-         VALUES (?1,?2,?3,?4,?5,?6)",
-        params![entry.id, &path, &clean_summary, &clean_text, kws, ents],
+    sync_memories_fts(
+        &tx,
+        &entry.id,
+        &path,
+        &clean_summary,
+        &clean_text,
+        &kws,
+        &ents,
     )?;
 
     if let Some(vec) = &entry.vector {
@@ -935,17 +976,21 @@ pub fn record_access(
             )?;
         }
 
-        // Recompute query_diversity from distinct hashes in access_history
-        let diversity: i64 = tx.query_row(
-            "SELECT COUNT(DISTINCT query_hash) FROM access_history
-             WHERE memory_id = ?1 AND query_hash != ''",
-            params![id],
-            |r| r.get(0),
-        ).unwrap_or(0);
-        tx.execute(
-            "UPDATE memories SET query_diversity = ?1 WHERE id = ?2",
-            params![diversity, id],
-        )?;
+        // Increment diversity only when this access introduces a new query hash.
+        if !query_hash.is_empty() {
+            let hash_count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM access_history
+                 WHERE memory_id = ?1 AND query_hash = ?2",
+                params![id, &query_hash],
+                |r| r.get(0),
+            ).unwrap_or(0);
+            if hash_count == 1 {
+                tx.execute(
+                    "UPDATE memories SET query_diversity = query_diversity + 1 WHERE id = ?1",
+                    params![id],
+                )?;
+            }
+        }
 
         // Promotion gate: raw → consolidated when recall_count ≥ 3 AND query_diversity ≥ 3
         tx.execute(

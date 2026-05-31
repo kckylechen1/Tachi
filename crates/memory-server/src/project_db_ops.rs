@@ -34,9 +34,11 @@ pub(crate) async fn handle_tachi_init_project_db(
     // Hot-activate the project DB on the running server (no restart needed)
     let was_new_activation = server.activate_project_db(db_path.clone())?;
 
-    // Implement Plan C: Symlink at ~/.tachi/projects/{name}/memory.db -> project-local DB
+    let mut plan_c_note: Option<String> = None;
+    // Plan C: ~/.tachi/projects/<safe-name>/memory.db -> project-local DB (Unix only).
     if let Some(project_name_os) = project_root.file_name() {
         if let Some(project_name) = project_name_os.to_str() {
+            let safe_name = crate::utils::sanitize_safe_path_name(project_name);
             let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
             let app_home = std::env::var("TACHI_HOME")
                 .map(|v| {
@@ -47,7 +49,7 @@ pub(crate) async fn handle_tachi_init_project_db(
                     }
                 })
                 .unwrap_or_else(|_| home.join(".tachi"));
-            let global_project_dir = app_home.join("projects").join(project_name);
+            let global_project_dir = app_home.join("projects").join(&safe_name);
             tokio::fs::create_dir_all(&global_project_dir)
                 .await
                 .map_err(|e| format!("create global project dir: {e}"))?;
@@ -59,9 +61,31 @@ pub(crate) async fn handle_tachi_init_project_db(
             {
                 std::os::unix::fs::symlink(&db_path, &global_link)
                     .map_err(|e| format!("create project symlink: {e}"))?;
+                plan_c_note = Some(format!(
+                    "Global symlink: {} -> {}",
+                    global_link.display(),
+                    db_path.display()
+                ));
+            }
+            #[cfg(not(unix))]
+            {
+                plan_c_note = Some(
+                    "Plan C global symlink skipped on non-Unix hosts; use db_path directly."
+                        .to_string(),
+                );
             }
         }
     }
+
+    let activation_note = if was_new_activation {
+        "Project DB is now active on this server instance. No restart needed."
+    } else {
+        "Project DB was already active; re-opened with latest state."
+    };
+    let note = match plan_c_note {
+        Some(plan_c) => format!("{activation_note} {plan_c}"),
+        None => activation_note.to_string(),
+    };
 
     serde_json::to_string(&json!({
         "initialized": true,
@@ -71,11 +95,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         "project_root": project_root.display().to_string(),
         "db_path": db_path.display().to_string(),
         "db_relpath": rel.display().to_string(),
-        "note": if was_new_activation {
-            "Project DB is now active on this server instance. No restart needed."
-        } else {
-            "Project DB was already active; re-opened with latest state."
-        },
+        "note": note,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

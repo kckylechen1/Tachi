@@ -1,6 +1,6 @@
 {
   "name": "@chaoxlabs/tachi-node",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "High-performance memory storage & hybrid search engine (Rust native module)",
   "main": "index.js",
   "types": "index.d.ts",
@@ -44,10 +44,10 @@
     "*.node"
   ],
   "optionalDependencies": {
-    "@chaoxlabs/tachi-node-win32-x64-msvc": "1.3.0",
-    "@chaoxlabs/tachi-node-darwin-x64": "1.3.0",
-    "@chaoxlabs/tachi-node-darwin-arm64": "1.3.0",
-    "@chaoxlabs/tachi-node-linux-x64-gnu": "1.3.0",
-    "@chaoxlabs/tachi-node-linux-arm64-gnu": "1.3.0"
+    "@chaoxlabs/tachi-node-win32-x64-msvc": "1.4.0",
+    "@chaoxlabs/tachi-node-darwin-x64": "1.4.0",
+    "@chaoxlabs/tachi-node-darwin-arm64": "1.4.0",
+    "@chaoxlabs/tachi-node-linux-x64-gnu": "1.4.0",
+    "@chaoxlabs/tachi-node-linux-arm64-gnu": "1.4.0"
   }
 }
