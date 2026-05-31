@@ -791,6 +791,7 @@ impl Drop for SftEnvGuard {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes TACHI_HOME across async mock LLM + distillation
 async fn test_run_daily_sft_distillation() {
     let _guard = tachi_home_test_lock()
         .lock()
