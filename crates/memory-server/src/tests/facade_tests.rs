@@ -171,6 +171,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             state: None,
             project: None,
             domain: Some("engineering".to_string()),
+            metadata: None,
         },
     )
     .await
@@ -222,6 +223,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             state: None,
             project: None,
             domain: Some("rust".to_string()),
+            metadata: None,
         },
     )
     .await
@@ -292,6 +294,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             state: None,
             project: None,
             domain: None,
+            metadata: None,
         },
     )
     .await
@@ -351,6 +354,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             state: Some("running".to_string()),
             project: None,
             domain: None,
+            metadata: None,
         },
     )
     .await
@@ -410,6 +414,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             state: None,
             project: None,
             domain: None,
+            metadata: None,
         },
     )
     .await
