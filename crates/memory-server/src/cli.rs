@@ -42,25 +42,6 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub gc_interval_secs: Option<u64>,
 
-    /// Enable clawdoctor: periodic OpenClaw health check + auto-restart
-    /// (overrides CLAWDOCTOR_ENABLED)
-    #[arg(long)]
-    pub clawdoctor: Option<bool>,
-
-    /// OpenClaw gateway URL for clawdoctor health checks
-    /// (overrides CLAWDOCTOR_URL, default: http://127.0.0.1:18789)
-    #[arg(long)]
-    pub clawdoctor_url: Option<String>,
-
-    /// Clawdoctor check interval in seconds (overrides CLAWDOCTOR_INTERVAL_SECS, default: 300)
-    #[arg(long)]
-    pub clawdoctor_interval_secs: Option<u64>,
-
-    /// Consecutive failures before clawdoctor triggers a restart
-    /// (overrides CLAWDOCTOR_FAIL_THRESHOLD, default: 3)
-    #[arg(long)]
-    pub clawdoctor_fail_threshold: Option<u32>,
-
     /// CLI command (defaults to `serve` when omitted)
     #[command(subcommand)]
     pub command: Option<Commands>,

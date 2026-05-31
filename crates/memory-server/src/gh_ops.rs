@@ -1003,6 +1003,7 @@ mod safe_merge_tests {
         assert!(client.merge_calls().is_empty());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()

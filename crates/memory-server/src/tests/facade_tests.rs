@@ -234,22 +234,15 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
 
     let db_path = server.global_db_path_buf();
     let conn = rusqlite::Connection::open(db_path).expect("open test db");
-    let (keywords, entities, persons, domain, path): (
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    ) = conn
+    let (keywords, entities, domain, path): (String, String, Option<String>, String) = conn
         .query_row(
-            "SELECT keywords, entities, persons, domain, path FROM memories WHERE id=?1",
+            "SELECT keywords, entities, domain, path FROM memories WHERE id=?1",
             [mem_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .expect("row exists");
     assert_eq!(keywords, r#"["rust","mcp"]"#);
     assert_eq!(entities, r#"["memory-server","sigil"]"#);
-    assert_eq!(persons, "[]");
     assert_eq!(domain.as_deref(), Some("rust"));
     assert_eq!(path, "/project/sigil/mcp");
 }
@@ -308,6 +301,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
     assert!(parsed["thinking"]["key_evidence"].is_array());
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_memory_progress_writes_append_only_jsonl() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
@@ -443,8 +437,8 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
                 .connection()
                 .execute(
                     "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, persons, entities, location, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/status', 'status', 'status diagnostic memory', 0.8, ?2, 'fact', 'status', '[]', '[]', '[]', '', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, location, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/status', 'status', 'status diagnostic memory', 0.8, ?2, 'fact', 'status', '[]', '[]', '', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
                     rusqlite::params!["status-memory", Utc::now().to_rfc3339()],
                 )
                 .map_err(|e| e.to_string())?;

@@ -417,7 +417,8 @@ pub struct DomainConfig {
 ///
 /// Canonical fields for agents (MCP + new writes): `keywords`, `entities`, `domain`, `path`, …
 ///
-/// Legacy SQLite column `persons` remains for old rows; new Tachi paths should not populate it.
+/// Legacy OpenClaw/JSON `persons` is folded into `entities`; schema init drops the
+/// old physical column for Tachi DBs.
 ///
 /// Wire-compat aliases (JSON only; DB bridge copies legacy columns on open):
 ///   OpenClaw: entry_id → id, lossless_restatement → text
@@ -475,7 +476,7 @@ pub struct MemoryEntry {
     #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Legacy SQLite/JSON column. Reads preserve old rows; all writes fold into `entities` and store `[]`.
+    /// Legacy OpenClaw/JSON field. Reads preserve old payloads; writes fold it into `entities`.
     #[serde(default)]
     pub persons: Vec<String>,
 
@@ -561,13 +562,11 @@ impl MemoryEntry {
     }
 
     pub fn is_kanban(&self) -> bool {
-        self.category.eq_ignore_ascii_case("kanban")
-            || self.path.starts_with("/kanban/")
+        self.category.eq_ignore_ascii_case("kanban") || self.path.starts_with("/kanban/")
     }
 
     pub fn is_handoff(&self) -> bool {
-        self.category.eq_ignore_ascii_case("handoff")
-            || self.path.starts_with("/handoff/")
+        self.category.eq_ignore_ascii_case("handoff") || self.path.starts_with("/handoff/")
     }
 
     pub fn is_foundry_distill(&self) -> bool {

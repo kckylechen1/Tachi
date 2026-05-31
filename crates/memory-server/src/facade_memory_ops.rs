@@ -876,6 +876,7 @@ fn with_progress_status_lock<T>(
     let lock_path = status_path.with_extension("json.lock");
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(&lock_path)
         .map_err(|e| format!("open lock {}: {e}", lock_path.display()))?;

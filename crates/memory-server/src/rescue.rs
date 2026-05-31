@@ -21,7 +21,8 @@
 //!      surfaces collisions cleanly instead of double-inserting.
 //!   5. **Schema-aware.** Target schemas may include `domain` /
 //!      `retention_policy` columns that the legacy source lacks — we detect
-//!      and conditionally populate them.
+//!      and conditionally populate them. Legacy source `persons` is folded into
+//!      `entities`; new target writes do not populate the physical column.
 
 use rusqlite::{params, Connection, OpenFlags};
 use serde::Serialize;
@@ -245,15 +246,28 @@ fn read_source_rows(source: &Path) -> Result<Vec<SourceRow>, String> {
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| format!("open source DB: {e}"))?;
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, persons, entities, location, source, scope, archived,
-                    created_at, updated_at, access_count, last_access, metadata, revision
-             FROM memories
-             WHERE archived = 0",
+    let persons_expr = if conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
+            [],
+            |_| Ok(true),
         )
+        .unwrap_or(false)
+    {
+        "persons"
+    } else {
+        "'[]' AS persons"
+    };
+
+    let sql = format!(
+        "SELECT id, path, summary, text, importance, timestamp, category, topic,
+                keywords, {persons_expr}, entities, location, source, scope, archived,
+                created_at, updated_at, access_count, last_access, metadata, revision
+         FROM memories
+         WHERE archived = 0"
+    );
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| format!("prepare source select: {e}"))?;
 
     let rows = stmt
@@ -317,6 +331,13 @@ fn make_target_id(source_id: &str, target: &str) -> String {
 struct TargetCaps {
     has_domain: bool,
     has_retention_policy: bool,
+}
+
+fn merge_legacy_persons_into_entities(persons_raw: &str, entities_raw: &str) -> String {
+    let persons: Vec<String> = serde_json::from_str(persons_raw).unwrap_or_default();
+    let mut entities: Vec<String> = serde_json::from_str(entities_raw).unwrap_or_default();
+    memory_core::types::fold_person_names_into_entities(&mut entities, persons);
+    serde_json::to_string(&entities).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn detect_target_caps(conn: &Connection) -> Result<TargetCaps, String> {
@@ -435,14 +456,15 @@ pub fn apply_rescue(
         // B1/B2: normalize legacy source/category to satisfy CHECK constraints.
         let source_final = MemorySource::parse_or_external(&row.source).to_string();
         let category_final = MemoryCategory::normalize(&row.category).to_string();
+        let entities_final = merge_legacy_persons_into_entities(&row.persons, &row.entities);
 
         let result = if caps.has_domain && caps.has_retention_policy {
             conn.execute(
                 "INSERT INTO memories
                  (id, path, summary, text, importance, timestamp, category, topic, keywords,
-                  persons, entities, location, source, scope, archived, created_at, updated_at,
+                  entities, location, source, scope, archived, created_at, updated_at,
                   access_count, last_access, revision, metadata, retention_policy, domain)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
                 params![
                     new_id,
                     row.path,
@@ -453,8 +475,7 @@ pub fn apply_rescue(
                     category_final,
                     row.topic,
                     row.keywords,
-                    row.persons,
-                    row.entities,
+                    entities_final,
                     row.location,
                     source_final,
                     scope_final,
@@ -473,9 +494,9 @@ pub fn apply_rescue(
             conn.execute(
                 "INSERT INTO memories
                  (id, path, summary, text, importance, timestamp, category, topic, keywords,
-                  persons, entities, location, source, scope, archived, created_at, updated_at,
+                  entities, location, source, scope, archived, created_at, updated_at,
                   access_count, last_access, metadata, revision)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     new_id,
                     row.path,
@@ -486,8 +507,7 @@ pub fn apply_rescue(
                     category_final,
                     row.topic,
                     row.keywords,
-                    row.persons,
-                    row.entities,
+                    entities_final,
                     row.location,
                     source_final,
                     scope_final,
@@ -676,14 +696,14 @@ mod tests {
         }
         drop(src);
 
-        // ---- Build target DBs with the new 23-column schema (incl. domain). ----
+        // ---- Build target DBs with the new schema (incl. domain, no persons). ----
         let target_schema = "CREATE TABLE memories (
             id TEXT PRIMARY KEY, path TEXT NOT NULL DEFAULT '/',
             summary TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '',
             importance REAL NOT NULL DEFAULT 0.7, timestamp TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT 'fact', topic TEXT NOT NULL DEFAULT '',
-            keywords TEXT NOT NULL DEFAULT '[]', persons TEXT NOT NULL DEFAULT '[]',
-            entities TEXT NOT NULL DEFAULT '[]', location TEXT NOT NULL DEFAULT '',
+            keywords TEXT NOT NULL DEFAULT '[]', entities TEXT NOT NULL DEFAULT '[]',
+            location TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT 'manual', scope TEXT NOT NULL DEFAULT 'general',
             archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '', access_count INTEGER NOT NULL DEFAULT 0,

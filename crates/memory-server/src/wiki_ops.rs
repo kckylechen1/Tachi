@@ -1200,15 +1200,13 @@ pub(crate) async fn handle_wiki_search(
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
-            weights: params.weights.or_else(|| {
-                Some(HybridWeightsParam {
-                    semantic: 0.48,
-                    fts: 0.30,
-                    symbolic: 0.20,
-                    decay: 0.02,
-                    use_rrf: true,
-                })
-            }),
+            weights: params.weights.or(Some(HybridWeightsParam {
+                semantic: 0.48,
+                fts: 0.30,
+                symbolic: 0.20,
+                decay: 0.02,
+                use_rrf: true,
+            })),
             agent_role: params.agent_role,
             project: params.project,
             domain: params.domain,

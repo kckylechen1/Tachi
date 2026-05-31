@@ -61,7 +61,6 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
-            persons      TEXT NOT NULL DEFAULT '[]',
             entities     TEXT NOT NULL DEFAULT '[]',
             location     TEXT NOT NULL DEFAULT '',
             source       TEXT NOT NULL DEFAULT 'manual',
@@ -521,6 +520,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     normalize_memory_validity_columns(conn)?;
 
     bridge_hypertachi_memory_columns(conn)?;
+    crate::db::migrations::fold_and_drop_legacy_persons_column(conn)?;
 
     ensure_fts_backfilled(conn)?;
 
@@ -534,7 +534,6 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 /// Align HyperTachi-shaped legacy DBs (`indexed_tags`, `domain_key`) with Sigil's
 /// canonical columns before enum/CHECK migrations run.
 fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError> {
-    ensure_column(conn, "memories", "persons", "TEXT NOT NULL DEFAULT '[]'")?;
     ensure_column(conn, "memories", "location", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "domain", "TEXT")?;
 
@@ -875,7 +874,6 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
             category     TEXT NOT NULL DEFAULT 'fact',
             topic        TEXT NOT NULL DEFAULT '',
             keywords     TEXT NOT NULL DEFAULT '[]',
-            persons      TEXT NOT NULL DEFAULT '[]',
             entities     TEXT NOT NULL DEFAULT '[]',
             location     TEXT NOT NULL DEFAULT '',
             source       TEXT NOT NULL DEFAULT 'manual',
@@ -904,14 +902,14 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
 
         INSERT INTO memories_new
             (id, path, summary, text, importance, timestamp, valid_from, valid_until,
-             category, topic, keywords, persons, entities, location, source, scope, archived,
+             category, topic, keywords, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by,
              recall_count, query_diversity, tier)
         SELECT
              id, path, summary, text, importance, timestamp,
              COALESCE(NULLIF(valid_from, ''), timestamp), NULLIF(valid_until, ''),
-             category, topic, keywords, persons, entities, location, source, scope, archived,
+             category, topic, keywords, entities, location, source, scope, archived,
              created_at, updated_at, access_count, last_access, revision,
              metadata, retention_policy, domain, superseded_by,
               __RECALL_COUNT_EXPR__, __QUERY_DIVERSITY_EXPR__, __TIER_EXPR__
@@ -1269,14 +1267,21 @@ mod migration_tests {
     fn bridge_hypertachi_columns_before_enum_migration() {
         let conn = open_with_hypertachi_shape();
         init_schema(&conn).expect("init_schema should bridge hypertachi columns");
-        let (persons, keywords, location, domain): (String, String, String, Option<String>) = conn
+        let has_persons_column: bool = conn
             .query_row(
-                "SELECT persons, keywords, location, domain FROM memories WHERE id='hypertachi-1'",
+                "SELECT 1 FROM pragma_table_info('memories') WHERE name='persons' LIMIT 1",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        assert!(!has_persons_column);
+        let (keywords, location, domain): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT keywords, location, domain FROM memories WHERE id='hypertachi-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        assert_eq!(persons, "[]");
         assert_eq!(keywords, r#"["alice"]"#);
         assert_eq!(location, "");
         assert_eq!(domain.as_deref(), Some("finance"));
@@ -1353,11 +1358,11 @@ mod migration_tests {
             .execute(
                 r#"INSERT INTO memories
                    (id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, persons, entities, location, source, scope, archived,
+                    keywords, entities, location, source, scope, archived,
                     created_at, updated_at, access_count, last_access, revision,
                     metadata, retention_policy, domain)
                    VALUES ('row2', '/notes/y', '', '', 0.5, '2026-04-30T00:00:00Z',
-                           'fact', '', '[]','[]','[]','', 'manual', 'self', 0,
+                           'fact', '', '[]','[]','', 'manual', 'self', 0,
                            '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
                            '{}', NULL, NULL)"#,
                 [],
@@ -1437,11 +1442,11 @@ mod migration_tests {
         conn.execute(
             r#"INSERT INTO memories
                    (id, path, summary, text, importance, timestamp, category, topic,
-                    keywords, persons, entities, location, source, scope, archived,
+                    keywords, entities, location, source, scope, archived,
                     created_at, updated_at, access_count, last_access, revision,
                     metadata, retention_policy, domain)
                    VALUES ('row2', '/guide/fix/main/x', '', '', 0.5, '2026-04-30T00:00:00Z',
-                           'guide', '', '[]','[]','[]','', 'foundry_recall_rerank_cache', 'project', 0,
+                           'guide', '', '[]','[]','', 'foundry_recall_rerank_cache', 'project', 0,
                            '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, NULL, 1,
                            '{}', NULL, NULL)"#,
             [],
@@ -1571,14 +1576,14 @@ mod migration_tests {
             r#"
             INSERT INTO memories
                 (id, path, summary, text, importance, timestamp, category, topic,
-                 keywords, persons, entities, location, source, scope, archived,
+                 keywords, entities, location, source, scope, archived,
                  created_at, updated_at, access_count, revision, metadata)
             VALUES
                 ('row1', '/notes/a', '', 'alpha', 0.5, '2026-04-30T00:00:00Z',
-                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 'fact', '', '[]', '[]', '', 'manual', 'general', 0,
                  '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}'),
                 ('row2', '/notes/b', '', 'bravo', 0.5, '2026-04-30T00:00:00Z',
-                 'fact', '', '[]', '[]', '[]', '', 'manual', 'general', 0,
+                 'fact', '', '[]', '[]', '', 'manual', 'general', 0,
                  '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z', 0, 1, '{}');
             INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
             VALUES

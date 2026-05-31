@@ -79,6 +79,8 @@ fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&st
 pub(super) const ENRICH_BATCH_MAX: usize = 32;
 pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
+type MetadataExtractionResult = (usize, Result<(Vec<String>, Vec<String>), String>);
+
 impl MemoryServer {
     pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
         if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
@@ -182,7 +184,7 @@ impl MemoryServer {
             })
             .collect();
 
-        let metadata_results: Vec<(usize, Result<(Vec<String>, Vec<String>), String>)> =
+        let metadata_results: Vec<MetadataExtractionResult> =
             futures::future::join_all(metadata_futures).await;
 
         let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
