@@ -674,6 +674,20 @@ pub fn hybrid_search(
         }
     }
 
+    // ── Tier-based retrieval boosts ───────────────────────────────────────────
+    for (id, entry) in &entries_ref {
+        let tier_multiplier = match entry.tier.as_str() {
+            "pattern"     => 1.15,
+            "consolidated" => 1.08,
+            _ => 1.0, // raw
+        };
+        if tier_multiplier > 1.0 {
+            if let Some(score) = scores.get_mut(id) {
+                score.final_score *= tier_multiplier;
+            }
+        }
+    }
+
     let newest_by_entity = newest_by_shared_entity(&entries_ref);
     for id in newest_by_entity {
         if !superseded_ids.contains(&id) {
@@ -791,7 +805,9 @@ pub fn hybrid_search(
     // ── Record access (bump counters) ─────────────────────────────────────────
     if opts.record_access {
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
-        record_access(conn, &accessed_ids)?;
+        // FTS hits drive recall_count; collect before taking results slice
+        let fts_hit_ids: Vec<String> = fts_scores.keys().cloned().collect();
+        record_access(conn, &accessed_ids, &fts_hit_ids, Some(query))?;
         for r in &mut results {
             r.entry.access_count += 1;
         }
@@ -849,6 +865,9 @@ mod tests {
             vector: None,
             retention_policy: None,
             domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
         }
     }
 

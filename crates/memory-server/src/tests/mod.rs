@@ -21,8 +21,7 @@ fn ensure_test_env() {
 }
 
 fn home_test_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    crate::utils::global_test_lock()
 }
 
 /// Tests that spawn real subprocesses sensitive to `HOME` (e.g. `npx`, which
@@ -143,6 +142,9 @@ fn make_entry(id: &str) -> MemoryEntry {
         vector: None,
         retention_policy: None,
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     }
 }
 

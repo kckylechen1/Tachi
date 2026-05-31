@@ -573,7 +573,7 @@ fn is_orphan_entry(
             return false;
         }
     }
-    if named_project_from_path(db_path).is_some() {
+    if crate::path_utils::named_project_from_path(db_path).is_some() {
         return false;
     }
     !(entry.allow_write
@@ -582,23 +582,6 @@ fn is_orphan_entry(
             entry.role,
             DbRole::Agent | DbRole::Foundry | DbRole::Unknown
         ))
-}
-
-fn named_project_from_path(db_path: &Path) -> Option<String> {
-    let parent = db_path.parent()?;
-    let name = parent.file_name()?.to_str()?;
-    let grand = parent.parent()?;
-    let grand_name = grand.file_name()?.to_str()?;
-    let root = grand.parent()?;
-    let root_name = root.file_name()?.to_str()?;
-    if grand_name == "projects"
-        && root_name == ".tachi"
-        && db_path.file_name()?.to_str()? == "memory.db"
-    {
-        Some(name.to_string())
-    } else {
-        None
-    }
 }
 
 fn paths_equal(a: &Path, b: &Path) -> bool {

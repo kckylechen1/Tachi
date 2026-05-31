@@ -97,6 +97,11 @@ pub(crate) fn format_briefing(
         }
     }
 
+    out.push(
+        "\n> **Session end**: save decisions/outcomes → `tachi_memory(action='save', text=…, keywords=[…], project='…')`. Windsurf/Cursor have no auto-capture."
+            .to_string(),
+    );
+
     out.join("\n")
 }
 

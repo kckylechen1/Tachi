@@ -420,6 +420,50 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         None
     };
 
+    // Implement Plan C symlink validation at startup
+    if let Some(ref db_path) = project_db_path {
+        if let Some(root) = git_root.as_ref() {
+            if let Some(project_name) = root.file_name().and_then(|n| n.to_str()) {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                let app_home = std::env::var("TACHI_HOME")
+                    .map(|v| {
+                        if v.starts_with("~/") {
+                            home.join(&v[2..])
+                        } else {
+                            PathBuf::from(v)
+                        }
+                    })
+                    .unwrap_or_else(|_| home.join(".tachi"));
+                let projects_root = app_home.join("projects");
+                
+                // Do not create symlink if target is already inside ~/.tachi/projects/
+                if !db_path.starts_with(&projects_root) {
+                    let global_project_dir = projects_root.join(project_name);
+                    if std::fs::create_dir_all(&global_project_dir).is_ok() {
+                        let global_link = global_project_dir.join("memory.db");
+                        let link_is_correct = if global_link.is_symlink() || global_link.exists() {
+                            match std::fs::read_link(&global_link) {
+                                Ok(target) => target == *db_path,
+                                Err(_) => false,
+                            }
+                        } else {
+                            false
+                        };
+                        if !link_is_correct {
+                            let _ = std::fs::remove_file(&global_link);
+                            #[cfg(unix)]
+                            {
+                                if let Err(e) = std::os::unix::fs::symlink(db_path, &global_link) {
+                                    tracing::warn!(error = %e, "Failed to create project symlink at startup");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Commands::Distill { action } = &command {
         use crate::cli::DistillAction;
         let DistillAction::Run { db } = action;
@@ -1111,6 +1155,24 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
         }
 
+        {
+            let rem_server = server.clone();
+            tokio::spawn(async move {
+                loop {
+                    let next_run = crate::daily_pipeline::next_weekly_rem_run_time();
+                    tokio::time::sleep_until(next_run).await;
+                    match crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&rem_server).await {
+                        Ok(report) => eprintln!(
+                            "[rem-wiki-evolver] completed: clusters={} drafts={} skipped={} errors={}",
+                            report.clusters_found, report.drafts_written, report.skipped, report.errors
+                        ),
+                        Err(e) => eprintln!("[rem-wiki-evolver] failed: {e}"),
+                    }
+                }
+            });
+            eprintln!("[daemon] REM wiki evolver scheduled for Sunday 05:00 Asia/Shanghai");
+        }
+
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         };
@@ -1185,7 +1247,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // stdio mode (default) — auto-spawn daemon if not running
         {
             let daemon_running = crate::cli_client::detect_daemon(&app_home).await.is_some();
-            if !daemon_running {
+            let auto_daemon_disabled = std::env::var("TACHI_DISABLE_AUTO_DAEMON")
+                .map(|value| {
+                    let value = value.trim();
+                    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+                })
+                .unwrap_or(false);
+            if !daemon_running && !auto_daemon_disabled {
                 match std::env::current_exe() {
                     Ok(exe) => {
                         let port_str = cli.port.to_string();
@@ -1239,6 +1307,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         eprintln!("[auto-daemon] cannot determine binary path: {e}");
                     }
                 }
+            } else if !daemon_running {
+                eprintln!("[auto-daemon] disabled by TACHI_DISABLE_AUTO_DAEMON");
             }
         }
 

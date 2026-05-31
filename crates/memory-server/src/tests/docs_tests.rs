@@ -38,6 +38,9 @@ async fn test_docs_organization_and_task_sync() {
         }),
         retention_policy: None,
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     let resolved_card_2 = memory_core::MemoryEntry {
@@ -67,6 +70,9 @@ async fn test_docs_organization_and_task_sync() {
         }),
         retention_policy: None,
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     server

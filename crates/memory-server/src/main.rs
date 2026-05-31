@@ -72,6 +72,7 @@ mod memory_ops;
 mod memory_search_ops;
 mod notes_ops;
 mod pack_ops;
+mod path_utils;
 mod pipeline_ops;
 mod profiles;
 mod project_db_ops;
@@ -113,12 +114,12 @@ use crate::mcp_proxy::{
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
-    categorize_error, slim_entry, slim_entry_with_enrichment, slim_l0_rule, slim_search_result,
+    categorize_error, slim_entry, slim_entry_with_enrichment, slim_search_result,
     DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, find_project_git_root, is_active_global_rule, is_trusted_command,
+    find_git_root, find_project_git_root, is_trusted_command,
     lock_or_recover, parse_env_bool, parse_env_u64, read_or_recover, sanitize_safe_path_name,
     stable_hash, value_to_template_text, write_or_recover,
 };

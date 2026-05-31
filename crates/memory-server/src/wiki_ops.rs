@@ -636,6 +636,9 @@ pub(crate) async fn handle_wiki_ingest(
         vector: None,
         retention_policy: Some("permanent".to_string()),
         domain: Some("wiki".to_string()),
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     server.with_named_project_store("wiki", |store| {
@@ -837,6 +840,9 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
         vector: None,
         retention_policy: Some("durable".to_string()),
         domain: Some("wiki".to_string()),
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     let append_result = server.with_named_project_store("wiki", |store| {

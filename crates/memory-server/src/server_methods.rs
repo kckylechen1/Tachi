@@ -282,11 +282,24 @@ impl MemoryServer {
             .join(project_name)
             .join("memory.db");
         if !db_path.exists() {
-            Err(format!(
-                "Project '{}' not found (expected DB at {})",
-                project_name,
-                db_path.display()
-            ))
+            if db_path.is_symlink() {
+                let target_str = match std::fs::read_link(&db_path) {
+                    Ok(target) => target.display().to_string(),
+                    Err(_) => "<unknown>".to_string(),
+                };
+                Err(format!(
+                    "Project '{}' database symlink is broken: {} -> (target missing: {})",
+                    project_name,
+                    db_path.display(),
+                    target_str
+                ))
+            } else {
+                Err(format!(
+                    "Project '{}' not found (expected DB at {})",
+                    project_name,
+                    db_path.display()
+                ))
+            }
         } else {
             Ok(db_path)
         }

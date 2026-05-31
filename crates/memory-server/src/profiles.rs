@@ -206,6 +206,8 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search action is read-only)
     "tachi_memory",
+    // Zero-param session-start alias for tachi_memory(action='briefing')
+    "tachi_briefing",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -285,6 +287,10 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
+    // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
+    "tachi_briefing",
+    // Direct notepad/conclusion saver facade (high-frequency)
+    "tachi_save",
     // Live web search
     "tachi_web_search",
     // Wiki facade (search / browse / write)
@@ -860,6 +866,8 @@ mod tests {
             vec![
                 test_tool("tachi_task"),
                 test_tool("tachi_memory"),
+                test_tool("tachi_briefing"),
+                test_tool("tachi_save"),
                 test_tool("tachi_web_search"),
                 test_tool("tachi_wiki"),
                 test_tool("tachi_skill"),
@@ -872,7 +880,6 @@ mod tests {
                 test_tool("post_card"),
                 // Old tools that should be excluded from standard
                 test_tool("tachi_search"),
-                test_tool("tachi_save"),
                 test_tool("tachi_handoff"),
                 test_tool("tachi_plan"),
                 test_tool("recall_context"),
@@ -898,6 +905,8 @@ mod tests {
             vec![
                 "tachi_task".to_string(),
                 "tachi_memory".to_string(),
+                "tachi_briefing".to_string(),
+                "tachi_save".to_string(),
                 "tachi_web_search".to_string(),
                 "tachi_wiki".to_string(),
                 "tachi_skill".to_string(),

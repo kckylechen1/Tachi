@@ -1199,12 +1199,57 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
-        description = "Programming-agent memory. Actions: search, save, extract_facts, briefing, checkpoint, alerts, ask, consolidate, progress, readiness. Policy: call briefing at non-trivial task start. Save at task end only for durable outcomes worth recalling next week: decisions, root causes, commands, files touched, API/schema contracts, release/deploy/test facts. Save concise conclusions, not raw chat; never secrets or chain-of-thought. Use checkpoint only for unfinished handoff/next steps. Use tachi_wiki for stable how-tos/reference docs, and memory paths like /scratch/... or /code-review/... for working/project notes. Include project, path, keywords, entities. Cursor/Windsurf have no auto-capture; OpenClaw agent_end is separate."
+        description = "Memory search and operations. action='search'/'ask': recall prior session context during work. action='extract_facts': atomize raw text/logs via LLM. action='checkpoint': mid-task pause/handoff. action='alerts': surface blocker signals when stuck. Note: use tachi_save to save high-value decisions/lessons."
     )]
     pub(crate) async fn tachi_memory(
         &self,
         Parameters(params): Parameters<TachiMemoryParams>,
     ) -> Result<String, String> {
+        crate::facade_memory_ops::handle_tachi_memory(self, params).await
+    }
+
+    /// Zero-param briefing alias. Call at the start of any non-trivial task to
+    /// load prior session context without having to remember the action name.
+    #[tool(
+        description = "Call at the START of any non-trivial task. Returns prior session context, recent decisions, and active todos. Zero params required — equivalent to tachi_memory(action='briefing')."
+    )]
+    pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
+        let params = TachiMemoryParams {
+            action: "briefing".to_string(),
+            query: None,
+            scope: None,
+            top_k: 6,
+            path_prefix: None,
+            file_context: None,
+            error_context: None,
+            category: None,
+            include_archived: false,
+            enable_rerank: false,
+            as_of: None,
+            synthesize: false,
+            model: None,
+            text: None,
+            title: None,
+            summary: None,
+            topic: None,
+            keywords: vec![],
+            entities: vec![],
+            importance: None,
+            retention_policy: None,
+            kind: None,
+            path: None,
+            id: None,
+            force: false,
+            source: None,
+            valid_from: None,
+            valid_until: None,
+            flow_id: None,
+            event: None,
+            state: None,
+            project: None,
+            domain: None,
+            metadata: None,
+        };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }
 
@@ -1229,7 +1274,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Unified save: writes a wiki entry, memory, or quick note. Set kind to 'wiki', 'note', or 'memory' — or omit for auto-detection."
+        description = "Save a conclusion (preference, decision, or lesson) after any meaningful step — do NOT wait for session end. For raw logs or general text, use tachi_memory(action='extract_facts')."
     )]
     pub(crate) async fn tachi_save(
         &self,
@@ -1366,7 +1411,7 @@ impl MemoryServer {
     // ─── Facade: wiki (search / browse / write) ─────────────────────────────
 
     #[tool(
-        description = "Unified wiki facade: search, browse, read, or write wiki entries. Returns readable Markdown. Pass `project` to target a named library explicitly. Diagnostics belong in tachi_status / tachi_doctor."
+        description = "Stable, reusable knowledge base. action='search': look up lessons, patterns, and how-tos BEFORE debugging from scratch or reaching for web search — a prior lesson may already exist. action='browse': explore available categories. action='read': load a specific entry by path. action='write': persist a reusable lesson, architecture decision, pattern, or how-to. WHEN: wiki for durable knowledge that helps future sessions (patterns, lessons, decisions, conventions). Use tachi_memory for session-specific facts (decisions, findings, commands for the current task). Pass project to target a named library."
     )]
     pub(crate) async fn tachi_wiki(
         &self,
@@ -1460,7 +1505,7 @@ impl MemoryServer {
     // ─── Facade: skill (discover / run) ──────────────────────────────────────
 
     #[tool(
-        description = "Unified skill facade: discover available skills or run a skill. Use action='discover' or 'run'."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem — a pre-built workflow may already exist (try: 'brainstorm', 'code-review', 'debug', 'ship', 'design'). action='run': execute a named skill by ID. Always discover before writing custom multi-step logic."
     )]
     pub(crate) async fn tachi_skill(
         &self,
@@ -1527,7 +1572,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / dispatch / board / merge) ─────────────────────
 
     #[tool(
-        description = "Unified task facade: plan a task, dispatch to an agent, view the board, or merge a worktree. Use action='plan', 'dispatch', 'board', or 'merge'."
+        description = "Task management facade. action='plan': search memory/wiki for relevant context and produce a todo list before complex multi-step work — call before dispatch; action='dispatch': spawn a delegate agent (Claude Code / Codex) to execute a task slice in a worktree; action='board': view active/completed task statuses; action='merge': land a worktree branch after review. Typical flow: plan → dispatch → board (poll status) → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1623,7 +1668,7 @@ impl MemoryServer {
     // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────
 
     #[tool(
-        description = "Tachi Shell: skill-gated flow orchestration. Actions: 'brainstorm' | 'plan' | 'dispatch' | 'kanban' | 'status' | 'review' | 'ship'. Each stage-bearing action injects the required Superpowers meta skill SOP and writes an instruction.md packet under .tachi/runs/<flow_id>/."
+        description = "Skill-gated flow orchestration for multi-step projects. WHEN: use tachi_shell when a task needs a full lifecycle with formal skill SOPs or multiple coordinated agents. Use tachi_task for single-agent work. action='brainstorm': explore options before committing to a design; action='plan': produce a decision-complete plan with validated structure; action='dispatch': assign work slices to agents; action='kanban': check progress; action='review': gate before merge; action='ship': release. Each stage-bearing action injects the corresponding Superpowers skill SOP and writes an instruction.md packet under .tachi/runs/<flow_id>/."
     )]
     pub(crate) async fn tachi_shell(
         &self,

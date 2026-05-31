@@ -1,7 +1,6 @@
 use super::*;
 use chrono::{Datelike, Duration as ChronoDuration, FixedOffset, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DailyPipelineReport {
@@ -98,11 +97,16 @@ pub(crate) async fn run_daily_pipeline(
     server: &MemoryServer,
 ) -> Result<DailyPipelineReport, String> {
     let date = shanghai_today();
-    let app_home = tachi_app_home();
+    let app_home = crate::path_utils::tachi_home();
     let (health_stage, health_json, report_path) =
         run_health_check(server, &app_home, &date).await?;
     if let Err(e) = run_truth_maintenance_stage(server, &app_home).await {
         eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
+    }
+
+    // ── SFT Factory: generate fine-tuning dialogues from distilled memories ───
+    if let Err(e) = crate::foundry_runtime_ops::sft_factory::run_daily_sft_distillation(server).await {
+        eprintln!("[daily_pipeline] SFT factory skipped: {e}");
     }
     let agent_stage = run_agent_evolution_stage(server, &app_home).await;
     let skill_stage = run_skill_evolution_stage(server).await;
@@ -152,6 +156,54 @@ pub(crate) fn next_daily_run_time() -> tokio::time::Instant {
     } else {
         today_0400 + ChronoDuration::days(1)
     };
+    let wait = (next_local.with_timezone(&Utc) - now_utc)
+        .to_std()
+        .unwrap_or_else(|_| Duration::from_secs(0));
+    tokio::time::Instant::now() + wait
+}
+
+/// Returns the instant for the next Sunday 05:00 Asia/Shanghai.
+/// Used by the weekly REM wiki evolver loop.
+pub(crate) fn next_weekly_rem_run_time() -> tokio::time::Instant {
+    let tz = shanghai_offset();
+    let now_utc = Utc::now();
+    let now_local = now_utc.with_timezone(&tz);
+
+    // chrono: weekday().num_days_from_sunday() gives 0 for Sunday.
+    let days_until_sunday = {
+        let wd = now_local.weekday().num_days_from_sunday() as i64;
+        if wd == 0 { 0i64 } else { 7 - wd }
+    };
+    let candidate_date = now_local.date_naive() + ChronoDuration::days(days_until_sunday);
+    let candidate = tz
+        .with_ymd_and_hms(
+            candidate_date.year(),
+            candidate_date.month(),
+            candidate_date.day(),
+            5,
+            0,
+            0,
+        )
+        .single()
+        .unwrap_or(now_local);
+
+    // If we already passed Sunday 05:00 this week, schedule for next Sunday.
+    let next_local = if now_local < candidate {
+        candidate
+    } else {
+        let next_date = candidate_date + ChronoDuration::days(7);
+        tz.with_ymd_and_hms(
+            next_date.year(),
+            next_date.month(),
+            next_date.day(),
+            5,
+            0,
+            0,
+        )
+        .single()
+        .unwrap_or(now_local)
+    };
+
     let wait = (next_local.with_timezone(&Utc) - now_utc)
         .to_std()
         .unwrap_or_else(|_| Duration::from_secs(0));
@@ -244,7 +296,7 @@ async fn run_truth_maintenance_for_target(
     let named_project = match (target_db, server.project_db_path_buf()) {
         (DbScope::Project, Some(default_path))
             if default_path != target.path
-                && canonical_named_project_from_path(&target.path).is_some() =>
+                && crate::path_utils::named_project_from_path(&target.path).is_some() =>
         {
             Some(target.label.clone())
         }
@@ -255,12 +307,93 @@ async fn run_truth_maintenance_for_target(
         "UPDATE memories
          SET archived = 1, updated_at = datetime('now')
          WHERE archived = 0
-           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned')
+           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
+           AND importance < 0.70
            AND access_count = 0
            AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
         [],
     )
     .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
+
+    // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
+    let total_active: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE archived = 0", [], |r| r.get(0))
+        .unwrap_or(0);
+    let consolidated_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE archived = 0 AND tier IN ('consolidated','pattern')",
+            [], |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let health_ratio = if total_active > 0 {
+        consolidated_count as f64 / total_active as f64
+    } else {
+        1.0
+    };
+    if health_ratio < 0.35 && total_active > 0 {
+        // Self-healing may only apply the same promotion gate as record_access:
+        // repeated exact recall from diverse queries. Do not promote merely
+        // because a raw note was accessed often.
+        let promoted = conn
+            .execute(
+                "UPDATE memories
+                 SET tier = 'consolidated', updated_at = datetime('now')
+                 WHERE archived = 0
+                   AND tier = 'raw'
+                   AND recall_count >= 3
+                   AND query_diversity >= 3
+                   AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
+                [],
+            )
+            .unwrap_or(0);
+        if promoted > 0 {
+            eprintln!(
+                "[daily_pipeline] self-heal {}: promoted {promoted} raw → consolidated (ratio was {health_ratio:.2})",
+                target.label
+            );
+        }
+    }
+
+    // ── Post-distillation embedding: enqueue non-raw entries without vectors ──
+    let needs_embed_ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT m.id FROM memories m
+                 LEFT JOIN memories_vec v ON m.id = v.id
+                 WHERE m.archived = 0
+                   AND m.tier != 'raw'
+                   AND v.id IS NULL
+                 ORDER BY m.importance DESC
+                 LIMIT 50",
+            )
+            .map_err(|e| format!("prepare embedding scan {}: {e}", target.label))?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| format!("query embedding scan {}: {e}", target.label))?
+            .filter_map(Result::ok)
+            .collect();
+        ids
+    };
+    if !needs_embed_ids.is_empty() {
+        let candidates =
+            memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false)
+                .unwrap_or_default();
+        for entry in candidates.values() {
+            let _ = server.enrichment_lock().enrich_tx.try_send(
+                crate::enrichment::build_enrichment_item(
+                    entry,
+                    true,  // needs_embedding
+                    false, // needs_summary
+                    target_db,
+                    named_project.clone(),
+                    None,
+                    None,
+                    None,
+                    entry.revision,
+                ),
+            );
+        }
+    }
 
     let mut stmt = conn
         .prepare(
@@ -1037,6 +1170,7 @@ async fn save_daily_health_wiki(
             source: None,
             valid_from: None,
             valid_until: None,
+            metadata: None,
         }))
         .await?;
     Ok(())
@@ -1095,40 +1229,6 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
     name.split(':').next_back().unwrap_or(&name).to_string()
 }
 
-fn canonical_named_project_from_path(db_path: &Path) -> Option<String> {
-    let parent = db_path.parent()?;
-    let name = parent.file_name()?.to_str()?;
-    let grand = parent.parent()?;
-    let grand_name = grand.file_name()?.to_str()?;
-    let root = grand.parent()?;
-    let root_name = root.file_name()?.to_str()?;
-    if grand_name == "projects"
-        && root_name == ".tachi"
-        && db_path.file_name()?.to_str()? == "memory.db"
-    {
-        Some(name.to_string())
-    } else {
-        None
-    }
-}
-
-fn tachi_app_home() -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    for key in ["TACHI_HOME", "SIGIL_HOME"] {
-        if let Ok(raw) = std::env::var(key) {
-            if raw == "~" {
-                return home;
-            }
-            if let Some(rest) = raw.strip_prefix("~/") {
-                return home.join(rest);
-            }
-            if !raw.trim().is_empty() {
-                return PathBuf::from(raw);
-            }
-        }
-    }
-    home.join(".tachi")
-}
 
 fn shanghai_today() -> String {
     Utc::now()

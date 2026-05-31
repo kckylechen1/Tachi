@@ -107,6 +107,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             source: None,
             valid_from: None,
             valid_until: None,
+            metadata: None,
         }))
         .await
         .expect("tachi_save note should succeed");
@@ -161,6 +162,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 source: None,
                 valid_from: None,
                 valid_until: None,
+                metadata: None,
             }))
             .await
             .expect_err("invalid note path should be rejected");
@@ -210,13 +212,19 @@ async fn tachi_memory_save_with_title_stays_memory() {
             state: None,
             project: None,
             domain: None,
+            metadata: None,
         }))
         .await
         .expect("tachi_memory save should succeed");
-    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
-    assert!(saved_json.get("wiki_path").is_none());
-
-    let id = saved_json["id"].as_str().expect("memory id").to_string();
+    assert!(saved.contains("Saved ->"));
+    assert!(saved.contains("/facts/memory-boundary"));
+    let id = saved
+        .split("id: `")
+        .nth(1)
+        .and_then(|rest| rest.split('`').next())
+        .expect("save markdown id")
+        .to_string();
+    assert!(!id.is_empty());
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
             id,
@@ -381,6 +389,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             source: None,
             valid_from: None,
             valid_until: None,
+            metadata: None,
         }))
         .await
         .expect_err("symlink note leaf should be rejected");
@@ -459,6 +468,51 @@ async fn save_memory_includes_provenance_for_registered_agent() {
     assert_eq!(provenance["requested_scope"], json!("project"));
     assert_eq!(provenance["db_scope"], json!("global"));
     assert_eq!(provenance["agent"]["agent_id"], json!("claude-code"));
+}
+
+#[tokio::test]
+async fn save_memory_allows_curated_tier_metadata() {
+    let server = make_server();
+
+    let saved = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "Curated trading lessons should enter the lifecycle as consolidated knowledge.".to_string(),
+            summary: "Curated lifecycle tier".to_string(),
+            path: "/trading/equity/lessons/tier-test".to_string(),
+            importance: 0.85,
+            category: "experience".to_string(),
+            topic: "memory-lifecycle".to_string(),
+            keywords: vec!["tier".to_string()],
+            persons: vec![],
+            entities: vec!["Tachi".to_string()],
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            retention_policy: Some("permanent".to_string()),
+            domain: Some("equity_trading".to_string()),
+            timestamp: None,
+            valid_from: None,
+            valid_until: None,
+            metadata: Some(json!({"tier": "consolidated"})),
+        }))
+        .await
+        .expect("save_memory should succeed");
+    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
+    let id = saved_json["id"].as_str().expect("id").to_string();
+
+    let tier = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT tier FROM memories WHERE id = ?1", [&id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())
+        })
+        .expect("read tier");
+    assert_eq!(tier, "consolidated");
 }
 
 #[tokio::test]

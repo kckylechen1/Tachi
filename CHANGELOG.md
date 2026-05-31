@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-01
+
+Plan C project DB, memory lifecycle / SFT factory, and facade module split.
+
+### Added
+
+- **Plan C**: local project `memory.db` with `~/.tachi/projects/<name>/memory.db` symlinks and hot `tachi_init_project_db` activation.
+- **SFT factory** and **REM wiki evolver** foundry pipelines; parallel `briefing` memory + wiki search.
+- **Memory lifecycle**: `recall_count`, `query_diversity`, tier promotion (`raw` → `consolidated`); metadata `tier` on save.
+- **`build.sh`**: release build, install to `bin/memory-server`, refresh `~/bin/tachi` symlink (macOS ad-hoc sign).
+
+### Changed
+
+- Split `facade_memory_ops` and `memory_search_ops` into submodules.
+- Merge `main`: drop legacy `persons` column / `clawdoctor`; `MEMORY_SELECT_COLUMNS` uses `'[]' AS persons`.
+- MCP metadata forwarding on `tachi_save` / `tachi_memory`.
+
+### Fixed
+
+- #137: `path_utils` dedup, entity pollution in `capture_session`, word-boundary agent matching.
+- Post-merge upsert SQL and SFT/wiki SELECT without dropped `persons` column; CI clippy (`-D warnings`).
+- Jaccard dedup refreshes candidate `memories_fts` row; `record_access` increments `query_diversity` incrementally.
+- Plan C symlink uses sanitized project dir name; non-Unix hosts get an explicit note in the init response.
+- Align `crates/memory-node/package.json` to 1.4.0 for release version checks.
+
+## [1.3.1] - 2026-05-31
+
+Patch release for #137 follow-up fixes after code review.
+
+### Fixed
+
+- **`matches_agent_tag`**: hyphenated agent ids such as `jayne-main` match again; `user-memory` slugs avoid substring false positives like `my-user-memory-analyzer`.
+- **`path_utils::tachi_home`**: restore legacy `TACHI_APP_HOME` fallback for SFT output paths and other foundry artifacts.
+- **`visit_jsonl_files`**: follow directory symlinks with cycle detection so passive Claude JSONL discovery works through linked roots.
+
+### Changed
+
+- Ignore local `bin/` build outputs in git.
+
 ## [1.3.0] - 2026-05-30
 
 Twenty commits since v1.2.0. Major themes: search quality improvements, memory lifecycle hardening, MCP numeric coercion fixes, wiki read/browse refactor, docs organizer, and comprehensive audit fixes.

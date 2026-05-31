@@ -182,6 +182,10 @@ pub(crate) struct TachiSaveParams {
     /// When this memory stopped being true/effective. None = still valid.
     #[serde(default)]
     pub valid_until: Option<String>,
+
+    /// Arbitrary metadata payload merged before provenance injection.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -193,7 +197,7 @@ fn default_memory_top_k() -> usize {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiMemoryParams {
-    /// Action: "search", "save", "extract_facts", "briefing", "checkpoint", "alerts", "ask", "consolidate", "progress", or "readiness"
+    /// briefing (→ Markdown context block; call at session start) | save (→ entry id; call proactively after any meaningful step, not only at session end) | extract_facts (→ saved count; LLM atomizes raw text into N entries) | checkpoint (→ checkpoint id; mid-task pause or handoff) | alerts (→ warning list; when stuck or failing repeatedly) | search (→ ranked results) | ask (→ synthesized answer, use synthesize=true) | consolidate (→ merged count) | progress (→ status update) | readiness (→ health + tool visibility JSON)
     pub action: String,
 
     // --- search fields ---
@@ -250,7 +254,7 @@ pub(crate) struct TachiMemoryParams {
     pub kind: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Hierarchical path, e.g. /notes/2026-05-29 or /project/sigil/search."
+        description = "Hierarchical path for saving. Working notes: /scratch/<project>/..., review notes: /code-review/<project>/..., wiki: /wiki/... e.g. /scratch/sigil/schema-bug-fix"
     )]
     pub path: Option<String>,
     #[serde(default)]
@@ -263,6 +267,8 @@ pub(crate) struct TachiMemoryParams {
     pub valid_from: Option<String>,
     #[serde(default)]
     pub valid_until: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]

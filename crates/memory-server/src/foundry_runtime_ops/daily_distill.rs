@@ -67,7 +67,53 @@ pub fn resolve_distill_backend() -> DistillBackend {
     }
 }
 
-/// Batch size for one LLM call. Override with `FOUNDRY_DISTILL_BATCH_SIZE`.
+/// Strip agent-internal noise from raw session text before passing to the LLM.
+/// Removes thinking traces, tool JSON blobs, SYSTEM_MEMORY injections, and
+/// image references that contaminate distillation quality.
+pub fn scrub_agent_noise(text: &str) -> String {
+    // Patterns to strip line-by-line
+    let noise_line_prefixes: &[&str] = &[
+        "**Prioritizing",
+        "**Refining",
+        "**Analyzing",
+        "I'm now focusing",
+        "I'm now zeroing",
+        "<SYSTEM-RETRIEVED-MEMORY",
+        "<image name=",
+    ];
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        // Skip lines that are pure tool JSON
+        if (trimmed.starts_with('{') || trimmed.starts_with('['))
+            && (trimmed.contains("\"SearchPath\"")
+                || trimmed.contains("\"file_path\"")
+                || trimmed.contains("\"todos\"")
+                || trimmed.contains("\"prompt\""))
+        {
+            continue;
+        }
+        if noise_line_prefixes.iter().any(|p| trimmed.starts_with(p)) {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Collapse runs of blank lines into at most two
+    let mut prev_blank = false;
+    let mut result = String::with_capacity(out.len());
+    for line in out.lines() {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank {
+            continue;
+        }
+        prev_blank = is_blank;
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
+}
+
 pub fn resolve_batch_size() -> usize {
     std::env::var("FOUNDRY_DISTILL_BATCH_SIZE")
         .ok()
@@ -85,16 +131,20 @@ const MIN_BUCKET_SIZE: usize = 3;
 /// within the limit and avoid token overflow on the model side.
 const MAX_BATCH_PAYLOAD_CHARS: usize = 60_000;
 
-/// System prompt for the batch distill mega-call. Mirrors the design doc
-/// (Phase 1 mega-prompt) — instructs the model to return a JSON array
-/// with one object per input group.
+/// System prompt for the batch distill mega-call.
+/// Enforces structured synthesis using decision markers for downstream SFT factory use.
 const DISTILL_DAILY_SYSTEM_PROMPT: &str = r#"You are Tachi's batch memory distiller. You will receive a list of memory groups; each group contains 3+ related memories from a single coherence bucket (shared topic or entity, scoped to a single path prefix).
 
 For EACH group, write a concise, faithful synthesis that:
 - Preserves the most important durable facts (decisions, identifiers, file paths, commands, error signatures).
-- Drops chit-chat, redundant restatements, and time-sensitive scratch notes.
+- Drops chit-chat, redundant restatements, time-sensitive scratch notes, tool JSON blobs, and thinking traces.
 - Uses neutral third-person prose. Do NOT invent facts not present in the inputs.
 - Stays under ~400 words per group.
+- Structures key decisions using these markers when applicable:
+  - [核心] for the central conclusion or architectural decision
+  - [结论] for a derived insight or final determination
+  - [方案] for a chosen implementation approach or solution
+  - [重构/优化] for a refactoring or performance improvement decision
 
 Return ONLY a JSON array. No prose before or after. Each element MUST be:
 {
@@ -505,7 +555,7 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
 
         let mut stmt = conn
             .prepare(
-                "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+                "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
                   FROM memories
                   WHERE archived = 0 AND source != ?1
                   ORDER BY timestamp ASC",
@@ -608,7 +658,7 @@ fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
                     "path": entry.path,
                     "importance": entry.importance,
                     "summary": entry.summary,
-                    "text": entry.text.chars().take(800).collect::<String>(),
+                    "text": scrub_agent_noise(&entry.text).chars().take(800).collect::<String>(),
                     "keywords": entry.keywords,
                     "entities": entry.entities,
                 })
@@ -864,6 +914,9 @@ fn persist_distill_memory(
         vector: None,
         retention_policy: None,
         domain: None,
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "consolidated".to_string(), // distilled memories skip raw — directly promoted
     };
 
     server.with_project_store(|store| {

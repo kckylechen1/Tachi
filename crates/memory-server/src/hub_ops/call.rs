@@ -205,6 +205,9 @@ pub(crate) async fn handle_distill_trajectory(
         vector: None,
         retention_policy: Some("permanent".to_string()),
         domain: domain.clone(),
+        recall_count: 0,
+        query_diversity: 0,
+        tier: "raw".to_string(),
     };
 
     let prior_snapshot = {

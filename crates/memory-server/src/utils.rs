@@ -94,7 +94,7 @@ pub(super) fn is_trusted_command(cmd: &str) -> bool {
     false
 }
 
-pub(super) fn sanitize_safe_path_name(name: &str) -> String {
+pub(crate) fn sanitize_safe_path_name(name: &str) -> String {
     let sanitized: String = name
         .trim()
         .chars()
@@ -274,6 +274,12 @@ pub(super) fn write_or_recover<'a, T>(
             poisoned.into_inner()
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn global_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[cfg(test)]

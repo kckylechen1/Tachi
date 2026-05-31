@@ -9,6 +9,8 @@ mod helpers;
 mod maintenance;
 mod recall;
 mod recall_cache;
+pub(crate) mod sft_factory;
+pub(crate) mod wiki_evolver;
 
 pub(crate) use recall::rerank_rows_with_outcome;
 
@@ -118,6 +120,7 @@ fn default_capture_importance() -> f64 {
 
 // Re-export items so sibling modules (main.rs etc.) can use them
 pub(crate) use daily_distill::run_daily_batch_distill;
+pub(crate) use daily_distill::scrub_agent_noise;
 #[allow(unused_imports)]
 pub(crate) use daily_distill::DistillBatchReport;
 pub(crate) use handlers::{

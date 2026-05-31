@@ -547,7 +547,7 @@ fn classify_route(
             return Route::Project;
         }
     }
-    if let Some(name) = named_project_from_path(db_path) {
+    if let Some(name) = crate::path_utils::named_project_from_path(db_path) {
         return Route::NamedProject(name);
     }
     if entry.allow_write
@@ -571,28 +571,6 @@ fn classify_route(
     Route::Orphan(reason)
 }
 
-/// Extract a project name from `~/.tachi/projects/<name>/memory.db`.
-fn named_project_from_path(db_path: &Path) -> Option<String> {
-    // Only canonical Tachi project DBs should route as named projects:
-    //   .../.tachi/projects/<name>/memory.db
-    // Similar-looking external paths such as ".../data/tachi/projects/<name>/memory.db"
-    // must stay on explicit path routing so background workers write back to
-    // the original DB instead of inventing ~/.tachi/projects/<name>/memory.db.
-    let parent = db_path.parent()?;
-    let name = parent.file_name()?.to_str()?;
-    let grand = parent.parent()?;
-    let grand_name = grand.file_name()?.to_str()?;
-    let root = grand.parent()?;
-    let root_name = root.file_name()?.to_str()?;
-    if grand_name == "projects"
-        && root_name == ".tachi"
-        && db_path.file_name()?.to_str()? == "memory.db"
-    {
-        Some(name.to_string())
-    } else {
-        None
-    }
-}
 
 fn paths_equal(a: &Path, b: &Path) -> bool {
     // Manifest paths are pre-canonicalized by the doctor / manifest
@@ -718,18 +696,18 @@ mod tests {
     #[test]
     fn named_project_extracted_from_canonical_layout() {
         let p = PathBuf::from("/home/u/.tachi/projects/myproj/memory.db");
-        assert_eq!(named_project_from_path(&p).as_deref(), Some("myproj"));
+        assert_eq!(crate::path_utils::named_project_from_path(&p).as_deref(), Some("myproj"));
     }
 
     #[test]
     fn named_project_rejects_non_canonical_layout() {
         let p = PathBuf::from("/x/y/notprojects/foo/memory.db");
-        assert!(named_project_from_path(&p).is_none());
+        assert!(crate::path_utils::named_project_from_path(&p).is_none());
     }
 
     #[test]
     fn named_project_rejects_external_projects_dir() {
         let p = PathBuf::from("/home/u/work/data/tachi/projects/hyperion/memory.db");
-        assert!(named_project_from_path(&p).is_none());
+        assert!(crate::path_utils::named_project_from_path(&p).is_none());
     }
 }
