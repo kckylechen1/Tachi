@@ -12,17 +12,17 @@ on:
 
 jobs:
   resolve-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve version
         id: version
         run: |
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             version="${{ inputs.version }}"
           else
             version="${GITHUB_REF_NAME#v}"
@@ -33,6 +33,10 @@ jobs:
           if [ -z "$server_version" ]; then
             echo "Could not find memory-server version in Cargo.toml."
             exit 1
+          fi
+
+          if [ -z "$version" ]; then
+            version="$server_version"
           fi
 
           if [ "$version" != "$server_version" ]; then
@@ -57,17 +61,17 @@ jobs:
     name: Bottle - ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check out tap repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: kckylechen1/homebrew-tachi
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           path: tap
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
 
       - name: Sync formula before bottle build
         run: |
@@ -87,7 +91,7 @@ jobs:
           ls -la tachi--*.tar.gz tachi--*.json
 
       - name: Upload bottle artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bottle-${{ matrix.platform }}
           path: |
@@ -96,7 +100,7 @@ jobs:
 
   publish-bottles:
     needs: [resolve-version, build-bottle]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -104,10 +108,10 @@ jobs:
       TAP_REPO: kckylechen1/homebrew-tachi
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download all bottle artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: bottles
 
@@ -118,15 +122,17 @@ jobs:
           cat bottle-manifest.json
 
       - name: Upload bottles to GitHub Release (tap repo)
-        uses: softprops/action-gh-release@v2
-        with:
-          repository: ${{ env.TAP_REPO }}
-          tag_name: tachi-${{ needs.resolve-version.outputs.version }}
-          files: bottles/*/tachi--*.tar.gz
-          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          TAG="tachi-${VERSION}"
+          gh release view "$TAG" --repo "$TAP_REPO" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$TAP_REPO" --title "$TAG" --notes ""
+          gh release upload "$TAG" bottles/*/tachi--*.tar.gz --repo "$TAP_REPO" --clobber
 
       - name: Check out tap repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ env.TAP_REPO }}
           token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

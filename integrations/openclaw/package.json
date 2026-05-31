@@ -15,15 +15,11 @@
   "scripts": {
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "postinstall": "node --input-type=module -e \"import('@chaoxlabs/tachi-node').then(m => console.log('✓ native module OK')).catch(e => console.warn('⚠ native module unavailable:', e.message, '— MCP-only mode'))\""
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@sinclair/typebox": "^0.34.48"
-  },
-  "optionalDependencies": {
-    "@chaoxlabs/tachi-node": "file:../../crates/memory-node"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

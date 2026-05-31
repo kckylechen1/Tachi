@@ -5,6 +5,10 @@ members = [
     "crates/memory-python",
     "crates/memory-server",
 ]
+default-members = [
+    "crates/memory-core",
+    "crates/memory-server",
+]
 resolver = "2"
 
 [profile.release]
