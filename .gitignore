@@ -1,5 +1,12 @@
-# Agent run logs
+# Agent run logs (claude-code-runs and other local agent artifacts)
 .agent/
+.agent/claude-code-runs/
+
+# Claude Code worktrees / local session artifacts (repo root only; not ~/.claude)
+.claude/
+
+# One-off local migration helper (machine-specific ~/.tachi / ~/.openclaw paths)
+scripts/migrate_openclaw_central.py
 
 # Tachi runtime artifacts
 .tachi/

@@ -1,9 +1,0 @@
-Both bugs are fixed and verified:
-
-**Bug 1 — `tachi_search(scope="project")` empty results**: Added scope normalization in `tools.rs` so unrecognized scope values like `"project"`, `"global"`, `"user"` are treated as `"all"`. A note is prepended to the response when the fallback is applied, guiding users to use the `project` parameter for DB targeting.
-
-**Bug 2 — CLI `tachi search` missing `--project`**: Added `--project` option to the `Search` CLI command in `cli.rs` and refactored the handler in `bootstrap.rs` to route through `dispatch_cli_tool` (same pattern as `WikiSearch`/`Remember`), enabling full `MemoryServer` + named project DB resolution.
-
-**Verification**: `cargo check` clean, existing test passes.
-
-Full report: `/Users/kckylechen/Desktop/Sigil/.agent/claude-code-runs/2026-05-04T03-09-10-595Z-fix-scope-and-cli-search/result.md`
