@@ -383,6 +383,20 @@ MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 
 ---
 
+## 🙏 致谢
+
+Tachi 的设计灵感来源于多个在 AI Agent 长期记忆领域的开创性研究：
+
+- **[LongMem](https://github.com/Victorwz/LongMem)** (NeurIPS 2023) — Wang 等人提出的解耦记忆架构，使用冻结的骨干 LLM 作为记忆编码器，自适应残差 SideNet 作为记忆检索器。这启发了 Tachi 的双库隔离设计和缓存长期上下文以避免记忆过期的理念。
+
+- **[gbrain](https://github.com/garrytan/gbrain)** — Garry Tan 为 OpenClaw/Hermes 打造的高度个性化 Agent Brain。其 brain-vs-memory 分层哲学（世界知识存 brain，运行状态存 agent memory，当前上下文存 session）直接影响了 Tachi 的路径命名空间设计与全局/项目级记忆隔离。Dream cycle 概念启发了 Tachi 的后台 GC 与记忆合并管线。
+
+- **[ENGRAM](https://arxiv.org/abs/2511.12960)** (Stockham 等人) — 情景/语义/程序性记忆分类系统证明了：精心的记忆分类配合直接的稠密检索，比复杂的知识图谱更有效。这验证了 Tachi 采用类型化记忆记录（`category`、`domain`、`retention_policy`）配合混合检索的设计方向。
+
+- **[Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — Andrej Karpathy 提出的 LLM Wiki 理念：让 LLM 维护结构化的 wiki 页面，而非每次重新搜索原始文档。这直接启发了 Tachi 的 wiki 系统：LLM 增量构建和维护持久的知识页面，交叉引用随时间更新，回答时引用已包含综合知识的 wiki 页面——知识随每个来源和每个问题而复利增长。
+
+---
+
 ## 📜 开源协议
 
 基于 [AGPLv3 License](LICENSE) © 2026 Tachi Authors。

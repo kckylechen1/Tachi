@@ -457,6 +457,20 @@ MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 
 ---
 
+## 🙏 谢先贤
+
+藏经阁之法，非凭空而创，实受益于数家先贤之开创性研究：
+
+- **[LongMem](https://github.com/Victorwz/LongMem)** (NeurIPS 2023) — Wang 等人所创之解耦记忆架构，以冻结骨干 LLM 为记忆编码器，自适应残差 SideNet 为记忆检索器。此法启发了藏经阁之双库隔离设计与缓存长期上下文以避记忆过期之理念。
+
+- **[gbrain](https://github.com/garrytan/gbrain)** — Garry Tan 为 OpenClaw/Hermes 所铸之高度个性化 Agent Brain。其 brain-vs-memory 分层哲学（世界知识存 brain，运行状态存 agent memory，当前上下文存 session）直接影响了藏经阁之路径命名空间设计与全局/项目级记忆隔离。Dream cycle 概念启发了藏经阁之后台 GC 与记忆合并管线。
+
+- **[ENGRAM](https://arxiv.org/abs/2511.12960)** (Stockham 等人) — 情景/语义/程序性记忆分类系统证明了：精心之记忆分类配合直接稠密检索，胜于复杂知识图谱。此验证了藏经阁采用类型化记忆记录（`category`、`domain`、`retention_policy`）配合混合检索之设计方向。
+
+- **[Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — Andrej Karpathy 所倡之 LLM Wiki 理念：令 LLM 维护结构化之 wiki 页面，而非每次重搜原始文档。此法直接启发了藏经阁之 wiki 系统：LLM 增量构建与维护持久之知识页面，交叉引用随时日更新，应答之时引用已含综合知识之 wiki 页面——知识随每一来源、每一问题而复利增长。
+
+---
+
 ## 📜 十三、 门规
 
 尊奉 [AGPLv3 License](LICENSE) 誓约 © 2026 Tachi Authors 保其长青。
