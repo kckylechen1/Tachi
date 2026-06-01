@@ -152,11 +152,11 @@ pub(crate) fn collect_snapshot(
     let daemon = match read_pid_file(&lock_path) {
         Some(pid) if process_alive(pid) => DaemonStatus::Running {
             pid,
-            lock_path: lock_path.clone(),
+            lock_path,
         },
         Some(pid) => DaemonStatus::StalePid {
             pid,
-            lock_path: lock_path.clone(),
+            lock_path,
         },
         None => DaemonStatus::None,
     };

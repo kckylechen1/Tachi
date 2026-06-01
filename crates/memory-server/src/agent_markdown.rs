@@ -1,5 +1,6 @@
 //! Human-readable Markdown formatting for agent-facing MCP tools.
 
+use crate::utils::compact_text_line;
 use serde_json::Value;
 
 /// Escape characters that have special meaning in Markdown bold/code contexts.
@@ -8,15 +9,6 @@ fn md_escape(s: &str) -> String {
         .replace('[', "\\[")
         .replace(']', "\\]")
         .replace('_', "\\_")
-}
-
-fn compact_text(s: &str, limit: usize) -> String {
-    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= limit {
-        one_line
-    } else {
-        format!("{}...", one_line.chars().take(limit).collect::<String>())
-    }
 }
 
 pub(crate) fn format_briefing(
@@ -162,7 +154,7 @@ pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> 
             out.push(format!(
                 "{}. {relevance} `{path}` - {}",
                 idx + 1,
-                md_escape(&compact_text(summary, 120)),
+                md_escape(&compact_text_line(summary, 120)),
             ));
         }
     }
@@ -306,7 +298,7 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             "{}. **{}**{id_suffix} {relevance} `{path}` - {}",
             idx + 1,
             md_escape(topic),
-            md_escape(&compact_text(summary, 120)),
+            md_escape(&compact_text_line(summary, 120)),
         ));
         if let Some(files) = row.get("files").and_then(Value::as_array) {
             let paths: Vec<String> = files

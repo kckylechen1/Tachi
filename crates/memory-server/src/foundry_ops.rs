@@ -855,7 +855,7 @@ pub(crate) async fn handle_queue_agent_evolution(
     save_foundry_job_state(server, &job, "queued", json!({}))?;
 
     let server = server.clone();
-    let params_for_task = params.clone();
+    let params_for_task = params;
     let job_for_task = job.clone();
     tokio::spawn(async move {
         if let Err(err) = save_foundry_job_state(&server, &job_for_task, "running", json!({})) {

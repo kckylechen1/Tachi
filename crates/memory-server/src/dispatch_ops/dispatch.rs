@@ -210,7 +210,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     None,
                     None,
                     None,
-                    Some(json!({ "error": e.clone() })),
+                    Some(json!({ "error": e })),
                 );
                 return Err(e);
             }
@@ -239,7 +239,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     None,
                     None,
                     None,
-                    Some(json!({ "error": e.clone() })),
+                    Some(json!({ "error": e })),
                 );
                 return Err(e);
             }

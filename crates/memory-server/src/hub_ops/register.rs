@@ -198,7 +198,7 @@ pub(crate) async fn handle_hub_register(
         if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
             let llm = server.llm.clone();
             let claude_pool = server.claude_pool.clone();
-            let cap_clone = cap.clone();
+            let cap_clone = cap;
             let desc_empty = params.description.is_empty();
             let db_path = match target_db {
                 DbScope::Global => server.global_db_path.clone(),

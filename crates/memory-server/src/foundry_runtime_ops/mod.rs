@@ -121,16 +121,10 @@ fn default_capture_importance() -> f64 {
 // Re-export items so sibling modules (main.rs etc.) can use them
 pub(crate) use daily_distill::run_daily_batch_distill;
 pub(crate) use daily_distill::scrub_agent_noise;
-#[allow(unused_imports)]
-pub(crate) use daily_distill::DistillBatchReport;
 pub(crate) use handlers::{
     handle_capture_session, handle_compact_context, handle_compact_rollup,
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
 pub(crate) use maintenance::{enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker};
-// Phase 1: legacy 30-minute per-capture distill scheduler kept as a
-// manual fallback. The bootstrap loop now drives
-// `run_daily_batch_distill` instead, but operators can still call this
-// directly during incident recovery.
-#[allow(unused_imports)]
-pub(crate) use maintenance::schedule_pending_distill_jobs;
+// Legacy per-capture distill scheduler kept for manual incident recovery;
+// bootstrap now drives `run_daily_batch_distill` instead.

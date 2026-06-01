@@ -112,7 +112,7 @@ impl ClaudePool {
 
         let started_at = Utc::now().to_rfc3339();
         let started = Instant::now();
-        let result = self.run_claude_cli(prompt).await.map_err(|e| e.to_string());
+        let result = self.run_claude_cli(prompt).await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let finished_at = Utc::now().to_rfc3339();
 

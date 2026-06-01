@@ -612,7 +612,7 @@ pub(crate) async fn handle_wiki_ingest(
         summary: summary.clone(),
         text: content.clone(),
         importance: 0.8,
-        timestamp: timestamp.clone(),
+        timestamp,
         valid_from: String::new(),
         valid_until: None,
         category: "experience".to_string(),
@@ -629,7 +629,7 @@ pub(crate) async fn handle_wiki_ingest(
         revision: 1,
         metadata: json!({
             "wiki": true,
-            "wiki_title": title.clone(),
+            "wiki_title": title,
             "ingest_source": params.source.clone(),
             "allow_cross_project": true,
         }),

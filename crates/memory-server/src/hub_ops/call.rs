@@ -340,7 +340,7 @@ pub(crate) async fn handle_distill_trajectory(
             .as_ref()
             .map(|cap| cap.created_at.clone())
             .unwrap_or(timestamp.clone()),
-        updated_at: timestamp.clone(),
+        updated_at: timestamp,
     };
 
     if let Some(project_name) = named_project.as_deref() {

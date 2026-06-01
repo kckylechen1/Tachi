@@ -21,8 +21,6 @@ struct ChatLaneConfig {
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Phase 2: Distill lane retained for back-compat; call_distill_llm
-                    // no longer invoked but kept for env-var probing & rollback.
 enum ChatLane {
     Extract,
     Distill,

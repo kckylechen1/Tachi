@@ -1,5 +1,6 @@
 //! All formatting and evidence helpers used across facade_memory_ops sub-modules.
 
+use crate::utils::compact_text_line;
 use serde_json::{json, Value};
 
 pub(crate) fn wants_json(format: Option<&str>) -> bool {
@@ -44,16 +45,6 @@ pub(crate) fn sections_to_evidence(sections: &[(String, Value)]) -> Result<Value
         }
     }
     Ok(Value::Array(rows))
-}
-
-pub(crate) fn compact_line(text: &str, limit: usize) -> String {
-    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= limit {
-        one_line
-    } else {
-        let keep = limit.saturating_sub(3);
-        format!("{}...", one_line.chars().take(keep).collect::<String>())
-    }
 }
 
 pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> String {
@@ -108,7 +99,7 @@ pub(crate) fn format_extract_result(raw: &str) -> String {
             out.push(format!(
                 "{}. `{path}` - {}",
                 idx + 1,
-                compact_line(text, 100)
+                compact_text_line(text, 100)
             ));
         }
     }
@@ -163,14 +154,14 @@ pub(crate) fn format_agent_status(
                     topic,
                     score,
                     path,
-                    compact_line(summary, 100)
+                    compact_text_line(summary, 100)
                 ));
             }
         }
     }
     if let Some(synthesis) = synthesis.filter(|s| !s.trim().is_empty()) {
         out.push("\n### Synthesis".to_string());
-        out.push(compact_line(synthesis, 600));
+        out.push(compact_text_line(synthesis, 600));
     }
     out.join("\n")
 }

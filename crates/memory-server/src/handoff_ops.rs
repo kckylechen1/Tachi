@@ -477,7 +477,7 @@ fn repair_handoff_flow_artifact(
         }));
     };
 
-    let patch = json!({ "issue": github.clone() });
+    let patch = json!({ "issue": github });
     let status_patch = merge_github_status(run_dir, patch)?;
     append_github_event(
         run_dir,
@@ -698,7 +698,7 @@ async fn promote_handoff_issue_with_client<C: GhClient>(
     let mut event_persisted = false;
     if let Some((flow_id, run_dir)) = flow_artifact {
         let patch = json!({
-            "issue": github.clone(),
+            "issue": github,
         });
         status_patch = match merge_github_status(&run_dir, patch) {
             Ok(patch) => Some(patch),
