@@ -393,13 +393,13 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree."
+        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree. Pass dry_run=true to preview planned moves/frontmatter/task-sync changes without modifying any files."
     )]
     pub(crate) async fn tachi_wiki_organize(
         &self,
         Parameters(params): Parameters<TachiWikiOrganizeParams>,
     ) -> Result<String, String> {
-        crate::docs_ops::handle_wiki_organize(self, &params.dir_path).await
+        crate::docs_ops::handle_wiki_organize(self, &params.dir_path, params.dry_run).await
     }
 
     #[tool(
@@ -1250,6 +1250,7 @@ impl MemoryServer {
             project: None,
             domain: None,
             metadata: None,
+            files: Vec::new(),
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

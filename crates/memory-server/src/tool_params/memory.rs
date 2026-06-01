@@ -1156,4 +1156,9 @@ pub(crate) fn fact_to_entry(
 pub(crate) struct TachiWikiOrganizeParams {
     /// Absolute path to the docs directory to organize.
     pub dir_path: String,
+    /// When true, report planned moves / frontmatter / task-sync changes
+    /// WITHOUT touching the filesystem (no moves, no writes, no _index.md
+    /// rebuild). Defaults to false (apply changes).
+    #[serde(default)]
+    pub dry_run: bool,
 }

@@ -308,6 +308,17 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             md_escape(topic),
             md_escape(&compact_text(summary, 120)),
         ));
+        if let Some(files) = row.get("files").and_then(Value::as_array) {
+            let paths: Vec<String> = files
+                .iter()
+                .filter_map(Value::as_str)
+                .take(5)
+                .map(|p| format!("`{}`", md_escape(p)))
+                .collect();
+            if !paths.is_empty() {
+                out.push(format!("   📎 {}", paths.join(", ")));
+            }
+        }
     }
     out.join("\n")
 }

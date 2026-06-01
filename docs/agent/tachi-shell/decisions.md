@@ -1,3 +1,9 @@
+---
+title: "Tachi Shell Design Decisions"
+summary: "Core architectural decisions for Tachi Shell orchestration, workflow gates, and state management."
+category: "agent/tachi-shell"
+organize: true
+---
 # Tachi Shell Decisions
 
 ## Document-first before runtime automation

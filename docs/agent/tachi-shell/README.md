@@ -1,3 +1,9 @@
+---
+title: "Tachi Shell Control Plane"
+summary: "Document-first control plane for Tachi Shell design and status."
+category: "agent/tachi-shell"
+organize: true
+---
 # Tachi Shell Control Plane
 
 This directory is the document-first control plane for Tachi Shell while the runtime implementation is still evolving.

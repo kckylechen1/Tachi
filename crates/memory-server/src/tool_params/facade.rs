@@ -186,6 +186,13 @@ pub(crate) struct TachiSaveParams {
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+
+    /// Source files this memory references (stored as `metadata.files`). Surfaced
+    /// inline on search results so agents can jump to the referenced file without
+    /// a follow-up `get_memory`. Merged with paths auto-parsed from `spec:` pointers.
+    #[serde(default)]
+    #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
+    pub files: Vec<String>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -272,6 +279,10 @@ pub(crate) struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// Referenced source files, stored as `metadata.files` and surfaced inline on search.
+    #[serde(default)]
+    #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
+    pub files: Vec<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]

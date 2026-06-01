@@ -144,6 +144,14 @@ pub(super) fn slim_search_result(
     if !entry.summary.is_empty() {
         obj.insert("summary".into(), json!(entry.summary));
     }
+    // Surface referenced source files (metadata.files) inline so agents can jump
+    // to the file without a follow-up get_memory. Only string entries are kept.
+    if let Some(serde_json::Value::Array(files)) = entry.metadata.get("files") {
+        let paths: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+        if !paths.is_empty() {
+            obj.insert("files".into(), json!(paths));
+        }
+    }
     obj.insert(
         "relevance".into(),
         json!(round_score(result.score.final_score)),

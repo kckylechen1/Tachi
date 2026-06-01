@@ -1,3 +1,9 @@
+---
+title: "Tachi Desktop Electron Frontend Design"
+summary: "Architecture and roadmap for the Tachi Desktop Electron management UI."
+category: "engineering/architecture"
+organize: true
+---
 # Tachi Desktop — Electron Frontend
 
 **Date**: 2026-03-25

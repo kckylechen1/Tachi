@@ -1,3 +1,9 @@
+---
+title: "Kernel Surface V1 Specification"
+summary: "Defines the 5-layer API contract and exposure model for the Tachi kernel."
+category: "engineering/architecture"
+organize: true
+---
 # Kernel Surface V1
 
 ## Purpose

@@ -129,6 +129,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            files: Vec::new(),
         }))
         .await
         .expect("tachi_save note should succeed");
@@ -184,6 +185,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 valid_from: None,
                 valid_until: None,
                 metadata: None,
+                files: Vec::new(),
             }))
             .await
             .expect_err("invalid note path should be rejected");
@@ -235,6 +237,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             project: None,
             domain: None,
             metadata: None,
+            files: Vec::new(),
         }))
         .await
         .expect("tachi_memory save should succeed");
@@ -301,6 +304,56 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
 
     assert!(response.contains("plain-memory-row"));
     assert!(!response.contains("wiki-row-should-not-appear"));
+}
+
+#[tokio::test]
+async fn tachi_search_surfaces_referenced_files() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut memory = make_entry("row-with-files");
+            memory.path = "/facts/spec-pointer".to_string();
+            memory.text = "UniqueFilesNeedle references a spec.".to_string();
+            memory.summary = "Row with referenced files".to_string();
+            memory.metadata = json!({
+                "files": ["docs/SPEC.md", "crates/memory-server/src/lib.rs"]
+            });
+            store.upsert(&memory).map_err(|e| e.to_string())?;
+
+            let mut bare = make_entry("row-without-files");
+            bare.path = "/facts/no-pointer".to_string();
+            bare.text = "UniqueFilesNeedle without any files.".to_string();
+            bare.summary = "Row without files".to_string();
+            store.upsert(&bare).map_err(|e| e.to_string())
+        })
+        .expect("seed referenced-files entries");
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "UniqueFilesNeedle".to_string(),
+            scope: "memory".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            category: None,
+            include_archived: false,
+            enable_rerank: false,
+            as_of: None,
+        }))
+        .await
+        .expect("memory scoped search");
+
+    assert!(
+        response.contains("📎"),
+        "expected referenced-files marker in: {response}"
+    );
+    assert!(
+        response.contains("docs/SPEC.md"),
+        "expected referenced file path in: {response}"
+    );
 }
 
 #[tokio::test]
@@ -412,6 +465,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            files: Vec::new(),
         }))
         .await
         .expect_err("symlink note leaf should be rejected");

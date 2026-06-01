@@ -1,3 +1,9 @@
+---
+title: "Sigil vs HyperTachi Product Boundary"
+summary: "Defines scope separation between Sigil engineering docs and HyperTachi equity intel."
+category: "product/sigil"
+organize: true
+---
 # Sigil vs HyperTachi — Product Boundary
 
 > **Status**: Contract | **Last reviewed**: 2026-06-01  

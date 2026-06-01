@@ -1,3 +1,9 @@
+---
+title: "Tool Surface Bundle Plan"
+summary: "Defines tool exposure policies and surface bundles for Tachi, OpenClaw, and IDE hosts."
+category: "engineering/architecture"
+organize: true
+---
 # Tool Surface Bundle Plan
 
 This document is the exposure-policy companion to [Kernel Surface V1](./kernel-surface-v1.md).  

@@ -1,3 +1,9 @@
+---
+title: "Neural Foundry V1 Architecture"
+summary: "Spec for Tachi's shift to a shared runtime for memory, skills, and agent evolution."
+category: "engineering/architecture"
+organize: true
+---
 # Neural Foundry V1
 
 ## Why

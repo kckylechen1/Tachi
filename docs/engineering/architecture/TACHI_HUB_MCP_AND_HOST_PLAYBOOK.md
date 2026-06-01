@@ -1,3 +1,9 @@
+---
+title: "Tachi/Hub MCP & Host Environment Playbook"
+summary: "Architectural guide for Tachi/Hub MCP integration, Vault credential management, and host environment constraints."
+category: "engineering/architecture"
+organize: true
+---
 # Tachi / Hub、MCP 与宿主环境 — 讨论整理
 
 本文档整理自 2026-05 前后关于 **Sigil / Tachi** 的一次对话，主题包括：MCP 收口、Vault 与凭据、GitHub/`gh`、强制策略、与 IDE/终端 的对比。用于内部对齐，**不包含任何真实 API Key 或令牌**。

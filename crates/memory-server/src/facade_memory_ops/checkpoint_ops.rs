@@ -98,6 +98,7 @@ pub(crate) async fn save_memory_checkpoint(
         valid_from: params.valid_from.take(),
         valid_until: params.valid_until.take(),
         metadata: params.metadata.take(),
+        files: Vec::new(),
     };
     let body = handle_tachi_save(server, save_params).await?;
     Ok((body, display_path, false))
@@ -157,6 +158,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         project: None,
         domain: Some("agent".to_string()),
         metadata: None,
+        files: Vec::new(),
     };
     let (saved, display_path, already_formatted) = save_memory_checkpoint(server, params).await?;
     Ok(Some(json!({

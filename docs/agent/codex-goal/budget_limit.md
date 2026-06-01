@@ -1,3 +1,9 @@
+---
+title: "Budget Limit Reached Template"
+summary: "Template for handling goals that have exhausted their resource budget."
+category: "agent/codex-goal"
+organize: true
+---
 ## Budget Limit Reached
 
 The active dispatch goal has reached its resource budget.

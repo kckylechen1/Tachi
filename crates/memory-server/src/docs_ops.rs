@@ -614,6 +614,7 @@ fn get_test_fallback_metadata(source_path: &str, content: &str) -> (String, Stri
 pub(crate) async fn handle_wiki_organize(
     server: &MemoryServer,
     dir_path: &str,
+    dry_run: bool,
 ) -> Result<String, String> {
     let root = Path::new(dir_path);
     if !root.is_dir() {
@@ -647,6 +648,10 @@ pub(crate) async fn handle_wiki_organize(
     // 白名单保护文件列表
     let whitelist = ["README.md", "INSTALL.md", "_index.md"];
 
+    let mut moved_count = 0;
+    let mut synced_count = 0;
+    let mut log_messages = Vec::new();
+
     // 建立标准分类结构目录
     let standard_dirs = [
         "engineering/architecture",
@@ -658,6 +663,12 @@ pub(crate) async fn handle_wiki_organize(
         "archive",
     ];
     for sub in &standard_dirs {
+        if dry_run {
+            if !canonical_root.join(sub).is_dir() {
+                log_messages.push(format!("[dry-run] Would create standard directory '{}'", sub));
+            }
+            continue;
+        }
         fs::create_dir_all(canonical_root.join(sub))
             .map_err(|e| format!("Failed to create standard directory '{}': {e}", sub))?;
     }
@@ -695,10 +706,6 @@ pub(crate) async fn handle_wiki_organize(
     }
     md_paths.sort();
 
-    let mut moved_count = 0;
-    let mut synced_count = 0;
-    let mut log_messages = Vec::new();
-
     // 记录标准分类目录前缀
     let standard_subdirs = ["engineering/", "product/", "agent/"];
 
@@ -726,6 +733,14 @@ pub(crate) async fn handle_wiki_organize(
                 // logged but must not abort the remaining file scan.
                 let (new_body, task_modified) = sync_tasks_in_content(server, body);
                 if task_modified {
+                    if dry_run {
+                        log_messages.push(format!(
+                            "[dry-run] Would sync task checkmarks in-place: '{}'",
+                            relative_str
+                        ));
+                        synced_count += 1;
+                        continue;
+                    }
                     let new_content = if let Some(ref fm) = fm_opt {
                         format!("{}{}", serialize_frontmatter(fm), new_body)
                     } else {
@@ -796,9 +811,12 @@ pub(crate) async fn handle_wiki_organize(
         let dest_path = dest_dir.join(filename);
 
         // 确保目的地目录的父目录存在
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory '{}': {e}", parent.display()))?;
+        if !dry_run {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create directory '{}': {e}", parent.display())
+                })?;
+            }
         }
 
         let dest_rel_path = format!("{}/{}", dest_rel_dir, filename.to_string_lossy());
@@ -825,6 +843,15 @@ pub(crate) async fn handle_wiki_organize(
 
         // 如果物理路径不需要移动 (即已经在标准目录，且目的地一致)
         if is_already_categorized && path == dest_path {
+            if dry_run {
+                if final_content != content {
+                    log_messages.push(format!(
+                        "[dry-run] Would sync tasks/frontmatter in-place: '{}'",
+                        relative_str
+                    ));
+                }
+                continue;
+            }
             // 只写入可能更新后的内容（就地勾选/Frontmatter 补齐）
             fs::write(&path, &final_content)
                 .map_err(|e| format!("Failed to update file {}: {e}", path.display()))?;
@@ -833,6 +860,34 @@ pub(crate) async fn handle_wiki_organize(
                 relative_str
             ));
         } else {
+            if dry_run {
+                if dest_path.exists() {
+                    let mtime_src = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    let mtime_dest = fs::metadata(&dest_path)
+                        .and_then(|m| m.modified())
+                        .unwrap_or(SystemTime::UNIX_EPOCH);
+                    if mtime_src >= mtime_dest {
+                        log_messages.push(format!(
+                            "[dry-run] Would move (newer) '{}' to '{}' and archive older destination",
+                            relative_str, dest_rel_path
+                        ));
+                    } else {
+                        log_messages.push(format!(
+                            "[dry-run] Would archive '{}' to 'archive/' (destination '{}' is newer)",
+                            relative_str, dest_rel_path
+                        ));
+                    }
+                } else {
+                    log_messages.push(format!(
+                        "[dry-run] Would move '{}' to '{}'",
+                        relative_str, dest_rel_path
+                    ));
+                }
+                moved_count += 1;
+                continue;
+            }
             // 处理物理移动与同名冲突
             if dest_path.exists() {
                 // 读修改时间 (mtime)
@@ -997,12 +1052,18 @@ pub(crate) async fn handle_wiki_organize(
 
     let index_content = index_lines.join("\n");
     let index_path = canonical_root.join("_index.md");
-    if let Err(e) = fs::write(&index_path, &index_content) {
+    if dry_run {
+        let existing = fs::read_to_string(&index_path).unwrap_or_default();
+        if existing != index_content {
+            log_messages.push("[dry-run] Would rebuild docs/_index.md".to_string());
+        }
+    } else if let Err(e) = fs::write(&index_path, &index_content) {
         log_messages.push(format!("WARN: failed to write _index.md: {e}"));
     }
 
     let result = json!({
         "status": "success",
+        "dry_run": dry_run,
         "moved_files": moved_count,
         "synced_tasks": synced_count,
         "log": log_messages,

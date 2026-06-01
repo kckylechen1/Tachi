@@ -1,3 +1,9 @@
+---
+title: "Tachi Dispatch Goal System Design"
+summary: "Design report mapping Codex goal system to Tachi dispatch for better tracking."
+category: "engineering/architecture"
+organize: true
+---
 # Tachi Dispatch Goal 系统设计报告
 
 **报告日期**: 2026-05-06

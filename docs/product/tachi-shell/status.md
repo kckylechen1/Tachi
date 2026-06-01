@@ -1,3 +1,9 @@
+---
+title: "Tachi Shell Status"
+summary: "MVP status, completed features, and next steps for Tachi Shell."
+category: "product/tachi-shell"
+organize: true
+---
 # Tachi Shell Status
 
 ## Snapshot
