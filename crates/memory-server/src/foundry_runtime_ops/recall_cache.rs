@@ -64,7 +64,7 @@ async fn search_rows_for_recall_cache(
                 .map_err(|e| format!("Search failed in path DB {}: {e}", db_path.display()))?;
             Ok(rows
                 .into_iter()
-                .map(|row| slim_search_result(&row, item.target_db))
+                .map(|row| slim_search_result(&row, item.target_db, params.include_metadata))
                 .collect())
         });
     }
@@ -158,6 +158,7 @@ pub(super) async fn process_recall_rerank_cache_job(
                 error_context: None,
                 enable_rerank: false,
                 as_of: None,
+                include_metadata: false,
             },
         )
         .await?;

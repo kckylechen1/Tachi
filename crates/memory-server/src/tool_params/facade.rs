@@ -204,48 +204,74 @@ fn default_memory_top_k() -> usize {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiMemoryParams {
-    /// briefing (→ Markdown context block; call at session start) | save (→ entry id; call proactively after any meaningful step, not only at session end) | extract_facts (→ saved count; LLM atomizes raw text into N entries) | checkpoint (→ checkpoint id; mid-task pause or handoff) | alerts (→ warning list; when stuck or failing repeatedly) | search (→ ranked results) | ask (→ synthesized answer, use synthesize=true) | consolidate (→ merged count) | progress (→ status update) | readiness (→ health + tool visibility JSON)
+    #[schemars(
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
+    )]
     pub action: String,
-    /// Output format for facade responses: "markdown" (default, compact for agents) or "json" (minified, stable for automation).
     #[serde(default, alias = "output_format")]
+    #[schemars(
+        description = "Response shape: \"markdown\" (default, agent-readable) or \"json\" (minified, for automation)."
+    )]
     pub format: Option<String>,
 
     // --- search fields ---
     #[serde(default)]
+    #[schemars(description = "Search or ask query text (required for action=search or ask).")]
     pub query: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Recall scope for search/ask: \"all\" (default), \"memory\", or \"wiki\"."
+    )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
+    #[schemars(description = "Maximum results to return (default: 6).")]
     pub top_k: usize,
     #[serde(default)]
+    #[schemars(description = "Optional path prefix filter, e.g. /scratch/sigil/.")]
     pub path_prefix: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional open-file path hint to bias recall.")]
     pub file_context: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional error message hint to bias recall.")]
     pub error_context: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Wiki category filter when scope includes wiki.")]
     pub category: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Include archived wiki/memory entries in search results.")]
     pub include_archived: bool,
     #[serde(default)]
+    #[schemars(
+        description = "Enable adaptive Voyage reranking when top hybrid scores are close (search/ask)."
+    )]
     pub enable_rerank: bool,
     #[serde(default)]
+    #[schemars(
+        description = "Point-in-time validity filter (ISO 8601). Returns only memories valid at this time."
+    )]
     pub as_of: Option<String>,
-    /// When action="ask" or action="consolidate", optionally call the configured LLM to synthesize from evidence.
     #[serde(default)]
+    #[schemars(
+        description = "When action=ask or consolidate, call the configured LLM to synthesize from evidence."
+    )]
     pub synthesize: bool,
-    /// Optional model override for synthesis calls.
     #[serde(default)]
+    #[schemars(description = "Optional model override for ask/consolidate synthesis.")]
     pub model: Option<String>,
 
     // --- save fields ---
     #[serde(default)]
+    #[schemars(description = "Full text to save (action=save, checkpoint, extract_facts source).")]
     pub text: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional title (wiki-style entries).")]
     pub title: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Short summary stored alongside text.")]
     pub summary: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Topic label for the entry.")]
     pub topic: Option<String>,
     #[serde(default, alias = "indexed_tags")]
     #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
@@ -257,10 +283,13 @@ pub(crate) struct TachiMemoryParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(description = "Importance score 0.0–1.0 (default: 0.5 on save).")]
     pub importance: Option<f64>,
     #[serde(default)]
+    #[schemars(description = "Retention policy name (save).")]
     pub retention_policy: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Save kind hint: memory, note, or wiki (auto-detected if omitted).")]
     pub kind: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -268,28 +297,36 @@ pub(crate) struct TachiMemoryParams {
     )]
     pub path: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Existing memory id to update (save) instead of creating a new row.")]
     pub id: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Bypass dedup guards on save when true.")]
     pub force: bool,
     #[serde(default)]
+    #[schemars(description = "Provenance source label, e.g. cursor, codex, openclaw.")]
     pub source: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Validity start (ISO 8601) for time-bounded facts.")]
     pub valid_from: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Validity end (ISO 8601) for time-bounded facts.")]
     pub valid_until: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Arbitrary JSON metadata merged into the stored entry.")]
     pub metadata: Option<serde_json::Value>,
-    /// Referenced source files, stored as `metadata.files` and surfaced inline on search.
     #[serde(default)]
     #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
     pub files: Vec<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]
+    #[schemars(description = "Flow id for action=progress (create or resume a tracked command).")]
     pub flow_id: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Progress event name, e.g. step_done, failed.")]
     pub event: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Progress state payload or status line for action=progress.")]
     pub state: Option<String>,
 
     // --- shared ---
@@ -303,6 +340,13 @@ pub(crate) struct TachiMemoryParams {
         description = "Optional area tag (e.g. rust, ci, mcp). Filter on search; stored on save. Does not select the DB — use project for that."
     )]
     pub domain: Option<String>,
+
+    // --- briefing shape ---
+    #[serde(default)]
+    #[schemars(
+        description = "When true (action=briefing), emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
+    )]
+    pub compact: bool,
 }
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────

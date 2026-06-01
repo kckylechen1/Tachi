@@ -173,6 +173,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             project: None,
             domain: Some("engineering".to_string()),
             metadata: None,
+            compact: false,
             files: Vec::new(),
         },
     )
@@ -227,6 +228,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             project: None,
             domain: Some("rust".to_string()),
             metadata: None,
+            compact: false,
             files: Vec::new(),
         },
     )
@@ -293,6 +295,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             project: None,
             domain: None,
             metadata: None,
+            compact: false,
             files: Vec::new(),
         },
     )
@@ -398,6 +401,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             project: None,
             domain: None,
             metadata: None,
+            compact: false,
             files: Vec::new(),
         },
     )
@@ -460,6 +464,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             project: None,
             domain: None,
             metadata: None,
+            compact: false,
             files: Vec::new(),
         },
     )

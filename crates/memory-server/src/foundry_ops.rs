@@ -222,6 +222,7 @@ async fn build_evidence(
                 error_context: None,
                 enable_rerank: false,
                 as_of: None,
+                include_metadata: false,
             },
         )
         .await?;

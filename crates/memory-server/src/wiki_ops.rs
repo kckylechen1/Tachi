@@ -310,35 +310,71 @@ fn list_wiki_entries(
     project: &str,
     limit: usize,
 ) -> Result<(Vec<MemoryEntry>, &'static str), String> {
-    match server.with_named_project_store_read(project, |store| {
+    // Wiki entries can live in any of three stores: a named project DB
+    // (when the caller scopes to one), the active workspace project DB, or
+    // the global DB. We try named → project → global and merge the user-facing
+    // entries so `wiki_read` finds an entry no matter which store holds it.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut merged: Vec<MemoryEntry> = Vec::new();
+    let mut first_source: &'static str = "empty";
+
+    let named_result = server.with_named_project_store_read(project, |store| {
         store
             .list_by_path("/wiki", limit, false)
             .map_err(|e| format!("wiki list: {e}"))
-    }) {
-        Ok(entries) => Ok((
-            entries
-                .into_iter()
-                .filter(is_user_facing_wiki_entry)
-                .collect(),
-            "named",
-        )),
-        Err(named_err) => server
-            .with_global_store_read(|store| {
+    });
+    match named_result {
+        Ok(entries) => {
+            for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+                if first_source == "empty" {
+                    first_source = "named";
+                }
+                if seen.insert(entry.id.clone()) {
+                    merged.push(entry);
+                }
+            }
+        }
+        Err(_) => {
+            // Named project store not found; fall through to project + global.
+            if let Ok(entries) = server.with_project_store_read(|store| {
+                store
+                    .list_by_path("/wiki", limit, false)
+                    .map_err(|e| format!("wiki project list: {e}"))
+            }) {
+                for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+                    if first_source == "empty" {
+                        first_source = "project";
+                    }
+                    if seen.insert(entry.id.clone()) {
+                        merged.push(entry);
+                    }
+                }
+            }
+            match server.with_global_store_read(|store| {
                 store
                     .list_by_path("/wiki", limit, false)
                     .map_err(|e| format!("wiki fallback list: {e}"))
-            })
-            .map(|entries| {
-                (
-                    entries
-                        .into_iter()
-                        .filter(is_user_facing_wiki_entry)
-                        .collect(),
-                    "global",
-                )
-            })
-            .map_err(|fallback_err| format!("{named_err}; {fallback_err}")),
+            }) {
+                Ok(entries) => {
+                    for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+                        if first_source == "empty" {
+                            first_source = "global";
+                        }
+                        if seen.insert(entry.id.clone()) {
+                            merged.push(entry);
+                        }
+                    }
+                }
+                Err(global_err) => {
+                    if merged.is_empty() {
+                        return Err(format!("wiki list: {global_err}"));
+                    }
+                }
+            }
+        }
     }
+
+    Ok((merged, first_source))
 }
 
 fn obsidian_file_stem(entry: &MemoryEntry) -> String {
@@ -1214,6 +1250,7 @@ pub(crate) async fn handle_wiki_search(
             error_context: params.error_context,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;

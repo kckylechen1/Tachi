@@ -1199,7 +1199,7 @@ impl MemoryServer {
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
-        description = "Memory search and operations. action='search'/'ask': recall prior session context during work. action='extract_facts': atomize raw text/logs via LLM. action='checkpoint': mid-task pause/handoff. action='alerts': surface blocker signals when stuck. Note: use tachi_save to save high-value decisions/lessons."
+        description = "Unified memory facade. Actions: search (hybrid recall), save (persist entry; prefer tachi_save for decisions), extract_facts (LLM atomize logs), briefing (session start), checkpoint (handoff), alerts (warnings when stuck), ask (Q&A over evidence), consolidate (merge duplicates), progress (long-running flow), readiness (health/tools). Use tachi_briefing for zero-arg briefing alias."
     )]
     pub(crate) async fn tachi_memory(
         &self,
@@ -1251,6 +1251,7 @@ impl MemoryServer {
             domain: None,
             metadata: None,
             files: Vec::new(),
+            compact: false,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

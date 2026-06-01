@@ -20,7 +20,8 @@ pub(crate) async fn handle_memory_briefing(
         .or_else(|| params.topic.clone())
         .or_else(|| params.title.clone())
         .unwrap_or_else(|| "current task recent decisions blockers next steps".to_string());
-    let top_k = params.top_k.max(1).min(12);
+    let compact = params.compact;
+    let top_k = params.top_k.max(1).min(if compact { 6 } else { 12 });
     let include_wiki = !matches!(
         params
             .scope
@@ -29,6 +30,10 @@ pub(crate) async fn handle_memory_briefing(
             .as_deref(),
         Some("memory")
     );
+    let memory_cap = if compact { 6 } else { 12 };
+    let wiki_cap = if compact { 3 } else { 5 };
+    let kanban_cap = if compact { 3 } else { 5 };
+    let checkpoint_cap = if compact { 2 } else { 3 };
 
     // Memory + wiki searches run concurrently to reduce briefing latency.
     let mem_params = SearchMemoryParams {
@@ -49,13 +54,14 @@ pub(crate) async fn handle_memory_briefing(
         error_context: params.error_context.clone(),
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
+        include_metadata: false,
     };
 
     let wiki_params = if include_wiki {
         Some(SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: top_k.min(5),
+            top_k: top_k.min(wiki_cap),
             path_prefix: Some(
                 params
                     .path_prefix
@@ -75,6 +81,7 @@ pub(crate) async fn handle_memory_briefing(
             error_context: params.error_context.clone(),
             enable_rerank: false,
             as_of: params.as_of.clone(),
+            include_metadata: false,
         })
     } else {
         None
@@ -97,27 +104,43 @@ pub(crate) async fn handle_memory_briefing(
     };
 
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
-        crate::status_ops::collect_agent_warning_lines(server),
+        async {
+            if compact {
+                Vec::<String>::new()
+            } else {
+                crate::status_ops::collect_agent_warning_lines(server).await
+            }
+        },
         crate::dispatch_ops::handle_tachi_board(
             server,
             TachiBoardParams {
                 state_filter: Some("all".to_string()),
-                limit: Some(top_k.min(5)),
+                limit: Some(top_k.min(kanban_cap)),
                 project: params.project.clone(),
             },
         ),
-        async { crate::status_ops::list_recent_checkpoint_entries(server, 3) },
-        crate::wiki_ops::wiki_hygiene_counts(server),
+        async { crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap) },
+        async {
+            if compact {
+                Ok(json!({"orphans":0,"stale_nodes":0,"duplicates":0}))
+            } else {
+                crate::wiki_ops::wiki_hygiene_counts(server).await
+            }
+        },
     );
-    let warnings = warnings_res;
+    let warnings: Vec<String> = warnings_res;
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
-    let wiki_counts = wiki_counts_res?;
-    let health_summary = json!({
-        "health_score": if warnings.is_empty() { 95 } else { 85 },
-        "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
-        "wiki": wiki_counts,
-    });
+    let wiki_counts: serde_json::Value = wiki_counts_res?;
+    let health_summary = if compact {
+        json!({"health_score": 95, "warnings": [], "wiki": wiki_counts, "compact": true})
+    } else {
+        json!({
+            "health_score": if warnings.is_empty() { 95 } else { 85 },
+            "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
+            "wiki": wiki_counts,
+        })
+    };
 
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
@@ -128,6 +151,13 @@ pub(crate) async fn handle_memory_briefing(
             "health": health_summary,
             "kanban": board,
             "recent_checkpoints": checkpoints,
+            "compact": compact,
+            "limits": {
+                "memories": memory_cap,
+                "wiki": wiki_cap,
+                "kanban": kanban_cap,
+                "checkpoints": checkpoint_cap,
+            },
         }));
     }
 
@@ -138,5 +168,6 @@ pub(crate) async fn handle_memory_briefing(
         &health_summary,
         &board,
         &checkpoints,
+        compact,
     ))
 }

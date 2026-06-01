@@ -171,6 +171,7 @@ pub(crate) async fn handle_memory_graph(
                 error_context: None,
                 enable_rerank: false,
                 as_of: None,
+                include_metadata: false,
             },
         )
         .await?;

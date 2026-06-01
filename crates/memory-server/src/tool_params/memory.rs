@@ -408,6 +408,12 @@ pub(crate) struct SearchMemoryParams {
     /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
     #[serde(default)]
     pub as_of: Option<String>,
+
+    /// When true, include the full `metadata` blob on each result row. Off by
+    /// default to keep token usage tight; the kanban board sets this so it can
+    /// surface `a2a_state`, `eval_ledger_id`, `agent`, etc.
+    #[serde(default)]
+    pub include_metadata: bool,
 }
 
 impl SearchMemoryParams {
