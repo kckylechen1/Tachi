@@ -150,14 +150,8 @@ pub(crate) fn collect_snapshot(
 ) -> StatusSnapshot {
     let lock_path = app_home.join("daemon.lock");
     let daemon = match read_pid_file(&lock_path) {
-        Some(pid) if process_alive(pid) => DaemonStatus::Running {
-            pid,
-            lock_path,
-        },
-        Some(pid) => DaemonStatus::StalePid {
-            pid,
-            lock_path,
-        },
+        Some(pid) if process_alive(pid) => DaemonStatus::Running { pid, lock_path },
+        Some(pid) => DaemonStatus::StalePid { pid, lock_path },
         None => DaemonStatus::None,
     };
 
@@ -1034,17 +1028,21 @@ fn build_status_warnings(
     let total_dbs = snapshot.dbs.len();
     let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
-    let low_coverage_count = snapshot
+    let low_coverage_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
         .filter(|d| d.memory_total > 0 && d.vector_coverage < 0.9)
-        .count();
-    let vector_dimension_mismatch_count = snapshot
+        .map(|d| d.label.as_str())
+        .collect();
+    let low_coverage_count = low_coverage_dbs.len();
+    let vector_dimension_mismatch_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
         .filter(|d| vector_dimension_mismatch(d))
-        .count();
-    let auth_failures = snapshot
+        .map(|d| d.label.as_str())
+        .collect();
+    let vector_dimension_mismatch_count = vector_dimension_mismatch_dbs.len();
+    let auth_failure_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
         .filter(|d| {
@@ -1053,7 +1051,9 @@ fn build_status_warnings(
                 .and_then(|job| job.inferred_invalid_provider.as_ref())
                 .is_some()
         })
-        .count();
+        .map(|d| d.label.as_str())
+        .collect();
+    let auth_failures = auth_failure_dbs.len();
 
     let mut warnings: Vec<String> = Vec::new();
     if !daemon_state["running"].as_bool().unwrap_or(false) {
@@ -1064,25 +1064,52 @@ fn build_status_warnings(
     }
     if low_coverage_count > 0 {
         warnings.push(format!(
-            "{low_coverage_count} db(s) have vector coverage below 90%"
+            "{low_coverage_count} db(s) have vector coverage below 90%: {}",
+            low_coverage_dbs.join(", ")
         ));
     }
     if vector_dimension_mismatch_count > 0 {
         warnings.push(format!(
-            "{vector_dimension_mismatch_count} db(s) have vector dimension metadata that differs from expected {EXPECTED_EMBEDDING_DIM}"
+            "{vector_dimension_mismatch_count} db(s) have vector dimension metadata that differs from expected {EXPECTED_EMBEDDING_DIM}: {}",
+            vector_dimension_mismatch_dbs.join(", ")
         ));
     }
     if total_failed > 0 {
+        let failed_dbs: Vec<&str> = snapshot
+            .dbs
+            .iter()
+            .filter(|d| d.failed > 0)
+            .map(|d| d.label.as_str())
+            .collect();
+        let db_list = if failed_dbs.is_empty() {
+            format!("across {total_dbs} db(s)")
+        } else {
+            format!("[{}] across {} db(s)", failed_dbs.join(", "), total_dbs)
+        };
         warnings.push(format!(
-            "{total_failed} foundry job(s) failed across {total_dbs} dbs"
+            "{total_failed} foundry job(s) failed {db_list}"
         ));
     }
     if auth_failures > 0 {
-        warnings.push("latest foundry failures include provider auth/API-key errors".to_string());
+        warnings.push(format!(
+            "latest foundry failures include provider auth/API-key errors in: {}",
+            auth_failure_dbs.join(", ")
+        ));
     }
     if total_stuck > 0 {
+        let stuck_dbs: Vec<&str> = snapshot
+            .dbs
+            .iter()
+            .filter(|d| d.stuck_in_progress > 0)
+            .map(|d| d.label.as_str())
+            .collect();
+        let db_list = if stuck_dbs.is_empty() {
+            String::new()
+        } else {
+            format!(" — affected: {}", stuck_dbs.join(", "))
+        };
         warnings.push(format!(
-            "{total_stuck} foundry job(s) stuck in_progress for over {STUCK_THRESHOLD_SECS}s"
+            "{total_stuck} foundry job(s) stuck in_progress for over {STUCK_THRESHOLD_SECS}s{db_list}"
         ));
     }
     if snapshot
@@ -1251,5 +1278,117 @@ mod tests {
                 "is_checkpoint_fixture_path({path:?}) misclassified"
             );
         }
+    }
+
+    fn db_status(label: &str, failed: usize, stuck: usize, coverage: f64) -> DbStatus {
+        DbStatus {
+            path: format!("/tmp/{label}.db"),
+            label: label.to_string(),
+            orphan: false,
+            memory_total: 100,
+            vector_count: (100.0 * coverage) as usize,
+            vector_missing: 0,
+            vector_orphans: 0,
+            vector_coverage: coverage,
+            vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
+            enrichment_failed_recent: 0,
+            pending: 0,
+            running: 0,
+            completed: 0,
+            failed,
+            gc_eligible: 0,
+            stuck_in_progress: stuck,
+            latest_job: None,
+            latest_failed_job: None,
+            error: None,
+        }
+    }
+
+    fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
+        StatusSnapshot {
+            daemon: DaemonStatus::None,
+            dbs,
+            manifest_path: String::new(),
+            dispatches: Vec::new(),
+            recent_evals: Vec::new(),
+            last_daily_report: None,
+            distill_marker: None,
+            api_keys: Vec::new(),
+            health_score: 95,
+        }
+    }
+
+    fn daemon_running() -> serde_json::Value {
+        serde_json::json!({ "running": true })
+    }
+
+    #[test]
+    fn build_status_warnings_lists_db_names_for_low_coverage() {
+        let snapshot = empty_snapshot(vec![
+            db_status("global", 0, 0, 0.95),
+            db_status("sigil", 0, 0, 0.42),
+            db_status("hyperion", 0, 0, 0.81),
+        ]);
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        let low_cov = warnings
+            .iter()
+            .find(|w| w.contains("vector coverage below 90%"))
+            .expect("low-coverage warning present");
+        assert!(
+            low_cov.contains("sigil") && low_cov.contains("hyperion"),
+            "low-coverage warning should name the affected dbs, got: {low_cov}"
+        );
+        assert!(
+            !low_cov.contains("global"),
+            "healthy dbs must not appear in low-coverage warning, got: {low_cov}"
+        );
+    }
+
+    #[test]
+    fn build_status_warnings_lists_db_names_for_failed_jobs() {
+        let mut sigil = db_status("sigil", 3, 0, 0.95);
+        sigil.latest_failed_job = Some(LatestFailedJob {
+            id: "job-1".to_string(),
+            kind: "enrich".to_string(),
+            lane: None,
+            updated_at: None,
+            reason: Some("401 invalid api key".to_string()),
+            inferred_invalid_provider: Some("openai".to_string()),
+        });
+        let snapshot = empty_snapshot(vec![db_status("global", 0, 0, 0.95), sigil]);
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        let failed = warnings
+            .iter()
+            .find(|w| w.contains("foundry job(s) failed"))
+            .expect("failed-jobs warning present");
+        assert!(
+            failed.contains("sigil"),
+            "failed-jobs warning should name the affected dbs, got: {failed}"
+        );
+        let auth = warnings
+            .iter()
+            .find(|w| w.contains("auth/API-key errors"))
+            .expect("auth-failure warning present");
+        assert!(
+            auth.contains("sigil"),
+            "auth-failure warning should name the affected dbs, got: {auth}"
+        );
+    }
+
+    #[test]
+    fn build_status_warnings_lists_db_names_for_stuck_jobs() {
+        let snapshot = empty_snapshot(vec![
+            db_status("global", 0, 0, 0.95),
+            db_status("sigil", 0, 2, 0.95),
+        ]);
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        let stuck = warnings
+            .iter()
+            .find(|w| w.contains("stuck in_progress"))
+            .expect("stuck-jobs warning present");
+        assert!(
+            stuck.contains("sigil"),
+            "stuck-jobs warning should name the affected dbs, got: {stuck}"
+        );
     }
 }

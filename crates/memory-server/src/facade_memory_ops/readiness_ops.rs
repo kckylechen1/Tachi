@@ -59,6 +59,22 @@ pub(crate) async fn handle_memory_ask(
     };
     let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
     let evidence = sections_to_evidence(&sections)?;
+    // Tag each evidence row with the project DB it came from, and surface a
+    // warning when the user didn't pin `project` and the evidence spans
+    // multiple project DBs. Without this, ask synthesis can pull answers from
+    // an unrelated project's memory (e.g. "what is the current health status?"
+    // returns Hyperion's Hermes API description).
+    let project_dbs: Vec<String> = evidence_rows(&evidence)
+        .iter()
+        .filter_map(|row| row.get("db").and_then(Value::as_str))
+        .filter(|db| *db == "project")
+        .map(|_| "project".to_string())
+        .collect();
+    let uses_global = evidence_rows(&evidence)
+        .iter()
+        .any(|row| row.get("db").and_then(Value::as_str) == Some("global"));
+    let cross_project = params.project.is_none() && !project_dbs.is_empty() && uses_global;
+    let evidence = inject_project_tags(evidence);
     let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
         Some(synthesize_answer(server, &query, &evidence, params.model.as_deref()).await)
@@ -72,30 +88,69 @@ pub(crate) async fn handle_memory_ask(
             "evidence": evidence,
             "thinking": thinking,
             "synthesis": synthesis,
+            "cross_project": cross_project,
+            "cross_project_hint": if cross_project {
+                Some("evidence spans multiple project DBs; pass `project=...` to pin a library or restrict `scope` to one DB".to_string())
+            } else {
+                None
+            },
         }));
     }
     let synthesis_text = synthesis.as_ref().and_then(synthesis_markdown_text);
+    let mut fields: Vec<(&str, String)> = vec![
+        ("status", "completed".to_string()),
+        ("query", query),
+        (
+            "evidence",
+            format!("{} hit(s)", evidence_rows(&evidence).len()),
+        ),
+        (
+            "confidence",
+            thinking
+                .get("confidence")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+                .to_string(),
+        ),
+    ];
+    if cross_project {
+        fields.push((
+            "cross_project",
+            "evidence spans multiple project DBs; pin `project=...` to scope to one library".to_string(),
+        ));
+    }
     Ok(format_agent_status(
         "Tachi ask",
-        &[
-            ("status", "completed".to_string()),
-            ("query", query),
-            (
-                "evidence",
-                format!("{} hit(s)", evidence_rows(&evidence).len()),
-            ),
-            (
-                "confidence",
-                thinking
-                    .get("confidence")
-                    .and_then(Value::as_str)
-                    .unwrap_or("none")
-                    .to_string(),
-            ),
-        ],
+        &fields,
         Some(&evidence),
         synthesis_text.as_deref(),
     ))
+}
+
+/// Annotate each evidence row with the project DB it came from so consumers
+/// (and the LLM synthesis prompt) can distinguish global vs project evidence
+/// at a glance. We surface this as a `db` field that the synthesis prompt
+/// already knows to honor; downstream markdown rendering reads it back via
+/// [`format_agent_status`].
+fn inject_project_tags(evidence: Value) -> Value {
+    let Value::Array(rows) = evidence else {
+        return evidence;
+    };
+    let tagged: Vec<Value> = rows
+        .into_iter()
+        .map(|mut row| {
+            let db = row
+                .get("db")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if let Some(obj) = row.as_object_mut() {
+                obj.insert("project_db".to_string(), Value::String(db));
+            }
+            row
+        })
+        .collect();
+    Value::Array(tagged)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,13 +256,19 @@ pub(crate) async fn handle_memory_readiness(
     let required_tools = tools
         .iter()
         .map(|tool| {
+            let visible = crate::profiles::tool_visible(
+                tool,
+                server.active_tool_profile(),
+                env_patterns.as_deref(),
+            );
             json!({
                 "name": tool,
-                "visible": crate::profiles::tool_visible(
-                    tool,
-                    server.active_tool_profile(),
-                    env_patterns.as_deref(),
-                )
+                "visible": visible,
+                "reason": if visible {
+                    "exposed by active profile/TACHI_EXPOSED_TOOLS".to_string()
+                } else {
+                    "filtered out by active profile or TACHI_EXPOSED_TOOLS".to_string()
+                },
             })
         })
         .collect::<Vec<_>>();
@@ -225,6 +286,11 @@ pub(crate) async fn handle_memory_readiness(
                 .unwrap_or(false)
         })
         .count();
+    let hidden_tools: Vec<&str> = required_tools
+        .iter()
+        .filter(|tool| !tool.get("visible").and_then(Value::as_bool).unwrap_or(false))
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
     let vector_health =
         crate::status_ops::database_vector_health_json(&server.global_db_path_buf());
     let pending_vectors = vector_health
@@ -238,19 +304,30 @@ pub(crate) async fn handle_memory_readiness(
             "health": status,
             "runtime": runtime,
             "required_tools": required_tools,
+            "required_tools_summary": {
+                "visible_count": visible_tools,
+                "total_count": tools.len(),
+                "hidden": hidden_tools,
+            },
             "vector_health": vector_health,
             "recent_kanban": recent_kanban,
         }));
     }
+    let tool_summary = if hidden_tools.is_empty() {
+        format!("{visible_tools}/{} visible (all exposed)", tools.len())
+    } else {
+        format!(
+            "{visible_tools}/{} visible — hidden: {}",
+            tools.len(),
+            hidden_tools.join(", ")
+        )
+    };
     Ok(format_agent_status(
         "Tachi readiness",
         &[
             ("status", "completed".to_string()),
             ("health_score", health_score),
-            (
-                "visible_required_tools",
-                format!("{visible_tools}/{}", tools.len()),
-            ),
+            ("required_tools", tool_summary),
             ("pending_vectors", pending_vectors.to_string()),
             ("recent_kanban", kanban_count.to_string()),
             (
@@ -280,7 +357,7 @@ pub(crate) async fn synthesize_answer(
     evidence: &Value,
     model: Option<&str>,
 ) -> Value {
-    let system = "Answer using only the supplied Tachi evidence. If evidence is insufficient, say what is missing. Keep it concise and cite memory ids or paths when present.";
+    let system = "Answer using only the supplied Tachi evidence. Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. When evidence spans multiple project DBs, prefer the one most relevant to the question and explicitly call out when a claim is grounded in cross-project evidence. If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";
     let evidence_text = serde_json::to_string(evidence).unwrap_or_else(|_| "[]".to_string());
     let user = format!("Question:\n{query}\n\nEvidence JSON:\n{evidence_text}");
     match tokio::time::timeout(
