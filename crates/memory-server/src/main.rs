@@ -94,6 +94,7 @@ mod vault_crypto;
 mod vault_ops;
 mod vector_backfill;
 mod vector_sweep;
+mod provider_config;
 mod web_search_ops;
 mod wiki_ops;
 
@@ -125,7 +126,7 @@ use crate::utils::{
     parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
     write_or_recover,
 };
-use crate::vault_ops::{load_unlocked_api_key_secrets, load_unlocked_env_secrets};
+use crate::vault_ops::load_unlocked_env_secrets;
 
 use chrono::Utc;
 use clap::Parser;
@@ -670,9 +671,18 @@ impl MemoryServer {
     }
 
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
-        self.llm.clear_provider_secrets();
-        let secrets = load_unlocked_api_key_secrets(self)?;
-        Ok(self.llm.set_provider_secrets(secrets))
+        crate::provider_config::materialize_for_server(self).map(|report| {
+            if report.from_alias > 0 || report.stripped_env_placeholders > 0 {
+                tracing::info!(
+                    "[provider] materialized {} secret(s) (vault={}, aliases={}, stripped_env={})",
+                    report.loaded,
+                    report.from_vault,
+                    report.from_alias,
+                    report.stripped_env_placeholders
+                );
+            }
+            report.loaded
+        })
     }
 
     pub(crate) fn unlocked_env_secrets_for_child_env(

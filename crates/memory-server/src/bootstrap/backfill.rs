@@ -36,7 +36,8 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    crate::vector_backfill::load_vault_keys_into_llm(&llm, vault_db_path);
+    crate::provider_config::materialize_standalone(&llm, vault_db_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let entries =
         crate::vector_backfill::list_missing_vector_entries(&store, false).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, e)

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tokio::time::{interval, MissedTickBehavior};
 
+use crate::llm::LlmClient;
 use crate::manifest::Manifest;
 use crate::vector_backfill;
 
@@ -86,11 +87,12 @@ pub struct VectorSweepScheduler {
 }
 
 impl VectorSweepScheduler {
+    /// Uses the daemon's shared `LlmClient` (same provider secrets as MCP/enrichment).
     pub fn start(
         manifest_path: PathBuf,
         global_db: PathBuf,
         project_db: Option<PathBuf>,
-        vault_db: PathBuf,
+        llm: Arc<LlmClient>,
     ) -> Self {
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
         let runs = Arc::new(AtomicU64::new(0));
@@ -119,7 +121,7 @@ impl VectorSweepScheduler {
                         for path in paths {
                             match vector_backfill::sweep_db_vectors(
                                 &path,
-                                &vault_db,
+                                llm.as_ref(),
                                 batch,
                                 skip_cache,
                             ).await {

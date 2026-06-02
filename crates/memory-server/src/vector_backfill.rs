@@ -74,27 +74,10 @@ pub(crate) async fn embed_and_write_batch(
     Ok(written)
 }
 
-pub(crate) fn load_vault_keys_into_llm(
-    llm: &LlmClient,
-    vault_db_path: &Path,
-) {
-    match crate::status_ops::status_health::load_keychain_vault_api_key_values(vault_db_path) {
-        Ok(secrets) => {
-            let loaded = llm.set_provider_secrets(secrets);
-            if loaded > 0 {
-                tracing::debug!("[vector-backfill] loaded {loaded} API key(s) from Vault");
-            }
-        }
-        Err(err) => {
-            tracing::warn!("[vector-backfill] Vault keys unavailable: {err}");
-        }
-    }
-}
-
 /// Sweep one DB: at most `max_entries` missing rows embedded.
 pub(crate) async fn sweep_db_vectors(
     db_path: &Path,
-    vault_db_path: &Path,
+    llm: &LlmClient,
     max_entries: usize,
     skip_recall_cache: bool,
 ) -> Result<(usize, usize), String> {
@@ -112,13 +95,11 @@ pub(crate) async fn sweep_db_vectors(
 
     drop(store);
     let mut store = MemoryStore::open(db_str).map_err(|e| format!("open mut: {e}"))?;
-    let llm = LlmClient::new().map_err(|e| format!("LLM init: {e}"))?;
-    load_vault_keys_into_llm(&llm, vault_db_path);
 
     let batch_size = 32usize.min(todo.max(1));
     let mut done = 0usize;
     for chunk in missing.chunks(batch_size) {
-        done += embed_and_write_batch(&mut store, &llm, chunk).await?;
+        done += embed_and_write_batch(&mut store, llm, chunk).await?;
         if done < todo {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

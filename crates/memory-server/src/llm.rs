@@ -246,7 +246,9 @@ impl LlmClient {
             })
         };
 
-        vault_value.or_else(|| Self::first_env(keys))
+        vault_value.or_else(|| {
+            Self::first_env(keys).filter(|value| !crate::provider_config::is_vault_alias(value))
+        })
     }
 
     fn required_secret(&self, keys: &[&str]) -> Result<String, String> {

@@ -727,7 +727,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 v.unlock_time = Some(std::time::Instant::now());
             }
             let loaded = server.refresh_llm_provider_secrets_from_vault()?;
-            eprintln!("[vault] loaded {loaded} provider key(s) from unlocked vault");
+            eprintln!("[vault] materialized {loaded} provider key(s) (vault + config.env aliases)");
             Ok(true)
         })();
 
@@ -736,6 +736,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             Err(e) => eprintln!("[vault] auto-unlock skipped: {e}"),
             _ => {}
         }
+    }
+
+    match server.refresh_llm_provider_secrets_from_vault() {
+        Ok(n) if n > 0 => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
+        Ok(_) => eprintln!("[provider] no provider keys materialized (Vault locked or empty)"),
+        Err(e) => eprintln!("[provider] warn: secret materialization failed: {e}"),
     }
 
     // Spawn idle connection cleanup task
@@ -1101,12 +1107,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // the manifest watcher + per-DB workers.
         let _scheduler = scheduler;
 
-        let vault_db_path = app_home.join("vault").join("vault.db");
         let _vector_sweep = crate::vector_sweep::VectorSweepScheduler::start(
             manifest_path.clone(),
             global_db_path.clone(),
             project_db_path.clone(),
-            vault_db_path,
+            server.llm.clone(),
         );
         eprintln!("[daemon] vector sweep scheduled (manifest={})", manifest_path.display());
 
