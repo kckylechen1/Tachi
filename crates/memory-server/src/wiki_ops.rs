@@ -305,6 +305,27 @@ fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
             .unwrap_or(false)
 }
 
+fn merge_wiki_store_entries(
+    merged: &mut Vec<MemoryEntry>,
+    seen: &mut HashSet<String>,
+    first_source: &mut &'static str,
+    store_label: &'static str,
+    entries: Vec<MemoryEntry>,
+    limit: usize,
+) {
+    for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+        if merged.len() >= limit {
+            break;
+        }
+        if *first_source == "empty" {
+            *first_source = store_label;
+        }
+        if seen.insert(entry.id.clone()) {
+            merged.push(entry);
+        }
+    }
+}
+
 fn list_wiki_entries(
     server: &MemoryServer,
     project: &str,
@@ -323,57 +344,62 @@ fn list_wiki_entries(
     // is asking for (e.g. `project=wiki` resolves to `~/.tachi/projects/wiki`
     // which holds a different wiki namespace), and we must fall through to
     // the workspace project + global stores so the read still finds the
-    // entry. Entries are deduplicated by id.
-    if let Ok(entries) = server.with_named_project_store_read(project, |store| {
-        store
-            .list_by_path("/wiki", limit, false)
-            .map_err(|e| format!("wiki list: {e}"))
-    }) {
-        for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-            if first_source == "empty" {
-                first_source = "named";
-            }
-            if seen.insert(entry.id.clone()) {
-                merged.push(entry);
-            }
+    // entry. Entries are deduplicated by id and capped at `limit`.
+    if merged.len() < limit {
+        if let Ok(entries) = server.with_named_project_store_read(project, |store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki list: {e}"))
+        }) {
+            merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "named",
+                entries,
+                limit,
+            );
         }
     }
-    if let Ok(entries) = server.with_project_store_read(|store| {
-        store
-            .list_by_path("/wiki", limit, false)
-            .map_err(|e| format!("wiki project list: {e}"))
-    }) {
-        for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-            if first_source == "empty" {
-                first_source = "project";
-            }
-            if seen.insert(entry.id.clone()) {
-                merged.push(entry);
-            }
+    if merged.len() < limit {
+        if let Ok(entries) = server.with_project_store_read(|store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki project list: {e}"))
+        }) {
+            merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "project",
+                entries,
+                limit,
+            );
         }
     }
-    match server.with_global_store_read(|store| {
-        store
-            .list_by_path("/wiki", limit, false)
-            .map_err(|e| format!("wiki fallback list: {e}"))
-    }) {
-        Ok(entries) => {
-            for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-                if first_source == "empty" {
-                    first_source = "global";
+    if merged.len() < limit {
+        match server.with_global_store_read(|store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki fallback list: {e}"))
+        }) {
+            Ok(entries) => merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "global",
+                entries,
+                limit,
+            ),
+            Err(global_err) => {
+                if merged.is_empty() {
+                    return Err(format!("wiki list: {global_err}"));
                 }
-                if seen.insert(entry.id.clone()) {
-                    merged.push(entry);
-                }
-            }
-        }
-        Err(global_err) => {
-            if merged.is_empty() {
-                return Err(format!("wiki list: {global_err}"));
             }
         }
     }
 
+    merged.truncate(limit);
     Ok((merged, first_source))
 }
 

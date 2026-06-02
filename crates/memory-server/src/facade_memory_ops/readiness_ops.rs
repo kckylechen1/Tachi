@@ -59,21 +59,17 @@ pub(crate) async fn handle_memory_ask(
     };
     let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
     let evidence = sections_to_evidence(&sections)?;
-    // Tag each evidence row with the project DB it came from, and surface a
-    // warning when the user didn't pin `project` and the evidence spans
-    // multiple project DBs. Without this, ask synthesis can pull answers from
-    // an unrelated project's memory (e.g. "what is the current health status?"
-    // returns Hyperion's Hermes API description).
-    let project_dbs: Vec<String> = evidence_rows(&evidence)
+    // Tag each evidence row with the store it came from, and surface a warning
+    // when the user didn't pin `project` and evidence spans both global and
+    // project stores. Without this, ask synthesis can blend unrelated context
+    // (e.g. "what is the current health status?" returns another project's API).
+    let has_project_db = evidence_rows(&evidence)
         .iter()
-        .filter_map(|row| row.get("db").and_then(Value::as_str))
-        .filter(|db| *db == "project")
-        .map(|_| "project".to_string())
-        .collect();
+        .any(|row| row.get("db").and_then(Value::as_str) == Some("project"));
     let uses_global = evidence_rows(&evidence)
         .iter()
         .any(|row| row.get("db").and_then(Value::as_str) == Some("global"));
-    let cross_project = params.project.is_none() && !project_dbs.is_empty() && uses_global;
+    let cross_store = params.project.is_none() && has_project_db && uses_global;
     let evidence = inject_project_tags(evidence);
     let thinking = build_thinking_scaffold("ask", &query, &evidence);
     let synthesis = if params.synthesize {
@@ -88,9 +84,9 @@ pub(crate) async fn handle_memory_ask(
             "evidence": evidence,
             "thinking": thinking,
             "synthesis": synthesis,
-            "cross_project": cross_project,
-            "cross_project_hint": if cross_project {
-                Some("evidence spans multiple project DBs; pass `project=...` to pin a library or restrict `scope` to one DB".to_string())
+            "cross_store": cross_store,
+            "cross_store_hint": if cross_store {
+                Some("evidence spans global and project stores; pass `project=...` to pin a library or restrict `scope` to one store".to_string())
             } else {
                 None
             },
@@ -113,10 +109,10 @@ pub(crate) async fn handle_memory_ask(
                 .to_string(),
         ),
     ];
-    if cross_project {
+    if cross_store {
         fields.push((
-            "cross_project",
-            "evidence spans multiple project DBs; pin `project=...` to scope to one library".to_string(),
+            "cross_store",
+            "evidence spans global and project stores; pin `project=...` to scope to one library".to_string(),
         ));
     }
     Ok(format_agent_status(
@@ -357,7 +353,7 @@ pub(crate) async fn synthesize_answer(
     evidence: &Value,
     model: Option<&str>,
 ) -> Value {
-    let system = "Answer using only the supplied Tachi evidence. Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. When evidence spans multiple project DBs, prefer the one most relevant to the question and explicitly call out when a claim is grounded in cross-project evidence. If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";
+    let system = "Answer using only the supplied Tachi evidence. Each evidence row carries a `db` field — values are `global` for the shared library and `project` for a workspace/named project DB. When evidence spans both stores, prefer rows most relevant to the question and explicitly call out claims grounded in cross-store evidence. If evidence is insufficient, say what is missing. Keep the answer concise and cite memory ids or paths when present.";
     let evidence_text = serde_json::to_string(evidence).unwrap_or_else(|_| "[]".to_string());
     let user = format!("Question:\n{query}\n\nEvidence JSON:\n{evidence_text}");
     match tokio::time::timeout(
