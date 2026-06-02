@@ -1,11 +1,16 @@
-//! Bounded Claude Code CLI pool used by Foundry batch distill (Phase 1).
+//! Bounded Claude Code CLI pool used by Foundry batch distill, dispatch V2
+//! plan stage, Hub skill evolve, and Hub security scan.
 //!
 //! Each call:
 //!   * acquires a semaphore permit (cap concurrent CLI invocations);
 //!   * writes `prompt.md` / `result.md` / `status.json` under
 //!     `~/.tachi/foundry-runs/<label>-<UTCts>/`;
 //!   * spawns `claude -p --output-format json --dangerously-skip-permissions`
-//!     with the prompt on stdin;
+//!     with the prompt on stdin — this is the intentional default because
+//!     Claude CLI's interactive permission prompts would hang daemon-driven
+//!     callers (Foundry distill, Hub evolve). Set
+//!     `TACHI_CLAUDE_SKIP_PERMISSIONS=false` to restore prompts for
+//!     non-daemon use;
 //!   * enforces a wall-clock timeout (default 180s, env
 //!     `CLAUDE_POOL_TIMEOUT_SECS`).
 //!
@@ -13,10 +18,9 @@
 //! older than the policy (7d success / 30d failed) so the foundry runs
 //! folder doesn't grow without bound.
 //!
-//! This module deliberately keeps the surface small — the only consumer
-//! today is `foundry_runtime_ops::maintenance::run_daily_batch_distill`.
-//! Callers are expected to handle their own LLM-fallback policy when
-//! `call()` returns Err.
+//! Callers use `pool_call_with_fallback` for a Claude CLI → raw API
+//! degradation path. Each caller is expected to handle its own LLM-fallback
+//! policy when `call()` returns Err.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -153,6 +157,12 @@ impl ClaudePool {
         }
     }
 
+    /// Spawn `claude -p --output-format json [--dangerously-skip-permissions]`
+    /// with the prompt on stdin. Honors `TACHI_CLAUDE_SKIP_PERMISSIONS`:
+    /// true (default, daemon-safe) | false (restore interactive prompts).
+    /// The default is true because this pool serves non-interactive callers
+    /// (Foundry distill, dispatch V2 plan, Hub evolve/security scan) where
+    /// a permission prompt would hang indefinitely.
     async fn run_claude_cli(&self, prompt: &str) -> Result<String, String> {
         let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -530,6 +540,35 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("CLAUDE_BIN", v),
             None => std::env::remove_var("CLAUDE_BIN"),
+        }
+    }
+
+    #[test]
+    fn skip_permissions_defaults_to_true_when_env_unset() {
+        // clear the env var so .unwrap_or(true) fires.
+        let prev = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS").ok();
+        std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS");
+        let skip = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        assert!(skip, "default should be true (daemon-safe)");
+        match prev {
+            Some(v) => std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", v),
+            None => std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS"),
+        }
+    }
+
+    #[test]
+    fn skip_permissions_is_false_when_env_is_false() {
+        let prev = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS").ok();
+        std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", "false");
+        let skip = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        assert!(!skip, "explicit false should disable skip");
+        match prev {
+            Some(v) => std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", v),
+            None => std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS"),
         }
     }
 
