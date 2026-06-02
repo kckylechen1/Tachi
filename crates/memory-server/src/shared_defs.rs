@@ -129,9 +129,15 @@ fn round_score(value: f64) -> f64 {
 
 /// Token-efficient search hit: id/path/topic/summary plus scores only.
 /// Full text and metadata remain available via `get_memory`.
+///
+/// Pass `include_metadata = true` to also surface the full `metadata` map.
+/// This is required for callers that need to read semantic fields like
+/// kanban `a2a_state`; for everything else the default keeps token usage
+/// tight by omitting the metadata blob.
 pub(super) fn slim_search_result(
     result: &memory_core::SearchResult,
     db: DbScope,
+    include_metadata: bool,
 ) -> serde_json::Value {
     let entry = &result.entry;
     let mut obj = serde_json::Map::new();
@@ -144,12 +150,19 @@ pub(super) fn slim_search_result(
     if !entry.summary.is_empty() {
         obj.insert("summary".into(), json!(entry.summary));
     }
-    // Surface referenced source files (metadata.files) inline so agents can jump
-    // to the file without a follow-up get_memory. Only string entries are kept.
-    if let Some(serde_json::Value::Array(files)) = entry.metadata.get("files") {
-        let paths: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
-        if !paths.is_empty() {
-            obj.insert("files".into(), json!(paths));
+    if include_metadata {
+        // Always include metadata when requested — consumers like the kanban
+        // board rely on it to surface a2a_state, eval_ledger_id, agent, etc.
+        obj.insert("metadata".into(), entry.metadata.clone());
+    } else {
+        // Surface referenced source files (metadata.files) inline so agents can
+        // jump to the file without a follow-up get_memory. Only string entries
+        // are kept.
+        if let Some(serde_json::Value::Array(files)) = entry.metadata.get("files") {
+            let paths: Vec<&str> = files.iter().filter_map(|v| v.as_str()).collect();
+            if !paths.is_empty() {
+                obj.insert("files".into(), json!(paths));
+            }
         }
     }
     obj.insert(

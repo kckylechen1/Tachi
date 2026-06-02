@@ -166,7 +166,7 @@ pub(crate) async fn search_memory_rows(
 
     let mut output: Vec<serde_json::Value> = deduped_results
         .iter()
-        .map(|(r, db_scope)| slim_search_result(r, *db_scope))
+        .map(|(r, db_scope)| slim_search_result(r, *db_scope, params.include_metadata))
         .collect();
 
     if pipeline_enabled {

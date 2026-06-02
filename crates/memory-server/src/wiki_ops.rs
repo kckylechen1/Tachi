@@ -305,40 +305,102 @@ fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
             .unwrap_or(false)
 }
 
+fn merge_wiki_store_entries(
+    merged: &mut Vec<MemoryEntry>,
+    seen: &mut HashSet<String>,
+    first_source: &mut &'static str,
+    store_label: &'static str,
+    entries: Vec<MemoryEntry>,
+    limit: usize,
+) {
+    for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+        if merged.len() >= limit {
+            break;
+        }
+        if *first_source == "empty" {
+            *first_source = store_label;
+        }
+        if seen.insert(entry.id.clone()) {
+            merged.push(entry);
+        }
+    }
+}
+
 fn list_wiki_entries(
     server: &MemoryServer,
     project: &str,
     limit: usize,
 ) -> Result<(Vec<MemoryEntry>, &'static str), String> {
-    match server.with_named_project_store_read(project, |store| {
-        store
-            .list_by_path("/wiki", limit, false)
-            .map_err(|e| format!("wiki list: {e}"))
-    }) {
-        Ok(entries) => Ok((
-            entries
-                .into_iter()
-                .filter(is_user_facing_wiki_entry)
-                .collect(),
-            "named",
-        )),
-        Err(named_err) => server
-            .with_global_store_read(|store| {
-                store
-                    .list_by_path("/wiki", limit, false)
-                    .map_err(|e| format!("wiki fallback list: {e}"))
-            })
-            .map(|entries| {
-                (
-                    entries
-                        .into_iter()
-                        .filter(is_user_facing_wiki_entry)
-                        .collect(),
-                    "global",
-                )
-            })
-            .map_err(|fallback_err| format!("{named_err}; {fallback_err}")),
+    // Wiki entries can live in any of three stores: a named project DB
+    // (when the caller scopes to one), the active workspace project DB, or
+    // the global DB. We try named → project → global and merge the user-facing
+    // entries so `wiki_read` finds an entry no matter which store holds it.
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut merged: Vec<MemoryEntry> = Vec::new();
+    let mut first_source: &'static str = "empty";
+
+    // Try every store regardless of whether the previous one returned Ok:
+    // a named project store may exist but not contain the entry the caller
+    // is asking for (e.g. `project=wiki` resolves to `~/.tachi/projects/wiki`
+    // which holds a different wiki namespace), and we must fall through to
+    // the workspace project + global stores so the read still finds the
+    // entry. Entries are deduplicated by id and capped at `limit`.
+    if merged.len() < limit {
+        if let Ok(entries) = server.with_named_project_store_read(project, |store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki list: {e}"))
+        }) {
+            merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "named",
+                entries,
+                limit,
+            );
+        }
     }
+    if merged.len() < limit {
+        if let Ok(entries) = server.with_project_store_read(|store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki project list: {e}"))
+        }) {
+            merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "project",
+                entries,
+                limit,
+            );
+        }
+    }
+    if merged.len() < limit {
+        match server.with_global_store_read(|store| {
+            store
+                .list_by_path("/wiki", limit, false)
+                .map_err(|e| format!("wiki fallback list: {e}"))
+        }) {
+            Ok(entries) => merge_wiki_store_entries(
+                &mut merged,
+                &mut seen,
+                &mut first_source,
+                "global",
+                entries,
+                limit,
+            ),
+            Err(global_err) => {
+                if merged.is_empty() {
+                    return Err(format!("wiki list: {global_err}"));
+                }
+            }
+        }
+    }
+
+    merged.truncate(limit);
+    Ok((merged, first_source))
 }
 
 fn obsidian_file_stem(entry: &MemoryEntry) -> String {
@@ -612,7 +674,7 @@ pub(crate) async fn handle_wiki_ingest(
         summary: summary.clone(),
         text: content.clone(),
         importance: 0.8,
-        timestamp: timestamp.clone(),
+        timestamp,
         valid_from: String::new(),
         valid_until: None,
         category: "experience".to_string(),
@@ -629,7 +691,7 @@ pub(crate) async fn handle_wiki_ingest(
         revision: 1,
         metadata: json!({
             "wiki": true,
-            "wiki_title": title.clone(),
+            "wiki_title": title,
             "ingest_source": params.source.clone(),
             "allow_cross_project": true,
         }),
@@ -1214,6 +1276,7 @@ pub(crate) async fn handle_wiki_search(
             error_context: params.error_context,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;

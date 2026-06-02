@@ -98,9 +98,9 @@ pub(crate) fn build_save_entry(
         Some(requested_scope.as_str()),
         target_db,
         json!({
-            "path": path.clone(),
-            "category": category.clone(),
-            "topic": topic.clone(),
+            "path": path,
+            "category": category,
+            "topic": topic,
         }),
     );
     if let Some(obj) = metadata.as_object_mut() {
@@ -333,7 +333,7 @@ pub(crate) async fn handle_save_memory(
     upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
 
     if !needs_embedding && entry.vector.is_some() {
-        spawn_save_contradiction_detection(server, id.clone(), target_db, named_project.clone());
+        spawn_save_contradiction_detection(server, id, target_db, named_project.clone());
     }
 
     let enrichment_enqueued = enqueue_save_enrichment(

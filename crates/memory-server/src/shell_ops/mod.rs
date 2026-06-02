@@ -950,7 +950,7 @@ fn advance_stage(
     };
     if created || !new_status.contains_key("flow_id") {
         new_status.insert("flow_id".into(), json!(flow_id));
-        new_status.insert("created_at".into(), json!(now.clone()));
+        new_status.insert("created_at".into(), json!(now));
         new_status.insert("task".into(), json!(task));
         new_status.insert("dispatch_ids".into(), json!([]));
         new_status.insert("history".into(), json!([]));
@@ -961,7 +961,7 @@ fn advance_stage(
         .map(|s| s.to_string());
     new_status.insert("stage".into(), json!(stage));
     new_status.insert("state".into(), json!(stage_state_for(stage)));
-    new_status.insert("updated_at".into(), json!(now.clone()));
+    new_status.insert("updated_at".into(), json!(now));
     new_status.insert(
         "injected".into(),
         json!({

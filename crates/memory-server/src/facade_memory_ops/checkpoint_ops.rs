@@ -159,6 +159,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         domain: Some("agent".to_string()),
         metadata: None,
         files: Vec::new(),
+        compact: false,
     };
     let (saved, display_path, already_formatted) = save_memory_checkpoint(server, params).await?;
     Ok(Some(json!({

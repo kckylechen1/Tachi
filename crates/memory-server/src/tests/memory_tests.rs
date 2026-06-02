@@ -237,6 +237,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             project: None,
             domain: None,
             metadata: None,
+            compact: false,
             files: Vec::new(),
         }))
         .await
@@ -401,6 +402,7 @@ async fn search_memory_boosts_guide_rows_by_context() {
             error_context: Some("linker error: could not find native static library".to_string()),
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         }))
         .await
         .expect("search memory with guide context");

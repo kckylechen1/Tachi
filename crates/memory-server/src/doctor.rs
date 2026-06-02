@@ -710,14 +710,14 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
                     action: "checkpoint_wal_copy".to_string(),
                     outcome: "ok".to_string(),
                     note: "wrote .checkpointed.<ts>.db copy (original untouched)".to_string(),
-                    destination: Some(dest_str.clone()),
+                    destination: Some(dest_str),
                 },
                 Err(e) => AutoFixAction {
                     path: src.to_string(),
                     action: "checkpoint_wal_copy".to_string(),
                     outcome: "error".to_string(),
                     note: format!("wal_checkpoint failed on copy: {e}"),
-                    destination: Some(dest_str.clone()),
+                    destination: Some(dest_str),
                 },
             }
         }

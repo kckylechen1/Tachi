@@ -558,6 +558,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             error_context: params.error_context,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;
@@ -600,6 +601,7 @@ pub(crate) async fn handle_tachi_task_brief(
             error_context: None,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;
@@ -623,6 +625,7 @@ pub(crate) async fn handle_tachi_task_brief(
             error_context: None,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;
@@ -701,6 +704,7 @@ pub(crate) async fn handle_tachi_progress_check(
             error_context: None,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await?;
@@ -818,6 +822,7 @@ async fn build_route_recommendation(
             error_context: None,
             enable_rerank: false,
             as_of: None,
+            include_metadata: false,
         },
     )
     .await

@@ -114,6 +114,17 @@ pub(crate) fn sanitize_safe_path_name(name: &str) -> String {
     }
 }
 
+/// Collapse whitespace and truncate to `limit` chars (including ellipsis).
+pub(crate) fn compact_text_line(text: &str, limit: usize) -> String {
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= limit {
+        one_line
+    } else {
+        let keep = limit.saturating_sub(3);
+        format!("{}...", one_line.chars().take(keep).collect::<String>())
+    }
+}
+
 pub(super) fn value_to_template_text(v: &Value) -> String {
     if let Some(s) = v.as_str() {
         s.to_string()
@@ -285,6 +296,15 @@ pub(crate) fn global_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_text_line_respects_limit_with_ellipsis() {
+        assert_eq!(compact_text_line("hello world", 20), "hello world");
+        assert_eq!(
+            compact_text_line("one two three four five", 10),
+            "one two..."
+        );
+    }
 
     #[test]
     fn redact_sensitive_value_redacts_secret_keys_and_url_params() {

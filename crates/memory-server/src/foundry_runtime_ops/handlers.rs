@@ -702,6 +702,7 @@ pub(crate) async fn handle_recall_context(
                 error_context: None,
                 enable_rerank: false,
                 as_of: None,
+                include_metadata: false,
             },
         )
         .await?;
@@ -782,6 +783,7 @@ pub(crate) async fn handle_recall_context(
                 error_context: None,
                 enable_rerank: false,
                 as_of: None,
+                include_metadata: false,
             },
         )
         .await

@@ -307,7 +307,7 @@ pub(super) fn resolve_recall_scope(
     let openclaw_root = build_openclaw_agent_root(agent_id);
     let foundry_root = build_foundry_agent_root(agent_id);
     let foundry_distill_root = build_foundry_distill_root(agent_id);
-    let allowed_prefixes = vec![openclaw_root.clone(), foundry_root.clone()];
+    let allowed_prefixes = vec![openclaw_root.clone(), foundry_root];
 
     match requested {
         Some(prefix)

@@ -1,5 +1,6 @@
 //! Human-readable Markdown formatting for agent-facing MCP tools.
 
+use crate::utils::compact_text_line;
 use serde_json::Value;
 
 /// Escape characters that have special meaning in Markdown bold/code contexts.
@@ -10,15 +11,6 @@ fn md_escape(s: &str) -> String {
         .replace('_', "\\_")
 }
 
-fn compact_text(s: &str, limit: usize) -> String {
-    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= limit {
-        one_line
-    } else {
-        format!("{}...", one_line.chars().take(limit).collect::<String>())
-    }
-}
-
 pub(crate) fn format_briefing(
     query: &str,
     memories: &Value,
@@ -26,15 +18,21 @@ pub(crate) fn format_briefing(
     health_summary: &Value,
     kanban: &Value,
     checkpoints: &Value,
+    compact: bool,
 ) -> String {
+    let memory_cap = if compact { 6 } else { 12 };
+    let wiki_cap = if compact { 3 } else { 5 };
+    let kanban_cap = if compact { 3 } else { 5 };
+    let checkpoint_cap = if compact { 2 } else { 3 };
+
     let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
 
     out.push("\n### Memories".to_string());
-    out.push(format_section_rows(memories, 12));
+    out.push(format_section_rows(memories, memory_cap));
 
     if wiki.as_array().is_some_and(|rows| !rows.is_empty()) {
         out.push("\n### Wiki".to_string());
-        out.push(format_section_rows(wiki, 5));
+        out.push(format_section_rows(wiki, wiki_cap));
     }
 
     if let Some(score) = health_summary.get("health_score") {
@@ -69,7 +67,7 @@ pub(crate) fn format_briefing(
     if let Some(tasks) = kanban.get("tasks").and_then(Value::as_array) {
         if !tasks.is_empty() {
             out.push("\n### Kanban".to_string());
-            for task in tasks.iter().take(5) {
+            for task in tasks.iter().take(kanban_cap) {
                 let summary = task
                     .get("summary")
                     .and_then(Value::as_str)
@@ -86,13 +84,13 @@ pub(crate) fn format_briefing(
     if let Some(cps) = checkpoints.as_array() {
         if !cps.is_empty() {
             out.push("\n### Recent checkpoints".to_string());
-            for cp in cps.iter().take(3) {
-                let title = cp
+            for cp in cps.iter().take(checkpoint_cap) {
+                let raw_title = cp
                     .get("title")
                     .or_else(|| cp.get("summary"))
                     .and_then(Value::as_str)
                     .unwrap_or("(checkpoint)");
-                out.push(format!("- {title}"));
+                out.push(format!("- {}", compact_text_line(raw_title, 140)));
             }
         }
     }
@@ -162,7 +160,7 @@ pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> 
             out.push(format!(
                 "{}. {relevance} `{path}` - {}",
                 idx + 1,
-                md_escape(&compact_text(summary, 120)),
+                md_escape(&compact_text_line(summary, 120)),
             ));
         }
     }
@@ -306,7 +304,7 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
             "{}. **{}**{id_suffix} {relevance} `{path}` - {}",
             idx + 1,
             md_escape(topic),
-            md_escape(&compact_text(summary, 120)),
+            md_escape(&compact_text_line(summary, 120)),
         ));
         if let Some(files) = row.get("files").and_then(Value::as_array) {
             let paths: Vec<String> = files
@@ -321,4 +319,144 @@ fn format_section_rows(rows: &Value, limit: usize) -> String {
         }
     }
     out.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn long_title() -> String {
+        // 250 chars of 'a' with newlines
+        let body = "a".repeat(220);
+        format!("{body}\n\nNext paragraph that should be truncated by the cap.")
+    }
+
+    #[test]
+    fn format_briefing_truncates_long_checkpoint_titles() {
+        let checkpoints = serde_json::json!([
+            {"id": "c1", "title": long_title(), "summary": "fallback"}
+        ]);
+        let memories = serde_json::json!([]);
+        let wiki = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+
+        let out = format_briefing(
+            "q",
+            &memories,
+            &wiki,
+            &health,
+            &kanban,
+            &checkpoints,
+            false,
+        );
+
+        // Compact-style truncation kicks in for checkpoints: must be capped.
+        // We can't assert an exact char count because compact_text_line adds "…",
+        // but the raw newline must not survive, and the line must be short.
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("- "))
+            .expect("at least one bullet");
+        assert!(!line.contains('\n'), "checkpoint title must be single-line");
+        assert!(line.len() < 200, "checkpoint title should be truncated; got len {}", line.len());
+    }
+
+    #[test]
+    fn format_briefing_compact_caps_section_rows() {
+        let memories: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("m{i}"),
+                    "summary": format!("row {i}"),
+                    "topic": "t",
+                    "path": "/p",
+                })
+            })
+            .collect();
+        let wiki: Vec<serde_json::Value> = (0..20)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("w{i}"),
+                    "summary": format!("wiki {i}"),
+                    "topic": "t",
+                    "path": "/wiki/x",
+                })
+            })
+            .collect();
+        let checkpoints: Vec<serde_json::Value> = (0..5)
+            .map(|i| serde_json::json!({"id": format!("c{i}"), "title": format!("cp {i}")}))
+            .collect();
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+
+        let compact = format_briefing(
+            "q",
+            &serde_json::json!(memories),
+            &serde_json::json!(wiki),
+            &health,
+            &kanban,
+            &serde_json::json!(checkpoints),
+            true,
+        );
+        let full = format_briefing(
+            "q",
+            &serde_json::json!(memories),
+            &serde_json::json!(wiki),
+            &health,
+            &kanban,
+            &serde_json::json!(checkpoints),
+            false,
+        );
+
+        // `format_section_rows` emits lines like "1. **topic** ..." — count
+        // numbered rows under a section header.
+        fn numbered_rows(s: &str, section_header: &str) -> usize {
+            let mut in_section = false;
+            let mut n = 0;
+            for line in s.lines() {
+                if line.starts_with("### ") {
+                    in_section = line.contains(section_header);
+                    continue;
+                }
+                if in_section
+                    && !line.starts_with("> ")
+                    && !line.trim().is_empty()
+                    && line
+                        .trim_start()
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_digit())
+                {
+                    n += 1;
+                }
+            }
+            n
+        }
+
+        let compact_mem = numbered_rows(&compact, "Memories");
+        let full_mem = numbered_rows(&full, "Memories");
+        assert_eq!(
+            compact_mem, 6,
+            "compact must cap memories at 6, got {compact_mem}"
+        );
+        assert!(
+            full_mem >= compact_mem,
+            "full must show at least as many memories as compact (compact={compact_mem} full={full_mem})"
+        );
+
+        let compact_cp = numbered_rows(&compact, "Recent checkpoints");
+        assert!(
+            compact_cp <= 2,
+            "compact must cap checkpoints at 2, got {compact_cp}"
+        );
+
+        // Compact output should be substantially shorter than full output.
+        assert!(
+            compact.len() < full.len(),
+            "compact ({} bytes) should be smaller than full ({} bytes)",
+            compact.len(),
+            full.len()
+        );
+    }
 }

@@ -589,10 +589,10 @@ async fn ingest_structured_event(
         text,
         params.importance.unwrap_or(0.75).clamp(0.0, 1.0),
         "ingest_event".to_string(),
-        params.scope.clone(),
+        params.scope,
         metadata,
         None,
-        domain.clone(),
+        domain,
         true,
     );
 
@@ -628,7 +628,7 @@ async fn ingest_structured_event(
                     true,
                     true,
                     target_db,
-                    named_project.clone(),
+                    named_project,
                     None,
                     None,
                     None,

@@ -120,9 +120,10 @@ organize: false
     .unwrap();
 
     // 3. 执行 Wiki Organize 整理流程
-    let res_str = crate::docs_ops::handle_wiki_organize(&server, &docs_path.to_string_lossy(), false)
-        .await
-        .unwrap();
+    let res_str =
+        crate::docs_ops::handle_wiki_organize(&server, &docs_path.to_string_lossy(), false)
+            .await
+            .unwrap();
     let res: serde_json::Value = serde_json::from_str(&res_str).unwrap();
 
     assert_eq!(res["status"], "success");
@@ -315,9 +316,10 @@ organize: true
     .unwrap();
     let original = fs::read_to_string(&src).unwrap();
 
-    let res_str = crate::docs_ops::handle_wiki_organize(&server, &docs_path.to_string_lossy(), true)
-        .await
-        .unwrap();
+    let res_str =
+        crate::docs_ops::handle_wiki_organize(&server, &docs_path.to_string_lossy(), true)
+            .await
+            .unwrap();
     let res: serde_json::Value = serde_json::from_str(&res_str).unwrap();
 
     // Reports success in dry-run mode and flags it.

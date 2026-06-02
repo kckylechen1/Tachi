@@ -523,8 +523,8 @@ pub(crate) async fn handle_post_card(
     if classify_enabled {
         let db_path = server.global_db_path.clone();
         let card_id_clone = card_id.clone();
-        let body_clone = body.clone();
-        let title_clone = title.clone();
+        let body_clone = body;
+        let title_clone = title;
         let source_clone = entry.source.clone();
         let metadata_clone = metadata.clone();
         let expected_revision = entry.revision;

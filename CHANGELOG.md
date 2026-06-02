@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-06-02
+
+Polish release plus MCP UX fixes from hands-on testing: briefing compact mode, kanban metadata, wiki multi-store reads, ask cross-store hints, status warnings with DB names, Voyage rerank empty-document guard, and install URL pinning.
+
+### Added
+
+- `tachi_memory` briefing `compact=true` caps memories/wiki/kanban/checkpoints and skips health/wiki-hygiene for cheaper session starts.
+- `SearchMemoryParams.include_metadata` (default `false`; board enables it) so kanban `a2a_state` surfaces in briefings.
+- Ask responses expose `cross_store` / `cross_store_hint` when evidence spans global and project stores without a pinned `project`.
+
+### Fixed
+
+- Kanban tasks no longer render `[unknown]` in briefings when `a2a_state` is stored in metadata.
+- Checkpoint titles in briefings truncate to 140 chars (same helper as section rows).
+- `tachi_wiki` read/list merges named, workspace project, and global wiki stores (with dedup and `limit` enforcement).
+- Status warnings and readiness output name affected DBs and hidden required tools.
+- Voyage rerank filters empty/whitespace documents and maps indices back to the original evidence rows.
+
+### Changed
+
+- `crates/memory-{core,node,python,server}/Cargo.toml` bumped to `1.4.3`.
+- Installer URLs across all READMEs and `docs/INSTALL.md` now point at `https://raw.githubusercontent.com/kckylechen1/tachi/v1.4.2/...` (the latest released tag) rather than `main`.
+
+### Style
+
+- `rustfmt` normalization on `bootstrap/tidy.rs`, `docs_ops.rs`, `facade_save_ops.rs`, `utils.rs`, and `tests/docs_tests.rs`. No semantic changes; 497 tests still pass, `cargo clippy -- -D warnings` clean.
+
 ## [1.4.2] - 2026-06-01
 
 Final format-contract patch for the `tachi_memory` facade.
