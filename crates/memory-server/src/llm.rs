@@ -28,6 +28,15 @@ enum ChatLane {
     Summary,
 }
 
+fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
+    documents
+        .iter()
+        .enumerate()
+        .filter(|(_, doc)| !doc.trim().is_empty())
+        .map(|(idx, doc)| (doc, idx))
+        .unzip()
+}
+
 /// LLM and embedding client using Voyage API for embeddings
 /// and lane-specific OpenAI-compatible chat providers.
 #[derive(Clone)]
@@ -376,16 +385,18 @@ impl LlmClient {
         documents: &[String],
         top_k: usize,
     ) -> Result<Vec<(usize, f64)>, String> {
-        if documents.is_empty() {
+        let (filtered_docs, index_map) = non_empty_rerank_documents(documents);
+        if filtered_docs.is_empty() {
             return Ok(vec![]);
         }
         let voyage_api_key = self.required_secret(&["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])?;
+        let effective_top_k = top_k.max(1).min(filtered_docs.len());
 
         let body = serde_json::json!({
             "model": "rerank-2.5",
             "query": query,
-            "documents": documents,
-            "top_k": top_k.max(1).min(documents.len()),
+            "documents": filtered_docs,
+            "top_k": effective_top_k,
         });
 
         let response = self
@@ -414,14 +425,18 @@ impl LlmClient {
 
         let mut out = Vec::with_capacity(data.len());
         for item in data {
-            let index = item["index"]
+            let filtered_index = item["index"]
                 .as_u64()
                 .ok_or("Invalid Voyage rerank response: missing index")?
                 as usize;
             let relevance = item["relevance_score"]
                 .as_f64()
                 .ok_or("Invalid Voyage rerank response: missing relevance_score")?;
-            out.push((index, relevance));
+            let orig_index = index_map
+                .get(filtered_index)
+                .copied()
+                .unwrap_or(filtered_index);
+            out.push((orig_index, relevance));
         }
         Ok(out)
     }
@@ -947,6 +962,21 @@ mod tests {
             "vault-value"
         );
         std::env::remove_var(KEY);
+    }
+
+    #[test]
+    fn rerank_document_filter_preserves_original_indices() {
+        let docs = vec![
+            "first".to_string(),
+            "   ".to_string(),
+            "second".to_string(),
+            "".to_string(),
+        ];
+
+        let (filtered, index_map) = non_empty_rerank_documents(&docs);
+
+        assert_eq!(filtered, vec![&docs[0], &docs[2]]);
+        assert_eq!(index_map, vec![0, 2]);
     }
 
     #[test]
