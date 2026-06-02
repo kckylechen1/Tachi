@@ -318,58 +318,58 @@ fn list_wiki_entries(
     let mut merged: Vec<MemoryEntry> = Vec::new();
     let mut first_source: &'static str = "empty";
 
-    let named_result = server.with_named_project_store_read(project, |store| {
+    // Try every store regardless of whether the previous one returned Ok:
+    // a named project store may exist but not contain the entry the caller
+    // is asking for (e.g. `project=wiki` resolves to `~/.tachi/projects/wiki`
+    // which holds a different wiki namespace), and we must fall through to
+    // the workspace project + global stores so the read still finds the
+    // entry. Entries are deduplicated by id.
+    if let Ok(entries) = server.with_named_project_store_read(project, |store| {
         store
             .list_by_path("/wiki", limit, false)
             .map_err(|e| format!("wiki list: {e}"))
-    });
-    match named_result {
+    }) {
+        for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+            if first_source == "empty" {
+                first_source = "named";
+            }
+            if seen.insert(entry.id.clone()) {
+                merged.push(entry);
+            }
+        }
+    }
+    if let Ok(entries) = server.with_project_store_read(|store| {
+        store
+            .list_by_path("/wiki", limit, false)
+            .map_err(|e| format!("wiki project list: {e}"))
+    }) {
+        for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
+            if first_source == "empty" {
+                first_source = "project";
+            }
+            if seen.insert(entry.id.clone()) {
+                merged.push(entry);
+            }
+        }
+    }
+    match server.with_global_store_read(|store| {
+        store
+            .list_by_path("/wiki", limit, false)
+            .map_err(|e| format!("wiki fallback list: {e}"))
+    }) {
         Ok(entries) => {
             for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
                 if first_source == "empty" {
-                    first_source = "named";
+                    first_source = "global";
                 }
                 if seen.insert(entry.id.clone()) {
                     merged.push(entry);
                 }
             }
         }
-        Err(_) => {
-            // Named project store not found; fall through to project + global.
-            if let Ok(entries) = server.with_project_store_read(|store| {
-                store
-                    .list_by_path("/wiki", limit, false)
-                    .map_err(|e| format!("wiki project list: {e}"))
-            }) {
-                for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-                    if first_source == "empty" {
-                        first_source = "project";
-                    }
-                    if seen.insert(entry.id.clone()) {
-                        merged.push(entry);
-                    }
-                }
-            }
-            match server.with_global_store_read(|store| {
-                store
-                    .list_by_path("/wiki", limit, false)
-                    .map_err(|e| format!("wiki fallback list: {e}"))
-            }) {
-                Ok(entries) => {
-                    for entry in entries.into_iter().filter(is_user_facing_wiki_entry) {
-                        if first_source == "empty" {
-                            first_source = "global";
-                        }
-                        if seen.insert(entry.id.clone()) {
-                            merged.push(entry);
-                        }
-                    }
-                }
-                Err(global_err) => {
-                    if merged.is_empty() {
-                        return Err(format!("wiki list: {global_err}"));
-                    }
-                }
+        Err(global_err) => {
+            if merged.is_empty() {
+                return Err(format!("wiki list: {global_err}"));
             }
         }
     }
