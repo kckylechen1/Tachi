@@ -83,7 +83,7 @@ pub(crate) async fn collect_tachi_search_sections(
             as_of: params.as_of.clone(),
             include_metadata: false,
         };
-        match handle_search_memory(server, mem_params).await {
+        match handle_search_memory(server, mem_params, false).await {
             Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, params.top_k))),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
@@ -115,7 +115,7 @@ pub(crate) async fn collect_tachi_search_sections(
             as_of: params.as_of.clone(),
             include_metadata: false,
         };
-        match search_memory_rows(server, wiki_params).await {
+        match search_memory_rows(server, wiki_params, false).await {
             Ok(rows) => sections.push(("Wiki".to_string(), Value::Array(rows))),
             Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
         }

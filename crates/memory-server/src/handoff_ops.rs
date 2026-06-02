@@ -230,6 +230,33 @@ fn handoff_acknowledged(entry: &MemoryEntry, memo: &HandoffMemo) -> bool {
             .unwrap_or(false)
 }
 
+/// Pending cross-project handoff memos in global DB (session briefing feed).
+pub(crate) fn list_pending_handoffs_for_briefing(
+    server: &MemoryServer,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let limit = limit.max(1).min(12);
+    let entries = server.with_global_store_read(pending_handoff_entries)?;
+    let rows = entries
+        .into_iter()
+        .take(limit)
+        .map(|entry| {
+            let memo = memo_from_entry(&entry);
+            serde_json::json!({
+                "id": entry.id,
+                "path": entry.path,
+                "from_agent": memo.from_agent,
+                "target_agent": memo.target_agent,
+                "summary": memo.summary,
+                "next_steps": memo.next_steps,
+                "created_at": memo.created_at,
+                "kind": "handoff",
+            })
+        })
+        .collect();
+    Ok(rows)
+}
+
 fn pending_handoff_entries(store: &mut MemoryStore) -> Result<Vec<MemoryEntry>, String> {
     let mut entries = store
         .list_by_path(HANDOFF_PATH, HANDOFF_DB_LIMIT, false)

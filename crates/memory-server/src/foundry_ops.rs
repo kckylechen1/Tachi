@@ -224,6 +224,7 @@ async fn build_evidence(
                 as_of: None,
                 include_metadata: false,
             },
+        false,
         )
         .await?;
         if rows.is_empty() {

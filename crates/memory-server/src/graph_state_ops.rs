@@ -173,6 +173,7 @@ pub(crate) async fn handle_memory_graph(
                 as_of: None,
                 include_metadata: false,
             },
+        false,
         )
         .await?;
         seed_ids.extend(rows.into_iter().filter_map(|row| {

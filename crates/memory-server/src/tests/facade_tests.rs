@@ -472,7 +472,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     .expect("briefing should succeed");
 
     assert!(body.starts_with("## Tachi briefing"));
-    assert!(body.contains("### Memories"));
+    assert!(body.contains("### Memories (this project)"));
     assert!(body.contains("### Health snapshot"));
     assert!(!body.contains("merge_hints"));
     assert!(!body.contains("skill_quality"));

@@ -1101,6 +1101,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // the manifest watcher + per-DB workers.
         let _scheduler = scheduler;
 
+        let vault_db_path = app_home.join("vault").join("vault.db");
+        let _vector_sweep = crate::vector_sweep::VectorSweepScheduler::start(
+            manifest_path.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+            vault_db_path,
+        );
+        eprintln!("[daemon] vector sweep scheduled (manifest={})", manifest_path.display());
+
         {
             let daily_server = server.clone();
             tokio::spawn(async move {

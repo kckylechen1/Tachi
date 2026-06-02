@@ -1278,6 +1278,7 @@ pub(crate) async fn handle_wiki_search(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await?;
 

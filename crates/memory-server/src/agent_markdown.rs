@@ -13,8 +13,10 @@ fn md_escape(s: &str) -> String {
 
 pub(crate) fn format_briefing(
     query: &str,
+    project_label: Option<&str>,
     memories: &Value,
     wiki: &Value,
+    cross_project: &Value,
     health_summary: &Value,
     kanban: &Value,
     checkpoints: &Value,
@@ -24,10 +26,40 @@ pub(crate) fn format_briefing(
     let wiki_cap = if compact { 3 } else { 5 };
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
+    let cross_cap = if compact { 3 } else { 5 };
 
     let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
+    if let Some(project) = project_label.filter(|p| !p.is_empty()) {
+        out.push(format!("Project focus: `{project}` (memories/wiki from this repo)"));
+    }
 
-    out.push("\n### Memories".to_string());
+    if let Some(handoffs) = cross_project.as_array() {
+        if !handoffs.is_empty() {
+            out.push(
+                "\n### Cross-project (global handoffs)".to_string(),
+            );
+            out.push(
+                "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')`._".to_string(),
+            );
+            for row in handoffs.iter().take(cross_cap) {
+                let from = row
+                    .get("from_agent")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                let summary = row
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or("(handoff)");
+                let path = row.get("path").and_then(Value::as_str).unwrap_or("/handoff");
+                out.push(format!(
+                    "- [handoff] `{path}` from **{from}**: {}",
+                    md_escape(&compact_text_line(summary, 120))
+                ));
+            }
+        }
+    }
+
+    out.push("\n### Memories (this project)".to_string());
     out.push(format_section_rows(memories, memory_cap));
 
     if wiki.as_array().is_some_and(|rows| !rows.is_empty()) {
@@ -341,10 +373,13 @@ mod tests {
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
         let kanban = serde_json::json!({"tasks": []});
 
+        let cross = serde_json::json!([]);
         let out = format_briefing(
             "q",
+            Some("sigil"),
             &memories,
             &wiki,
+            &cross,
             &health,
             &kanban,
             &checkpoints,
@@ -390,10 +425,13 @@ mod tests {
         let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
         let kanban = serde_json::json!({"tasks": []});
 
+        let cross = serde_json::json!([]);
         let compact = format_briefing(
             "q",
+            None,
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
+            &cross,
             &health,
             &kanban,
             &serde_json::json!(checkpoints),
@@ -401,8 +439,10 @@ mod tests {
         );
         let full = format_briefing(
             "q",
+            None,
             &serde_json::json!(memories),
             &serde_json::json!(wiki),
+            &cross,
             &health,
             &kanban,
             &serde_json::json!(checkpoints),

@@ -92,6 +92,8 @@ mod tools;
 mod utils;
 mod vault_crypto;
 mod vault_ops;
+mod vector_backfill;
+mod vector_sweep;
 mod web_search_ops;
 mod wiki_ops;
 

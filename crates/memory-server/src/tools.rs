@@ -139,7 +139,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
-        handle_search_memory(self, params).await
+        handle_search_memory(self, params, false).await
     }
 
     #[tool(
@@ -149,7 +149,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
-        handle_search_memory(self, params).await
+        handle_search_memory(self, params, false).await
     }
 
     #[tool(
@@ -1211,13 +1211,17 @@ impl MemoryServer {
     /// Zero-param briefing alias. Call at the start of any non-trivial task to
     /// load prior session context without having to remember the action name.
     #[tool(
-        description = "Call at the START of any non-trivial task. Returns prior session context, recent decisions, and active todos. Zero params required — equivalent to tachi_memory(action='briefing')."
+        description = "Call at the START of any non-trivial task. Returns project-scoped memories, pending global handoffs (cross-project issue board), wiki, kanban, and checkpoints. Zero params — compact mode; uses current git repo. For all-global briefing use tachi_memory(action='briefing', scope='all')."
     )]
     pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
+        let named = crate::memory_search_ops::resolve_workspace_named_project();
+        let query = named.as_ref().map(|name| {
+            format!("{name} current task recent decisions blockers next steps")
+        });
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
             format: None,
-            query: None,
+            query,
             scope: None,
             top_k: 6,
             path_prefix: None,
@@ -1247,11 +1251,11 @@ impl MemoryServer {
             flow_id: None,
             event: None,
             state: None,
-            project: None,
+            project: named,
             domain: None,
             metadata: None,
             files: Vec::new(),
-            compact: false,
+            compact: true,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }
