@@ -149,11 +149,8 @@ pub(crate) async fn handle_tachi_save(
         }
         _ => {
             // "memory" or any other value
-            let metadata = merge_referenced_files(
-                params.metadata.clone(),
-                &params.files,
-                &params.text,
-            );
+            let metadata =
+                merge_referenced_files(params.metadata.clone(), &params.files, &params.text);
             let mem_params = SaveMemoryParams {
                 text: params.text.clone(),
                 summary: params.summary.clone().unwrap_or_default(),
@@ -208,8 +205,10 @@ fn merge_referenced_files(
     };
 
     // 1. Carry forward any files already present on the incoming metadata.
-    if let Some(serde_json::Value::Array(existing)) =
-        metadata.as_ref().and_then(|m| m.get("files").cloned()).as_ref()
+    if let Some(serde_json::Value::Array(existing)) = metadata
+        .as_ref()
+        .and_then(|m| m.get("files").cloned())
+        .as_ref()
     {
         for v in existing {
             if let Some(s) = v.as_str() {
@@ -270,7 +269,8 @@ mod referenced_files_tests {
 
     #[test]
     fn parses_spec_pointer_lines_only() {
-        let text = "Decision recorded.\nspec: docs/SPEC.md, src/lib.rs\nWe also spec-checked things.";
+        let text =
+            "Decision recorded.\nspec: docs/SPEC.md, src/lib.rs\nWe also spec-checked things.";
         assert_eq!(
             parse_spec_pointers(text),
             vec!["docs/SPEC.md".to_string(), "src/lib.rs".to_string()]
@@ -296,4 +296,3 @@ mod referenced_files_tests {
         );
     }
 }
-

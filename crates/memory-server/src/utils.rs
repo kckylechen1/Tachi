@@ -300,7 +300,10 @@ mod tests {
     #[test]
     fn compact_text_line_respects_limit_with_ellipsis() {
         assert_eq!(compact_text_line("hello world", 20), "hello world");
-        assert_eq!(compact_text_line("one two three four five", 10), "one two...");
+        assert_eq!(
+            compact_text_line("one two three four five", 10),
+            "one two..."
+        );
     }
 
     #[test]

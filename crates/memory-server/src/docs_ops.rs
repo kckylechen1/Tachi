@@ -665,7 +665,10 @@ pub(crate) async fn handle_wiki_organize(
     for sub in &standard_dirs {
         if dry_run {
             if !canonical_root.join(sub).is_dir() {
-                log_messages.push(format!("[dry-run] Would create standard directory '{}'", sub));
+                log_messages.push(format!(
+                    "[dry-run] Would create standard directory '{}'",
+                    sub
+                ));
             }
             continue;
         }
