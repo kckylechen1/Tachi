@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-06-02
+
+Polish release: rustfmt normalization across touched source files, plus pin all installer one-liner URLs (READMEs, `docs/INSTALL.md`, `scripts/install.sh`, `integrations/openclaw/README.md`) to the v1.4.2 release tag so users running `curl ... | bash` from the docs get the tested binary rather than whatever happens to be on `main`.
+
+### Changed
+
+- `crates/memory-{core,node,python,server}/Cargo.toml` bumped to `1.4.3`.
+- Installer URLs across all READMEs and `docs/INSTALL.md` now point at `https://raw.githubusercontent.com/kckylechen1/tachi/v1.4.2/...` (the latest released tag) rather than `main`.
+
+### Style
+
+- `rustfmt` normalization on `bootstrap/tidy.rs`, `docs_ops.rs`, `facade_save_ops.rs`, `utils.rs`, and `tests/docs_tests.rs`. No semantic changes; 497 tests still pass, `cargo clippy -- -D warnings` clean.
+
 ## [1.4.2] - 2026-06-01
 
 Final format-contract patch for the `tachi_memory` facade.
