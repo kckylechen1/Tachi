@@ -1081,6 +1081,28 @@ mod tests {
     }
 
     #[test]
+    fn superpowers_meta_skills_resolve_for_all_shell_stages() {
+        for stage in STAGE_ACTIONS {
+            let rel = meta_skill_for_stage(stage).expect("mapped stage");
+            let resolved = resolve_meta_skill(rel).unwrap_or_else(|| {
+                panic!("superpowers skill not found for stage {stage} at {rel}")
+            });
+            assert!(
+                resolved.ends_with("SKILL.md"),
+                "stage {stage} should resolve to SKILL.md, got {}",
+                resolved.display()
+            );
+            let content = std::fs::read_to_string(&resolved).unwrap_or_else(|e| {
+                panic!("read superpowers skill for {stage}: {e}")
+            });
+            assert!(
+                content.contains("name:") || content.starts_with("# "),
+                "stage {stage} skill should look like a SKILL.md front matter or heading"
+            );
+        }
+    }
+
+    #[test]
     fn build_instruction_includes_required_sections() {
         let inj = InjectionResult {
             required: true,

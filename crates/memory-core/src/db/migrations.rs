@@ -242,28 +242,48 @@ pub fn migrate_v9_relocate_and_drop_location(
 }
 
 fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
-    let mut stmt = conn
-        .prepare("SELECT id, path, location, metadata FROM memories WHERE trim(location) <> ''")?;
-    let rows: Vec<(String, String, String, String)> = stmt
-        .query_map([], |row| {
+    const BATCH: usize = 500;
+    let mut relocated = 0usize;
+    let mut after_id = String::new();
+    loop {
+        let rows = fetch_location_batch(conn, &after_id, BATCH)?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, path, location, metadata_raw) in &rows {
+            let mut metadata: serde_json::Value =
+                serde_json::from_str(metadata_raw).unwrap_or_else(|_| json!({}));
+            let new_path = apply_location_relocation(path, location, &mut metadata);
+            let metadata_str = serde_json::to_string(&metadata)
+                .map_err(|e| MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}")))?;
+            conn.execute(
+                "UPDATE memories SET path = ?1, metadata = ?2, location = '' WHERE id = ?3",
+                params![new_path, metadata_str, id],
+            )?;
+            relocated += 1;
+        }
+        after_id = rows.last().expect("non-empty batch").0.clone();
+    }
+    Ok(relocated)
+}
+
+fn fetch_location_batch(
+    conn: &Connection,
+    after_id: &str,
+    limit: usize,
+) -> Result<Vec<(String, String, String, String)>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, location, metadata FROM memories
+         WHERE trim(location) <> '' AND id > ?1
+         ORDER BY id
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![after_id, limit as i64], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-
-    let mut relocated = 0usize;
-    for (id, path, location, metadata_raw) in rows {
-        let mut metadata: serde_json::Value =
-            serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({}));
-        let new_path = apply_location_relocation(&path, &location, &mut metadata);
-        let metadata_str = serde_json::to_string(&metadata)
-            .map_err(|e| MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}")))?;
-        conn.execute(
-            "UPDATE memories SET path = ?1, metadata = ?2, location = '' WHERE id = ?3",
-            params![new_path, metadata_str, id],
-        )?;
-        relocated += 1;
-    }
-    Ok(relocated)
+    Ok(rows)
 }
 
 pub(crate) fn table_has_column(
@@ -876,5 +896,46 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(meta["geo"], "Paris");
         assert_eq!(meta["legacy_metadata"], json!(["legacy"]));
+    }
+
+    #[test]
+    fn v9_relocates_many_location_rows_in_batches() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL DEFAULT '/',
+                location TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );",
+        )
+        .unwrap();
+
+        let batch = conn.transaction().unwrap();
+        {
+            let mut stmt = batch
+                .prepare("INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, '{}')")
+                .unwrap();
+            for i in 0..1200 {
+                let id = format!("row-{i:04}");
+                stmt.execute(params![id, "/", format!("/scratch/batch-{i}")])
+                    .unwrap();
+            }
+        }
+        batch.commit().unwrap();
+
+        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(&conn).unwrap();
+        assert_eq!(relocated, 1200);
+        assert_eq!(dropped, 1);
+        assert!(!table_has_column(&conn, "memories", "location").unwrap());
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE trim(path) = '/'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }
