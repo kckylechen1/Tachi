@@ -32,6 +32,7 @@
 )]
 
 mod agent_markdown;
+mod backend_tier;
 mod bootstrap;
 mod builtins;
 mod capability_ops;
