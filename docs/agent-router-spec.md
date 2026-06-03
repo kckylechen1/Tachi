@@ -50,12 +50,12 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 │                    │  ┌──────────────────┐  │                     │
 │                    │  │ Agent Registry   │  │  ← static config     │
 │                    │  │ ┌───┬───┬───┬──┐ │  │                     │
-│                    │  │ │cld│cdx│gem│qw│ │  │                     │
-│                    │  │ │cop│dro│...│  │ │  │                     │
+│                    │  │ │cld│cdx│grk│ki│ │  │                     │
+│                    │  │ │custom │auto│ │ │  │                     │
 │                    │  │ └───┴───┴───┴──┘ │  │                     │
 │                    │  └──────────────────┘  │                     │
 │                    │  ┌──────────────────┐  │                     │
-│                    │  │ Classifier Router│  │  ← qwen scores tasks │
+│                    │  │ Classifier Router│  │  ← active fleet scores tasks │
 │                    │  └──────────────────┘  │                     │
 │                    │  ┌──────────────────┐  │                     │
 │                    │  │  Selector        │  │  ← pick agent(s)    │
@@ -87,9 +87,9 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 │         ┌─────────┬──────────┬──┴──┬──────────┬──────────┐        │
 │         ▼         ▼          ▼     ▼          ▼          ▼        │
 │    ┌────────┐ ┌──────┐ ┌────────┐ ┌────┐ ┌──────────┐ ┌──────┐   │
-│    │ claude │ │ codex│ │ gemini │ │qwen│ │ copilot  │ │ droid│   │
-│    └───┬────┘ └──┬───┘ └───┬────┘ └─┬──┘ └────┬─────┘ └──┬───┘   │
-│        └─────────┴─────────┴────────┴─────────┴──────────┘        │
+│    │ claude │ │ codex│ │  grok  │ │kimi│ │ custom  │              │
+│    └───┬────┘ └──┬───┘ └───┬────┘ └─┬──┘ └────┬─────┘              │
+│        └─────────┴─────────┴────────┴─────────┘                    │
 │                              │                                      │
 │                    ┌─────────▼──────────┐                          │
 │                    │   Agent Results    │  ← unified JSON schema   │
@@ -135,8 +135,8 @@ pub struct AgentConstraints {
 }
 
 pub enum CostTier {
-    Cheap,      // qwen
-    Standard,   // gemini, copilot, droid
+    Cheap,      // reserved for future local/small workers
+    Standard,   // kimi, grok
     Premium,    // claude, codex
 }
 
@@ -159,22 +159,15 @@ pub enum SpawnMode {
         sandbox_flag: Option<&'static str>, // "--sandbox"
         // MCP via ~/.codex/config.toml (not CLI arg)
     },
-    GeminiPrompt {
+    GrokExec {
         output_format_flag: &'static str,
         json_format: &'static str,
-        // MCP TBD
+        // MCP TBD; prompt envelope carries Tachi context when MCP is unavailable
     },
-    QwenPrompt {
-        // TBD: flags may vary
-    },
-    CopilotExec {
-        execute_prompt_flag: &'static str,      // "--execute-prompt"
-        output_format_flag: &'static str,       // "--output-format"
-        json_format: &'static str,              // "json"
-        additional_mcp_config_flag: &'static str, // "--additional-mcp-config"
-    },
-    DroidExec {
-        // TBD
+    KimiExec {
+        output_format_flag: &'static str,
+        json_format: &'static str,
+        // MCP TBD; preferred for Chinese and long-context tasks
     },
     Custom {
         args_template: Vec<String>,  // template with placeholders
@@ -255,17 +248,17 @@ pub fn is_agent_available(name: &str) -> bool {
 
 ### 4.4 Per-Agent CLI Parameter Mapping
 
-Based on actual `--help` output from each agent:
+Based on the Phase 1 active agent fleet:
 
-| Parameter | Claude `-p` | Codex `exec` | Gemini `-p` | Qwen (positional) | Copilot `-p` | Droid `exec` |
-|-----------|------------|-------------|------------|------------------|-------------|-------------|
-| **Prompt** | positional / `-p` | positional / stdin | `-p` / positional | positional / stdin | `-p` | positional / stdin |
-| **JSON output** | `--output-format json` | `--json` (JSONL) | `--output-format json` | `--output-format json` | `--output-format json` (JSONL) | `--output-format json` |
-| **System prompt** | `--system-prompt` / `--append-system-prompt` | ❌ (inject in prompt) | ❌ (inject in prompt) | `--system-prompt` / `--append-system-prompt` | ❌ (inject in prompt) | `--append-system-prompt` |
-| **Model select** | `--model` | `-m, --model` | `-m, --model` | `-m, --model` | `--model` | `-m, --model` |
-| **MCP config** | `--mcp-config <file>` | `~/.codex/config.toml` side-effect | `--mcp-config <json\|file>` | `--mcp-config <json\|file>` | `--additional-mcp-config <json>` | ❌ (MCP TBD) |
-| **Sandbox** | ❌ | `-s, --sandbox <mode>` | `--sandbox` | `--sandbox` | `--allow-all` / `--yolo` | `--auto <level>` |
-| **Budget/time** | `--max-budget-usd` | ❌ | ❌ | `--max-wall-time` / `--max-tool-calls` | ❌ | ❌ |
+| Parameter | Claude `-p` | Codex `exec` | Grok `exec` | Kimi `exec` | Custom |
+|-----------|------------|-------------|-------------|-------------|--------|
+| **Prompt** | positional / `-p` | positional / stdin | positional / stdin | positional / stdin | template placeholder |
+| **JSON output** | `--output-format json` | `--json` (JSONL) | JSONL / stdout capture | JSONL / stdout capture | adapter-defined |
+| **System prompt** | `--system-prompt` / `--append-system-prompt` | inject in prompt | inject in prompt | inject in prompt | adapter-defined |
+| **Model select** | `--model` | `-m, --model` | adapter-defined | adapter-defined | adapter-defined |
+| **MCP config** | `--mcp-config <file>` | `~/.codex/config.toml` side-effect | prompt envelope fallback | prompt envelope fallback | unsupported unless adapter owns it |
+| **Sandbox** | n/a | `-s, --sandbox <mode>` | adapter-defined | adapter-defined | adapter-defined |
+| **Budget/time** | `--max-budget-usd` | n/a | adapter-defined | adapter-defined | adapter-defined |
 | **JSON Schema** | `--json-schema` | `--output-schema <file>` | ❌ | `--json-schema` | ❌ | ❌ |
 | **Agent preset** | `--agent` / `--agents <json>` | ❌ (TOML only, no CLI) | ❌ | ❌ | `--agent <agent>` | ❌ |
 | **Approval** | `--permission-mode` | `--dangerously-bypass-approvals-and-sandbox` | `--approval-mode` | `--approval-mode` | `--allow-all` / `--yolo` | `--auto <level>` / `--skip-permissions-unsafe` |
@@ -292,7 +285,7 @@ Extend the existing `tachi_dispatch` tool parameters:
       "agent": {
         "type": "string",
         "description": "Agent name or 'auto' for automatic selection",
-        "enum": ["claude", "codex", "gemini", "qwen", "copilot", "droid", "custom", "auto"]
+        "enum": ["claude", "codex", "grok", "kimi", "custom", "auto"]
       },
       "prompt": {
         "type": "string",
@@ -354,15 +347,15 @@ When `agent="auto"`, the Selector picks agents based on `task_type` and `budget_
 ```rust
 pub fn select_agents_fallback(task_type: &str, budget: BudgetHint, strategy: Strategy) -> Vec<&'static str> {
     let candidates = match task_type {
-        "design"       => vec!["claude", "gemini"],
-        "code"         => vec!["claude", "codex", "copilot", "gemini"],
-        "review"       => vec!["claude", "gemini", "copilot"],
-        "test"         => vec!["copilot", "claude", "codex"],
-        "doc"          => vec!["claude", "qwen", "gemini"],
-        "debug"        => vec!["claude", "codex", "droid"],
-        "plan"         => vec!["claude", "gemini"],
-        "chinese"      => vec!["qwen", "gemini", "claude"],
-        "long_context" => vec!["gemini", "claude", "codex"],
+        "design"       => vec!["claude", "grok"],
+        "code"         => vec!["claude", "codex", "grok"],
+        "review"       => vec!["claude", "kimi"],
+        "test"         => vec!["codex", "claude"],
+        "doc"          => vec!["claude", "kimi"],
+        "debug"        => vec!["claude", "codex", "grok"],
+        "plan"         => vec!["claude", "grok"],
+        "chinese"      => vec!["kimi", "claude"],
+        "long_context" => vec!["kimi", "claude", "codex"],
         _              => vec!["claude"],
     };
 
@@ -390,7 +383,7 @@ pub fn select_agents_fallback(task_type: &str, budget: BudgetHint, strategy: Str
 
 ### 5.3 Classifier Router (Auto Router)
 
-Inspired by UltraCode-Shim's Auto Router. Instead of hardcoded `task_type → agent` mapping, use a **cheap classifier model** (e.g. `qwen`) to score each candidate agent 0–1 for the current task.
+Inspired by UltraCode-Shim's Auto Router. Instead of hardcoded `task_type → agent` mapping, use a configured classifier lane from the active fleet to score each candidate agent 0–1 for the current task.
 
 **Classifier prompt template:**
 
@@ -404,10 +397,8 @@ Task: {task_description}
 Agents:
 - claude: design=10, code=10, long_context=8, chinese=7, reasoning=10, speed=7
 - codex: design=7, code=10, long_context=8, chinese=6, reasoning=9, speed=8
-- gemini: design=8, code=9, long_context=10, chinese=7, reasoning=9, speed=8
-- qwen: design=6, code=8, long_context=6, chinese=10, reasoning=8, speed=9
-- copilot: design=7, code=9, long_context=6, chinese=6, reasoning=8, speed=8
-- droid: design=7, code=9, long_context=7, chinese=5, reasoning=8, speed=7
+- grok: design=8, code=9, long_context=8, chinese=7, reasoning=9, speed=8
+- kimi: design=7, code=8, long_context=10, chinese=10, reasoning=8, speed=8
 
 Output format: {"scores": {"<agent>": <0-1>, ...}}
 ```
@@ -426,9 +417,9 @@ pub async fn select_agents_classifier(
         return cached;
     }
 
-    // 2. Run classifier (cheap model, e.g. qwen)
+    // 2. Run configured classifier from the active fleet
     let prompt = build_classifier_prompt(task, candidates);
-    let result = dispatch_single("qwen", &prompt).await;
+    let result = dispatch_single(classifier_agent, &prompt).await;
     
     // 3. Parse scores
     let scores: HashMap<String, f64> = parse_classifier_output(&result.content);
@@ -689,13 +680,13 @@ pub fn default_role_config(role: DispatchRole) -> RoleConfig {
     match role {
         DispatchRole::Orchestrator => RoleConfig {
             preferred_agent: "claude",
-            fallback_agents: vec!["codex", "gemini"],
+            fallback_agents: vec!["codex", "grok"],
             max_concurrent: 1,
             effort: EffortLevel::Deep,
         },
         DispatchRole::Worker => RoleConfig {
-            preferred_agent: "qwen",
-            fallback_agents: vec!["gemini", "copilot"],
+            preferred_agent: "kimi",
+            fallback_agents: vec!["grok", "codex"],
             max_concurrent: 5,  // fan-out limit
             effort: EffortLevel::Standard,
         },
@@ -731,9 +722,9 @@ let result = dispatch_orchestrator("claude", "Design a microservice architecture
 
 // Orchestrator breaks it into sub-tasks, dispatches workers in parallel
 let workers = vec![
-    dispatch_worker("qwen", "Implement the auth service"),
-    dispatch_worker("gemini", "Implement the API gateway"),
-    dispatch_worker("copilot", "Write integration tests"),
+    dispatch_worker("kimi", "Implement the auth service"),
+    dispatch_worker("grok", "Implement the API gateway"),
+    dispatch_worker("codex", "Write integration tests"),
 ];
 let worker_results = futures::future::join_all(workers).await;
 
@@ -746,11 +737,11 @@ let final = aggregate_orchestrator_result(&result, &worker_results);
 | Pattern | Orchestrator | Worker | Total Cost |
 |---------|-------------|--------|------------|
 | Single premium | Claude 4 × 1 | — | $5.0 |
-| Split | Claude 4 × 0.2 (plan) | Qwen × 3 (implement) | $1.0 + $0.3 = $1.3 |
-| All cheap | — | Qwen × 4 | $0.4 |
-| Consensus | Claude 4 × 1 | Gemini + Copilot (review) | $5.0 + $1.0 = $6.0 |
+| Split | Claude 4 × 0.2 (plan) | Kimi × 3 (implement) | $1.0 + worker cost |
+| All standard | — | Kimi/Grok × 4 | worker cost only |
+| Consensus | Claude 4 × 1 | Kimi + Codex (review) | $5.0 + worker cost |
 
-### 7.4 Droid Mission Mode (Built-in Multi-Agent)
+### 7.4 Deferred Research: Droid Mission Mode (Built-in Multi-Agent)
 
 **Critical discovery:** Droid `exec` has a `--mission` flag that enables **multi-agent orchestration in non-interactive mode**:
 
@@ -950,7 +941,7 @@ fn codex_cleanup(payload: &McpConfigPayload) -> Result<(), McpError> {
 }
 ```
 
-#### Copilot — JSON String Inline
+#### Deferred Research: Copilot — JSON String Inline
 ```rust
 fn generate_copilot_mcp(tachi_endpoint: &str) -> McpConfigPayload {
     let json = json!({"mcpServers": {"tachi": {"command": "tachi", "args": ["mcp-server"]}}});
@@ -1248,7 +1239,7 @@ pub fn classify_error(agent: &str, stdout: &str, stderr: &str, exit_code: Option
                 AgentErrorKind::UnknownExitCode(exit_code.unwrap_or(-1))
             }
         }
-        "gemini" => {
+        "grok" => {
             if combined.contains("quota") {
                 AgentErrorKind::RateLimit { retry_after: None }
             } else {
@@ -1273,7 +1264,7 @@ pub fn recovery_strategy(error: &AgentErrorKind, agent: &AgentDef) -> RecoveryAc
             RecoveryAction::RetryNow
         }
         AgentErrorKind::ContextExceeded { .. } => {
-            RecoveryAction::SwitchAgent("gemini")  // long context fallback
+            RecoveryAction::SwitchAgent("kimi")  // long context fallback
         }
         AgentErrorKind::UnsupportedTool { .. } => {
             RecoveryAction::SwitchAgent("claude")  // most capable fallback
@@ -1367,10 +1358,10 @@ tachi dispatch claude "Refactor this function to use iterators"
 tachi dispatch auto "Design a logo for my startup" --task-type design --classifier
 
 # Consensus strategy with 3 agents
-tachi dispatch auto "Review this PR" --strategy consensus --agents claude,gemini,copilot
+tachi dispatch auto "Review this PR" --strategy consensus --agents claude,kimi,codex
 
 # Fallback chain
-tachi dispatch auto "Fix this bug" --strategy fallback --agents claude,codex,gemini
+tachi dispatch auto "Fix this bug" --strategy fallback --agents claude,codex,grok
 
 # Budget-conscious
 tachi dispatch auto "Summarize this document" --budget cheap
@@ -1381,7 +1372,7 @@ tachi dispatch auto "Generate test cases" --strategy parallel-all
 # Orchestrator + Worker split
 tachi dispatch auto "Build a full-stack app" \
   --orchestrator claude \
-  --worker qwen \
+  --worker kimi \
   --strategy orchestrator-worker
 ```
 
@@ -1395,18 +1386,18 @@ default_strategy = "first"
 default_budget = "balanced"
 max_concurrent_agents = 3
 classifier_enabled = true
-classifier_agent = "qwen"
+classifier_agent = "claude"
 classifier_quality_bar = 0.7
 
 [orchestrator]
 preferred = "claude"
-fallback = ["codex", "gemini"]
+fallback = ["codex", "grok"]
 max_concurrent = 1
 effort = "deep"
 
 [worker]
-preferred = "qwen"
-fallback = ["gemini", "copilot"]
+preferred = "kimi"
+fallback = ["grok", "codex"]
 max_concurrent = 5
 effort = "standard"
 
@@ -1419,20 +1410,13 @@ custom_timeout_secs = 600
 enabled = true
 weight = 1.0
 
-[agents.gemini]
-enabled = true
-weight = 0.9
-
-[agents.qwen]
+[agents.grok]
 enabled = true
 weight = 0.8
 
-[agents.copilot]
+[agents.kimi]
 enabled = true
 weight = 0.9
-
-[agents.droid]
-enabled = false  # disabled by default (MCP support unknown)
 
 [aggregation.consensus]
 min_agents = 2
@@ -1453,25 +1437,24 @@ tool_rejection_repair = true
 
 ### Phase 1: Agent Registry + Extended Dispatch (2-3 days)
 
-**Goal:** Support all 6 CLI agents with `tachi_dispatch`.
+**Goal:** Support the Phase 1 CLI fleet with `tachi_dispatch`.
 
 - [ ] Define `AgentDef`, `AgentRegistry`, `SpawnMode`, `McpFormat` structs
 - [ ] Implement `find_agent()`, `is_agent_available()`
 - [ ] Refactor `build_claude_command()` → `build_command(agent: &AgentDef, ...)`
-- [ ] Add `build_codex_command()`, `build_gemini_command()`, `build_qwen_command()`, `build_copilot_command()`, `build_droid_command()`
-- [ ] Add MCP adapters for Claude (JSON file) and Copilot (JSON string)
+- [ ] Add `build_codex_command()`, `build_grok_command()`, `build_kimi_command()`
+- [ ] Add MCP adapters for Claude and Grok (JSON file)
 - [ ] Add Codex MCP adapter (TOML file with backup/restore)
 - [ ] Update `TachiDispatchParams` JSON schema
-- [ ] Extend `tachi_dispatch` to accept `"gemini"`, `"qwen"`, `"copilot"`, `"droid"`
+- [ ] Extend `tachi_dispatch` to accept `"grok"`, `"kimi"`
 - [ ] Add per-agent timeout support
 - [ ] Add `tachi dispatch` CLI subcommand
 - [ ] Add `RequestEnvelope` with basic system prompt template
 
 **Acceptance:**
 ```bash
-tachi dispatch gemini "Hello world"  # works
-tachi dispatch qwen "你好"           # works
-tachi dispatch copilot "Review this" # works
+tachi dispatch grok "Hello world"  # works
+tachi dispatch kimi "你好"         # works
 ```
 
 ### Phase 2: Auto-Select + Concurrent Execution + Classifier (2-3 days)
@@ -1479,7 +1462,7 @@ tachi dispatch copilot "Review this" # works
 **Goal:** `agent="auto"`, classifier router, concurrent dispatch, basic strategies.
 
 - [ ] Implement `select_agents_fallback()` with hardcoded task_type map
-- [ ] Implement Classifier Router (qwen-based scoring)
+- [ ] Implement Classifier Router (active fleet scoring)
 - [ ] Add classifier cache (LRU, per-task)
 - [ ] Implement `agent="auto"` in `tachi_dispatch`
 - [ ] Implement `Strategy::First` (fastest wins via `tokio::select!`)
@@ -1492,7 +1475,7 @@ tachi dispatch copilot "Review this" # works
 **Acceptance:**
 ```bash
 tachi dispatch auto "Design a React component" --task-type design --strategy first --classifier
-# Returns first response among claude + gemini, selected by qwen classifier
+# Returns first response among claude + grok, selected by the configured classifier
 ```
 
 ### Phase 3: Orchestrator/Worker + Aggregation + Reliability (3-5 days)
@@ -1515,8 +1498,8 @@ tachi dispatch auto "Design a React component" --task-type design --strategy fir
 **Acceptance:**
 ```bash
 tachi dispatch auto "Build a REST API" --strategy orchestrator-worker \
-  --orchestrator claude --worker qwen
-# Claude plans, Qwen implements, Claude reviews
+  --orchestrator claude --worker kimi
+# Claude plans, Kimi implements, Claude reviews
 ```
 
 ### Phase 4: Production Hardening (2-3 days)
