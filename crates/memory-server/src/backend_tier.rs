@@ -49,6 +49,7 @@ pub(crate) fn resolve_lane_model(
     lane: &str,
     tier_env: &str,
     explicit_model: Option<String>,
+    fallback_model: Option<String>,
     default_model: &str,
 ) -> String {
     if let Some(model) = explicit_model.filter(|m| !m.trim().is_empty()) {
@@ -59,6 +60,9 @@ pub(crate) fn resolve_lane_model(
             return model;
         }
     }
+    if let Some(model) = fallback_model.filter(|m| !m.trim().is_empty()) {
+        return model;
+    }
     default_model.trim().to_string()
 }
 
@@ -68,28 +72,43 @@ mod tests {
 
     #[test]
     fn tier_parse_and_fast_default() {
-        std::env::set_var("TACHI_BACKEND_EXTRACT_TIER", "fast");
+        std::env::set_var("TACHI_BACKEND_EXTRACT_TIER_TEST_FAST", "fast");
         assert_eq!(
-            BackendModelTier::from_env("TACHI_BACKEND_EXTRACT_TIER"),
+            BackendModelTier::from_env("TACHI_BACKEND_EXTRACT_TIER_TEST_FAST"),
             Some(BackendModelTier::Fast)
         );
         assert_eq!(
             BackendModelTier::Fast.model_for_lane("extract").as_deref(),
             Some("Qwen/Qwen3.5-27B")
         );
-        std::env::remove_var("TACHI_BACKEND_EXTRACT_TIER");
+        std::env::remove_var("TACHI_BACKEND_EXTRACT_TIER_TEST_FAST");
     }
 
     #[test]
     fn explicit_model_wins_over_tier() {
-        std::env::set_var("TACHI_BACKEND_EXTRACT_TIER", "balanced");
+        std::env::set_var("TACHI_BACKEND_EXTRACT_TIER_TEST_EXPLICIT", "balanced");
         let model = resolve_lane_model(
             "extract",
-            "TACHI_BACKEND_EXTRACT_TIER",
+            "TACHI_BACKEND_EXTRACT_TIER_TEST_EXPLICIT",
             Some("custom/model".to_string()),
+            None,
             "default",
         );
         assert_eq!(model, "custom/model");
-        std::env::remove_var("TACHI_BACKEND_EXTRACT_TIER");
+        std::env::remove_var("TACHI_BACKEND_EXTRACT_TIER_TEST_EXPLICIT");
+    }
+
+    #[test]
+    fn tier_wins_over_general_fallback_model() {
+        std::env::set_var("TACHI_BACKEND_EXTRACT_TIER_TEST_FALLBACK", "fast");
+        let model = resolve_lane_model(
+            "extract",
+            "TACHI_BACKEND_EXTRACT_TIER_TEST_FALLBACK",
+            None,
+            Some("fallback/model".to_string()),
+            "default",
+        );
+        assert_eq!(model, "Qwen/Qwen3.5-27B");
+        std::env::remove_var("TACHI_BACKEND_EXTRACT_TIER_TEST_FALLBACK");
     }
 }

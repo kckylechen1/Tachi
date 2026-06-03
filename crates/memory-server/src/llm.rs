@@ -181,11 +181,21 @@ impl LlmClient {
     ) -> Result<ChatLaneConfig, String> {
         let base_url =
             Self::first_env(base_url_envs).unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
-        let explicit = Self::first_env(model_envs);
+        let explicit = model_envs
+            .first()
+            .and_then(|&key| std::env::var(key).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let fallback = if model_envs.len() > 1 {
+            Self::first_env(&model_envs[1..])
+        } else {
+            None
+        };
         let model = crate::backend_tier::resolve_lane_model(
             lane,
             tier_env,
             explicit,
+            fallback,
             default_model,
         );
 
