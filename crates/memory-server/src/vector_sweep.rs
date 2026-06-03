@@ -43,7 +43,7 @@ fn sweep_disabled() -> bool {
     )
 }
 
-fn collect_sweep_paths(
+pub(crate) fn collect_sweep_paths(
     manifest_path: &Path,
     global_db: &Path,
     project_db: Option<&Path>,
@@ -80,6 +80,41 @@ fn collect_sweep_paths(
     paths
 }
 
+/// Run one lightweight sweep pass across manifest DBs. Testable entry point used
+/// by the daemon scheduler on startup and on each interval tick.
+pub(crate) async fn run_vector_sweep_once(
+    manifest_path: &Path,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    llm: &LlmClient,
+    batch_per_db: usize,
+    skip_cache: bool,
+) -> usize {
+    let paths = collect_sweep_paths(manifest_path, global_db, project_db);
+    let mut total_done = 0usize;
+    for path in paths {
+        match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
+            Ok((done, todo)) if todo > 0 => {
+                total_done += done;
+                tracing::info!(
+                    "[vector-sweep] {} embedded {done}/{todo}",
+                    path.display()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("[vector-sweep] {} failed: {e}", path.display());
+            }
+        }
+    }
+    if total_done > 0 {
+        tracing::info!(
+            "[vector-sweep] run complete, embedded {total_done} row(s)"
+        );
+    }
+    total_done
+}
+
 /// Background task: periodically embed missing vectors across manifest DBs.
 pub struct VectorSweepScheduler {
     _cancel: tokio::sync::watch::Sender<()>,
@@ -100,50 +135,39 @@ impl VectorSweepScheduler {
                 tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
                 return;
             }
+
+            let batch = sweep_batch_per_db();
+            let skip_cache = skip_recall_cache();
+            let manifest_ref = manifest_path.as_path();
+            let global_ref = global_db.as_path();
+            let project_ref = project_db.as_deref();
+
+            // Run once immediately so startup does not wait a full interval.
+            run_vector_sweep_once(
+                manifest_ref,
+                global_ref,
+                project_ref,
+                llm.as_ref(),
+                batch,
+                skip_cache,
+            )
+            .await;
+
             let mut tick = interval(Duration::from_secs(sweep_interval_secs()));
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            tick.tick().await;
 
             loop {
                 tokio::select! {
                     _ = cancel_rx.changed() => break,
                     _ = tick.tick() => {
-                        let paths = collect_sweep_paths(
-                            &manifest_path,
-                            &global_db,
-                            project_db.as_deref(),
-                        );
-                        let batch = sweep_batch_per_db();
-                        let skip_cache = skip_recall_cache();
-                        let mut total_done = 0usize;
-                        for path in paths {
-                            match vector_backfill::sweep_db_vectors(
-                                &path,
-                                llm.as_ref(),
-                                batch,
-                                skip_cache,
-                            ).await {
-                                Ok((done, todo)) if todo > 0 => {
-                                    total_done += done;
-                                    tracing::info!(
-                                        "[vector-sweep] {} embedded {done}/{todo}",
-                                        path.display()
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "[vector-sweep] {} failed: {e}",
-                                        path.display()
-                                    );
-                                }
-                            }
-                        }
-                        if total_done > 0 {
-                            tracing::info!(
-                                "[vector-sweep] run complete, embedded {total_done} row(s)"
-                            );
-                        }
+                        run_vector_sweep_once(
+                            manifest_ref,
+                            global_ref,
+                            project_ref,
+                            llm.as_ref(),
+                            batch,
+                            skip_cache,
+                        ).await;
                     }
                 }
             }
@@ -152,5 +176,65 @@ impl VectorSweepScheduler {
         Self {
             _cancel: cancel_tx,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn collect_sweep_paths_includes_global_and_manifest_entries() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("global.db");
+        fs::write(&global, b"").unwrap();
+        let project = tmp.path().join("project.db");
+        fs::write(&project, b"").unwrap();
+        let manifest_path = tmp.path().join("manifest.json");
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"{{
+  "schema_version": 1,
+  "generated_at": "2026-01-01T00:00:00Z",
+  "dbs": [
+    {{
+      "path": "{}",
+      "role": "project",
+      "owner": "test",
+      "schema_kind": "tachi",
+      "vec_enabled": true,
+      "allow_write": true,
+      "last_doctor_at": "",
+      "last_classification": "healthy",
+      "scope_hint": "project:test",
+      "notes": ""
+    }},
+    {{
+      "path": "{}",
+      "role": "global",
+      "owner": "test",
+      "schema_kind": "tachi",
+      "vec_enabled": true,
+      "allow_write": false,
+      "last_doctor_at": "",
+      "last_classification": "healthy",
+      "scope_hint": "global",
+      "notes": ""
+    }}
+  ]
+}}"#,
+                project.display(),
+                global.display()
+            ),
+        )
+        .unwrap();
+
+        let paths = collect_sweep_paths(&manifest_path, &global, None);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p.ends_with("global.db")));
+        assert!(paths.iter().any(|p| p.ends_with("project.db")));
     }
 }
