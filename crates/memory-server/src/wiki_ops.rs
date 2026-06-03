@@ -515,7 +515,11 @@ pub(crate) fn validate_reference_format(reference: &str) -> Result<(), String> {
     }
 
     // Repo-relative spec paths (Issue → Doc edges in #150)
-    if trimmed.starts_with("docs/") || trimmed.starts_with("skill/") {
+    if trimmed.starts_with("docs/")
+        || trimmed.starts_with("docs\\")
+        || trimmed.starts_with("skill/")
+        || trimmed.starts_with("skill\\")
+    {
         return Ok(());
     }
 

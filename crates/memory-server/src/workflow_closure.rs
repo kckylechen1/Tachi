@@ -114,7 +114,13 @@ mod tests {
             &["docs/foo.md".to_string()],
             &["#149".to_string(), "kckylechen1/tachi#150".to_string()],
         );
-        assert_eq!(refs.len(), 3);
-        assert_eq!(refs[0], "kckylechen1/tachi#150");
+        assert_eq!(
+            refs,
+            vec![
+                "kckylechen1/tachi#150".to_string(),
+                "docs/foo.md".to_string(),
+                "#149".to_string(),
+            ]
+        );
     }
 }

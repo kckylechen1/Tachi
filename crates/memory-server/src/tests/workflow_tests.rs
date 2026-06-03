@@ -38,8 +38,18 @@ async fn workflow_close_loop_writes_wiki_with_references() {
         .await
         .expect("get");
     let entry: Value = serde_json::from_str(&fetched).expect("entry");
-    let refs = entry["metadata"]["source_refs"]
+    let refs: Vec<String> = entry["metadata"]["source_refs"]
         .as_array()
-        .expect("refs");
-    assert!(refs.len() >= 2);
+        .expect("refs")
+        .iter()
+        .map(|value| value.as_str().expect("reference string").to_string())
+        .collect();
+    assert_eq!(
+        refs,
+        vec![
+            "kckylechen1/tachi#150".to_string(),
+            "docs/wiki-references-spec.md".to_string(),
+            "#149".to_string(),
+        ]
+    );
 }
