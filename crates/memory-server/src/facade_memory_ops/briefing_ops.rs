@@ -9,7 +9,7 @@ use super::evidence_format::{
     wants_json,
 };
 use crate::agent_markdown;
-use crate::memory_search_ops::resolve_workspace_named_project;
+use crate::memory_search_ops::{named_project_db_exists, resolve_workspace_named_project};
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -29,7 +29,9 @@ pub(crate) async fn handle_memory_briefing(
     let named_project = params
         .project
         .clone()
-        .or_else(resolve_workspace_named_project);
+        .or_else(|| {
+            resolve_workspace_named_project().filter(|name| named_project_db_exists(name))
+        });
     let query = params
         .query
         .clone()

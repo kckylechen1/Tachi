@@ -23,22 +23,18 @@ fn embedding_input(text: &str, summary: &str) -> String {
 pub(crate) fn list_missing_vector_entries(
     store: &MemoryStore,
     skip_recall_cache: bool,
+    limit: Option<usize>,
 ) -> Result<Vec<(String, String, String, i64)>, String> {
-    let mut out = Vec::new();
-    for (id, text, summary, revision) in store
-        .entries_missing_vectors()
-        .map_err(|e| format!("list missing vectors: {e}"))?
-    {
-        if skip_recall_cache {
-            if let Some(entry) = store.get(&id).map_err(|e| format!("load {id}: {e}"))? {
-                if entry.source == FOUNDRY_RECALL_CACHE_SOURCE {
-                    continue;
-                }
-            }
-        }
-        out.push((id, text, summary, revision));
-    }
-    Ok(out)
+    store
+        .entries_missing_vectors_filtered(
+            if skip_recall_cache {
+                Some(FOUNDRY_RECALL_CACHE_SOURCE)
+            } else {
+                None
+            },
+            limit,
+        )
+        .map_err(|e| format!("list missing vectors: {e}"))
 }
 
 /// Embed and persist up to `batch_size` rows; returns count written.
@@ -85,16 +81,13 @@ pub(crate) async fn sweep_db_vectors(
         .to_str()
         .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
 
-    let store = MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
-    let mut missing = list_missing_vector_entries(&store, skip_recall_cache)?;
+    let mut store =
+        MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
+    let missing = list_missing_vector_entries(&store, skip_recall_cache, Some(max_entries))?;
     if missing.is_empty() {
         return Ok((0, 0));
     }
-    missing.truncate(max_entries);
     let todo = missing.len();
-
-    drop(store);
-    let mut store = MemoryStore::open(db_str).map_err(|e| format!("open mut: {e}"))?;
 
     let batch_size = 32usize.min(todo.max(1));
     let mut done = 0usize;

@@ -39,7 +39,7 @@ pub(super) async fn run_backfill_vectors(
     crate::provider_config::materialize_standalone(&llm, vault_db_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let entries =
-        crate::vector_backfill::list_missing_vector_entries(&store, false).map_err(|e| {
+        crate::vector_backfill::list_missing_vector_entries(&store, false, None).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::Other, e)
         })?;
 

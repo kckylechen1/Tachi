@@ -50,50 +50,76 @@ pub(crate) async fn search_memory_rows(
 
     let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
 
+    let mut searched_named = false;
     if let Some(ref project_name) = params.project {
-        let project_results = server.with_named_project_store_read(project_name, |store| {
-            let vec_avail = store.vec_available;
-            let project_opts = params.to_search_options(vec_avail);
-            store
-                .search(&params.query, Some(project_opts))
-                .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
-        })?;
-        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-    } else if project_only {
-        let named_project = crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
-        if let Some(ref project_name) = named_project {
-            if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
-                let workspace_path = server.project_db_path_buf();
-                let named_path =
-                    crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
-                let skip_workspace = workspace_path
-                    .as_deref()
-                    .zip(named_path.as_deref())
-                    .map(|(w, n)| w == n)
-                    .unwrap_or(false);
+        if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
+            let project_results = server.with_named_project_store_read(project_name, |store| {
+                let vec_avail = store.vec_available;
+                let project_opts = params.to_search_options(vec_avail);
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
+            })?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            searched_named = true;
+        } else if !project_only {
+            return Err(format!(
+                "Project '{project_name}' not found (expected DB at {})",
+                crate::MemoryServer::resolve_named_project_db_path(project_name)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|e| e)
+            ));
+        }
+    }
 
-                if !skip_workspace && server.has_project_db() {
-                    let project_opts = params.to_search_options(server.project_vec_available);
-                    let project_results = server.with_project_store_read(|store| {
-                        store
-                            .search(&params.query, Some(project_opts))
-                            .map_err(|e| format!("Search failed in workspace project DB: {e}"))
-                    })?;
-                    combined_results
-                        .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-                }
+    if !searched_named {
+        if project_only {
+            let named_project =
+                crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
+            if let Some(ref project_name) = named_project {
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
+                {
+                    let workspace_path = server.project_db_path_buf();
+                    let named_path =
+                        crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
+                    let skip_workspace = workspace_path
+                        .as_deref()
+                        .zip(named_path.as_deref())
+                        .map(|(w, n)| w == n)
+                        .unwrap_or(false);
 
-                if named_path.is_some() {
-                    let project_results =
-                        server.with_named_project_store_read(project_name, |store| {
-                            let vec_avail = store.vec_available;
-                            let project_opts = params.to_search_options(vec_avail);
+                    if !skip_workspace && server.has_project_db() {
+                        let project_opts = params.to_search_options(server.project_vec_available);
+                        let project_results = server.with_project_store_read(|store| {
                             store.search(&params.query, Some(project_opts)).map_err(|e| {
-                                format!(
-                                    "Search failed in named project DB '{project_name}': {e}"
-                                )
+                                format!("Search failed in workspace project DB: {e}")
                             })
                         })?;
+                        combined_results
+                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    }
+
+                    if named_path.is_some() {
+                        let project_results =
+                            server.with_named_project_store_read(project_name, |store| {
+                                let vec_avail = store.vec_available;
+                                let project_opts = params.to_search_options(vec_avail);
+                                store.search(&params.query, Some(project_opts)).map_err(|e| {
+                                    format!(
+                                        "Search failed in named project DB '{project_name}': {e}"
+                                    )
+                                })
+                            })?;
+                        combined_results
+                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    }
+                } else if server.has_project_db() {
+                    let project_opts = params.to_search_options(server.project_vec_available);
+                    let project_results = server.with_project_store_read(|store| {
+                        store.search(&params.query, Some(project_opts)).map_err(|e| {
+                            format!("Search failed in workspace project DB: {e}")
+                        })
+                    })?;
                     combined_results
                         .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                 }
@@ -106,58 +132,50 @@ pub(crate) async fn search_memory_rows(
                 })?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
-        } else if server.has_project_db() {
-            let project_opts = params.to_search_options(server.project_vec_available);
-            let project_results = server.with_project_store_read(|store| {
+        } else {
+            let inferred_project = infer_search_project(&params.query, params.domain.as_deref());
+            let inferred_db_path = inferred_project
+                .as_deref()
+                .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
+            let workspace_db_path = server.project_db_path_buf();
+            let skip_workspace = inferred_db_path.is_some()
+                && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+
+            let global_opts = params.to_search_options(server.global_vec_available);
+            let global_results = server.with_global_store_read(|store| {
                 store
-                    .search(&params.query, Some(project_opts))
-                    .map_err(|e| format!("Search failed in workspace project DB: {e}"))
+                    .search(&params.query, Some(global_opts))
+                    .map_err(|e| format!("Search failed in global DB: {}", e))
             })?;
-            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-        }
-    } else {
-        let inferred_project = infer_search_project(&params.query, params.domain.as_deref());
-        let inferred_db_path = inferred_project
-            .as_deref()
-            .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
-        let workspace_db_path = server.project_db_path_buf();
-        let skip_workspace =
-            inferred_db_path.is_some() && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+            combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-        let global_opts = params.to_search_options(server.global_vec_available);
-        let global_results = server.with_global_store_read(|store| {
-            store
-                .search(&params.query, Some(global_opts))
-                .map_err(|e| format!("Search failed in global DB: {}", e))
-        })?;
-        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
-
-        if let Some(ref project_name) = inferred_project {
-            match server.with_named_project_store_read(project_name, |store| {
-                let vec_avail = store.vec_available;
-                let project_opts = params.to_search_options(vec_avail);
-                store
-                    .search(&params.query, Some(project_opts))
-                    .map_err(|e| {
+            if let Some(ref project_name) = inferred_project {
+                match server.with_named_project_store_read(project_name, |store| {
+                    let vec_avail = store.vec_available;
+                    let project_opts = params.to_search_options(vec_avail);
+                    store.search(&params.query, Some(project_opts)).map_err(|e| {
                         format!("Search failed in inferred project DB '{project_name}': {e}")
                     })
-            }) {
-                Ok(project_results) => {
-                    combined_results
-                        .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                }) {
+                    Ok(project_results) => {
+                        combined_results
+                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Search failed in inferred project DB '{project_name}': {e}"
+                        );
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Search failed in inferred project DB '{project_name}': {e}");
-                }
+            } else if server.has_project_db() && !skip_workspace {
+                let project_opts = params.to_search_options(server.project_vec_available);
+                let project_results = server.with_project_store_read(|store| {
+                    store
+                        .search(&params.query, Some(project_opts))
+                        .map_err(|e| format!("Search failed in project DB: {}", e))
+                })?;
+                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
-        } else if server.has_project_db() && !skip_workspace {
-            let project_opts = params.to_search_options(server.project_vec_available);
-            let project_results = server.with_project_store_read(|store| {
-                store
-                    .search(&params.query, Some(project_opts))
-                    .map_err(|e| format!("Search failed in project DB: {}", e))
-            })?;
-            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
         }
     }
 

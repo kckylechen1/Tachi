@@ -276,22 +276,59 @@ impl MemoryStore {
     pub fn entries_missing_vectors(
         &self,
     ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, text, summary, revision FROM memories
-             WHERE id NOT IN (SELECT id FROM memories_vec)
-             ORDER BY rowid",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(rows)
+        self.entries_missing_vectors_filtered(None, None)
+    }
+
+    /// Like [`entries_missing_vectors`], but can exclude a source and cap row count.
+    pub fn entries_missing_vectors_filtered(
+        &self,
+        exclude_source: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
+        let limit_val = limit.map(|l| l as i64).unwrap_or(-1);
+        let mut out = Vec::new();
+        match exclude_source {
+            Some(source) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, text, summary, revision FROM memories
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
+                     AND source != ?1
+                     ORDER BY rowid
+                     LIMIT ?2",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![source, limit_val], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            None => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT id, text, summary, revision FROM memories
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
+                     ORDER BY rowid
+                     LIMIT ?1",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![limit_val], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// List entries that are missing summaries.

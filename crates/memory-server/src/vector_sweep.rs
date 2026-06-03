@@ -1,7 +1,6 @@
 //! Daemon periodic sweep for memories missing vector embeddings.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -95,7 +94,6 @@ impl VectorSweepScheduler {
         llm: Arc<LlmClient>,
     ) -> Self {
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
-        let runs = Arc::new(AtomicU64::new(0));
 
         tokio::spawn(async move {
             if sweep_disabled() {
@@ -141,7 +139,6 @@ impl VectorSweepScheduler {
                                 }
                             }
                         }
-                        runs.fetch_add(1, Ordering::Relaxed);
                         if total_done > 0 {
                             tracing::info!(
                                 "[vector-sweep] run complete, embedded {total_done} row(s)"
