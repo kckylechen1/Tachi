@@ -132,7 +132,6 @@ impl ClaudePool {
                         "bytes": text.len(),
                     }),
                 );
-                let _ = run_dir;
                 Ok(ClaudeCallOutcome { text })
             }
             Err(err) => {

@@ -90,16 +90,18 @@ pub(crate) async fn collect_tachi_search_sections(
     }
 
     if effective_scope == "wiki" || effective_scope == "all" {
+        let wiki_path_prefix = match (&params.path_prefix, &params.category) {
+            (Some(prefix), _) => prefix.clone(),
+            (None, Some(category)) if !category.trim().is_empty() => {
+                format!("/wiki/{}", category.trim().trim_start_matches('/'))
+            }
+            _ => "/wiki".to_string(),
+        };
         let wiki_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
             top_k: params.top_k,
-            path_prefix: Some(
-                params
-                    .path_prefix
-                    .clone()
-                    .unwrap_or_else(|| "/wiki".to_string()),
-            ),
+            path_prefix: Some(wiki_path_prefix),
             include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),

@@ -88,10 +88,6 @@ enum Route {
 
 /// Per-DB worker handle. The scheduler holds one per active manifest DB.
 struct WorkerHandle {
-    db_path: PathBuf,
-    label: String,
-    route: Route,
-    metrics: Arc<WorkerMetrics>,
     cancel: tokio_util::sync::CancellationToken,
     join: tokio::task::JoinHandle<()>,
 }
@@ -104,10 +100,6 @@ struct WorkerHandle {
 /// via their per-task `CancellationToken`).
 pub struct FoundryScheduler {
     workers: Arc<Mutex<BTreeMap<PathBuf, WorkerHandle>>>,
-    manifest_path: PathBuf,
-    foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
-    own_global: PathBuf,
-    own_project: Option<PathBuf>,
     cancel_root: tokio_util::sync::CancellationToken,
     _manifest_task: tokio::task::JoinHandle<()>,
 }
@@ -172,10 +164,6 @@ impl FoundryScheduler {
 
         Self {
             workers,
-            manifest_path,
-            foundry_tx,
-            own_global,
-            own_project,
             cancel_root,
             _manifest_task: manifest_task,
         }
@@ -279,14 +267,7 @@ fn reconcile_workers(
         });
         map.insert(
             path.clone(),
-            WorkerHandle {
-                db_path: path,
-                label,
-                route,
-                metrics,
-                cancel,
-                join,
-            },
+            WorkerHandle { cancel, join },
         );
     }
 }

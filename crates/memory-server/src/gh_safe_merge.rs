@@ -300,7 +300,6 @@ pub trait GhClient: Send + Sync {
         strategy: MergeStrategy,
         expected_head_sha: &str,
     ) -> Result<MergeResult, GhError>;
-    async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError>;
     async fn issue_create(
         &self,
         repo: &str,
@@ -368,6 +367,15 @@ mod mock {
         pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy, String)> {
             self.merge_calls.lock().unwrap().clone()
         }
+
+        pub async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError> {
+            self.issues
+                .lock()
+                .unwrap()
+                .get(&(repo.to_string(), number))
+                .cloned()
+                .ok_or_else(|| GhError::NotFound(format!("issue {repo}#{number}")))
+        }
     }
 
     #[async_trait]
@@ -413,14 +421,6 @@ mod mock {
                 merge_sha: format!("mock-sha-for-{}", pr.head_sha),
                 strategy,
             })
-        }
-        async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError> {
-            self.issues
-                .lock()
-                .unwrap()
-                .get(&(repo.to_string(), number))
-                .cloned()
-                .ok_or_else(|| GhError::NotFound(format!("issue {repo}#{number}")))
         }
         async fn issue_create(
             &self,

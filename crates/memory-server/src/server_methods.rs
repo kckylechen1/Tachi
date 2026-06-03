@@ -88,13 +88,10 @@ impl MemoryServer {
             .to_string();
         let store = MemoryStore::open_with_label(db_str, &project_label)
             .map_err(|e| format!("open project db: {e}"))?;
-        let vec_available = store.vec_available;
-
         let state = ProjectDbState {
             store: Arc::new(StdMutex::new(store)),
             rw_gate: Arc::new(StdRwLock::new(())),
             db_path: Arc::new(db_path),
-            vec_available,
         };
 
         let mut guard = self

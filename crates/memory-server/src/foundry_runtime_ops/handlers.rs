@@ -98,6 +98,8 @@ pub(crate) async fn handle_compact_rollup(
         "rollup_id": params.rollup_id,
         "target_tokens": params.target_tokens.max(32),
         "current_summary": params.current_summary,
+        "path_prefix": params.path_prefix,
+        "project": params.project,
         "items": items
             .iter()
             .map(|item| json!({
@@ -595,6 +597,8 @@ pub(crate) async fn handle_compact_context(
         "trigger": params.trigger,
         "target_tokens": params.target_tokens.max(32),
         "current_summary": params.current_summary,
+        "path_prefix": params.path_prefix,
+        "project": params.project,
         "messages": params.messages,
     });
     let draft = match run_compaction_model(

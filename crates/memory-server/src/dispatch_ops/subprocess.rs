@@ -137,8 +137,6 @@ pub(super) async fn run_agent_subprocess(
     // tokio kills the child via SIGKILL instead of leaving it orphaned.
     cmd.kill_on_drop(true);
 
-    let start = std::time::Instant::now();
-
     let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn agent process: {e}"))?;
@@ -159,7 +157,6 @@ pub(super) async fn run_agent_subprocess(
         }
     };
 
-    let duration_ms = start.elapsed().as_millis() as u64;
     let exit_code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -175,7 +172,6 @@ pub(super) async fn run_agent_subprocess(
     Ok(DispatchResult {
         output: output_text,
         exit_code,
-        duration_ms,
     })
 }
 

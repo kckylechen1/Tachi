@@ -559,39 +559,6 @@ impl<'a> GhClient for CliGhClient<'a> {
         })
     }
 
-    async fn issue_view(
-        &self,
-        repo: &str,
-        number: u64,
-    ) -> Result<crate::gh_safe_merge::IssueState, GhError> {
-        validate_repo(repo).map_err(GhError::Sanitized)?;
-        let (mut cmd, token) = self.build()?;
-        cmd.args(["issue", "view", &number.to_string()])
-            .args(["--repo", repo])
-            .args(["--json", "number,title,state,url"]);
-        let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
-        let v: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| GhError::Sanitized(format!("issue_view parse: {e}")))?;
-        Ok(crate::gh_safe_merge::IssueState {
-            number: v.get("number").and_then(|n| n.as_u64()).unwrap_or(number),
-            title: v
-                .get("title")
-                .and_then(|t| t.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            state: v
-                .get("state")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            url: v
-                .get("url")
-                .and_then(|u| u.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        })
-    }
-
     async fn issue_create(
         &self,
         repo: &str,
