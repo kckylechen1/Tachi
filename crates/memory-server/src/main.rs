@@ -31,6 +31,7 @@
     clippy::useless_format
 )]
 
+mod agent_eval;
 mod agent_markdown;
 mod backend_tier;
 mod bootstrap;

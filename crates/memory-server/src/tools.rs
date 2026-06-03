@@ -1406,6 +1406,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Agent eval harness: load JSONL fixture rows and aggregate success/verification rates by agent+task_type (#158)."
+    )]
+    pub(crate) async fn tachi_agent_eval(
+        &self,
+        Parameters(params): Parameters<TachiAgentEvalParams>,
+    ) -> Result<String, String> {
+        crate::agent_eval::handle_agent_eval(self, params).await
+    }
+
+    #[tool(
         description = "View the task board (kanban) showing all dispatched background tasks and their statuses. Returns a list of tasks with their A2A state (WORKING, COMPLETED, FAILED, etc)."
     )]
     pub(crate) async fn tachi_board(
