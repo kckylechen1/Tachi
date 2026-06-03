@@ -143,7 +143,15 @@ pub(crate) async fn handle_orchestrator(
                 .clone()
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let status = parse_todo_status(params.todo_status.as_deref().unwrap_or("pending"))?;
+            let status = match params.todo_status.as_deref() {
+                Some(raw) => parse_todo_status(raw)?,
+                None => list
+                    .todos
+                    .iter()
+                    .find(|todo| todo.id == todo_id)
+                    .map(|todo| todo.status.clone())
+                    .unwrap_or(TodoStatus::Pending),
+            };
             if let Some(existing) = list.todos.iter_mut().find(|t| t.id == todo_id) {
                 if let Some(content) = params.todo_content.as_ref().filter(|c| !c.trim().is_empty())
                 {
@@ -152,14 +160,22 @@ pub(crate) async fn handle_orchestrator(
                 if let Some(agent) = params.agent.as_ref().filter(|a| !a.trim().is_empty()) {
                     existing.agent = agent.clone();
                 }
+                if status == TodoStatus::Done {
+                    if existing.status != TodoStatus::Done {
+                        existing.completed_at = Some(now.clone());
+                    }
+                } else {
+                    existing.completed_at = None;
+                }
+                if status == TodoStatus::Blocked {
+                    if let Some(reason) = params.blocked_reason.clone() {
+                        existing.blocked_reason = Some(reason);
+                    }
+                } else {
+                    existing.blocked_reason = None;
+                }
                 existing.status = status.clone();
                 existing.updated_at = now.clone();
-                if status == TodoStatus::Done {
-                    existing.completed_at = Some(now.clone());
-                }
-                if let Some(reason) = params.blocked_reason.clone() {
-                    existing.blocked_reason = Some(reason);
-                }
                 if let Some(verification) = params.verification.clone() {
                     existing.verification = Some(verification);
                 }

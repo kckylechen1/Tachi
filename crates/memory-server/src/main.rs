@@ -319,6 +319,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_memory",
     "tachi_handoff",
     "tachi_complete",
+    "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
