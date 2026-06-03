@@ -149,7 +149,7 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<MemoryEntry>, S
         let mut stmt = conn
             .prepare(
                 "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,
-                        category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,
+                        category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,
                         access_count,last_access,revision,metadata,retention_policy,domain,
                         recall_count,query_diversity,tier
                  FROM memories

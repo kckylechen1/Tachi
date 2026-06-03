@@ -258,10 +258,22 @@ fn read_source_rows(source: &Path) -> Result<Vec<SourceRow>, String> {
     } else {
         "'[]' AS persons"
     };
+    let location_expr = if conn
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('memories') WHERE name='location' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false)
+    {
+        "location"
+    } else {
+        "'' AS location"
+    };
 
     let sql = format!(
         "SELECT id, path, summary, text, importance, timestamp, category, topic,
-                keywords, {persons_expr}, entities, location, source, scope, archived,
+                keywords, {persons_expr}, entities, {location_expr}, source, scope, archived,
                 created_at, updated_at, access_count, last_access, metadata, revision
          FROM memories
          WHERE archived = 0"
@@ -331,6 +343,7 @@ fn make_target_id(source_id: &str, target: &str) -> String {
 struct TargetCaps {
     has_domain: bool,
     has_retention_policy: bool,
+    has_location: bool,
 }
 
 fn merge_legacy_persons_into_entities(persons_raw: &str, entities_raw: &str) -> String {
@@ -343,6 +356,7 @@ fn merge_legacy_persons_into_entities(persons_raw: &str, entities_raw: &str) -> 
 fn detect_target_caps(conn: &Connection) -> Result<TargetCaps, String> {
     let mut has_domain = false;
     let mut has_retention_policy = false;
+    let mut has_location = false;
     let mut stmt = conn
         .prepare("PRAGMA table_info(memories)")
         .map_err(|e| format!("inspect target memories schema: {e}"))?;
@@ -357,10 +371,14 @@ fn detect_target_caps(conn: &Connection) -> Result<TargetCaps, String> {
         if col == "retention_policy" {
             has_retention_policy = true;
         }
+        if col == "location" {
+            has_location = true;
+        }
     }
     Ok(TargetCaps {
         has_domain,
         has_retention_policy,
+        has_location,
     })
 }
 
@@ -446,7 +464,6 @@ pub fn apply_rescue(
                 }),
             );
         }
-        let meta_str = meta_val.to_string();
 
         let scope_final = if assignment.trading {
             "user".to_string()
@@ -457,40 +474,79 @@ pub fn apply_rescue(
         let source_final = MemorySource::parse_or_external(&row.source).to_string();
         let category_final = MemoryCategory::normalize(&row.category).to_string();
         let entities_final = merge_legacy_persons_into_entities(&row.persons, &row.entities);
+        let path_final = memory_core::types::apply_location_relocation(
+            &row.path,
+            &row.location,
+            &mut meta_val,
+        );
+        let meta_str = meta_val.to_string();
 
         let result = if caps.has_domain && caps.has_retention_policy {
-            conn.execute(
-                "INSERT INTO memories
-                 (id, path, summary, text, importance, timestamp, category, topic, keywords,
-                  entities, location, source, scope, archived, created_at, updated_at,
-                  access_count, last_access, revision, metadata, retention_policy, domain)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
-                params![
-                    new_id,
-                    row.path,
-                    row.summary,
-                    row.text,
-                    row.importance,
-                    row.timestamp,
-                    category_final,
-                    row.topic,
-                    row.keywords,
-                    entities_final,
-                    row.location,
-                    source_final,
-                    scope_final,
-                    row.archived,
-                    row.created_at,
-                    row.updated_at,
-                    row.access_count,
-                    row.last_access,
-                    row.revision,
-                    meta_str,
-                    "durable",
-                    if assignment.trading { Some("equity_trading") } else { None::<&str> },
-                ],
-            )
-        } else {
+            if caps.has_location {
+                conn.execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords,
+                      entities, location, source, scope, archived, created_at, updated_at,
+                      access_count, last_access, revision, metadata, retention_policy, domain)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+                    params![
+                        new_id,
+                        path_final,
+                        row.summary,
+                        row.text,
+                        row.importance,
+                        row.timestamp,
+                        category_final,
+                        row.topic,
+                        row.keywords,
+                        entities_final,
+                        "",
+                        source_final,
+                        scope_final,
+                        row.archived,
+                        row.created_at,
+                        row.updated_at,
+                        row.access_count,
+                        row.last_access,
+                        row.revision,
+                        meta_str,
+                        "durable",
+                        if assignment.trading { Some("equity_trading") } else { None::<&str> },
+                    ],
+                )
+            } else {
+                conn.execute(
+                    "INSERT INTO memories
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords,
+                      entities, source, scope, archived, created_at, updated_at,
+                      access_count, last_access, revision, metadata, retention_policy, domain)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                    params![
+                        new_id,
+                        path_final,
+                        row.summary,
+                        row.text,
+                        row.importance,
+                        row.timestamp,
+                        category_final,
+                        row.topic,
+                        row.keywords,
+                        entities_final,
+                        source_final,
+                        scope_final,
+                        row.archived,
+                        row.created_at,
+                        row.updated_at,
+                        row.access_count,
+                        row.last_access,
+                        row.revision,
+                        meta_str,
+                        "durable",
+                        if assignment.trading { Some("equity_trading") } else { None::<&str> },
+                    ],
+                )
+            }
+        } else if caps.has_location {
             conn.execute(
                 "INSERT INTO memories
                  (id, path, summary, text, importance, timestamp, category, topic, keywords,
@@ -499,7 +555,7 @@ pub fn apply_rescue(
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
                 params![
                     new_id,
-                    row.path,
+                    path_final,
                     row.summary,
                     row.text,
                     row.importance,
@@ -508,7 +564,36 @@ pub fn apply_rescue(
                     row.topic,
                     row.keywords,
                     entities_final,
-                    row.location,
+                    "",
+                    source_final,
+                    scope_final,
+                    row.archived,
+                    row.created_at,
+                    row.updated_at,
+                    row.access_count,
+                    row.last_access,
+                    meta_str,
+                    row.revision,
+                ],
+            )
+        } else {
+            conn.execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords,
+                  entities, source, scope, archived, created_at, updated_at,
+                  access_count, last_access, metadata, revision)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![
+                    new_id,
+                    path_final,
+                    row.summary,
+                    row.text,
+                    row.importance,
+                    row.timestamp,
+                    category_final,
+                    row.topic,
+                    row.keywords,
+                    entities_final,
                     source_final,
                     scope_final,
                     row.archived,
@@ -703,7 +788,6 @@ mod tests {
             importance REAL NOT NULL DEFAULT 0.7, timestamp TEXT NOT NULL,
             category TEXT NOT NULL DEFAULT 'fact', topic TEXT NOT NULL DEFAULT '',
             keywords TEXT NOT NULL DEFAULT '[]', entities TEXT NOT NULL DEFAULT '[]',
-            location TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT 'manual', scope TEXT NOT NULL DEFAULT 'general',
             archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT '', access_count INTEGER NOT NULL DEFAULT 0,

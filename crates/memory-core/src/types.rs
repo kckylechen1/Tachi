@@ -603,6 +603,11 @@ impl MemoryEntry {
         let persons: Vec<String> = self.persons.drain(..).collect();
         fold_person_names_into_entities(&mut self.entities, persons);
     }
+
+    /// Fold legacy `location` into `path` / metadata before persisting (schema v9).
+    pub fn fold_location_into_metadata(&mut self) {
+        fold_location_into_metadata(self);
+    }
 }
 
 /// Push a named entity for recall; `Kyle` also adds canonical `user`.
@@ -628,6 +633,45 @@ pub fn fold_person_names_into_entities(
     for name in persons {
         push_entity_name(entities, &name);
     }
+}
+
+/// True when legacy `location` looks like a hierarchical or file path, not a place name.
+pub fn is_path_like_location(location: &str) -> bool {
+    let t = location.trim();
+    !t.is_empty() && (t.starts_with('/') || t.contains('/'))
+}
+
+/// Relocate legacy `location` into `path` or `metadata` before persisting (schema v9).
+///
+/// Returns the effective path after relocation.
+pub fn apply_location_relocation(
+    path: &str,
+    location: &str,
+    metadata: &mut serde_json::Value,
+) -> String {
+    let loc = location.trim();
+    let mut effective_path = path.trim().to_string();
+    if loc.is_empty() {
+        return effective_path;
+    }
+    if is_path_like_location(loc) {
+        if effective_path.is_empty() || effective_path == "/" {
+            effective_path = crate::path_router::normalize_path(loc);
+        } else if let Some(obj) = metadata.as_object_mut() {
+            obj.entry("context_path")
+                .or_insert_with(|| serde_json::Value::String(loc.to_string()));
+        }
+    } else if let Some(obj) = metadata.as_object_mut() {
+        obj.entry("geo")
+            .or_insert_with(|| serde_json::Value::String(loc.to_string()));
+    }
+    effective_path
+}
+
+/// Fold wire/API `location` into storage fields and clear the legacy column value.
+pub fn fold_location_into_metadata(entry: &mut MemoryEntry) {
+    let location = std::mem::take(&mut entry.location);
+    entry.path = apply_location_relocation(&entry.path, &location, &mut entry.metadata);
 }
 
 // ─── Defaults ────────────────────────────────────────────────────────────────

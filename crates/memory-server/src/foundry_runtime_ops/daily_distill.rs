@@ -555,7 +555,7 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
 
         let mut stmt = conn
             .prepare(
-                "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
+                "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
                   FROM memories
                   WHERE archived = 0 AND source != ?1
                   ORDER BY timestamp ASC",
@@ -903,7 +903,7 @@ fn persist_distill_memory(
         keywords,
         persons: Vec::new(),
         entities,
-        location: group.path_prefix.clone(),
+        location: String::new(),
         source: FOUNDRY_DISTILL_SOURCE.to_string(),
         scope: "project".to_string(),
         archived: false,

@@ -38,7 +38,7 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     }
 }
 
-const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
+const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
 
 fn sync_memories_fts(
     tx: &rusqlite::Transaction<'_>,
@@ -81,6 +81,7 @@ pub fn normalize_for_write(entry: &mut MemoryEntry) {
         }
     }
     entry.fold_persons_into_entities();
+    entry.fold_location_into_metadata();
 }
 
 /// Serialize `entities` with legacy `persons` folded in.
@@ -143,7 +144,9 @@ pub fn upsert(
         .transpose()?;
     let write_time_utc = now_utc_iso();
 
-    let metadata_json = serde_json::to_string(&entry.metadata)?;
+    let mut metadata = entry.metadata.clone();
+    let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
+    let metadata_json = serde_json::to_string(&metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
@@ -270,16 +273,16 @@ pub fn upsert(
                         r#"INSERT INTO memories
                               (id, path, summary, text, importance,
                                timestamp, valid_from, valid_until, category, topic, keywords, entities,
-                               location, source, scope, archived, created_at, updated_at,
+                               source, scope, archived, created_at, updated_at,
                                access_count, last_access, revision, metadata,
                                retention_policy, domain, recall_count, query_diversity, tier,
                                superseded_by)
-                           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
                            ON CONFLICT(id) DO NOTHING"#,
                         params![
                             entry.id, &path, &clean_summary, &clean_text, importance,
                             timestamp_utc, valid_from_utc, valid_until_utc, category, entry.topic,
-                            kws_json, e_json, entry.location, &source, scope,
+                            kws_json, e_json, &source, scope,
                             entry.archived, &write_time_utc, &write_time_utc,
                             entry.access_count, last_access_utc, entry.revision.max(1),
                             metadata_json, &retention_policy, entry.domain,
@@ -299,10 +302,10 @@ pub fn upsert(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
                timestamp, valid_from, valid_until, category, topic, keywords, entities,
-               location, source, scope, archived, created_at, updated_at,
+               source, scope, archived, created_at, updated_at,
                access_count, last_access, revision, metadata,
                retention_policy, domain, recall_count, query_diversity, tier)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -315,7 +318,6 @@ pub fn upsert(
                topic        = excluded.topic,
                keywords     = excluded.keywords,
                entities     = excluded.entities,
-               location     = excluded.location,
                source       = excluded.source,
                scope        = excluded.scope,
                archived     = excluded.archived,
@@ -341,7 +343,6 @@ pub fn upsert(
             entry.topic,
             kws_json,
             e_json,
-            entry.location,
             &source,
             scope,
             entry.archived,
