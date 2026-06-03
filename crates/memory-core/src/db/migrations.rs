@@ -242,17 +242,11 @@ pub fn migrate_v9_relocate_and_drop_location(
 }
 
 fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, path, location, metadata FROM memories WHERE trim(location) <> ''",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, path, location, metadata FROM memories WHERE trim(location) <> ''")?;
     let rows: Vec<(String, String, String, String)> = stmt
         .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-            ))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -261,9 +255,8 @@ fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
         let mut metadata: serde_json::Value =
             serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({}));
         let new_path = apply_location_relocation(&path, &location, &mut metadata);
-        let metadata_str = serde_json::to_string(&metadata).map_err(|e| {
-            MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}"))
-        })?;
+        let metadata_str = serde_json::to_string(&metadata)
+            .map_err(|e| MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}")))?;
         conn.execute(
             "UPDATE memories SET path = ?1, metadata = ?2, location = '' WHERE id = ?3",
             params![new_path, metadata_str, id],
@@ -830,37 +823,27 @@ mod tests {
         .unwrap();
         conn.execute(
             "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                "m1",
-                "/",
-                "/scratch/hyperion",
-                "{}"
-            ],
+            params!["m1", "/", "/scratch/hyperion", "{}"],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                "m2",
-                "/notes/x",
-                "/code-review/sigil",
-                "{}"
-            ],
+            params!["m2", "/notes/x", "/code-review/sigil", "{}"],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                "m3",
-                "/facts/y",
-                "Shanghai",
-                "{}"
-            ],
+            params!["m3", "/facts/y", "Shanghai", "{}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params!["m4", "/facts/z", "Paris", r#"["legacy"]"#],
         )
         .unwrap();
 
         let (relocated, dropped) = migrate_v9_relocate_and_drop_location(&conn).unwrap();
-        assert_eq!(relocated, 3);
+        assert_eq!(relocated, 4);
         assert_eq!(dropped, 1);
         assert!(!table_has_column(&conn, "memories", "location").unwrap());
 
@@ -870,15 +853,28 @@ mod tests {
         assert_eq!(path, "/scratch/hyperion");
 
         let metadata: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='m2'", [], |r| r.get(0))
+            .query_row("SELECT metadata FROM memories WHERE id='m2'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(meta["context_path"], "/code-review/sigil");
 
         let metadata: String = conn
-            .query_row("SELECT metadata FROM memories WHERE id='m3'", [], |r| r.get(0))
+            .query_row("SELECT metadata FROM memories WHERE id='m3'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(meta["geo"], "Shanghai");
+
+        let metadata: String = conn
+            .query_row("SELECT metadata FROM memories WHERE id='m4'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(meta["geo"], "Paris");
+        assert_eq!(meta["legacy_metadata"], json!(["legacy"]));
     }
 }

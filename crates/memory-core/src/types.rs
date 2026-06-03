@@ -657,15 +657,33 @@ pub fn apply_location_relocation(
     if is_path_like_location(loc) {
         if effective_path.is_empty() || effective_path == "/" {
             effective_path = crate::path_router::normalize_path(loc);
-        } else if let Some(obj) = metadata.as_object_mut() {
+        } else {
+            let obj = ensure_metadata_object(metadata);
             obj.entry("context_path")
                 .or_insert_with(|| serde_json::Value::String(loc.to_string()));
         }
-    } else if let Some(obj) = metadata.as_object_mut() {
+    } else {
+        let obj = ensure_metadata_object(metadata);
         obj.entry("geo")
             .or_insert_with(|| serde_json::Value::String(loc.to_string()));
     }
     effective_path
+}
+
+fn ensure_metadata_object(
+    metadata: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if !metadata.is_object() {
+        let previous =
+            std::mem::replace(metadata, serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(obj) = metadata {
+            obj.insert("legacy_metadata".to_string(), previous);
+        }
+    }
+    match metadata {
+        serde_json::Value::Object(obj) => obj,
+        _ => unreachable!("metadata was normalized to an object"),
+    }
 }
 
 /// Fold wire/API `location` into storage fields and clear the legacy column value.
@@ -881,6 +899,21 @@ mod tests {
         let mut entities = Vec::new();
         push_entity_name(&mut entities, "Kyle");
         assert_eq!(entities, vec!["Kyle".to_string(), "user".to_string()]);
+    }
+
+    #[test]
+    fn location_relocation_preserves_non_object_metadata() {
+        let mut metadata = json!(["legacy"]);
+        let path = apply_location_relocation("/facts/y", "Shanghai", &mut metadata);
+        assert_eq!(path, "/facts/y");
+        assert_eq!(metadata["geo"], "Shanghai");
+        assert_eq!(metadata["legacy_metadata"], json!(["legacy"]));
+
+        let mut metadata = json!("legacy note");
+        let path = apply_location_relocation("/notes/x", "/code-review/sigil", &mut metadata);
+        assert_eq!(path, "/notes/x");
+        assert_eq!(metadata["context_path"], "/code-review/sigil");
+        assert_eq!(metadata["legacy_metadata"], "legacy note");
     }
 
     #[test]
