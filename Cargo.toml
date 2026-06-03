@@ -2,7 +2,6 @@
 members = [
     "crates/memory-core",
     "crates/memory-node",
-    "crates/memory-python",
     "crates/memory-server",
 ]
 default-members = [
