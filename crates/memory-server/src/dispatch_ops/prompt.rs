@@ -35,6 +35,12 @@ pub(super) fn resolve_effective_skills(
 pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
     let mut parts: Vec<String> = Vec::new();
 
+    if let Some(overlay) =
+        crate::prompt_envelope::render_envelope_overlay(&params.agent, params.stage.as_deref())
+    {
+        parts.push(overlay);
+    }
+
     // Resolve skills with stage defaults
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
 
