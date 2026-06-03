@@ -922,6 +922,18 @@ pub(crate) struct TachiAgentEvalParams {
     pub fixture_path: Option<String>,
 }
 
+// ─── Facade: agent registry / router ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiAgentsParams {
+    /// list | select
+    pub action: String,
+    #[serde(default)]
+    pub intent: Option<String>,
+    #[serde(default)]
+    pub task: Option<String>,
+}
+
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
