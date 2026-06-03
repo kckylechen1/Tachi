@@ -99,8 +99,8 @@ fn validate_reference_format(reference: &str) -> Result<(), String> {
     // GitHub shorthand: #69, repo#69, owner/repo#69
     static GH_SHORTHAND_RE: OnceLock<Regex> = OnceLock::new();
     let gh_re = GH_SHORTHAND_RE.get_or_init(|| {
-        Regex::new(r"^(?:[a-zA-Z0-9_-]+/)?[a-zA-Z0-9_.-]+)?#\d+$
-    }).unwrap();
+        Regex::new(r"^(?:#\d+|[a-zA-Z0-9_.-]+#\d+|[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+#\d+)$").unwrap()
+    });
     if gh_re.is_match(trimmed) {
         return Ok(());
     }

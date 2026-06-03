@@ -165,6 +165,10 @@ pub(crate) struct TachiSaveParams {
     #[serde(default)]
     pub force: bool,
 
+    /// External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N).
+    #[serde(default)]
+    pub references: Vec<String>,
+
     /// Topic / subject area
     #[serde(default)]
     pub topic: Option<String>,

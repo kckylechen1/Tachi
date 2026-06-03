@@ -402,6 +402,10 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             domain: None,
             retention_policy: Some("permanent".to_string()),
             force: true,
+            references: vec![
+                "https://example.com/spec".to_string(),
+                "kckylechen1/tachi#149".to_string(),
+            ],
             topic: Some("routing-boundary".to_string()),
             source: None,
             valid_from: None,
@@ -431,6 +435,10 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
     assert_eq!(
         fetched_json["metadata"]["wiki_title"],
         json!("Routing Boundary Wiki")
+    );
+    assert_eq!(
+        fetched_json["metadata"]["source_refs"],
+        json!(["https://example.com/spec", "kckylechen1/tachi#149"])
     );
 }
 

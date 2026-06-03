@@ -496,14 +496,21 @@ pub(crate) fn validate_reference_format(reference: &str) -> Result<(), String> {
         return Err("Reference cannot be empty".to_string());
     }
 
-    if trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
-        || trimmed.starts_with("file://")
-    {
-        return Ok(());
+    if let Some(rest) = trimmed.strip_prefix("http://") {
+        if !rest.is_empty() {
+            return Ok(());
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        if !rest.is_empty() {
+            return Ok(());
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("file://") {
+        if !rest.is_empty() {
+            return Ok(());
+        }
     }
 
-    if trimmed.starts_with('/') {
+    if trimmed.starts_with('/') && trimmed.len() > 1 {
         return Ok(());
     }
 
@@ -529,8 +536,7 @@ pub(crate) fn validate_reference_format(reference: &str) -> Result<(), String> {
 
 pub(crate) fn validate_references(references: &[String]) -> Result<(), String> {
     for (i, reference) in references.iter().enumerate() {
-        validate_reference_format(reference)
-            .map_err(|e| format!("references[{i}]: {e}"))?;
+        validate_reference_format(reference).map_err(|e| format!("references[{i}]: {e}"))?;
     }
     Ok(())
 }
@@ -1723,7 +1729,10 @@ mod reference_validation_tests {
             "ftp://example.com",
             "just some text",
         ] {
-            assert!(validate_reference_format(bad).is_err(), "expected err: {bad}");
+            assert!(
+                validate_reference_format(bad).is_err(),
+                "expected err: {bad}"
+            );
         }
     }
 
