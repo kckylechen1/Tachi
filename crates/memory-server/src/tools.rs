@@ -1346,6 +1346,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Issue→Doc→Memory closure: action=close_loop writes wiki with references[] (issue + docs + related issues); build_references previews the array. Replaces nightly wiki compile (#77)."
+    )]
+    pub(crate) async fn tachi_workflow(
+        &self,
+        Parameters(params): Parameters<TachiWorkflowParams>,
+    ) -> Result<String, String> {
+        crate::workflow_closure::handle_workflow(self, params).await
+    }
+
+    #[tool(
         description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, lightweight skill suggestions, and debugging checklist. (Alias: tachi_task_brief)"
     )]
     pub(crate) async fn tachi_plan(

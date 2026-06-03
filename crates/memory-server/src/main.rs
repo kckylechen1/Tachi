@@ -97,6 +97,7 @@ mod vector_sweep;
 mod provider_config;
 mod web_search_ops;
 mod wiki_ops;
+mod workflow_closure;
 
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{

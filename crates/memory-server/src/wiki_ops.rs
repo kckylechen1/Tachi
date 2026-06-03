@@ -514,6 +514,11 @@ pub(crate) fn validate_reference_format(reference: &str) -> Result<(), String> {
         return Ok(());
     }
 
+    // Repo-relative spec paths (Issue → Doc edges in #150)
+    if trimmed.starts_with("docs/") || trimmed.starts_with("skill/") {
+        return Ok(());
+    }
+
     static WIN_PATH_RE: OnceLock<regex::Regex> = OnceLock::new();
     let win_re = WIN_PATH_RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z]:[/\\]").unwrap());
     if win_re.is_match(trimmed) {
@@ -1715,6 +1720,7 @@ mod reference_validation_tests {
             "#69",
             "repo#69",
             "owner/repo#69",
+            "docs/wiki-references-spec.md",
         ] {
             assert!(validate_reference_format(ok).is_ok(), "expected ok: {ok}");
         }
