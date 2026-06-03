@@ -636,6 +636,10 @@ pub(crate) struct TachiWikiParams {
     pub domain: Option<String>,
     #[serde(default)]
     pub force: bool,
+
+    /// External references (URLs, absolute paths, GitHub shorthands). Validated on write.
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 // ─── Facade: skill (discover / run) ──────────────────────────────────────────

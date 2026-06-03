@@ -86,6 +86,7 @@ pub(crate) async fn handle_tachi_save(
                 domain: params.domain.clone(),
                 project: params.project.clone(),
                 force: params.force,
+                references: Vec::new(),
             };
             handle_tachi_wiki_write(server, wiki_params).await
         }

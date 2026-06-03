@@ -3,6 +3,7 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use memory_core::scorer::local_pagerank;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const WIKI_LOG_MAX_BYTES: usize = 256 * 1024;
 const WIKI_LOG_MAX_ENTRIES: usize = 200;
@@ -489,6 +490,75 @@ fn is_entity_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_' || ch == '-'
 }
 
+pub(crate) fn validate_reference_format(reference: &str) -> Result<(), String> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return Err("Reference cannot be empty".to_string());
+    }
+
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("file://")
+    {
+        return Ok(());
+    }
+
+    if trimmed.starts_with('/') {
+        return Ok(());
+    }
+
+    static WIN_PATH_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let win_re = WIN_PATH_RE.get_or_init(|| regex::Regex::new(r"^[a-zA-Z]:[/\\]").unwrap());
+    if win_re.is_match(trimmed) {
+        return Ok(());
+    }
+
+    static GH_SHORTHAND_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let gh_re = GH_SHORTHAND_RE.get_or_init(|| {
+        regex::Regex::new(r"^(?:#\d+|[a-zA-Z0-9_.-]+#\d+|[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+#\d+)$")
+            .unwrap()
+    });
+    if gh_re.is_match(trimmed) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Invalid reference format: '{trimmed}'. Expected URL (http/https/file), absolute path, or GitHub shorthand (#N, repo#N, owner/repo#N)"
+    ))
+}
+
+pub(crate) fn validate_references(references: &[String]) -> Result<(), String> {
+    for (i, reference) in references.iter().enumerate() {
+        validate_reference_format(reference)
+            .map_err(|e| format!("references[{i}]: {e}"))?;
+    }
+    Ok(())
+}
+
+fn append_references_section(body: &mut String, metadata: &serde_json::Value) {
+    let Some(refs) = metadata.get("source_refs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    if refs.is_empty() {
+        return;
+    }
+    body.push_str("\n\n## References\n\n");
+    for ref_val in refs {
+        let Some(ref_str) = ref_val.as_str() else {
+            continue;
+        };
+        let line = if ref_str.starts_with("http://")
+            || ref_str.starts_with("https://")
+            || ref_str.starts_with("file://")
+        {
+            format!("- [{ref_str}]({ref_str})\n")
+        } else {
+            format!("- `{ref_str}`\n")
+        };
+        body.push_str(&line);
+    }
+}
+
 fn markdown_for_obsidian(entry: &MemoryEntry) -> String {
     let mut body = String::new();
     body.push_str("---\n");
@@ -519,6 +589,7 @@ fn markdown_for_obsidian(entry: &MemoryEntry) -> String {
             body.push_str(&format!("- [[{}]]\n", entity));
         }
     }
+    append_references_section(&mut body, &entry.metadata);
     body
 }
 
@@ -1622,4 +1693,43 @@ pub(crate) async fn handle_wiki_lint(
         "skill_quality": skill_quality,
     }))
     .map_err(|e| format!("serialize wiki_lint: {e}"))
+}
+
+#[cfg(test)]
+mod reference_validation_tests {
+    use super::{validate_reference_format, validate_references};
+
+    #[test]
+    fn valid_reference_formats() {
+        for ok in [
+            "https://example.com",
+            "file:///path/to/file.md",
+            "/Users/foo/project/README.md",
+            "C:\\Users\\foo\\file.txt",
+            "#69",
+            "repo#69",
+            "owner/repo#69",
+        ] {
+            assert!(validate_reference_format(ok).is_ok(), "expected ok: {ok}");
+        }
+    }
+
+    #[test]
+    fn invalid_reference_formats() {
+        for bad in [
+            "",
+            "   ",
+            "relative/path.md",
+            "ftp://example.com",
+            "just some text",
+        ] {
+            assert!(validate_reference_format(bad).is_err(), "expected err: {bad}");
+        }
+    }
+
+    #[test]
+    fn batch_validation_reports_index() {
+        let err = validate_references(&["#1".to_string(), "nope".to_string()]).unwrap_err();
+        assert!(err.contains("references[1]"), "err: {err}");
+    }
 }

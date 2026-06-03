@@ -1499,6 +1499,7 @@ impl MemoryServer {
                     domain: params.domain.clone(),
                     project: params.project.clone(),
                     force: params.force,
+                    references: params.references.clone(),
                 };
                 handle_tachi_wiki_write(self, wiki_params).await
             }
