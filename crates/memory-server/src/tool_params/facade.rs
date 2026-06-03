@@ -417,7 +417,7 @@ fn default_dispatch_timeout() -> u64 {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiDispatchParams {
-    /// Agent backend to use: "claude" | "codex" | "custom"
+    /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
     pub agent: String,
 
     /// Task description / prompt for the agent

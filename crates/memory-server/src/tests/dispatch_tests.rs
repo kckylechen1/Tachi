@@ -187,6 +187,37 @@ fn dispatch_ids_are_unique_within_same_second() {
     );
 }
 
+#[tokio::test]
+async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
+    let server = make_server();
+    let err = crate::dispatch_ops::handle_tachi_dispatch(
+        &server,
+        TachiDispatchParams {
+            agent: "gemini".to_string(),
+            task: "noop".to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            project: None,
+            stage: None,
+        },
+    )
+    .await
+    .expect_err("gemini should not be in the fleet");
+    assert!(err.contains("Unknown agent"), "err: {err}");
+    assert!(err.contains("claude"), "err: {err}");
+    assert!(err.contains("grok"), "err: {err}");
+}
+
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
 //
 // Spawns the full V2 flow against a fake `claude` binary that emits a
