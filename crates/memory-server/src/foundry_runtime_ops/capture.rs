@@ -105,13 +105,27 @@ pub(super) fn merge_capture_entries(
         existing.timestamp.clone()
     };
 
+    let mut path = if existing.path.trim().is_empty() {
+        incoming.path.clone()
+    } else {
+        existing.path.clone()
+    };
+    let legacy_location = if incoming.location.trim().is_empty() {
+        existing.location.as_str()
+    } else {
+        incoming.location.as_str()
+    };
+    let mut metadata = merge_metadata(
+        &existing.metadata,
+        &incoming.metadata,
+        &incoming.id,
+        similarity,
+    );
+    path = memory_core::types::apply_location_relocation(&path, legacy_location, &mut metadata);
+
     MemoryEntry {
         id: existing.id.clone(),
-        path: if existing.path.trim().is_empty() {
-            incoming.path.clone()
-        } else {
-            existing.path.clone()
-        },
+        path,
         summary: merged_summary,
         text: merged_text,
         importance: existing.importance * 0.6 + incoming.importance * 0.4,
@@ -150,11 +164,7 @@ pub(super) fn merge_capture_entries(
                 .chain(existing.persons.iter().cloned())
                 .collect(),
         ),
-        location: if incoming.location.trim().is_empty() {
-            existing.location.clone()
-        } else {
-            incoming.location.clone()
-        },
+        location: String::new(),
         source: "capture_session".to_string(),
         scope: if incoming.scope == "general" {
             existing.scope.clone()
@@ -165,12 +175,7 @@ pub(super) fn merge_capture_entries(
         access_count: existing.access_count,
         last_access: existing.last_access.clone(),
         revision: existing.revision + 1,
-        metadata: merge_metadata(
-            &existing.metadata,
-            &incoming.metadata,
-            &incoming.id,
-            similarity,
-        ),
+        metadata,
         vector: None,
         retention_policy: None,
         domain: None,

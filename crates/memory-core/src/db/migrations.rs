@@ -13,13 +13,16 @@
 //! - v6: fold non-empty `persons` JSON into `entities`, then clear `persons`
 //! - v7: reconcile half-migrated DBs (re-bridge + drop `indexed_tags`/`domain_key`, ensure `location`)
 //! - v8: drop the legacy physical `persons` column after folding it into `entities`
+//! - v9: relocate non-empty `location` into `path` / metadata, then drop `location`
 
 use std::path::Path;
 
 use rusqlite::{params, Connection};
+use serde_json::json;
 
 use crate::error::MemoryError;
 use crate::path_router;
+use crate::types::apply_location_relocation;
 
 use super::common::now_utc_iso;
 
@@ -37,6 +40,8 @@ pub struct MigrationReport {
     pub persons_folded_into_entities: usize,
     pub legacy_columns_reconciled: usize,
     pub persons_columns_dropped: usize,
+    pub locations_relocated: usize,
+    pub location_columns_dropped: usize,
 }
 
 /// Run all data-fix migrations in order. Idempotent.
@@ -94,6 +99,13 @@ pub fn run_data_migrations(
     if !was_run(conn, "v8_drop_legacy_persons_column")? {
         report.persons_columns_dropped = fold_and_drop_legacy_persons_column(conn)?;
         mark_run(conn, "v8_drop_legacy_persons_column")?;
+    }
+
+    if !was_run(conn, "v9_relocate_and_drop_location")? {
+        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(conn)?;
+        report.locations_relocated = relocated;
+        report.location_columns_dropped = dropped;
+        mark_run(conn, "v9_relocate_and_drop_location")?;
     }
 
     Ok(report)
@@ -217,6 +229,53 @@ pub fn fold_and_drop_legacy_persons_column(conn: &Connection) -> Result<usize, M
     Ok(folded + 1)
 }
 
+/// Relocate legacy `location` values, then drop the physical column.
+pub fn migrate_v9_relocate_and_drop_location(
+    conn: &Connection,
+) -> Result<(usize, usize), MemoryError> {
+    if !table_has_column(conn, "memories", "location")? {
+        return Ok((0, 0));
+    }
+    let relocated = relocate_location_rows(conn)?;
+    conn.execute("ALTER TABLE memories DROP COLUMN location", [])?;
+    Ok((relocated, 1))
+}
+
+fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
+    let mut stmt = conn
+        .prepare("SELECT id, path, location, metadata FROM memories WHERE trim(location) <> ''")?;
+    let rows: Vec<(String, String, String, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut relocated = 0usize;
+    for (id, path, location, metadata_raw) in rows {
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({}));
+        let new_path = apply_location_relocation(&path, &location, &mut metadata);
+        let metadata_str = serde_json::to_string(&metadata)
+            .map_err(|e| MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}")))?;
+        conn.execute(
+            "UPDATE memories SET path = ?1, metadata = ?2, location = '' WHERE id = ?3",
+            params![new_path, metadata_str, id],
+        )?;
+        relocated += 1;
+    }
+    Ok(relocated)
+}
+
+pub(crate) fn table_has_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, MemoryError> {
+    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1");
+    let exists = conn.query_row(&sql, [column], |_| Ok(())).is_ok();
+    Ok(exists)
+}
+
 // ─── v5: drop HyperTachi legacy columns ───────────────────────────────────────
 
 fn migrate_v5_drop_hypertachi_legacy_columns(conn: &Connection) -> Result<usize, MemoryError> {
@@ -228,12 +287,6 @@ fn migrate_v5_drop_hypertachi_legacy_columns(conn: &Connection) -> Result<usize,
         }
     }
     Ok(dropped)
-}
-
-fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MemoryError> {
-    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1");
-    let exists = conn.query_row(&sql, [column], |_| Ok(())).is_ok();
-    Ok(exists)
 }
 
 // ─── v1: normalize paths ──────────────────────────────────────────────────────
@@ -505,8 +558,9 @@ mod tests {
     }
 
     fn insert_row(conn: &Connection, id: &str, path: &str, scope: &str, metadata: &str) {
-        conn.execute(
-            "INSERT INTO memories
+        if table_has_column(conn, "memories", "location").unwrap() {
+            conn.execute(
+                "INSERT INTO memories
               (id, path, summary, text, importance, timestamp, category, topic,
                keywords, entities, location, source, scope, archived,
                created_at, updated_at, access_count, last_access, revision,
@@ -515,9 +569,24 @@ mod tests {
                      '[]', '[]', '', 'manual', ?3, 0,
                      '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
                      ?4, NULL, NULL)",
-            params![id, path, scope, metadata],
-        )
-        .unwrap();
+                params![id, path, scope, metadata],
+            )
+            .unwrap();
+        } else {
+            conn.execute(
+                "INSERT INTO memories
+              (id, path, summary, text, importance, timestamp, category, topic,
+               keywords, entities, source, scope, archived,
+               created_at, updated_at, access_count, last_access, revision,
+               metadata, retention_policy, domain)
+             VALUES (?1, ?2, '', '', 0.5, '2026-01-01T00:00:00Z', 'fact', '',
+                     '[]', '[]', 'manual', ?3, 0,
+                     '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 0, NULL, 1,
+                     ?4, NULL, NULL)",
+                params![id, path, scope, metadata],
+            )
+            .unwrap();
+        }
     }
 
     #[test]
@@ -738,5 +807,74 @@ mod tests {
         assert!(!table_has_column(&conn, "memories", "indexed_tags").unwrap());
         assert!(!table_has_column(&conn, "memories", "domain_key").unwrap());
         assert_eq!(migrate_v5_drop_hypertachi_legacy_columns(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn v9_relocates_path_like_location_and_drops_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL DEFAULT '/',
+                location TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params!["m1", "/", "/scratch/hyperion", "{}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params!["m2", "/notes/x", "/code-review/sigil", "{}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params!["m3", "/facts/y", "Shanghai", "{}"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, ?4)",
+            params!["m4", "/facts/z", "Paris", r#"["legacy"]"#],
+        )
+        .unwrap();
+
+        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(&conn).unwrap();
+        assert_eq!(relocated, 4);
+        assert_eq!(dropped, 1);
+        assert!(!table_has_column(&conn, "memories", "location").unwrap());
+
+        let path: String = conn
+            .query_row("SELECT path FROM memories WHERE id='m1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(path, "/scratch/hyperion");
+
+        let metadata: String = conn
+            .query_row("SELECT metadata FROM memories WHERE id='m2'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(meta["context_path"], "/code-review/sigil");
+
+        let metadata: String = conn
+            .query_row("SELECT metadata FROM memories WHERE id='m3'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(meta["geo"], "Shanghai");
+
+        let metadata: String = conn
+            .query_row("SELECT metadata FROM memories WHERE id='m4'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(meta["geo"], "Paris");
+        assert_eq!(meta["legacy_metadata"], json!(["legacy"]));
     }
 }

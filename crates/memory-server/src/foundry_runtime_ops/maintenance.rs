@@ -704,7 +704,12 @@ fn collect_metadata_file_patterns(value: &serde_json::Value, out: &mut Vec<Strin
 fn infer_file_patterns(source_entries: &[MemoryEntry]) -> Vec<String> {
     let mut patterns = Vec::new();
     for entry in source_entries {
-        for candidate in [&entry.path, &entry.location] {
+        let context_path = entry
+            .metadata
+            .get("context_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        for candidate in [&entry.path, &entry.location, context_path] {
             let token = trim_context_token(candidate);
             if looks_like_file_pattern(&token) {
                 patterns.push(token.clone());
@@ -1212,7 +1217,7 @@ async fn process_memory_distill_job(
                 .flat_map(|entry| entry.entities.clone())
                 .collect::<Vec<_>>(),
         ),
-        location: item.path_prefix.clone(),
+        location: String::new(),
         source: FOUNDRY_DISTILL_SOURCE.to_string(),
         scope: if item.target_db == DbScope::Project {
             "project".to_string()

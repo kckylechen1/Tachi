@@ -258,7 +258,7 @@ pub(super) async fn process_recall_rerank_cache_job(
             ],
             persons: Vec::new(),
             entities: result_ids,
-            location: item.path_prefix.clone(),
+            location: String::new(),
             source: FOUNDRY_RECALL_RERANK_CACHE_SOURCE.to_string(),
             scope: scope.clone(),
             archived: false,

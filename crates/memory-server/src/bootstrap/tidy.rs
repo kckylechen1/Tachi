@@ -766,7 +766,7 @@ fn migrate_single_db(
     {
         let conn = source_store.connection();
         let mut stmt = conn.prepare(
-            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
+            "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
              FROM memories",
         )?;
         let rows = stmt.query_map([], memory_core::row_to_entry)?;

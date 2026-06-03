@@ -493,8 +493,8 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
                 .connection()
                 .execute(
                     "INSERT INTO memories
-                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, location, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
-                     VALUES (?1, '/facts/status', 'status', 'status diagnostic memory', 0.8, ?2, 'fact', 'status', '[]', '[]', '', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                     (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                     VALUES (?1, '/facts/status', 'status', 'status diagnostic memory', 0.8, ?2, 'fact', 'status', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
                     rusqlite::params!["status-memory", Utc::now().to_rfc3339()],
                 )
                 .map_err(|e| e.to_string())?;

@@ -603,6 +603,11 @@ impl MemoryEntry {
         let persons: Vec<String> = self.persons.drain(..).collect();
         fold_person_names_into_entities(&mut self.entities, persons);
     }
+
+    /// Fold legacy `location` into `path` / metadata before persisting (schema v9).
+    pub fn fold_location_into_metadata(&mut self) {
+        fold_location_into_metadata(self);
+    }
 }
 
 /// Push a named entity for recall; `Kyle` also adds canonical `user`.
@@ -628,6 +633,63 @@ pub fn fold_person_names_into_entities(
     for name in persons {
         push_entity_name(entities, &name);
     }
+}
+
+/// True when legacy `location` looks like a hierarchical or file path, not a place name.
+pub fn is_path_like_location(location: &str) -> bool {
+    let t = location.trim();
+    !t.is_empty() && (t.starts_with('/') || t.contains('/'))
+}
+
+/// Relocate legacy `location` into `path` or `metadata` before persisting (schema v9).
+///
+/// Returns the effective path after relocation.
+pub fn apply_location_relocation(
+    path: &str,
+    location: &str,
+    metadata: &mut serde_json::Value,
+) -> String {
+    let loc = location.trim();
+    let mut effective_path = path.trim().to_string();
+    if loc.is_empty() {
+        return effective_path;
+    }
+    if is_path_like_location(loc) {
+        if effective_path.is_empty() || effective_path == "/" {
+            effective_path = crate::path_router::normalize_path(loc);
+        } else {
+            let obj = ensure_metadata_object(metadata);
+            obj.entry("context_path")
+                .or_insert_with(|| serde_json::Value::String(loc.to_string()));
+        }
+    } else {
+        let obj = ensure_metadata_object(metadata);
+        obj.entry("geo")
+            .or_insert_with(|| serde_json::Value::String(loc.to_string()));
+    }
+    effective_path
+}
+
+fn ensure_metadata_object(
+    metadata: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if !metadata.is_object() {
+        let previous =
+            std::mem::replace(metadata, serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(obj) = metadata {
+            obj.insert("legacy_metadata".to_string(), previous);
+        }
+    }
+    match metadata {
+        serde_json::Value::Object(obj) => obj,
+        _ => unreachable!("metadata was normalized to an object"),
+    }
+}
+
+/// Fold wire/API `location` into storage fields and clear the legacy column value.
+pub fn fold_location_into_metadata(entry: &mut MemoryEntry) {
+    let location = std::mem::take(&mut entry.location);
+    entry.path = apply_location_relocation(&entry.path, &location, &mut entry.metadata);
 }
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
@@ -837,6 +899,21 @@ mod tests {
         let mut entities = Vec::new();
         push_entity_name(&mut entities, "Kyle");
         assert_eq!(entities, vec!["Kyle".to_string(), "user".to_string()]);
+    }
+
+    #[test]
+    fn location_relocation_preserves_non_object_metadata() {
+        let mut metadata = json!(["legacy"]);
+        let path = apply_location_relocation("/facts/y", "Shanghai", &mut metadata);
+        assert_eq!(path, "/facts/y");
+        assert_eq!(metadata["geo"], "Shanghai");
+        assert_eq!(metadata["legacy_metadata"], json!(["legacy"]));
+
+        let mut metadata = json!("legacy note");
+        let path = apply_location_relocation("/notes/x", "/code-review/sigil", &mut metadata);
+        assert_eq!(path, "/notes/x");
+        assert_eq!(metadata["context_path"], "/code-review/sigil");
+        assert_eq!(metadata["legacy_metadata"], "legacy note");
     }
 
     #[test]
