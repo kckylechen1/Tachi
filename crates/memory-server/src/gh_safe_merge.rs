@@ -267,7 +267,6 @@ pub struct MergeResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Constructed by CliGhClient::issue_view/issue_create; consumer wired in follow-up PR.
 pub struct IssueState {
     pub number: u64,
     pub title: String,
@@ -292,7 +291,6 @@ pub enum GhError {
 /// `MockGhClient`. Methods are intentionally narrow — the trait grows only
 /// when a `tachi_gh` action needs a new capability, never speculatively.
 #[async_trait]
-#[allow(dead_code)] // issue_view/issue_create wired in follow-up PR (issue-link action).
 pub trait GhClient: Send + Sync {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError>;
     async fn pr_merge(
@@ -302,7 +300,6 @@ pub trait GhClient: Send + Sync {
         strategy: MergeStrategy,
         expected_head_sha: &str,
     ) -> Result<MergeResult, GhError>;
-    async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError>;
     async fn issue_create(
         &self,
         repo: &str,
@@ -370,6 +367,15 @@ mod mock {
         pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy, String)> {
             self.merge_calls.lock().unwrap().clone()
         }
+
+        pub async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError> {
+            self.issues
+                .lock()
+                .unwrap()
+                .get(&(repo.to_string(), number))
+                .cloned()
+                .ok_or_else(|| GhError::NotFound(format!("issue {repo}#{number}")))
+        }
     }
 
     #[async_trait]
@@ -415,14 +421,6 @@ mod mock {
                 merge_sha: format!("mock-sha-for-{}", pr.head_sha),
                 strategy,
             })
-        }
-        async fn issue_view(&self, repo: &str, number: u64) -> Result<IssueState, GhError> {
-            self.issues
-                .lock()
-                .unwrap()
-                .get(&(repo.to_string(), number))
-                .cloned()
-                .ok_or_else(|| GhError::NotFound(format!("issue {repo}#{number}")))
         }
         async fn issue_create(
             &self,

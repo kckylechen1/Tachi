@@ -10,7 +10,6 @@ fn default_facade_top_k() -> usize {
     6
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiSearchParams {
     /// Search query text
@@ -71,7 +70,6 @@ fn default_web_search_top_k() -> usize {
     8
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiWebSearchParams {
     /// Web search query text
@@ -100,7 +98,6 @@ pub(crate) struct TachiWebSearchParams {
 
 // ─── Facade: unified save ────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiSaveParams {
     /// Full text content
@@ -201,7 +198,6 @@ fn default_memory_top_k() -> usize {
     6
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiMemoryParams {
     #[schemars(
@@ -355,7 +351,6 @@ fn default_true() -> bool {
     true
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiHandoffParams {
     /// Action: "leave" to leave a handoff memo, "check" to check for pending memos, "promote_issue" to create a GitHub issue from a memo
@@ -416,7 +411,6 @@ fn default_dispatch_timeout() -> u64 {
     600
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiDispatchParams {
     /// Agent backend to use: "claude" | "codex" | "custom"
@@ -493,7 +487,6 @@ pub(crate) struct TachiDispatchParams {
 
 // ─── Facade: worktree merge ──────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiApproveMergeParams {
     /// Path to the git worktree to merge
@@ -520,7 +513,6 @@ pub(crate) struct TachiApproveMergeParams {
 
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiCompleteParams {
     /// Task ID (if absent, one is generated from timestamp + agent)
@@ -599,7 +591,6 @@ pub(crate) struct TachiCompleteParams {
 
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiWikiParams {
     /// Action: "search", "browse", "read", or "write"
@@ -649,7 +640,6 @@ pub(crate) struct TachiWikiParams {
 
 // ─── Facade: skill (discover / run) ──────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiSkillParams {
     /// Action: "discover" or "run"
@@ -670,7 +660,6 @@ pub(crate) struct TachiSkillParams {
 
 // ─── Facade: task (plan / dispatch / board / merge) ──────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
     /// Action: "plan", "dispatch", "board", or "merge"
@@ -743,7 +732,6 @@ pub(crate) struct TachiTaskParams {
 
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiShellDispatchSliceParams {
     #[serde(default)]
@@ -764,7 +752,6 @@ pub(crate) struct TachiShellDispatchSliceParams {
     pub allowed_scope: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiShellParams {
     /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
@@ -829,7 +816,6 @@ pub(crate) struct TachiShellParams {
 
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiBoardParams {
     /// Filter by state: "working", "completed", "failed", "all" (default: "all")

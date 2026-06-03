@@ -52,12 +52,10 @@ fn default_section_cache_boundary() -> String {
     "session".to_string()
 }
 
-#[allow(dead_code)]
 fn default_compact_session_scope() -> String {
     "project".to_string()
 }
 
-#[allow(dead_code)]
 fn default_compact_session_importance() -> f64 {
     0.6
 }
@@ -76,7 +74,6 @@ fn default_wiki_project_name() -> String {
 
 // ─── Recall ─────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct RecallContextParams {
     /// User or agent query that should be used to recall prior context
@@ -133,7 +130,6 @@ pub(crate) struct RecallContextParams {
 
 // ─── Capture ────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct CaptureSessionParams {
     /// Conversation identifier
@@ -171,7 +167,6 @@ pub(crate) struct CaptureSessionParams {
 
 // ─── Compact ────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct CompactContextParams {
     /// Canonical agent id for pathing / provenance
@@ -215,7 +210,6 @@ pub(crate) struct CompactContextParams {
     pub persist: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, JsonSchema)]
 pub(crate) struct CompactArtifactItemParams {
     /// Stable id for the compacted artifact, if already assigned
@@ -285,7 +279,6 @@ impl<'de> Deserialize<'de> for CompactArtifactItemParams {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct CompactRollupParams {
     /// Canonical agent id for provenance
@@ -326,7 +319,6 @@ pub(crate) struct CompactRollupParams {
     pub build_section: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct CompactSessionMemoryParams {
     /// Canonical agent id for pathing / provenance
@@ -373,7 +365,6 @@ pub(crate) struct CompactSessionMemoryParams {
 
 // ─── Section Build ──────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SectionBuildParams {
     /// Logical section layer: static | session | live | other
@@ -411,7 +402,6 @@ pub(crate) struct SectionBuildParams {
 
 // ─── Recommend / Bundle ─────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct RecommendCapabilityParams {
     /// Natural language task or intent query
@@ -438,7 +428,6 @@ pub(crate) struct RecommendCapabilityParams {
     pub include_uncallable: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct RecommendSkillParams {
     /// Natural language task or intent query
@@ -457,7 +446,6 @@ pub(crate) struct RecommendSkillParams {
     pub include_uncallable: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct RecommendToolchainParams {
     /// Natural language task or intent query
@@ -480,7 +468,6 @@ pub(crate) struct RecommendToolchainParams {
     pub pack_limit: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PrepareCapabilityBundleParams {
     /// Natural language task or intent query
@@ -509,7 +496,6 @@ pub(crate) struct PrepareCapabilityBundleParams {
 
 // ─── Memory Graph ───────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct MemoryGraphParams {
     /// Optional seed memory id

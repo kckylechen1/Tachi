@@ -32,10 +32,6 @@ const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonInfo {
     pub url: String,
-    #[allow(dead_code)]
-    pub pid: u32,
-    #[allow(dead_code)]
-    pub port: u16,
     pub global_db: Option<String>,
     pub version: Option<String>,
 }
@@ -47,7 +43,7 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
     let raw = tokio::fs::read_to_string(&pid_path).await.ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
 
-    let pid = parsed.get("pid").and_then(|v| v.as_u64())? as u32;
+    parsed.get("pid").and_then(|v| v.as_u64())?;
     let port = parsed.get("port").and_then(|v| v.as_u64())? as u16;
     let url = parsed
         .get("url")
@@ -63,8 +59,6 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
     match probe {
         Ok(Ok(_)) => Some(DaemonInfo {
             url,
-            pid,
-            port,
             global_db: parsed
                 .get("global_db")
                 .and_then(|value| value.as_str())

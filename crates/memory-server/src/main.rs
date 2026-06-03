@@ -347,12 +347,10 @@ pub(crate) struct ToolDiscovery {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct ProjectDbState {
     store: Arc<StdMutex<MemoryStore>>,
     rw_gate: Arc<StdRwLock<()>>,
     db_path: Arc<PathBuf>,
-    vec_available: bool,
 }
 
 /// Agent profile registered via `agent_register`. Stored per-session (in-memory).
@@ -529,7 +527,6 @@ impl MemoryServer {
                     store: Arc::clone(store),
                     rw_gate,
                     db_path,
-                    vec_available: project_vec_available,
                 }),
                 _ => None,
             },

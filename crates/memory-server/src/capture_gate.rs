@@ -57,7 +57,7 @@ const BASE_BUCKETS: &[&str] = &[
 ];
 
 /// Register additional buckets at runtime. Thread-safe via Mutex.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn register_bucket(bucket: &'static str) {
     let registry = BUCKET_REGISTRY.get_or_init(|| Mutex::new(BASE_BUCKETS.to_vec()));
     if let Ok(mut buckets) = registry.lock() {

@@ -1,6 +1,5 @@
 use super::*;
 
-#[allow(dead_code)]
 fn default_hub_version() -> u32 {
     1
 }
@@ -9,12 +8,10 @@ fn default_scope() -> String {
     "project".to_string()
 }
 
-#[allow(dead_code)]
 fn default_hub_review_status() -> String {
     "approved".to_string()
 }
 
-#[allow(dead_code)]
 fn default_true() -> bool {
     true
 }
@@ -31,7 +28,6 @@ fn default_virtual_binding_priority() -> i32 {
     100
 }
 
-#[allow(dead_code)]
 fn default_audit_limit() -> usize {
     50
 }
@@ -64,7 +60,6 @@ where
 
 // ─── Registration / Discovery ───────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct RunSkillParams {
     /// ID of the skill capability to execute (e.g. "skill:code-review")
@@ -75,7 +70,6 @@ pub(crate) struct RunSkillParams {
     pub args: serde_json::Value,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct DistillTrajectoryParams {
     /// Natural-language task description
@@ -117,7 +111,6 @@ pub(crate) struct DistillTrajectoryParams {
     pub scope: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubRegisterParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
@@ -146,7 +139,6 @@ pub(crate) struct HubRegisterParams {
 /// is silently dropped (with a warning in the response) when the underlying
 /// register reports `auto_approval_eligible: false` — i.e. for an untrusted
 /// stdio MCP command. This keeps the trusted-command allowlist authoritative.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubQuickAddParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
@@ -173,7 +165,6 @@ pub(crate) struct HubQuickAddParams {
     pub auto_approve: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubDiscoverParams {
     /// Optional search query (searches name + description)
@@ -187,14 +178,12 @@ pub(crate) struct HubDiscoverParams {
     pub enabled_only: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubGetParams {
     /// Capability ID to retrieve
     pub id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubFeedbackParams {
     /// Capability ID
@@ -211,7 +200,6 @@ pub(crate) struct HubFeedbackParams {
 
 // ─── Call / Proxy ───────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubCallParams {
     /// MCP server capability ID (e.g. "mcp:github")
@@ -243,7 +231,6 @@ pub(crate) struct HubSetEnabledParams {
     pub enabled: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubReviewParams {
     /// Capability ID
@@ -256,7 +243,6 @@ pub(crate) struct HubReviewParams {
     pub enabled: Option<bool>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubSetActiveVersionParams {
     /// Alias capability id (logical entrypoint)
@@ -267,7 +253,6 @@ pub(crate) struct HubSetActiveVersionParams {
 
 // ─── Virtual Capability ─────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VirtualCapabilityRegisterParams {
     /// Virtual capability ID, e.g. "vc:web_search"
@@ -294,7 +279,6 @@ pub(crate) struct VirtualCapabilityRegisterParams {
     pub scope: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VirtualCapabilityBindParams {
     /// Virtual capability ID, e.g. "vc:web_search"
@@ -318,7 +302,6 @@ pub(crate) struct VirtualCapabilityBindParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VirtualCapabilityResolveParams {
     /// Virtual capability ID to resolve
@@ -327,7 +310,6 @@ pub(crate) struct VirtualCapabilityResolveParams {
 
 // ─── Export / Evolve / Chain ────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ExportSkillsParams {
     /// Target agent format: "claude", "openclaw", "cursor", "generic"
@@ -357,7 +339,6 @@ pub(crate) struct ExportSkillsParams {
     pub clean: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SkillEvolveParams {
     /// Skill capability ID to evolve (e.g. "skill:code-review")
@@ -376,7 +357,6 @@ pub(crate) struct SkillEvolveParams {
     pub dry_run: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ChainStep {
     /// Skill capability ID (e.g. "skill:summarize")
@@ -386,7 +366,6 @@ pub(crate) struct ChainStep {
     pub extra_args: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ChainSkillsParams {
     /// Ordered list of skill steps to execute
@@ -397,7 +376,6 @@ pub(crate) struct ChainSkillsParams {
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AuditLogParams {
     /// Maximum entries to return (default: 50)

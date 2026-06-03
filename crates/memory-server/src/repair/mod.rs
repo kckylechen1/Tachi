@@ -82,11 +82,9 @@ impl std::error::Error for RepairExit {}
 
 /// Errors raised by individual rules. We log + accumulate rather than abort.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum RepairError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
-    Other(String),
 }
 
 impl std::fmt::Display for RepairError {
@@ -94,7 +92,6 @@ impl std::fmt::Display for RepairError {
         match self {
             RepairError::Sqlite(e) => write!(f, "sqlite: {e}"),
             RepairError::Io(e) => write!(f, "io: {e}"),
-            RepairError::Other(s) => write!(f, "{s}"),
         }
     }
 }

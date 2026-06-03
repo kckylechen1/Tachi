@@ -6,7 +6,6 @@ fn default_project_db_relpath() -> String {
 
 // ─── Project DB ─────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct InitProjectDbParams {
     /// Optional target repository root. Defaults to current git root.
@@ -19,7 +18,6 @@ pub(crate) struct InitProjectDbParams {
 
 // ─── Pack System ────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PackListParams {
     /// If true, only return enabled packs (default: false)
@@ -27,14 +25,12 @@ pub(crate) struct PackListParams {
     pub enabled_only: Option<bool>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PackGetParams {
     /// Pack identifier, e.g. "garrytan/gstack" or "obra/superpowers"
     pub id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PackRegisterParams {
     /// Pack identifier, e.g. "garrytan/gstack"
@@ -65,7 +61,6 @@ pub(crate) struct PackRegisterParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PackRemoveParams {
     /// Pack identifier to remove
@@ -76,7 +71,6 @@ pub(crate) struct PackRemoveParams {
     pub clean_files: Option<bool>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct PackProjectParams {
     /// Pack identifier to project
@@ -86,7 +80,6 @@ pub(crate) struct PackProjectParams {
     pub agents: Vec<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ProjectionListParams {
     /// Filter by agent kind (optional)

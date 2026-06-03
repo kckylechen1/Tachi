@@ -137,8 +137,6 @@ pub(super) async fn run_agent_subprocess(
     // tokio kills the child via SIGKILL instead of leaving it orphaned.
     cmd.kill_on_drop(true);
 
-    let start = std::time::Instant::now();
-
     let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to spawn agent process: {e}"))?;
@@ -159,7 +157,6 @@ pub(super) async fn run_agent_subprocess(
         }
     };
 
-    let duration_ms = start.elapsed().as_millis() as u64;
     let exit_code = output.status.code();
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -175,27 +172,7 @@ pub(super) async fn run_agent_subprocess(
     Ok(DispatchResult {
         output: output_text,
         exit_code,
-        duration_ms,
     })
-}
-
-// ─── Parse Claude JSON output ────────────────────────────────────────────────
-
-#[allow(dead_code)]
-pub(super) fn parse_claude_output(raw: &str) -> serde_json::Value {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(result) = parsed.get("result") {
-            return json!({
-                "parsed": true,
-                "result": result,
-                "cost": parsed.get("cost_usd"),
-                "duration_ms": parsed.get("duration_ms"),
-                "num_turns": parsed.get("num_turns"),
-            });
-        }
-        return json!({"parsed": true, "raw_json": parsed});
-    }
-    json!({"parsed": false, "text": raw})
 }
 
 pub(super) fn tail_chars(text: &str, max_chars: usize) -> String {

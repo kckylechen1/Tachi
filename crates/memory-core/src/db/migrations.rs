@@ -288,7 +288,7 @@ fn migrate_v2_scope_normalize(conn: &mut Connection) -> Result<usize, MemoryErro
     // PR-1 already added a CHECK constraint that prevents non-canonical scope
     // values. Per-project DBs that pre-existed PR-1 should also have been
     // normalized by PR-1's migration when init_schema runs. This is a
-    // defensive sweep: count rows that LOOK wrong (defensive) and normalize.
+    // defensive sweep: count rows that LOOK wrong and normalize.
     let count = conn.execute(
         "UPDATE memories SET scope = 'general'
          WHERE scope IS NULL OR scope NOT IN ('user','project','general')",

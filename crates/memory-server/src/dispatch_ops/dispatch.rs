@@ -16,11 +16,9 @@ use super::subprocess::{
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
-    pub duration_ms: u64,
 }
 
 pub(crate) fn apply_unlocked_vault_env(cmd: &mut Command, server: &MemoryServer) -> usize {

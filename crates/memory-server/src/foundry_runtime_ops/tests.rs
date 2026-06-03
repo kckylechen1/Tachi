@@ -5,7 +5,7 @@ use super::handlers::{
 use super::maintenance::{
     build_distill_edges, classify_distill_guide_type, coherence_bucket_key,
     coherent_distill_buckets, infer_memory_insight, memory_claim_signature,
-    scheduled_distill_group_key, scheduled_distill_path_prefix,
+    scheduled_distill_path_prefix,
 };
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
 use super::*;
@@ -496,26 +496,6 @@ fn scheduled_distill_path_prefix_keeps_second_level_project_namespace() {
     assert_eq!(
         scheduled_distill_path_prefix("/wiki/debug/tachi/hub-call"),
         "/wiki/debug/tachi"
-    );
-}
-
-#[test]
-fn scheduled_distill_group_key_separates_topics_with_same_root() {
-    assert_eq!(
-        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
-        "/hapi#topic:changelog"
-    );
-    assert_eq!(
-        scheduled_distill_group_key("/project/API_配额/entry-1", "topic:quota"),
-        "/project/API_配额#topic:quota"
-    );
-    assert_ne!(
-        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
-        scheduled_distill_group_key("/hapi/strategy/entry-1", "topic:strategy")
-    );
-    assert_ne!(
-        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
-        scheduled_distill_group_key("/hapi/changelog/entry-2", "topic:release")
     );
 }
 

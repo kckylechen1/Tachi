@@ -8,44 +8,36 @@ fn default_sandbox_operation() -> String {
     "read".to_string()
 }
 
-#[allow(dead_code)]
 fn default_runtime_type() -> String {
     "process".to_string()
 }
 
-#[allow(dead_code)]
 fn default_sandbox_startup_ms() -> u64 {
     30_000
 }
 
-#[allow(dead_code)]
 fn default_sandbox_tool_ms() -> u64 {
     30_000
 }
 
-#[allow(dead_code)]
 fn default_sandbox_max_concurrency() -> u32 {
     1
 }
 
-#[allow(dead_code)]
 fn default_true_bool() -> bool {
     true
 }
 
-#[allow(dead_code)]
 fn default_sandbox_policy_limit() -> usize {
     100
 }
 
-#[allow(dead_code)]
 fn default_sandbox_exec_audit_limit() -> usize {
     100
 }
 
 // ─── Sandbox Access Rules ───────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxSetRuleParams {
     /// Agent role (e.g. "code-review", "finance", "admin")
@@ -57,7 +49,6 @@ pub(crate) struct SandboxSetRuleParams {
     pub access_level: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxCheckParams {
     /// Agent role to check access for
@@ -71,7 +62,6 @@ pub(crate) struct SandboxCheckParams {
 
 // ─── Sandbox Execution Policies ─────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxSetPolicyParams {
     /// Capability ID (typically MCP capability id, e.g. "mcp:exa")
@@ -105,14 +95,12 @@ pub(crate) struct SandboxSetPolicyParams {
     pub enabled: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxGetPolicyParams {
     /// Capability ID to query
     pub capability_id: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxListPoliciesParams {
     /// Only return enabled policies
@@ -123,7 +111,6 @@ pub(crate) struct SandboxListPoliciesParams {
     pub limit: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SandboxExecAuditParams {
     /// Optional capability filter (e.g. "mcp:exa")
