@@ -87,6 +87,7 @@ pub(crate) async fn save_memory_checkpoint(
             .take()
             .or_else(|| Some("durable".to_string())),
         force: true,
+        references: Vec::new(),
         topic: params
             .topic
             .take()

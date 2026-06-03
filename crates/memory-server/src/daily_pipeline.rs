@@ -1175,6 +1175,7 @@ async fn save_daily_health_wiki(
             domain: Some("wiki".to_string()),
             retention_policy: Some("permanent".to_string()),
             force: true,
+            references: Vec::new(),
             topic: Some("daily-health".to_string()),
             source: None,
             valid_from: None,

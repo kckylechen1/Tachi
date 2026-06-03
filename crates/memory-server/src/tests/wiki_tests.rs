@@ -1,6 +1,73 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
+    let server = make_server();
+
+    let bad = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Bad refs".to_string(),
+            text: "Should not persist.".to_string(),
+            path: None,
+            topic: Some("bad-refs".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.5,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            force: true,
+            references: vec!["relative/path.md".to_string()],
+        }))
+        .await
+        .expect_err("relative path should fail validation");
+    assert!(bad.contains("references[0]"), "err: {bad}");
+
+    let response = server
+        .tachi_wiki_write(Parameters(WikiWriteParams {
+            title: "Good refs".to_string(),
+            text: "Lesson with links.".to_string(),
+            path: None,
+            topic: Some("good-refs".to_string()),
+            summary: None,
+            category: "experience".to_string(),
+            keywords: vec![],
+            entities: vec![],
+            importance: 0.85,
+            scope: "global".to_string(),
+            retention_policy: "permanent".to_string(),
+            domain: None,
+            project: None,
+            force: true,
+            references: vec![
+                "https://github.com/kckylechen1/tachi/issues/149".to_string(),
+                "kckylechen1/tachi#149".to_string(),
+            ],
+        }))
+        .await
+        .expect("valid references should write");
+
+    let json: Value = serde_json::from_str(&response).expect("json");
+    let id = json["id"].as_str().expect("id");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: id.to_string(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get wiki memory");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry json");
+    let refs = entry["metadata"]["source_refs"]
+        .as_array()
+        .expect("source_refs array");
+    assert_eq!(refs.len(), 2);
+}
+
+#[tokio::test]
 async fn tachi_wiki_write_allows_wiki_bucket_without_capture_gate_warning() {
     let server = make_server();
 
@@ -20,6 +87,7 @@ async fn tachi_wiki_write_allows_wiki_bucket_without_capture_gate_warning() {
             domain: Some("coding".to_string()),
             project: None,
             force: false,
+            references: vec![],
         }))
         .await
         .expect("tachi_wiki_write should succeed");
@@ -52,6 +120,7 @@ async fn tachi_wiki_write_generates_readable_cjk_path_without_domain_warning() {
             domain: None,
             project: None,
             force: false,
+            references: vec![],
         }))
         .await
         .expect("tachi_wiki_write should succeed without explicit domain");
@@ -87,6 +156,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
             domain: None,
             project: None,
             force: true,
+            references: vec![],
         }))
         .await
         .expect("first wiki write");
@@ -109,6 +179,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
             domain: None,
             project: None,
             force: true,
+            references: vec![],
         }))
         .await
         .expect("second wiki write");
@@ -170,6 +241,7 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
             domain: None,
             project: None,
             force: true,
+            references: vec![],
         }))
         .await
         .expect("wiki write should supersede duplicate");
@@ -330,6 +402,10 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             domain: None,
             retention_policy: Some("permanent".to_string()),
             force: true,
+            references: vec![
+                "https://example.com/spec".to_string(),
+                "kckylechen1/tachi#149".to_string(),
+            ],
             topic: Some("routing-boundary".to_string()),
             source: None,
             valid_from: None,
@@ -359,6 +435,10 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
     assert_eq!(
         fetched_json["metadata"]["wiki_title"],
         json!("Routing Boundary Wiki")
+    );
+    assert_eq!(
+        fetched_json["metadata"]["source_refs"],
+        json!(["https://example.com/spec", "kckylechen1/tachi#149"])
     );
 }
 

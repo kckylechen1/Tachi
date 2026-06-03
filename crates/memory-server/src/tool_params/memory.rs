@@ -948,6 +948,10 @@ pub(crate) struct WikiWriteParams {
     /// Bypass noise filtering for short but intentional wiki entries.
     #[serde(default)]
     pub force: bool,
+
+    /// External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N).
+    #[serde(default)]
+    pub references: Vec<String>,
 }
 
 // ─── Wiki Search / Browse ───────────────────────────────────────────────────

@@ -403,6 +403,7 @@ async fn save_wiki_draft(
             domain: Some(draft.domain),
             retention_policy: Some("durable".to_string()),
             force: true,
+            references: Vec::new(),
             topic: Some(topic.to_string()),
             source: Some("rem_wiki_evolver".to_string()),
             valid_from: None,

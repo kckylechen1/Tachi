@@ -354,6 +354,8 @@ pub(crate) async fn handle_tachi_wiki_write(
     server: &MemoryServer,
     params: WikiWriteParams,
 ) -> Result<String, String> {
+    crate::wiki_ops::validate_references(&params.references)?;
+
     if !params.force && memory_core::is_noise_text(&params.text) {
         return serde_json::to_string(&json!({
             "saved": false,
@@ -400,6 +402,7 @@ pub(crate) async fn handle_tachi_wiki_write(
         "wiki_title": params.title,
         "user_force": params.force,
         "allow_cross_project": true,
+        "source_refs": params.references,
     });
     let _ = wiki_metadata.as_object_mut();
 
