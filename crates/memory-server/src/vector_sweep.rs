@@ -26,7 +26,7 @@ fn sweep_batch_per_db() -> usize {
     std::env::var("TACHI_VECTOR_SWEEP_BATCH_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .filter(|&n| n >= 1 && n <= 128)
+        .filter(|&n| (1..=128).contains(&n))
         .unwrap_or(DEFAULT_SWEEP_BATCH_PER_DB)
 }
 
