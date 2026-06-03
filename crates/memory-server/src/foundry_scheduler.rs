@@ -9,9 +9,8 @@
 //! single-process foundry worker can route to) re-injects them into the
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
 //! worker does **not** know how to route to (agents/, hub/, vault/, anything
-//! outside global + project + named-projects), it counts the orphans into
-//! [`SchedulerSnapshot::orphan_jobs_total`] so `tachi status` can surface
-//! them as a warning.
+//! outside global + project + named-projects), jobs are counted as orphans
+//! and logged at `eprintln` level.
 //!
 //! ### What this does NOT own
 //! - Job execution: the existing `run_foundry_maintenance_worker` in
@@ -24,10 +23,6 @@
 //! ### Cadences (per-design, see PR-4 spec)
 //! - Manifest re-read: [`MANIFEST_REFRESH_INTERVAL`] (60 s).
 //! - Per-DB safety-net poll: [`POLL_INTERVAL`] (30 s).
-//!
-//! ### Observability
-//! [`SchedulerSnapshot`] is read by `tachi status` to render per-DB health,
-//! pending-job counts, last-poll timestamp, and orphan warnings.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,7 +30,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Instant, MissedTickBehavior};
 
@@ -100,29 +94,6 @@ struct WorkerHandle {
     metrics: Arc<WorkerMetrics>,
     cancel: tokio_util::sync::CancellationToken,
     join: tokio::task::JoinHandle<()>,
-}
-
-/// Read-only snapshot of scheduler state for `tachi status`.
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // exposed for future in-daemon callers; tachi status reads manifest cross-process
-pub struct SchedulerSnapshot {
-    pub workers: Vec<WorkerSnapshot>,
-    pub orphan_dbs_total: u64,
-    pub orphan_jobs_total: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)]
-pub struct WorkerSnapshot {
-    pub db_path: String,
-    pub label: String,
-    pub route: String,
-    pub polls_total: u64,
-    pub jobs_reinjected_total: u64,
-    pub jobs_orphan_total: u64,
-    pub last_poll_unix_secs: u64,
-    pub last_pending_count: u64,
-    pub errors_total: u64,
 }
 
 /// Multi-DB foundry scheduler.
@@ -210,52 +181,7 @@ impl FoundryScheduler {
         }
     }
 
-    /// Capture a read-only snapshot for `tachi status`.
-    #[allow(dead_code)]
-    pub fn snapshot(&self) -> SchedulerSnapshot {
-        let map = self.workers.lock().unwrap_or_else(|e| e.into_inner());
-        let mut workers = Vec::with_capacity(map.len());
-        let mut orphan_dbs_total: u64 = 0;
-        let mut orphan_jobs_total: u64 = 0;
-        for handle in map.values() {
-            let polls = handle.metrics.polls_total.load(Ordering::Relaxed);
-            let reinj = handle.metrics.jobs_reinjected_total.load(Ordering::Relaxed);
-            let orph = handle.metrics.jobs_orphan_total.load(Ordering::Relaxed);
-            let last_poll = handle.metrics.last_poll_unix_secs.load(Ordering::Relaxed);
-            let last_pending = handle.metrics.last_pending_count.load(Ordering::Relaxed);
-            let errs = handle.metrics.errors_total.load(Ordering::Relaxed);
-            let route_str = match &handle.route {
-                Route::Global => "global".to_string(),
-                Route::Project => "project".to_string(),
-                Route::NamedProject(n) => format!("named:{n}"),
-                Route::Path => "path".to_string(),
-                Route::Orphan(reason) => format!("orphan:{reason}"),
-            };
-            if matches!(handle.route, Route::Orphan(_)) {
-                orphan_dbs_total += 1;
-                orphan_jobs_total += orph;
-            }
-            workers.push(WorkerSnapshot {
-                db_path: handle.db_path.display().to_string(),
-                label: handle.label.clone(),
-                route: route_str,
-                polls_total: polls,
-                jobs_reinjected_total: reinj,
-                jobs_orphan_total: orph,
-                last_poll_unix_secs: last_poll,
-                last_pending_count: last_pending,
-                errors_total: errs,
-            });
-        }
-        SchedulerSnapshot {
-            workers,
-            orphan_dbs_total,
-            orphan_jobs_total,
-        }
-    }
-
     /// Cancel all workers and the manifest watcher. Idempotent.
-    #[allow(dead_code)]
     pub fn shutdown(&self) {
         self.cancel_root.cancel();
         let map = self.workers.lock().unwrap_or_else(|e| e.into_inner());
@@ -264,29 +190,6 @@ impl FoundryScheduler {
         }
     }
 
-    /// Return the manifest path this scheduler is watching.
-    #[allow(dead_code)]
-    pub fn manifest_path(&self) -> &Path {
-        &self.manifest_path
-    }
-
-    /// Return the foundry sender this scheduler re-injects into.
-    #[allow(dead_code)]
-    pub fn foundry_tx(&self) -> &mpsc::Sender<FoundryMaintenanceItem> {
-        &self.foundry_tx
-    }
-
-    /// Return the daemon's own global DB path.
-    #[allow(dead_code)]
-    pub fn own_global(&self) -> &Path {
-        &self.own_global
-    }
-
-    /// Return the daemon's own project DB path, if any.
-    #[allow(dead_code)]
-    pub fn own_project(&self) -> Option<&Path> {
-        self.own_project.as_deref()
-    }
 }
 
 impl Drop for FoundryScheduler {

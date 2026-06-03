@@ -29,8 +29,6 @@ const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
 const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const FOUNDRY_RECALL_RERANK_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 const FOUNDRY_RELATED_LIMIT: usize = 4;
-#[allow(dead_code)] // Phase 1: only used by legacy schedule_pending_distill_jobs fallback.
-const FOUNDRY_DISTILL_WINDOW: usize = 8;
 const FOUNDRY_DISTILL_KEEP: usize = 6;
 const FOUNDRY_RECALL_RERANK_TOP_K: usize = 6;
 const FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER: usize = 3;
@@ -126,5 +124,3 @@ pub(crate) use handlers::{
     handle_compact_session_memory, handle_recall_context, handle_section_build,
 };
 pub(crate) use maintenance::{enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker};
-// Legacy per-capture distill scheduler kept for manual incident recovery;
-// bootstrap now drives `run_daily_batch_distill` instead.

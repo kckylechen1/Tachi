@@ -267,7 +267,6 @@ pub struct MergeResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Constructed by CliGhClient::issue_view/issue_create; consumer wired in follow-up PR.
 pub struct IssueState {
     pub number: u64,
     pub title: String,
@@ -292,7 +291,6 @@ pub enum GhError {
 /// `MockGhClient`. Methods are intentionally narrow — the trait grows only
 /// when a `tachi_gh` action needs a new capability, never speculatively.
 #[async_trait]
-#[allow(dead_code)] // issue_view/issue_create wired in follow-up PR (issue-link action).
 pub trait GhClient: Send + Sync {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError>;
     async fn pr_merge(

@@ -1,21 +1,17 @@
 use super::*;
 
-#[allow(dead_code)]
 fn default_path() -> String {
     "/".to_string()
 }
 
-#[allow(dead_code)]
 fn default_importance() -> f64 {
     0.7
 }
 
-#[allow(dead_code)]
 fn default_category() -> String {
     "fact".to_string()
 }
 
-#[allow(dead_code)]
 fn default_scope() -> String {
     "project".to_string()
 }
@@ -24,17 +20,14 @@ fn default_auto_link() -> bool {
     true
 }
 
-#[allow(dead_code)]
 fn default_top_k() -> usize {
     6
 }
 
-#[allow(dead_code)]
 fn default_candidates() -> usize {
     20
 }
 
-#[allow(dead_code)]
 fn default_mmr_threshold() -> Option<f64> {
     Some(0.85)
 }
@@ -47,12 +40,10 @@ fn default_find_similar_top_k() -> usize {
     5
 }
 
-#[allow(dead_code)]
 fn default_limit() -> usize {
     100
 }
 
-#[allow(dead_code)]
 fn default_extraction_source() -> String {
     "extraction".to_string()
 }
@@ -101,7 +92,6 @@ fn default_chunk_overlap_chars() -> usize {
     120
 }
 
-#[allow(dead_code)]
 fn default_sync_limit() -> usize {
     100
 }
@@ -148,7 +138,6 @@ fn default_contradiction_threshold() -> f64 {
 
 // ─── Save / Update ──────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct SaveMemoryParams {
     /// Full text content of the memory
@@ -248,7 +237,6 @@ pub(crate) struct SaveMemoryParams {
 /// and `importance` so callers only need to supply text. Internally delegates
 /// to `handle_save_memory`, so the capture gate, noise filter, provenance, and
 /// enrichment pipeline all run identically to a `save_memory` call.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct RememberParams {
     /// Full text content to remember.
@@ -314,7 +302,6 @@ pub(crate) struct RememberParams {
 
 // ─── Search ─────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HybridWeightsParam {
     /// Semantic (vector) weight (default: 0.4)
@@ -334,7 +321,6 @@ pub(crate) struct HybridWeightsParam {
     pub use_rrf: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SearchMemoryParams {
     /// Search query text
@@ -449,7 +435,6 @@ impl SearchMemoryParams {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct FindSimilarMemoryParams {
     /// Query embedding vector (same dimension as stored embeddings)
@@ -474,7 +459,6 @@ pub(crate) struct FindSimilarMemoryParams {
 
 // ─── Get / List / Delete / Archive ──────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct GetMemoryParams {
     /// Memory entry ID
@@ -490,7 +474,6 @@ pub(crate) struct GetMemoryParams {
     pub project: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ListMemoriesParams {
     /// Path prefix to filter
@@ -558,7 +541,6 @@ pub(crate) struct GetEdgesParams {
 
 // ─── Sync ───────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SyncMemoriesParams {
     /// Unique agent identifier for tracking known state
@@ -573,7 +555,6 @@ pub(crate) struct SyncMemoriesParams {
 
 // ─── State / Extraction / Ingest ────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SetStateParams {
     /// State key
@@ -583,14 +564,12 @@ pub(crate) struct SetStateParams {
     pub value: serde_json::Value,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct GetStateParams {
     /// State key
     pub key: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct ExtractFactsParams {
     /// Text to extract facts from
@@ -646,7 +625,6 @@ fn default_message_role() -> String {
     "user".to_string()
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct IngestEventParams {
     /// Conversation identifier
@@ -697,7 +675,6 @@ pub(crate) struct IngestEventParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct IngestSourceParams {
     /// Raw source content to ingest
@@ -756,7 +733,6 @@ pub(crate) struct IngestSourceParams {
     pub metadata: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct IngestParams {
     /// Ingest mode: "event" or "source"

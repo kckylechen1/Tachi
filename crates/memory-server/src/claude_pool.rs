@@ -52,11 +52,6 @@ pub struct ClaudePool {
 
 #[derive(Debug)]
 pub struct ClaudeCallOutcome {
-    /// Per-call run directory under `~/.tachi/foundry-runs/`. Surfaced
-    /// for audit/debugging — callers may inspect prompt.md / result.md
-    /// inside it but most production callers only use `text`.
-    #[allow(dead_code)]
-    pub run_dir: PathBuf,
     pub text: String,
 }
 
@@ -137,7 +132,8 @@ impl ClaudePool {
                         "bytes": text.len(),
                     }),
                 );
-                Ok(ClaudeCallOutcome { run_dir, text })
+                let _ = run_dir;
+                Ok(ClaudeCallOutcome { text })
             }
             Err(err) => {
                 let _ = std::fs::write(run_dir.join("result.md"), &err);

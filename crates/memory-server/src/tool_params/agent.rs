@@ -4,12 +4,10 @@ fn default_true() -> bool {
     true
 }
 
-#[allow(dead_code)]
 fn default_foundry_evidence_weight() -> f64 {
     1.0
 }
 
-#[allow(dead_code)]
 fn default_evolution_memory_query_limit() -> usize {
     5
 }
@@ -24,7 +22,6 @@ fn default_copilot_top_k() -> usize {
 
 // ─── Agent Registration ─────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentRegisterParams {
     /// Unique agent identifier (e.g. "claude-code", "openclaw", "cursor", "codex")
@@ -58,7 +55,6 @@ pub(crate) struct AgentRegisterParams {
     pub rate_limit_burst: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentWhoamiParams {
     /// No parameters needed — returns the current agent profile for this session.
@@ -68,7 +64,6 @@ pub(crate) struct AgentWhoamiParams {
 
 // ─── Handoff ────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HandoffLeaveParams {
     /// Summary of what was accomplished in this session
@@ -87,7 +82,6 @@ pub(crate) struct HandoffLeaveParams {
     pub context: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HandoffCheckParams {
     /// Agent ID checking for handoff memos. If omitted, returns all pending memos.
@@ -99,7 +93,6 @@ pub(crate) struct HandoffCheckParams {
     pub acknowledge: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HandoffPromoteIssueParams {
     /// Handoff memo ID to promote (with or without "handoff:" prefix)
@@ -122,7 +115,6 @@ pub(crate) struct HandoffPromoteIssueParams {
 
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TaskBriefParams {
     /// Natural-language task the agent is about to work on.
@@ -149,7 +141,6 @@ pub(crate) struct TaskBriefParams {
     pub top_k: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ProgressCheckParams {
     /// Natural-language task currently being attempted.
@@ -186,7 +177,6 @@ pub(crate) struct ProgressCheckParams {
 
 // ─── Agent Evolution ────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentEvolutionDocumentParams {
     /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
@@ -200,7 +190,6 @@ pub(crate) struct AgentEvolutionDocumentParams {
     pub content: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentEvolutionDocumentPathParams {
     /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
@@ -210,7 +199,6 @@ pub(crate) struct AgentEvolutionDocumentPathParams {
     pub path: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentEvolutionEvidenceParams {
     /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
@@ -236,7 +224,6 @@ pub(crate) struct AgentEvolutionEvidenceParams {
     pub weight: f64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentEvolutionEvidencePathParams {
     /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
@@ -258,7 +245,6 @@ pub(crate) struct AgentEvolutionEvidencePathParams {
     pub weight: f64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct AgentEvolutionMemoryQueryParams {
     /// Search query used to pull supporting evidence from memory
@@ -285,7 +271,6 @@ pub(crate) struct AgentEvolutionMemoryQueryParams {
     pub top_k: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct SynthesizeAgentEvolutionParams {
     /// Canonical target agent id
@@ -324,7 +309,6 @@ pub(crate) struct SynthesizeAgentEvolutionParams {
     pub dry_run: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ListAgentEvolutionProposalsParams {
     /// Canonical target agent id
@@ -339,7 +323,6 @@ pub(crate) struct ListAgentEvolutionProposalsParams {
     pub limit: usize,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ReviewAgentEvolutionProposalParams {
     /// Derived proposal id returned by synthesize/queue/list operations
@@ -353,7 +336,6 @@ pub(crate) struct ReviewAgentEvolutionProposalParams {
     pub note: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct ProjectAgentProfileParams {
     /// Canonical target agent id

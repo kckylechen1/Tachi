@@ -82,7 +82,6 @@ impl std::error::Error for RepairExit {}
 
 /// Errors raised by individual rules. We log + accumulate rather than abort.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum RepairError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),

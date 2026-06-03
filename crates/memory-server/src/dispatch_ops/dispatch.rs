@@ -16,7 +16,6 @@ use super::subprocess::{
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,

@@ -179,25 +179,6 @@ pub(super) async fn run_agent_subprocess(
     })
 }
 
-// ─── Parse Claude JSON output ────────────────────────────────────────────────
-
-#[allow(dead_code)]
-pub(super) fn parse_claude_output(raw: &str) -> serde_json::Value {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(result) = parsed.get("result") {
-            return json!({
-                "parsed": true,
-                "result": result,
-                "cost": parsed.get("cost_usd"),
-                "duration_ms": parsed.get("duration_ms"),
-                "num_turns": parsed.get("num_turns"),
-            });
-        }
-        return json!({"parsed": true, "raw_json": parsed});
-    }
-    json!({"parsed": false, "text": raw})
-}
-
 pub(super) fn tail_chars(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
     chars.reverse();

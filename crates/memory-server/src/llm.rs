@@ -291,7 +291,6 @@ impl LlmClient {
 
     /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
     /// Convenience wrapper around embed_voyage_batch for single-item use.
-    #[allow(dead_code)]
     pub async fn embed_voyage(&self, text: &str, input_type: &str) -> Result<Vec<f32>, String> {
         let results = self
             .embed_voyage_batch(&[text.to_string()], input_type)

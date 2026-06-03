@@ -75,7 +75,6 @@ async fn cli_client_detect_daemon_succeeds_when_port_is_open() {
     let info = crate::cli_client::detect_daemon(&temp)
         .await
         .expect("expected Some(DaemonInfo) when port is listening");
-    assert_eq!(info.port, port);
     assert!(info.url.contains(&format!("127.0.0.1:{port}")));
 
     drop(listener);

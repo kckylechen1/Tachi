@@ -43,17 +43,6 @@ impl McpClientPool {
 // ─── MCP Pool Proxy Methods on MemoryServer ──────────────────────────────────
 
 impl MemoryServer {
-    /// Atomically check if connection exists and create if not.
-    /// Prevents TOCTOU race where two concurrent calls both spawn a child.
-    #[allow(dead_code)]
-    pub(super) async fn ensure_child_connected(
-        &self,
-        server_name: &str,
-    ) -> Result<(), rmcp::ErrorData> {
-        self.ensure_child_connected_with_context(&format!("mcp:{server_name}"), None)
-            .await
-    }
-
     pub(super) async fn ensure_child_connected_with_context(
         &self,
         resolved_capability_id: &str,
@@ -87,12 +76,6 @@ impl MemoryServer {
             }
         }
         self.connect_child_with_context(resolved_capability_id, requested_capability_id)
-            .await
-    }
-
-    #[allow(dead_code)]
-    pub(super) async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
-        self.connect_child_with_context(&format!("mcp:{server_name}"), None)
             .await
     }
 

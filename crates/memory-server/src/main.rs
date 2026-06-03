@@ -344,7 +344,6 @@ pub(crate) struct ToolDiscovery {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct ProjectDbState {
     store: Arc<StdMutex<MemoryStore>>,
     rw_gate: Arc<StdRwLock<()>>,
