@@ -17,9 +17,12 @@ fn registry() -> &'static HashMap<&'static str, PromptEnvelope> {
         let envelopes = [
             PromptEnvelope {
                 id: "deep_autonomous",
-                identity: "You are an autonomous implementation agent. Ship complete, verified work.",
-                constraints: "No scope creep. Prefer small diffs. Run verification before claiming done.",
-                output_contract: "Summarize changes, list commands run, call tachi_complete when finished.",
+                identity:
+                    "You are an autonomous implementation agent. Ship complete, verified work.",
+                constraints:
+                    "No scope creep. Prefer small diffs. Run verification before claiming done.",
+                output_contract:
+                    "Summarize changes, list commands run, call tachi_complete when finished.",
             },
             PromptEnvelope {
                 id: "pair_programming",
@@ -51,7 +54,6 @@ pub(crate) fn resolve_envelope_id(agent: &str, stage: Option<&str>) -> &'static 
     match (agent.as_str(), stage.as_str()) {
         (_, "review") => "reviewer",
         ("codex", "execute") | ("codex", "") => "deep_autonomous",
-        ("kimi", "review") | ("grok", "review") => "reviewer",
         ("kimi", _) | ("grok", _) => "pair_programming",
         (_, "plan") | (_, "auto") => "pair_programming",
         ("claude", _) => "deep_autonomous",
@@ -63,7 +65,7 @@ pub(crate) fn render_envelope_overlay(agent: &str, stage: Option<&str>) -> Optio
     let id = resolve_envelope_id(agent, stage);
     let envelope = registry().get(id)?;
     Some(format!(
-        "## Prompt envelope: {id}\n\n### Identity\n{}\n\n### Constraints\n{}\n\n### Output contract\n{}\n",
+        "## Prompt envelope: {id}\n\n### Identity\n{}\n\n### Constraints\n{}\n\n### Output contract\n{}",
         envelope.identity, envelope.constraints, envelope.output_contract
     ))
 }
@@ -74,9 +76,6 @@ mod tests {
 
     #[test]
     fn review_stage_selects_reviewer() {
-        assert_eq!(
-            resolve_envelope_id("claude", Some("review")),
-            "reviewer"
-        );
+        assert_eq!(resolve_envelope_id("claude", Some("review")), "reviewer");
     }
 }
