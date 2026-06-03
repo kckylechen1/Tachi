@@ -10,8 +10,11 @@ use super::kanban_helpers::{
 use super::mcp_config::generate_mcp_config;
 use super::prompt::{assemble_prompt, resolve_effective_skills};
 use super::subprocess::{
-    build_claude_command, build_codex_command, build_custom_command, run_agent_subprocess,
-    tail_chars,
+    build_claude_command, build_codex_command, build_custom_command, build_grok_command,
+    build_kimi_command, run_agent_subprocess, tail_chars,
+};
+use crate::agent_registry::{
+    dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
 };
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
@@ -53,7 +56,17 @@ pub(crate) async fn handle_tachi_dispatch(
     let now = Utc::now();
     let dispatch_id = new_dispatch_id(now, &params.agent);
 
-    let agent_norm = params.agent.to_ascii_lowercase();
+    let agent_norm = if params.agent.eq_ignore_ascii_case("custom") {
+        "custom".to_string()
+    } else if let Some(def) = resolve_dispatch_agent(&params.agent) {
+        def.name.to_string()
+    } else {
+        return Err(format!(
+            "Unknown agent '{}'. Supported: {}",
+            params.agent.trim(),
+            dispatch_agent_help_list()
+        ));
+    };
     let timeout = Duration::from_secs(params.timeout_secs);
 
     // 1. Create isolated workspace directory
@@ -79,14 +92,25 @@ pub(crate) async fn handle_tachi_dispatch(
     // where the generated config path is deliberately ignored). Failing
     // loudly here is clearer than silently producing a config file the
     // subprocess will never read.
-    if matches!(agent_norm.as_str(), "codex" | "codex-cli" | "openai")
-        && (inject_tachi || inject_hub)
-    {
-        return Err(
-            "inject_tachi_mcp / inject_hub_mcps are not supported for the codex backend. \
-             Configure MCP servers in ~/.codex/config.toml instead, or dispatch with agent='claude'."
-                .to_string(),
-        );
+    if inject_tachi || inject_hub {
+        if agent_norm == "custom" {
+            return Err(
+                "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend."
+                    .to_string(),
+            );
+        }
+        let def = resolve_dispatch_agent(&agent_norm).expect("resolved agent");
+        if !mcp_inject_supported(def) {
+            let hint = match def.name {
+                "codex" => "Configure MCP servers in ~/.codex/config.toml instead, or dispatch with agent='claude' or 'grok'.",
+                "kimi" => "Dispatch with agent='claude' or 'grok' for Tachi MCP injection.",
+                _ => "Use an agent that supports --mcp-config.",
+            };
+            return Err(format!(
+                "inject_tachi_mcp / inject_hub_mcps are not supported for the {} backend. {}",
+                def.name, hint
+            ));
+        }
     }
     let mcp_config_path = if inject_tachi || inject_hub {
         generate_mcp_config(server, &dispatch_id, inject_tachi, inject_hub).await?
@@ -332,17 +356,16 @@ pub(crate) async fn handle_tachi_dispatch(
 
     // 5. Build command
     let mut cmd = match agent_norm.as_str() {
-        "claude" | "claude-code" | "claude-cli" => {
-            build_claude_command(&params, &prompt, mcp_config_path.as_ref())
-        }
-        "codex" | "codex-cli" | "openai" => {
-            build_codex_command(&params, &prompt, mcp_config_path.as_ref())
-        }
+        "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref()),
+        "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref()),
+        "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref()),
+        "kimi" => build_kimi_command(&params, &prompt),
         "custom" => build_custom_command(&params, &prompt)?,
         other => {
             return Err(format!(
-                "Unknown agent '{}'. Use 'claude', 'codex', or 'custom'.",
-                other
+                "Internal error: unhandled dispatch agent '{}'. {}",
+                other,
+                dispatch_agent_help_list()
             ));
         }
     };

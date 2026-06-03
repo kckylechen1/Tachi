@@ -240,6 +240,7 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_handoff",
     "tachi_workflow",
     "tachi_orchestrator",
+    "tachi_agents",
     "tachi_dispatch",
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)

@@ -100,6 +100,58 @@ pub(super) fn build_codex_command(
     cmd
 }
 
+pub(super) fn build_grok_command(
+    params: &TachiDispatchParams,
+    prompt: &str,
+    mcp_config_path: Option<&PathBuf>,
+) -> Command {
+    let mut cmd = Command::new("grok");
+    cmd.arg("-p").arg(prompt);
+    cmd.arg("--output-format").arg("json");
+
+    let profile = resolve_permission_profile(params);
+    if profile == "full" {
+        cmd.arg("--permission-mode").arg("bypassPermissions");
+    }
+
+    if let Some(turns) = params.max_turns {
+        cmd.arg("--max-turns").arg(turns.to_string());
+    }
+
+    if let Some(ref model) = params.model {
+        cmd.arg("-m").arg(model);
+    }
+
+    if let Some(path) = mcp_config_path {
+        cmd.arg("--mcp-config").arg(path);
+    }
+
+    if let Some(ref cwd) = params.cwd {
+        cmd.current_dir(std::path::Path::new(cwd));
+    }
+    cmd
+}
+
+pub(super) fn build_kimi_command(params: &TachiDispatchParams, prompt: &str) -> Command {
+    let mut cmd = Command::new("kimi");
+    cmd.arg("-p").arg(prompt);
+    cmd.arg("--output-format").arg("json");
+
+    let profile = resolve_permission_profile(params);
+    if profile == "full" {
+        cmd.arg("-y");
+    }
+
+    if let Some(ref model) = params.model {
+        cmd.arg("-m").arg(model);
+    }
+
+    if let Some(ref cwd) = params.cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd
+}
+
 pub(super) fn build_custom_command(
     params: &TachiDispatchParams,
     prompt: &str,

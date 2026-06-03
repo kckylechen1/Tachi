@@ -33,6 +33,7 @@
 
 mod agent_eval;
 mod agent_markdown;
+mod agent_registry;
 mod backend_tier;
 mod bootstrap;
 mod builtins;
@@ -78,10 +79,11 @@ mod pack_ops;
 mod path_utils;
 mod pipeline_ops;
 mod profiles;
-mod prompt_envelope;
 mod project_db_ops;
+mod prompt_envelope;
 mod prompts;
 mod provenance;
+mod provider_config;
 mod repair;
 mod rescue;
 mod sandbox_ops;
@@ -98,7 +100,6 @@ mod vault_crypto;
 mod vault_ops;
 mod vector_backfill;
 mod vector_sweep;
-mod provider_config;
 mod web_search_ops;
 mod wiki_ops;
 mod workflow_closure;

@@ -1396,7 +1396,17 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Dispatch a task to a delegate agent (Claude Code CLI, Codex CLI, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
+        description = "Agent fleet registry (#155): action=list shows claude/codex/grok/kimi; action=select returns heuristic agent + fallback chain for an intent label."
+    )]
+    pub(crate) async fn tachi_agents(
+        &self,
+        Parameters(params): Parameters<TachiAgentsParams>,
+    ) -> Result<String, String> {
+        crate::agent_registry::handle_agents(self, params).await
+    }
+
+    #[tool(
+        description = "Dispatch a task to a delegate CLI agent (claude, codex, grok, kimi, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
     )]
     pub(crate) async fn tachi_dispatch(
         &self,
