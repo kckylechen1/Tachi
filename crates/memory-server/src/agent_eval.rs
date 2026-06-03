@@ -85,7 +85,9 @@ pub(crate) fn aggregate_scores(rows: &[EvalRow]) -> Vec<AgentTaskScore> {
     use std::collections::HashMap;
     let mut buckets: HashMap<(String, String), (u32, u32, u32)> = HashMap::new();
     for row in rows {
-        let task = format!("{:?}", row.task_type);
+        let task = serde_json::to_string(&row.task_type)
+            .map(|s| s.trim_matches('"').to_string())
+            .unwrap_or_else(|_| format!("{:?}", row.task_type));
         let key = (row.agent.clone(), task.clone());
         let entry = buckets.entry(key).or_insert((0, 0, 0));
         entry.0 += 1;
@@ -107,11 +109,7 @@ pub(crate) fn aggregate_scores(rows: &[EvalRow]) -> Vec<AgentTaskScore> {
             verification_rate: verified as f64 / samples_f,
         });
     }
-    out.sort_by(|a, b| {
-        a.agent
-            .cmp(&b.agent)
-            .then(a.task_type.cmp(&b.task_type))
-    });
+    out.sort_by(|a, b| a.agent.cmp(&b.agent).then(a.task_type.cmp(&b.task_type)));
     out
 }
 
@@ -129,7 +127,7 @@ pub(crate) async fn handle_agent_eval(
                 .ok_or_else(|| "fixture_path is required for aggregate".to_string())?;
             let rows = load_eval_jsonl(Path::new(path))?;
             let scores = aggregate_scores(&rows);
-            serde_json::to_string(&json!({
+            serde_json::to_string(&serde_json::json!({
                 "row_count": rows.len(),
                 "scores": scores,
             }))
@@ -178,6 +176,7 @@ mod tests {
         ];
         let scores = aggregate_scores(&rows);
         assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0].task_type, "fix_request");
         assert_eq!(scores[0].samples, 2);
         assert!((scores[0].success_rate - 0.5).abs() < f64::EPSILON);
     }
