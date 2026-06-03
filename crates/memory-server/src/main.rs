@@ -72,6 +72,7 @@ mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
 mod notes_ops;
+mod orchestrator_ops;
 mod pack_ops;
 mod path_utils;
 mod pipeline_ops;
@@ -318,6 +319,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_memory",
     "tachi_handoff",
     "tachi_complete",
+    "tachi_orchestrator",
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",

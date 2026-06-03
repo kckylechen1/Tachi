@@ -238,6 +238,7 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // Facade coordination tools
     "tachi_handoff",
     "tachi_workflow",
+    "tachi_orchestrator",
     "tachi_dispatch",
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
@@ -288,6 +289,8 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
+    // Persistent cross-session TODO / handoff state
+    "tachi_orchestrator",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
     "tachi_briefing",
     // Direct notepad/conclusion saver facade (high-frequency)
@@ -403,6 +406,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_complete",
     "tachi_handoff",
     "tachi_memory",
+    "tachi_orchestrator",
     "tachi_save",
     "tachi_wiki_write",
     "update_card",
