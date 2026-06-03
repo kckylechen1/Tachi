@@ -57,6 +57,7 @@ impl LlmClient {
         // ── Front-line LLM layer (Extract + Summary) ──
         // Extract: EXTRACT_* → SILICONFLOW_*
         let extract = Self::load_lane(
+            "extract",
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
                 "EXTRACT_BASE_URL",
@@ -64,11 +65,13 @@ impl LlmClient {
                 "EXTRACTOR_BASE_URL",
             ],
             &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
+            "TACHI_BACKEND_EXTRACT_TIER",
             DEFAULT_EXTRACT_MODEL,
         )?;
 
         // Summary: SUMMARY_* → EXTRACT_* → SILICONFLOW_*  (front-line default)
         let summary = Self::load_lane(
+            "summary",
             &["SUMMARY_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
                 "SUMMARY_BASE_URL",
@@ -82,6 +85,7 @@ impl LlmClient {
                 "SILICONFLOW_MODEL",
                 "EXTRACTOR_MODEL",
             ],
+            "TACHI_BACKEND_SUMMARY_TIER",
             &extract.model,
         )?;
 
@@ -89,6 +93,7 @@ impl LlmClient {
         // Both lanes now fall back to the front-line Extract/SiliconFlow chain.
         // Dedicated DISTILL_*/REASONING_* env vars still override if set.
         let reasoning = Self::load_lane(
+            "reasoning",
             &[
                 "REASONING_API_KEY",
                 "ZAI_API_KEY",
@@ -109,10 +114,12 @@ impl LlmClient {
                 "EXTRACT_MODEL",
                 "SILICONFLOW_MODEL",
             ],
+            "TACHI_BACKEND_REASONING_TIER",
             DEFAULT_REASONING_MODEL,
         )?;
 
         let distill = Self::load_lane(
+            "distill",
             &[
                 "DISTILL_API_KEY",
                 "REASONING_API_KEY",
@@ -133,6 +140,7 @@ impl LlmClient {
                 "EXTRACT_MODEL",
                 "SILICONFLOW_MODEL",
             ],
+            "TACHI_BACKEND_DISTILL_TIER",
             &reasoning.model,
         )?;
 
@@ -164,14 +172,32 @@ impl LlmClient {
     }
 
     fn load_lane(
+        lane: &str,
         api_key_envs: &[&'static str],
         base_url_envs: &[&str],
         model_envs: &[&str],
+        tier_env: &str,
         default_model: &str,
     ) -> Result<ChatLaneConfig, String> {
         let base_url =
             Self::first_env(base_url_envs).unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
-        let model = Self::first_env(model_envs).unwrap_or_else(|| default_model.trim().to_string());
+        let explicit = model_envs
+            .first()
+            .and_then(|&key| std::env::var(key).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let fallback = if model_envs.len() > 1 {
+            Self::first_env(&model_envs[1..])
+        } else {
+            None
+        };
+        let model = crate::backend_tier::resolve_lane_model(
+            lane,
+            tier_env,
+            explicit,
+            fallback,
+            default_model,
+        );
 
         Ok(ChatLaneConfig {
             base_url,
