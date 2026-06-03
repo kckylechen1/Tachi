@@ -295,3 +295,4 @@ mod skill_tests;
 mod vault_tests;
 mod vc_tests;
 mod wiki_tests;
+mod workflow_tests;

@@ -646,6 +646,49 @@ pub(crate) struct TachiWikiParams {
     pub references: Vec<String>,
 }
 
+// ─── Facade: workflow closure (Issue → Doc → Memory) ─────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiWorkflowParams {
+    /// close_loop | build_references
+    pub action: String,
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+    #[serde(default)]
+    pub doc_paths: Vec<String>,
+    #[serde(default)]
+    pub related_issues: Vec<String>,
+    #[serde(default)]
+    pub wiki_title: Option<String>,
+    #[serde(default)]
+    pub wiki_text: Option<String>,
+    #[serde(default)]
+    pub wiki_path: Option<String>,
+    #[serde(default)]
+    pub wiki_topic: Option<String>,
+    #[serde(default)]
+    pub wiki_summary: Option<String>,
+    #[serde(default)]
+    pub wiki_category: Option<String>,
+    #[serde(default)]
+    pub wiki_keywords: Vec<String>,
+    #[serde(default)]
+    pub wiki_entities: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub wiki_importance: Option<f64>,
+    #[serde(default)]
+    pub wiki_scope: Option<String>,
+    #[serde(default)]
+    pub wiki_domain: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
 // ─── Facade: skill (discover / run) ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
