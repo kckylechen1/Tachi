@@ -201,6 +201,7 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_unstick",
     "tachi_browse",
     "tachi_board",
+    "tachi_agent_eval",
     "tachi_wiki",
     "tachi_skill",
     "tachi_task",

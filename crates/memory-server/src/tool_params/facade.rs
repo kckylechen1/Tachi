@@ -912,6 +912,16 @@ pub(crate) struct TachiOrchestratorParams {
     pub newest_user_instruction: Option<String>,
 }
 
+// ─── Facade: agent eval harness ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiAgentEvalParams {
+    /// aggregate (more actions later)
+    pub action: String,
+    #[serde(default)]
+    pub fixture_path: Option<String>,
+}
+
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
