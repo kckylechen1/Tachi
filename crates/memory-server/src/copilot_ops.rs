@@ -560,6 +560,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await?;
 
@@ -603,6 +604,7 @@ pub(crate) async fn handle_tachi_task_brief(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await?;
     let memory_rows = search_memory_rows(
@@ -627,6 +629,7 @@ pub(crate) async fn handle_tachi_task_brief(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await?;
     let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
@@ -706,6 +709,7 @@ pub(crate) async fn handle_tachi_progress_check(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await?;
     let debug_checklist = build_debug_checklist(&wiki_rows);
@@ -824,6 +828,7 @@ async fn build_route_recommendation(
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await
     {

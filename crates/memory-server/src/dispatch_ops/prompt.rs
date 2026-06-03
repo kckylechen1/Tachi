@@ -68,6 +68,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
                 as_of: None,
                 include_metadata: false,
             },
+        false,
         )
         .await
         {
@@ -121,6 +122,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
             as_of: None,
             include_metadata: false,
         },
+        false,
     )
     .await
     {

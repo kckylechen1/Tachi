@@ -30,6 +30,7 @@ pub(crate) async fn handle_tachi_board(
             as_of: None,
             include_metadata: true,
         },
+        false,
     )
     .await?;
 

@@ -704,6 +704,7 @@ pub(crate) async fn handle_recall_context(
                 as_of: None,
                 include_metadata: false,
             },
+        false,
         )
         .await?;
         for row in rows {
@@ -785,6 +786,7 @@ pub(crate) async fn handle_recall_context(
                 as_of: None,
                 include_metadata: false,
             },
+        false,
         )
         .await
         {

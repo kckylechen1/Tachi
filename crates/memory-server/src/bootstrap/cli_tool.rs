@@ -35,7 +35,7 @@ pub(super) async fn run_cli_command(
                         let params: SearchMemoryParams =
                             serde_json::from_value(serde_json::Value::Object(args_map))
                                 .map_err(|e| format!("invalid search_memory args: {e}"))?;
-                        crate::memory_search_ops::handle_search_memory(&server, params).await
+                        crate::memory_search_ops::handle_search_memory(&server, params, false).await
                     })
                 },
             )

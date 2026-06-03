@@ -36,19 +36,12 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    match crate::status_ops::status_health::load_keychain_vault_api_key_values(vault_db_path) {
-        Ok(secrets) => {
-            let loaded = llm.set_provider_secrets(secrets);
-            if loaded > 0 {
-                println!("Loaded {loaded} API key(s) from Tachi Vault for backfill.");
-            }
-        }
-        Err(err) => {
-            eprintln!("  WARN: could not load Vault API keys for backfill: {err}");
-            eprintln!("  WARN: falling back to environment/config.env provider keys.");
-        }
-    }
-    let entries = store.entries_missing_vectors()?;
+    crate::provider_config::materialize_standalone(&llm, vault_db_path)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let entries =
+        crate::vector_backfill::list_missing_vector_entries(&store, false, None).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
 
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();
@@ -56,47 +49,17 @@ pub(super) async fn run_backfill_vectors(
 
     println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
 
-    // Re-open as mutable for update_enrichment_fields
     drop(store);
     let mut store = MemoryStore::open(db_str)?;
 
     for chunk in entries.chunks(batch_size) {
-        let texts: Vec<String> = chunk
-            .iter()
-            .map(|(_, text, summary, _)| {
-                let t = text.trim();
-                let s = if t.len() < 10 { summary.as_str() } else { t };
-                if s.len() > 8000 {
-                    s.chars().take(8000).collect()
-                } else {
-                    s.to_string()
-                }
-            })
-            .collect();
-
-        match llm.embed_voyage_batch(&texts, "document").await {
-            Ok(vecs) => {
-                for (i, (id, _, _, revision)) in chunk.iter().enumerate() {
-                    if i < vecs.len() {
-                        match store.update_enrichment_fields(
-                            id,
-                            None,
-                            Some(&vecs[i]),
-                            None,
-                            None,
-                            *revision,
-                        ) {
-                            Ok(true) => {}
-                            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
-                            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
-                        }
-                    }
-                }
-                processed += chunk.len();
+        match crate::vector_backfill::embed_and_write_batch(&mut store, &llm, chunk).await {
+            Ok(n) => {
+                processed += n;
                 println!("  [{processed}/{total_missing}] ✓ batch of {}", chunk.len());
             }
             Err(e) => {
-                eprintln!("  ERROR: Voyage API failed: {e}");
+                eprintln!("  ERROR: {e}");
                 eprintln!("  Stopping. {processed} entries saved successfully.");
                 break;
             }

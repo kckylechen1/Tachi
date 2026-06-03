@@ -1,25 +1,43 @@
 //! Briefing handler for `tachi_memory(action="briefing")`.
+//!
+//! Memories/wiki are **workspace-scoped** (`project_only` search). Cross-project
+//! signal lives in global **handoff** memos (like a local issue board) — not
+//! generic global hybrid search.
 
 use super::evidence_format::{
     json_string, parse_evidence_array, parse_json_or_empty, slim_kanban, slim_memory_rows,
     wants_json,
 };
 use crate::agent_markdown;
+use crate::memory_search_ops::{named_project_db_exists, resolve_workspace_named_project};
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::json;
 
+fn default_briefing_query(named_project: Option<&str>) -> String {
+    match named_project {
+        Some(name) => format!("{name} current task recent decisions blockers next steps"),
+        None => "current task recent decisions blockers next steps".to_string(),
+    }
+}
+
 pub(crate) async fn handle_memory_briefing(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
+    let named_project = params
+        .project
+        .clone()
+        .or_else(|| {
+            resolve_workspace_named_project().filter(|name| named_project_db_exists(name))
+        });
     let query = params
         .query
         .clone()
         .or_else(|| params.topic.clone())
         .or_else(|| params.title.clone())
-        .unwrap_or_else(|| "current task recent decisions blockers next steps".to_string());
+        .unwrap_or_else(|| default_briefing_query(named_project.as_deref()));
     let compact = params.compact;
     let top_k = params.top_k.max(1).min(if compact { 6 } else { 12 });
     let include_wiki = !matches!(
@@ -34,8 +52,8 @@ pub(crate) async fn handle_memory_briefing(
     let wiki_cap = if compact { 3 } else { 5 };
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
+    let cross_project_cap = if compact { 3 } else { 5 };
 
-    // Memory + wiki searches run concurrently to reduce briefing latency.
     let mem_params = SearchMemoryParams {
         query: query.clone(),
         query_vec: None,
@@ -48,7 +66,7 @@ pub(crate) async fn handle_memory_briefing(
         graph_relation_filter: None,
         weights: None,
         agent_role: None,
-        project: params.project.clone(),
+        project: named_project.clone(),
         domain: params.domain.clone(),
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),
@@ -75,7 +93,7 @@ pub(crate) async fn handle_memory_briefing(
             graph_relation_filter: None,
             weights: None,
             agent_role: None,
-            project: params.project.clone(),
+            project: named_project.clone(),
             domain: params.domain.clone(),
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
@@ -87,14 +105,22 @@ pub(crate) async fn handle_memory_briefing(
         None
     };
 
-    let (memories_result, wiki_result) =
-        tokio::join!(handle_search_memory(server, mem_params), async {
+    let (memories_result, wiki_result, cross_project_result) = tokio::join!(
+        handle_search_memory(server, mem_params, true),
+        async {
             if let Some(wp) = wiki_params {
-                search_memory_rows(server, wp).await
+                search_memory_rows(server, wp, true).await
             } else {
                 Ok(vec![])
             }
-        });
+        },
+        async {
+            crate::handoff_ops::list_pending_handoffs_for_briefing(
+                server,
+                cross_project_cap,
+            )
+        },
+    );
 
     let memories = slim_memory_rows(parse_evidence_array(memories_result?));
     let wiki = if include_wiki {
@@ -102,6 +128,7 @@ pub(crate) async fn handle_memory_briefing(
     } else {
         json!([])
     };
+    let cross_project = json!(cross_project_result?);
 
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         async {
@@ -116,7 +143,7 @@ pub(crate) async fn handle_memory_briefing(
             TachiBoardParams {
                 state_filter: Some("all".to_string()),
                 limit: Some(top_k.min(kanban_cap)),
-                project: params.project.clone(),
+                project: named_project.clone(),
             },
         ),
         async { crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap) },
@@ -146,8 +173,10 @@ pub(crate) async fn handle_memory_briefing(
         return json_string(&json!({
             "status": "completed",
             "query": query,
+            "project": named_project,
             "memories": memories,
             "wiki": wiki,
+            "cross_project": cross_project,
             "health": health_summary,
             "kanban": board,
             "recent_checkpoints": checkpoints,
@@ -157,14 +186,17 @@ pub(crate) async fn handle_memory_briefing(
                 "wiki": wiki_cap,
                 "kanban": kanban_cap,
                 "checkpoints": checkpoint_cap,
+                "cross_project": cross_project_cap,
             },
         }));
     }
 
     Ok(agent_markdown::format_briefing(
         &query,
+        named_project.as_deref(),
         &memories,
         &wiki,
+        &cross_project,
         &health_summary,
         &board,
         &checkpoints,

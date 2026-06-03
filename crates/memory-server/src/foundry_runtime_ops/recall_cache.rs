@@ -69,7 +69,7 @@ async fn search_rows_for_recall_cache(
         });
     }
 
-    search_memory_rows(server, params).await
+    search_memory_rows(server, params, false).await
 }
 
 /// LLM prompt parameters for the query-generation step. Kept here (not

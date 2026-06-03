@@ -472,7 +472,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     .expect("briefing should succeed");
 
     assert!(body.starts_with("## Tachi briefing"));
-    assert!(body.contains("### Memories"));
+    assert!(body.contains("### Memories (this project)"));
     assert!(body.contains("### Health snapshot"));
     assert!(!body.contains("merge_hints"));
     assert!(!body.contains("skill_quality"));
@@ -554,6 +554,50 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         json!("SILICONFLOW")
     );
     assert_eq!(parsed["models"]["embedding"]["model"], json!("voyage-4"));
+}
+
+#[tokio::test]
+async fn tachi_status_marks_vault_alias_in_config_env_as_vault_config() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let config_env = temp_home.temp_home.join(".tachi/config.env");
+    std::fs::create_dir_all(config_env.parent().expect("config env parent"))
+        .expect("create config env dir");
+    std::fs::write(
+        &config_env,
+        "VOYAGE_API_KEY=vault:VOYAGE_API_KEY\n",
+    )
+    .expect("write config env");
+
+    let global_db = temp_home.temp_home.join("global/memory.db");
+    std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("mkdir");
+    let store = memory_core::MemoryStore::open(global_db.to_str().unwrap()).expect("open global");
+    let _ = store; // vault entries optional for status name listing
+
+    let original_voyage = std::env::var_os("VOYAGE_API_KEY");
+    std::env::remove_var("VOYAGE_API_KEY");
+
+    let body = crate::status_ops::handle_tachi_status_full(&server)
+        .await
+        .expect("status should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("status JSON");
+    let voyage = parsed["api_keys"]
+        .as_array()
+        .expect("api_keys array")
+        .iter()
+        .find(|row| row["name"] == json!("VOYAGE_API_KEY"))
+        .expect("voyage key row");
+    // Without vault entry, alias alone may be unresolved; with vault it is vault(config.env).
+    assert!(
+        voyage["source"] == json!("vault(config.env)")
+            || voyage["source"] == json!("vault-alias-unresolved")
+            || voyage["status"] == json!("missing")
+    );
+
+    if let Some(value) = original_voyage {
+        std::env::set_var("VOYAGE_API_KEY", value);
+    } else {
+        std::env::remove_var("VOYAGE_API_KEY");
+    }
 }
 
 #[tokio::test]

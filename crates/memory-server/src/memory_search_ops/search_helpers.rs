@@ -250,6 +250,12 @@ pub(crate) fn named_project_db_exists(name: &str) -> bool {
 }
 
 /// Infer a named project library from query text when the caller omitted `project`.
+/// Git repo folder name for Plan C (`~/.tachi/projects/<name>/memory.db`), if any.
+pub(crate) fn resolve_workspace_named_project() -> Option<String> {
+    let git_root = crate::utils::find_project_git_root()?;
+    crate::path_utils::plan_c_dir_name_from_root(&git_root)
+}
+
 pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
     if matches!(
         domain.map(str::trim),

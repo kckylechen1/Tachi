@@ -285,29 +285,55 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
             }
         }
     }
-    let env_file_names = collect_config_env_key_names();
+    let config_env = crate::provider_config::collect_config_env_values();
 
     API_KEY_DEFS
         .iter()
         .map(|def| {
-            let env_configured = std::env::var(def.key)
-                .ok()
+            let env_value = std::env::var(def.key).ok();
+            let env_configured = env_value
+                .as_ref()
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false);
+            let env_is_vault_alias = env_value
+                .as_deref()
+                .map(crate::provider_config::is_vault_alias)
+                .unwrap_or(false);
             let vault_configured = vault_names.contains(def.key);
-            let config_present = env_file_names.contains(def.key);
+            let config_value = config_env.get(def.key);
+            let config_present = config_value.is_some();
+            let config_is_vault_alias = config_value
+                .map(|value| crate::provider_config::is_vault_alias(value))
+                .unwrap_or(false);
+            let config_alias_resolves = config_value
+                .and_then(|value| crate::provider_config::parse_vault_alias(value))
+                .map(|target| vault_names.contains(target))
+                .unwrap_or(false);
             let alias_configured = def.aliases.iter().any(|alias| {
                 vault_names.contains(*alias)
-                    || env_file_names.contains(*alias)
+                    || config_env.contains_key(*alias)
                     || std::env::var(alias)
                         .ok()
                         .is_some_and(|value| !value.trim().is_empty())
             });
             let file_configured = config_present;
-            let (status, source) = if vault_configured && (env_configured || file_configured) {
+            let (status, source) = if vault_configured
+                && (config_is_vault_alias && config_alias_resolves)
+            {
+                ("configured", "vault(config.env)")
+            } else if vault_configured
+                && (env_is_vault_alias || (file_configured && config_is_vault_alias))
+            {
+                if config_alias_resolves || env_is_vault_alias {
+                    ("configured", "vault(config.env)")
+                } else {
+                    ("missing", "vault-alias-unresolved")
+                }
+            } else if vault_configured && ((env_configured && !env_is_vault_alias) || (file_configured && !config_is_vault_alias))
+            {
                 (
                     "drift",
-                    if env_configured {
+                    if env_configured && !env_is_vault_alias {
                         "vault+env"
                     } else {
                         "vault+config.env"
@@ -319,9 +345,17 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
                 (
                     "configured",
                     if env_configured {
-                        "env"
+                        if env_is_vault_alias {
+                            "vault(config.env)"
+                        } else {
+                            "env"
+                        }
                     } else if file_configured {
-                        "config.env"
+                        if config_is_vault_alias {
+                            "vault(config.env)"
+                        } else {
+                            "config.env"
+                        }
                     } else {
                         "alias"
                     },
@@ -331,10 +365,14 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
             } else {
                 ("missing", "none")
             };
-            let drift_warning = if vault_configured && (env_configured || file_configured) {
-                Some("duplicate: key present in Vault and env/config.env (informational; runtime prefers Vault when unlocked)".to_string())
-            } else if vault_configured && config_present {
-                Some("duplicate: key name in config.env and Vault; remove config.env copy after Vault is confirmed".to_string())
+            let drift_warning = if vault_configured
+                && ((env_configured && !env_is_vault_alias)
+                    || (file_configured && !config_is_vault_alias))
+            {
+                Some(
+                    "duplicate: plaintext key in env/config.env while Vault also holds this key; use vault:NAME in config.env or remove the plaintext line"
+                        .to_string(),
+                )
             } else {
                 None
             };
@@ -352,38 +390,6 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
             }
         })
         .collect()
-}
-
-fn collect_config_env_key_names() -> HashSet<String> {
-    let mut paths = Vec::new();
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join(".tachi").join("config.env"));
-        paths.push(home.join(".sigil").join("config.env"));
-    }
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        paths.push(std::path::PathBuf::from(home).join("config.env"));
-    }
-    paths.push(std::path::PathBuf::from(".tachi/config.env"));
-    paths.push(std::path::PathBuf::from(".sigil/config.env"));
-
-    let mut names = HashSet::new();
-    for path in paths {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for line in raw.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once('=') {
-                if !value.trim().is_empty() {
-                    names.insert(key.trim().to_string());
-                }
-            }
-        }
-    }
-    names
 }
 
 pub(crate) fn calculate_health_score(
