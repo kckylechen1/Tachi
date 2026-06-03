@@ -127,7 +127,7 @@ pub(super) fn build_grok_command(
     }
 
     if let Some(ref cwd) = params.cwd {
-        cmd.arg("--cwd").arg(cwd);
+        cmd.current_dir(std::path::Path::new(cwd));
     }
     cmd
 }

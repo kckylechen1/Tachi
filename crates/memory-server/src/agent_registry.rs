@@ -64,9 +64,9 @@ pub(crate) fn resolve_dispatch_agent(raw: &str) -> Option<&'static DispatchAgent
     if norm.is_empty() {
         return None;
     }
-    DISPATCH_AGENTS.iter().find(|def| {
-        def.name == norm || def.aliases.iter().any(|alias| *alias == norm)
-    })
+    DISPATCH_AGENTS
+        .iter()
+        .find(|def| def.name == norm || def.aliases.iter().any(|alias| *alias == norm))
 }
 
 pub(crate) fn dispatch_agent_help_list() -> String {
@@ -115,13 +115,13 @@ pub(crate) fn select_agent_for_task(intent: &str, task: &str) -> &'static str {
     "claude"
 }
 
-pub(crate) fn fallback_chain(primary: &str) -> Vec<&'static str> {
+pub(crate) fn fallback_chain(primary: &str) -> &'static [&'static str] {
     match primary {
-        "claude" => vec!["claude", "grok", "codex"],
-        "codex" => vec!["codex", "claude"],
-        "grok" => vec!["grok", "claude"],
-        "kimi" => vec!["kimi", "claude"],
-        _ => vec!["claude", "codex", "grok", "kimi"],
+        "claude" => &["claude", "grok", "codex"],
+        "codex" => &["codex", "claude"],
+        "grok" => &["grok", "claude"],
+        "kimi" => &["kimi", "claude"],
+        _ => &["claude", "codex", "grok", "kimi"],
     }
 }
 
@@ -190,9 +190,17 @@ mod tests {
 
     #[test]
     fn mcp_policy_matches_fleet() {
-        assert!(mcp_inject_supported(resolve_dispatch_agent("claude").unwrap()));
-        assert!(mcp_inject_supported(resolve_dispatch_agent("grok").unwrap()));
-        assert!(!mcp_inject_supported(resolve_dispatch_agent("codex").unwrap()));
-        assert!(!mcp_inject_supported(resolve_dispatch_agent("kimi").unwrap()));
+        assert!(mcp_inject_supported(
+            resolve_dispatch_agent("claude").unwrap()
+        ));
+        assert!(mcp_inject_supported(
+            resolve_dispatch_agent("grok").unwrap()
+        ));
+        assert!(!mcp_inject_supported(
+            resolve_dispatch_agent("codex").unwrap()
+        ));
+        assert!(!mcp_inject_supported(
+            resolve_dispatch_agent("kimi").unwrap()
+        ));
     }
 }

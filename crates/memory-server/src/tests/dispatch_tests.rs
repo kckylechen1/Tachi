@@ -218,6 +218,37 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
     assert!(err.contains("grok"), "err: {err}");
 }
 
+#[tokio::test]
+async fn custom_dispatch_rejects_mcp_injection() {
+    let server = make_server();
+    let params = TachiDispatchParams {
+        agent: "custom".to_string(),
+        task: "should fail before subprocess".to_string(),
+        cwd: None,
+        skills: Vec::new(),
+        context_query: None,
+        model: None,
+        timeout_secs: 5,
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        max_turns: None,
+        sandbox: None,
+        inject_tachi_mcp: Some(true),
+        inject_hub_mcps: None,
+        command: vec!["true".to_string()],
+        project: None,
+        stage: None,
+    };
+
+    let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("custom backend must reject MCP injection");
+    assert!(
+        err.contains("custom backend"),
+        "unexpected custom injection error: {err}"
+    );
+}
+
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
 //
 // Spawns the full V2 flow against a fake `claude` binary that emits a

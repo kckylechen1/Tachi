@@ -13,7 +13,9 @@ use super::subprocess::{
     build_claude_command, build_codex_command, build_custom_command, build_grok_command,
     build_kimi_command, run_agent_subprocess, tail_chars,
 };
-use crate::agent_registry::{dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent};
+use crate::agent_registry::{
+    dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
+};
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
@@ -90,7 +92,13 @@ pub(crate) async fn handle_tachi_dispatch(
     // where the generated config path is deliberately ignored). Failing
     // loudly here is clearer than silently producing a config file the
     // subprocess will never read.
-    if (inject_tachi || inject_hub) && agent_norm != "custom" {
+    if inject_tachi || inject_hub {
+        if agent_norm == "custom" {
+            return Err(
+                "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend."
+                    .to_string(),
+            );
+        }
         let def = resolve_dispatch_agent(&agent_norm).expect("resolved agent");
         if !mcp_inject_supported(def) {
             let hint = match def.name {
