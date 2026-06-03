@@ -32,6 +32,7 @@
 )]
 
 mod agent_markdown;
+mod agent_registry;
 mod bootstrap;
 mod builtins;
 mod capability_ops;

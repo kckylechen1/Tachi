@@ -1376,7 +1376,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Dispatch a task to a delegate agent (Claude Code CLI, Codex CLI, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
+        description = "Dispatch a task to a delegate CLI agent (claude, codex, grok, kimi, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
     )]
     pub(crate) async fn tachi_dispatch(
         &self,
