@@ -1,9 +1,8 @@
 // types.rs — Unified data types for memory-core
 //
 // This schema is the **single source of truth** for all consumers:
-//   - OpenClaw memory-hybrid-bridge (Node.js via NAPI)
-//   - Antigravity memory-mcp (Python via PyO3)
-//   - Rust native
+//   - OpenClaw / tachi-node (Node.js via NAPI)
+//   - Rust native (memory-server MCP/CLI)
 //
 // Design: serde only, NO binding-specific macros (#[napi], #[pyclass]).
 // Bindings use JSON string serialization for maximum compatibility.

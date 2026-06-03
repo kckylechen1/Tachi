@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **`memory-python` crate**: legacy PyO3 binding for the scrapped `memory-mcp` prototype; Tachi uses `memory-server` + `memory-node` only.
+
 ## [1.4.3] - 2026-06-02
 
 Polish release plus MCP UX fixes from hands-on testing: briefing compact mode, kanban metadata, wiki multi-store reads, ask cross-store hints, status warnings with DB names, Voyage rerank empty-document guard, and install URL pinning.
