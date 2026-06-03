@@ -78,7 +78,7 @@ Phase 1 dispatch fleet is **four agents** only — see [`agent-fleet.md`](agent-
 ```
 
 **实现方式：**
-- 用 Qwen 2.5 32B (本地 ollama) 做 LoRA fine-tune
+- 用 Hugging Face 权重做 LoRA/QLoRA fine-tune；Apple Silicon 优先用 MLX 工具链，CUDA/cloud 可用 Axolotl 或 LLaMA-Factory
 - 输入：user prompt 前 100 字
 - 输出：`{"intent", "agent", "stage", "skills"}` JSON
 - 预期准确率：>85%（基于 7 类意图）
@@ -87,7 +87,7 @@ Phase 1 dispatch fleet is **four agents** only — see [`agent-fleet.md`](agent-
 
 ### 2.2 Dispatch Prompt Assembly — Few-Shot + 结构化模板
 
-**现状：** `dispatch_ops/prompt.rs` 的 `assemble_prompt()` 拼接 briefing + skills + avoidance + task，但缺乏动态示例。
+**现状：** `crates/memory-server/src/dispatch_ops/prompt.rs` 的 `assemble_prompt()` 拼接 briefing + skills + avoidance + task，但缺乏动态示例。
 
 **数据价值：** 样本展示了高质量 assistant 的回复模式：
 - 先给结论，再给根因，最后给方案
@@ -95,7 +95,7 @@ Phase 1 dispatch fleet is **four agents** only — see [`agent-fleet.md`](agent-
 - Tool chain：`rg` → `cat` → `cargo test`
 
 **实现方式：**
-1. 按意图分类（fix/review/plan/refactor/test/explain）建立 `dispatch_ops/prompt_examples/` 目录
+1. 按意图分类（fix/review/plan/refactor/test/explain）建立 `crates/memory-server/src/dispatch_ops/prompt_examples/` 目录
 2. `assemble_prompt()` 根据 task 类型注入对应的 few-shot example（2-3 条）
 3. 强制要求 agent 输出 `[结论]/[根因]/[方案]/[反方案]/[验证]` 结构
 
@@ -155,7 +155,7 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 
 ### 2.4 Shell Ops — 5-Stage Lifecycle 的动态示例
 
-**现状：** `shell_ops/mod.rs` 的 `meta_skill_for_stage()` 硬编码 5 个静态 skill path。
+**现状：** `crates/memory-server/src/shell_ops/mod.rs` 的 `meta_skill_for_stage()` 硬编码 5 个静态 skill path。
 
 **数据价值：** 样本就是 **动态生成的 stage 示例**。
 
@@ -239,17 +239,17 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 #### 方案 A：本地 Qwen LoRA（推荐）
 
 ```bash
-# 基础模型
-ollama pull qwen2.5:32b
+# 基础模型：下载标准 Hugging Face 权重，不使用 Ollama 包做训练
+huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 
-# LoRA 训练（用 axolotl 或 llama-factory）
+# Apple Silicon: 用 mlx-lm；CUDA/cloud: 用 axolotl 或 llama-factory
 # 数据：1,654 条 engineering 样本
 # 目标：7 类 intent 分类 + 5 段式结构化输出
-# 硬件：M3 Max 36GB 可跑（32B 量化后 ~20GB）
+# 硬件：32B 在 M3 Max 36GB 上很紧张，优先 7B/14B 或云端 32B
 ```
 
 **优点：** 本地运行，零 API 成本，隐私安全  
-**缺点：** 训练时间 2-4 小时，准确率可能略低于云端大模型
+**缺点：** 32B 本地训练资源紧张；M3 Max 36GB 更适合 7B/14B MLX LoRA，32B 建议云端或专用 CUDA GPU
 
 #### 方案 B：SiliconFlow API Fine-Tune
 
@@ -280,22 +280,22 @@ ollama pull qwen2.5:32b
 
 - [ ] 将 SFT 数据加载到 Tachi vector DB（用于检索）
 - [ ] 定义 `[结论]/[根因]/[方案]/[反方案]/[验证]` 的解析规则（regex）
-- [ ] 更新 `docs/wiki-references-spec.md` 加入结构化输出章节
-- [ ] 创建 `dispatch_ops/prompt_examples/` 目录，按 intent 分类存放样本
+- [ ] 更新 `wiki-references-spec.md` 加入结构化输出章节
+- [ ] 创建 `crates/memory-server/src/dispatch_ops/prompt_examples/` 目录，按 intent 分类存放样本
 
 ### Phase 2: Agent Router Classifier（下周）
 
 - [ ] 从 SFT 数据生成训练集（input: prompt, output: intent+agent+stage JSON）
 - [ ] LoRA 训练 Qwen 2.5 32B（或 SiliconFlow API fine-tune）
 - [ ] 评估准确率（目标 >85%）
-- [ ] 集成到 `dispatch_ops/dispatch.rs`：替换硬编码路由
+- [ ] 集成到 `crates/memory-server/src/dispatch_ops/dispatch.rs`：替换硬编码路由
 
 ### Phase 3: Wiki / Memory Format（下周）
 
 - [ ] 更新 `tachi_wiki_write` prompt 强制要求 5 段式结构
-- [ ] 更新 `wiki_ops.rs`：`markdown_for_obsidian` 解析 5 段标记
-- [ ] 更新 `memory_ops.rs`：自动提取 `[结论]`/`[方案]` 作为 keywords
-- [ ] 更新 `briefing_ops.rs`：采用 5 段式 briefing 格式
+- [ ] 更新 `crates/memory-server/src/wiki_ops.rs`：`markdown_for_obsidian` 解析 5 段标记
+- [ ] 更新 `crates/memory-server/src/memory_ops.rs`：自动提取 `[结论]`/`[方案]` 作为 keywords
+- [ ] 更新 `crates/memory-server/src/briefing_ops.rs`：采用 5 段式 briefing 格式
 
 ### Phase 4: Foundry Integration（本月）
 
