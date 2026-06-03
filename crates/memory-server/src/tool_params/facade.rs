@@ -865,6 +865,53 @@ pub(crate) struct TachiShellParams {
     pub slices: Vec<TachiShellDispatchSliceParams>,
 }
 
+// ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiOrchestratorParams {
+    /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
+    pub action: String,
+    pub task_id: String,
+    #[serde(default)]
+    pub todo_id: Option<String>,
+    #[serde(default)]
+    pub todo_content: Option<String>,
+    #[serde(default)]
+    pub todo_status: Option<String>,
+    #[serde(default)]
+    pub parent_todo_id: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    #[serde(default)]
+    pub verification: Option<String>,
+    #[serde(default)]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub current_state: Option<String>,
+    #[serde(default)]
+    pub completed_steps: Vec<String>,
+    #[serde(default)]
+    pub remaining_steps: Vec<String>,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+    #[serde(default)]
+    pub commands_run: Vec<String>,
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    #[serde(default)]
+    pub known_blockers: Vec<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub newest_user_instruction: Option<String>,
+}
+
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

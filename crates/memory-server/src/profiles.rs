@@ -238,6 +238,7 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // Facade coordination tools
     "tachi_handoff",
     "tachi_workflow",
+    "tachi_orchestrator",
     "tachi_dispatch",
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)

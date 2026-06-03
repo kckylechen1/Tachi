@@ -72,6 +72,7 @@ mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
 mod notes_ops;
+mod orchestrator_ops;
 mod pack_ops;
 mod path_utils;
 mod pipeline_ops;

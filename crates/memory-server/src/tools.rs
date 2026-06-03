@@ -1215,9 +1215,9 @@ impl MemoryServer {
     )]
     pub(crate) async fn tachi_briefing(&self) -> Result<String, String> {
         let named = crate::memory_search_ops::resolve_workspace_named_project();
-        let query = named.as_ref().map(|name| {
-            format!("{name} current task recent decisions blockers next steps")
-        });
+        let query = named
+            .as_ref()
+            .map(|name| format!("{name} current task recent decisions blockers next steps"));
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
             format: None,
@@ -1353,6 +1353,16 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiWorkflowParams>,
     ) -> Result<String, String> {
         crate::workflow_closure::handle_workflow(self, params).await
+    }
+
+    #[tool(
+        description = "Persistent orchestrator state outside LLM context: todo_list, todo_update, handoff_write, handoff_read, recovery_briefing. Stored in hard_state (survives compaction). Use task_id = dispatch_id or issue id."
+    )]
+    pub(crate) async fn tachi_orchestrator(
+        &self,
+        Parameters(params): Parameters<TachiOrchestratorParams>,
+    ) -> Result<String, String> {
+        crate::orchestrator_ops::handle_orchestrator(self, params).await
     }
 
     #[tool(
