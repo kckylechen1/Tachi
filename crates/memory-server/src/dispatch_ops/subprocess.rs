@@ -134,22 +134,34 @@ pub(super) fn build_grok_command(
 
 pub(super) fn build_kimi_command(params: &TachiDispatchParams, prompt: &str) -> Command {
     let mut cmd = Command::new("kimi");
-    cmd.arg("-p").arg(prompt);
-    cmd.arg("--output-format").arg("json");
-
-    let profile = resolve_permission_profile(params);
-    if profile == "full" {
-        cmd.arg("-y");
-    }
-
-    if let Some(ref model) = params.model {
-        cmd.arg("-m").arg(model);
+    for arg in kimi_command_args(params, prompt) {
+        cmd.arg(arg);
     }
 
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(cwd);
     }
     cmd
+}
+
+fn kimi_command_args(params: &TachiDispatchParams, prompt: &str) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        prompt.to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+    ];
+    let profile = resolve_permission_profile(params);
+    if profile == "full" {
+        args.push("-y".to_string());
+    }
+
+    if let Some(ref model) = params.model {
+        args.push("-m".to_string());
+        args.push(model.clone());
+    }
+
+    args
 }
 
 pub(super) fn build_custom_command(
@@ -231,4 +243,48 @@ pub(super) fn tail_chars(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
     chars.reverse();
     chars.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dispatch_params(agent: &str) -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: agent.to_string(),
+            task: "noop".to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            project: None,
+            stage: None,
+        }
+    }
+
+    #[test]
+    fn kimi_command_uses_supported_stream_json_output() {
+        let params = dispatch_params("kimi");
+        let args = kimi_command_args(&params, "hello");
+
+        assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--output-format", "stream-json"])
+        );
+        assert!(
+            !args
+                .windows(2)
+                .any(|pair| pair == ["--output-format", "json"]),
+            "Kimi Code supports text/stream-json, not json: {args:?}"
+        );
+    }
 }
