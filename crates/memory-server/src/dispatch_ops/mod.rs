@@ -36,3 +36,5 @@ pub(crate) use merge::{
     evaluate_delete_worktree_safety, resolve_tachi_clean_bin, validate_merge_branch_name,
     validate_static_merge_safety, worktree_equals_repo_root,
 };
+#[cfg(test)]
+pub(crate) use prompt::assemble_prompt;

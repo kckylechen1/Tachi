@@ -167,6 +167,41 @@ async fn tachi_task_brief_uses_wiki_hits_for_debug_checklist() {
     );
 }
 
+#[tokio::test]
+async fn dispatch_prompt_includes_task_route_overlay() {
+    let server = make_server();
+    let prompt = crate::dispatch_ops::assemble_prompt(
+        &server,
+        &TachiDispatchParams {
+            agent: "codex".to_string(),
+            task: "帮我编译二进制并且跑起来验证功能".to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            project: None,
+            stage: None,
+        },
+    )
+    .await;
+
+    assert!(prompt.contains("## Tachi task route"), "{prompt}");
+    assert!(prompt.contains("intent: test_request"), "{prompt}");
+    assert!(
+        prompt.contains("workflow:targeted-verification"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("tachi_progress_check(check)"), "{prompt}");
+}
+
 #[test]
 fn dispatch_ids_are_unique_within_same_second() {
     let now = chrono::Utc::now();

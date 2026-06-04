@@ -637,9 +637,7 @@ pub(crate) async fn handle_tachi_task_brief(
     .await?;
     let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
     let debug_checklist = build_debug_checklist(&wiki_rows);
-    let intent = classify_task_intent(&params.task);
-    let selected_sops = build_selected_sops(intent, &skills);
-    let tool_plan = build_tool_plan(intent);
+    let routing = build_task_brief_routing(&params.task, &skills);
 
     let route_rec =
         build_route_recommendation(server, &params.task, params.project.as_deref()).await;
@@ -651,9 +649,9 @@ pub(crate) async fn handle_tachi_task_brief(
         "project": params.project,
         "wiki_hits": compact_rows(wiki_rows, top_k),
         "memory_hits": compact_rows(memory_rows, top_k),
-        "intent": intent,
-        "selected_sops": selected_sops,
-        "tool_plan": tool_plan,
+        "intent": routing["intent"].clone(),
+        "selected_sops": routing["selected_sops"].clone(),
+        "tool_plan": routing["tool_plan"].clone(),
         "recommended_skills": skills,
         "debug_checklist": debug_checklist,
         "route_recommendation": route_rec,
@@ -665,6 +663,15 @@ pub(crate) async fn handle_tachi_task_brief(
         ],
     }))
     .map_err(|e| format!("serialize task_brief: {e}"))
+}
+
+pub(crate) fn build_task_brief_routing(task: &str, recommended_skills: &[Value]) -> Value {
+    let intent = classify_task_intent(task);
+    json!({
+        "intent": intent,
+        "selected_sops": build_selected_sops(intent, recommended_skills),
+        "tool_plan": build_tool_plan(intent),
+    })
 }
 
 fn classify_task_intent(task: &str) -> &'static str {
