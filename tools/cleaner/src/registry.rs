@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
 pub enum RegisterOutputFormat {
@@ -54,6 +55,7 @@ pub fn run_wt_register(options: RegisterOptions) -> Result<(), String> {
     }
 
     let registry_path = registry_path()?;
+    let _lock = acquire_registry_lock(&registry_path)?;
     let marker_path = path.join(".tachi-worktree.json");
     let now = chrono::Utc::now().to_rfc3339();
     let mut registry = read_registry(&registry_path)?;
@@ -103,6 +105,7 @@ pub fn remove_registry_entry(worktree_root: &Path) -> Result<bool, String> {
     if !registry_path.exists() {
         return Ok(false);
     }
+    let _lock = acquire_registry_lock(&registry_path)?;
     let mut registry = read_registry(&registry_path)?;
     let before = registry.worktrees.len();
     registry
@@ -152,6 +155,47 @@ fn write_registry(path: &Path, registry: &WorktreeRegistry) -> Result<(), String
     std::fs::rename(&tmp_path, path).map_err(|err| format!("rename registry tmp: {err}"))
 }
 
+struct RegistryLock {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = self.file.take();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_registry_lock(registry_path: &Path) -> Result<RegistryLock, String> {
+    if let Some(parent) = registry_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("create registry dir: {err}"))?;
+    }
+    let lock_path = registry_path.with_extension("json.lock");
+    for _ in 0..200 {
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lock_path)
+        {
+            Ok(file) => {
+                return Ok(RegistryLock {
+                    path: lock_path,
+                    file: Some(file),
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(err) => return Err(format!("create registry lock: {err}")),
+        }
+    }
+    Err(format!(
+        "timed out waiting for registry lock {}",
+        lock_path.display()
+    ))
+}
+
 fn write_marker(path: &Path, record: &WorktreeRecord) -> Result<(), String> {
     let raw =
         serde_json::to_string_pretty(record).map_err(|err| format!("serialize marker: {err}"))?;
@@ -182,7 +226,9 @@ fn emit_register_report(
 }
 
 fn registry_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set".to_string())?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| "neither HOME nor USERPROFILE is set".to_string())?;
     Ok(PathBuf::from(home).join(".tachi").join("worktrees.json"))
 }
 
@@ -276,5 +322,31 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn registry_path_falls_back_to_userprofile() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let old_userprofile = std::env::var_os("USERPROFILE");
+        std::env::remove_var("HOME");
+        std::env::set_var("USERPROFILE", "/tmp/tachi-userprofile");
+
+        let path = registry_path().unwrap();
+
+        match old_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match old_userprofile {
+            Some(value) => std::env::set_var("USERPROFILE", value),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/tachi-userprofile")
+                .join(".tachi")
+                .join("worktrees.json")
+        );
     }
 }
