@@ -280,25 +280,25 @@ pub(super) async fn run_vault_command(
         }
 
         VaultAction::List {
-            stdin_password,
-            keychain,
-            password_file,
+            stdin_password: _,
+            keychain: _,
+            password_file: _,
         } => {
+            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+                if let Ok(out) =
+                    crate::cli_client::call_daemon_tool(&info, "vault_list", serde_json::Map::new())
+                        .await
+                {
+                    print_vault_list_output(&out)?;
+                    return Ok(());
+                }
+            }
+
             let store = open_cli_store_read_only(global_db_path)?;
-            let config = store
+            store
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
-
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
-                return Err("Wrong password".into());
-            }
 
             let entries = store
                 .vault_list_entries()
@@ -319,6 +319,42 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
     }
+}
+
+fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(out) else {
+        println!("{out}");
+        return Ok(());
+    };
+    let Some(secrets) = value.get("secrets").and_then(|v| v.as_array()) else {
+        println!("{out}");
+        return Ok(());
+    };
+
+    if secrets.is_empty() {
+        println!("(no secrets stored)");
+        return Ok(());
+    }
+
+    println!("{:<30} {:<12} DESCRIPTION", "NAME", "TYPE");
+    for entry in secrets {
+        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let secret_type = entry
+            .get("secret_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let description = entry
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        println!("{name:<30} {secret_type:<12} {description}");
+    }
+    let count = value
+        .get("count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(secrets.len() as u64);
+    println!("\n{count} secret(s) total.");
+    Ok(())
 }
 
 pub(super) fn read_vault_password(

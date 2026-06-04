@@ -87,6 +87,7 @@ fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
 fn shell_params(action: &str) -> TachiShellParams {
     TachiShellParams {
         action: action.to_string(),
+        format: None,
         flow_id: None,
         task: None,
         title: None,

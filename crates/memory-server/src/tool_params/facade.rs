@@ -725,6 +725,9 @@ pub(crate) struct TachiSkillParams {
 pub(crate) struct TachiTaskParams {
     /// Action: "plan", "dispatch", "board", or "merge"
     pub action: String,
+    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    #[serde(default)]
+    pub format: Option<String>,
     // plan fields
     #[serde(default)]
     pub task: Option<String>,
@@ -818,6 +821,10 @@ pub(crate) struct TachiShellParams {
     /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
     pub action: String,
 
+    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    #[serde(default)]
+    pub format: Option<String>,
+
     /// Existing flow id to continue (optional). When omitted, a new flow_id is generated
     /// for stage-bearing actions (brainstorm/plan/dispatch/review/ship).
     #[serde(default)]
@@ -881,7 +888,8 @@ pub(crate) struct TachiShellParams {
 pub(crate) struct TachiOrchestratorParams {
     /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
     pub action: String,
-    pub task_id: String,
+    #[serde(default)]
+    pub task_id: Option<String>,
     #[serde(default)]
     pub todo_id: Option<String>,
     #[serde(default)]

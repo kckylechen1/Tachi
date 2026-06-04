@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) async fn run_doctor_command(
     json_output: bool,
-    scan_only: bool,
+    fix: bool,
     roots_override: Vec<PathBuf>,
     jobs_report: bool,
     probe_keys: bool,
@@ -17,7 +17,7 @@ pub(super) async fn run_doctor_command(
     };
     let quarantine_dir = app_home.join("quarantine");
     let opts = crate::doctor::ScanOptions {
-        auto_fix: !scan_only,
+        auto_fix: fix,
         max_depth: 10,
     };
     let report = crate::doctor::scan(&roots, &quarantine_dir, opts);

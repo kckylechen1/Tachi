@@ -1163,6 +1163,7 @@ mod tests {
         let _root = temp_runs_root();
         let p = TachiShellParams {
             action: "plan".into(),
+            format: None,
             flow_id: None,
             task: Some("hello".into()),
             title: Some("hello".into()),
@@ -1188,6 +1189,7 @@ mod tests {
         let _root = temp_runs_root();
         let p = TachiShellParams {
             action: "plan".into(),
+            format: None,
             flow_id: None,
             task: Some("t".into()),
             title: Some("t".into()),
@@ -1248,6 +1250,7 @@ mod tests {
         let _root = temp_runs_root();
         let p = TachiShellParams {
             action: "status".into(),
+            format: None,
             flow_id: Some("flow_does_not_exist".into()),
             task: None,
             title: None,
@@ -1280,6 +1283,7 @@ mod tests {
         .unwrap();
         let p = TachiShellParams {
             action: "status".into(),
+            format: None,
             flow_id: None,
             task: None,
             title: None,
@@ -1393,6 +1397,7 @@ mod tests {
         };
         let params = TachiShellParams {
             action: "dispatch".into(),
+            format: None,
             flow_id: None,
             task: Some("parent task".into()),
             title: Some("convoy test".into()),

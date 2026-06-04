@@ -3,7 +3,7 @@ use super::*;
 fn orchestrator_params(action: &str, task_id: &str) -> TachiOrchestratorParams {
     TachiOrchestratorParams {
         action: action.to_string(),
-        task_id: task_id.to_string(),
+        task_id: Some(task_id.to_string()),
         todo_id: None,
         todo_content: None,
         todo_status: None,
@@ -27,6 +27,29 @@ fn orchestrator_params(action: &str, task_id: &str) -> TachiOrchestratorParams {
 }
 
 #[tokio::test]
+async fn orchestrator_recovery_briefing_infers_active_task() {
+    let server = make_server();
+    let mut update = orchestrator_params("todo_update", "active-task-001");
+    update.todo_id = Some("t1".to_string());
+    update.todo_content = Some("Continue the active task".to_string());
+    update.todo_status = Some("in_progress".to_string());
+    server
+        .tachi_orchestrator(Parameters(update))
+        .await
+        .expect("todo_update");
+
+    let mut recovery = orchestrator_params("recovery_briefing", "unused");
+    recovery.task_id = None;
+    let raw = server
+        .tachi_orchestrator(Parameters(recovery))
+        .await
+        .expect("recovery without task_id");
+    let json: Value = serde_json::from_str(&raw).expect("json");
+    assert_eq!(json["task_id"], json!("active-task-001"));
+    assert_eq!(json["incomplete_todos"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
 async fn orchestrator_todos_and_handoff_persist() {
     let server = make_server();
     let task_id = "dispatch-test-001";
@@ -34,7 +57,7 @@ async fn orchestrator_todos_and_handoff_persist() {
     let update = server
         .tachi_orchestrator(Parameters(TachiOrchestratorParams {
             action: "todo_update".to_string(),
-            task_id: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
             todo_id: Some("t1".to_string()),
             todo_content: Some("Implement registry".to_string()),
             todo_status: Some("in_progress".to_string()),
@@ -63,7 +86,7 @@ async fn orchestrator_todos_and_handoff_persist() {
     let list = server
         .tachi_orchestrator(Parameters(TachiOrchestratorParams {
             action: "todo_list".to_string(),
-            task_id: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
             todo_id: None,
             todo_content: None,
             todo_status: None,
@@ -92,7 +115,7 @@ async fn orchestrator_todos_and_handoff_persist() {
     let handoff = server
         .tachi_orchestrator(Parameters(TachiOrchestratorParams {
             action: "handoff_write".to_string(),
-            task_id: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
             todo_id: None,
             todo_content: None,
             todo_status: None,
@@ -119,7 +142,7 @@ async fn orchestrator_todos_and_handoff_persist() {
     let recovery = server
         .tachi_orchestrator(Parameters(TachiOrchestratorParams {
             action: "recovery_briefing".to_string(),
-            task_id: task_id.to_string(),
+            task_id: Some(task_id.to_string()),
             todo_id: None,
             todo_content: None,
             todo_status: None,

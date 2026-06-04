@@ -832,7 +832,7 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            auto_fix: true,
+            auto_fix: false,
             max_depth: 10,
         }
     }
@@ -1079,6 +1079,20 @@ mod tests {
         assert_eq!(report.auto_fix_actions.len(), 1);
         assert_eq!(report.auto_fix_actions[0].outcome, "ok");
         assert!(!p.exists(), "original placeholder should have been moved");
+    }
+
+    #[test]
+    fn scan_default_is_read_only() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("memory.db");
+        fs::File::create(&p).unwrap();
+        let q = dir.path().join("quarantine");
+
+        let report = scan(&[dir.path().to_path_buf()], &q, ScanOptions::default());
+
+        assert_eq!(report.summary.placeholder, 1);
+        assert!(report.auto_fix_actions.is_empty());
+        assert!(p.exists(), "default doctor scan must not move files");
     }
 
     #[test]

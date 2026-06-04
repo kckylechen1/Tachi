@@ -528,7 +528,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     if let Commands::Doctor {
         json,
-        scan_only,
+        fix,
+        scan_only: _,
         roots,
         jobs,
         probe_keys,
@@ -536,7 +537,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     {
         return super::manifest_cli::run_doctor_command(
             *json,
-            *scan_only,
+            *fix,
             roots.clone(),
             *jobs,
             *probe_keys,

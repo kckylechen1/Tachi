@@ -1579,7 +1579,7 @@ impl MemoryServer {
                 }
                 let limit = params.limit.unwrap_or(10).max(1);
                 capabilities.truncate(limit);
-                let results = capabilities
+                let mut results = capabilities
                     .into_iter()
                     .map(|cap| {
                         json!({
@@ -1597,11 +1597,28 @@ impl MemoryServer {
                         })
                     })
                     .collect::<Vec<_>>();
+                if results.len() < limit {
+                    let mut local = discover_local_host_skills(
+                        params.query.as_deref().unwrap_or_default(),
+                        limit - results.len(),
+                    );
+                    let seen = results
+                        .iter()
+                        .filter_map(|cap| cap.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect::<std::collections::HashSet<_>>();
+                    local.retain(|cap| {
+                        cap.get("id")
+                            .and_then(Value::as_str)
+                            .is_none_or(|id| !seen.contains(id))
+                    });
+                    results.extend(local);
+                }
                 serde_json::to_string(&json!({
                     "query": params.query,
-                    "search_backend": if params.query.is_some() { "hub_search" } else { "hub_list" },
+                    "search_backend": if params.query.is_some() { "hub_search+local_skill_index" } else { "hub_list+local_skill_index" },
                     "online_search": false,
-                    "source": "local_approved_cache",
+                    "source": "local_approved_cache+host_skill_dirs",
                     "count": results.len(),
                     "results": results,
                 }))
@@ -1635,7 +1652,7 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiTaskParams>,
     ) -> Result<String, String> {
         let action = params.action.to_ascii_lowercase();
-        match action.as_str() {
+        let raw = match action.as_str() {
             "plan" => {
                 let task = params
                     .task
@@ -1649,7 +1666,7 @@ impl MemoryServer {
                     domain: params.domain.clone(),
                     top_k: params.top_k.unwrap_or(6),
                 };
-                handle_tachi_task_brief(self, brief_params).await
+                return handle_tachi_task_brief(self, brief_params).await;
             }
             "dispatch" => {
                 let agent = params
@@ -1706,7 +1723,13 @@ impl MemoryServer {
                 "Invalid action '{}'. Use 'plan', 'dispatch', 'board', or 'merge'.",
                 params.action
             )),
-        }
+        }?;
+        Ok(format_facade_response(
+            &format!("Tachi task {}", action),
+            &action,
+            &raw,
+            params.format.as_deref(),
+        ))
     }
 
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
@@ -1730,7 +1753,113 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<TachiShellParams>,
     ) -> Result<String, String> {
-        crate::shell_ops::handle_tachi_shell(self, params).await
+        let action = params.action.to_ascii_lowercase();
+        let format = params.format.clone();
+        let raw = crate::shell_ops::handle_tachi_shell(self, params).await?;
+        Ok(format_facade_response(
+            &format!("Tachi shell {}", action),
+            &action,
+            &raw,
+            format.as_deref(),
+        ))
+    }
+}
+
+fn wants_json_format(format: Option<&str>) -> bool {
+    format
+        .map(|format| format.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
+fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&str>) -> String {
+    if wants_json_format(format) {
+        return raw.to_string();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_string();
+    };
+    let mut lines = vec![format!("## {title}")];
+    lines.push(format!("action: `{action}`"));
+    append_known_field(&mut lines, &value, "flow_id");
+    append_known_field(&mut lines, &value, "dispatch_id");
+    append_known_field(&mut lines, &value, "stage");
+    append_known_field(&mut lines, &value, "state");
+    append_known_field(&mut lines, &value, "run_dir");
+    append_known_field(&mut lines, &value, "instruction_path");
+    append_known_field(&mut lines, &value, "prompt_file");
+    append_known_field(&mut lines, &value, "trajectory_file");
+    append_known_field(&mut lines, &value, "context_file");
+    append_known_field(&mut lines, &value, "message");
+    append_known_field(&mut lines, &value, "dispatch_error");
+
+    if let Some(tasks) = value.get("tasks").and_then(Value::as_array) {
+        lines.push(format!("tasks: {}", tasks.len()));
+        for task in tasks.iter().take(10) {
+            let id = task
+                .get("dispatch_id")
+                .and_then(Value::as_str)
+                .or_else(|| task.get("id").and_then(Value::as_str))
+                .unwrap_or("(task)");
+            let state = task
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let agent = task
+                .get("agent")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let summary = task
+                .get("task")
+                .and_then(Value::as_str)
+                .or_else(|| task.get("title").and_then(Value::as_str))
+                .or_else(|| task.get("summary").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .map(|text| format!(" - {text}"))
+                .unwrap_or_default();
+            lines.push(format!("- `{id}` {state} agent={agent}{summary}"));
+        }
+    }
+
+    if let Some(flows) = value.get("flows").and_then(Value::as_array) {
+        lines.push(format!("flows: {}", flows.len()));
+        for flow in flows.iter().take(10) {
+            let id = flow
+                .get("flow_id")
+                .and_then(Value::as_str)
+                .unwrap_or("(flow)");
+            let stage = flow.get("stage").and_then(Value::as_str).unwrap_or("?");
+            let state = flow.get("state").and_then(Value::as_str).unwrap_or("?");
+            let summary = flow
+                .get("title")
+                .and_then(Value::as_str)
+                .or_else(|| flow.get("task").and_then(Value::as_str))
+                .or_else(|| flow.get("summary").and_then(Value::as_str))
+                .filter(|text| !text.is_empty())
+                .map(|text| format!(" - {text}"))
+                .unwrap_or_default();
+            lines.push(format!("- `{id}` stage={stage} state={state}{summary}"));
+        }
+    }
+
+    if lines.len() <= 2 {
+        lines.push(format!("```json\n{}\n```", value));
+    }
+    lines.join("\n")
+}
+
+fn append_known_field(lines: &mut Vec<String>, value: &Value, field: &str) {
+    let Some(raw) = value.get(field) else {
+        return;
+    };
+    if raw.is_null() {
+        return;
+    }
+    if let Some(text) = raw.as_str() {
+        if !text.is_empty() {
+            lines.push(format!("{field}: `{text}`"));
+        }
+    } else {
+        lines.push(format!("{field}: `{raw}`"));
     }
 }
 
@@ -1752,4 +1881,223 @@ fn skill_discover_result_is_callable(cap: &Value) -> bool {
                 )
             })
             .unwrap_or(true)
+}
+
+fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let query_tokens = skill_query_tokens(query);
+    let mut candidates = Vec::new();
+    for root in local_skill_roots() {
+        collect_local_skills(&root, &query_tokens, &mut candidates);
+    }
+    candidates.sort_by(|a, b| {
+        let score_b = b.get("_score").and_then(Value::as_i64).unwrap_or(0);
+        let score_a = a.get("_score").and_then(Value::as_i64).unwrap_or(0);
+        score_b.cmp(&score_a).then_with(|| {
+            a.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .cmp(b.get("name").and_then(Value::as_str).unwrap_or(""))
+        })
+    });
+    let mut seen = std::collections::HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|cap| {
+            cap.get("id")
+                .and_then(Value::as_str)
+                .map(|id| seen.insert(id.to_string()))
+                .unwrap_or(true)
+        })
+        .filter(|cap| {
+            query_tokens.is_empty() || cap.get("_score").and_then(Value::as_i64) > Some(0)
+        })
+        .take(limit)
+        .map(|mut cap| {
+            if let Some(obj) = cap.as_object_mut() {
+                obj.remove("_score");
+            }
+            cap
+        })
+        .collect()
+}
+
+fn local_skill_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        roots.push(home.join(".agents/skills"));
+        roots.push(home.join(".codex/skills"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd.join("skill"));
+    }
+    roots
+}
+
+fn skill_query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .map(str::trim)
+        .filter(|token| token.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn collect_local_skills(root: &std::path::Path, query_tokens: &[String], out: &mut Vec<Value>) {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let skill_md = path.join("SKILL.md");
+            if skill_md.exists() {
+                if let Some(skill) = local_skill_from_file(&skill_md, query_tokens) {
+                    out.push(skill);
+                }
+            } else {
+                collect_local_skills(&path, query_tokens, out);
+            }
+        }
+    }
+}
+
+fn local_skill_from_file(path: &std::path::Path, query_tokens: &[String]) -> Option<Value> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let name = front_matter_value(&content, "name").unwrap_or_else(|| {
+        path.parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("skill")
+            .to_string()
+    });
+    let description = front_matter_value(&content, "description")
+        .or_else(|| front_matter_value(&content, "when_to_use"))
+        .unwrap_or_else(|| first_markdown_heading(&content).unwrap_or_default());
+    let haystack = format!(
+        "{} {} {}",
+        name,
+        description,
+        front_matter_value(&content, "when_to_use").unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    let score = if query_tokens.is_empty() {
+        1
+    } else {
+        query_tokens
+            .iter()
+            .filter(|token| haystack.contains(token.as_str()))
+            .count() as i64
+    };
+    if !query_tokens.is_empty() && score == 0 {
+        return None;
+    }
+    Some(json!({
+        "id": format!("host-skill:{}", name),
+        "name": name,
+        "description": description,
+        "cap_type": "skill",
+        "enabled": true,
+        "review_status": "approved",
+        "health_status": "healthy",
+        "visibility": "host-local",
+        "callable": true,
+        "db": "host",
+        "source": "host_skill_dir",
+        "path": path.display().to_string(),
+        "_score": score,
+    }))
+}
+
+fn front_matter_value(content: &str, key: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()? != "---" {
+        return None;
+    }
+    for line in lines {
+        if line == "---" {
+            return None;
+        }
+        let Some((raw_key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        if raw_key.trim() == key {
+            let value = raw_value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn first_markdown_heading(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("# ").map(str::trim))
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facade_response_defaults_to_markdown_and_preserves_json_opt_in() {
+        let raw = r#"{"flow_id":"flow_1","stage":"plan","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
+        let markdown = format_facade_response("Tachi shell plan", "plan", raw, None);
+        assert!(markdown.starts_with("## Tachi shell plan"));
+        assert!(markdown.contains("flow_id: `flow_1`"));
+        assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
+
+        let json = format_facade_response("Tachi shell plan", "plan", raw, Some("json"));
+        assert_eq!(json, raw);
+    }
+
+    #[test]
+    fn local_skill_discovery_scans_host_skill_dirs() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let temp_home =
+            std::env::temp_dir().join(format!("tachi-local-skill-test-{}", uuid::Uuid::new_v4()));
+        let skill_dir = temp_home.join(".agents/skills/agent-only-probe");
+        let duplicate_skill_dir = temp_home.join(".codex/skills/agent-only-probe");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::create_dir_all(&duplicate_skill_dir).expect("create duplicate skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: agent-only-probe\ndescription: Use for zhsearchprobe workflows\n---\n# Agent Only Probe\n",
+        )
+        .expect("write skill");
+        std::fs::write(
+            duplicate_skill_dir.join("SKILL.md"),
+            "---\nname: agent-only-probe\ndescription: Use for zhsearchprobe workflows\n---\n# Agent Only Probe Duplicate\n",
+        )
+        .expect("write duplicate skill");
+        std::env::set_var("HOME", &temp_home);
+
+        let found = discover_local_host_skills("zhsearchprobe", 5);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&temp_home);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].get("name").and_then(Value::as_str),
+            Some("agent-only-probe")
+        );
+        assert_eq!(
+            found[0].get("source").and_then(Value::as_str),
+            Some("host_skill_dir")
+        );
+    }
 }

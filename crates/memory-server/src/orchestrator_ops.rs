@@ -110,15 +110,69 @@ fn save_json<T: Serialize>(server: &MemoryServer, key: &str, value: &T) -> Resul
     })
 }
 
+fn list_state_rows(server: &MemoryServer) -> Result<Vec<memory_core::db::StateRow>, String> {
+    server.with_global_store_read(|store| {
+        store
+            .list_state(ORCHESTRATOR_NS)
+            .map_err(|e| format!("orchestrator list_state: {e}"))
+    })
+}
+
+fn task_id_from_key(key: &str) -> Option<String> {
+    key.strip_prefix("handoff:")
+        .or_else(|| key.strip_prefix("todos:"))
+        .map(str::to_string)
+        .filter(|task_id| !task_id.trim().is_empty())
+}
+
+fn has_incomplete_todos(list: &OrchestratorTodoList) -> bool {
+    list.todos.iter().any(|todo| {
+        !matches!(
+            todo.status,
+            TodoStatus::Done | TodoStatus::Cancelled | TodoStatus::Superseded
+        )
+    })
+}
+
+fn infer_active_task_id(server: &MemoryServer) -> Result<Option<String>, String> {
+    let rows = list_state_rows(server)?;
+    for row in rows.iter().filter(|row| row.key.starts_with("todos:")) {
+        let Ok(list) = serde_json::from_str::<OrchestratorTodoList>(&row.value_json) else {
+            continue;
+        };
+        if has_incomplete_todos(&list) {
+            return Ok(Some(list.task_id));
+        }
+    }
+    Ok(rows.iter().find_map(|row| task_id_from_key(&row.key)))
+}
+
 pub(crate) async fn handle_orchestrator(
     server: &MemoryServer,
     params: TachiOrchestratorParams,
 ) -> Result<String, String> {
     let action = params.action.trim().to_ascii_lowercase();
-    let task_id = params.task_id.trim().to_string();
-    if task_id.is_empty() {
-        return Err("task_id is required".to_string());
-    }
+    let task_id = params
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|task_id| !task_id.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            if action == "recovery_briefing" {
+                infer_active_task_id(server).ok().flatten()
+            } else {
+                None
+            }
+        });
+    let Some(task_id) = task_id else {
+        return Err(if action == "recovery_briefing" {
+            "task_id is required, or write a handoff/TODO first so Tachi can infer the active task"
+                .to_string()
+        } else {
+            "task_id is required".to_string()
+        });
+    };
 
     match action.as_str() {
         "todo_list" => {

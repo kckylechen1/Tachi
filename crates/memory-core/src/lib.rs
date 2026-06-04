@@ -697,6 +697,11 @@ impl MemoryStore {
         db::get_state(&self.conn, namespace, key)
     }
 
+    /// List deterministic key-value state rows in a namespace, newest first.
+    pub fn list_state(&self, namespace: &str) -> Result<Vec<db::StateRow>, MemoryError> {
+        db::list_state(&self.conn, namespace)
+    }
+
     // Hub, audit, agent state, sandbox, pack, and vault methods live in
     // `crate::store::*` extension modules so this file stays focused on core
     // CRUD/search/maintenance. They contribute to this same `impl MemoryStore`

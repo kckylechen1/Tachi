@@ -108,13 +108,16 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "PATH")]
         target_db: Option<PathBuf>,
     },
-    /// Doctor v2 — extension-aware DB classification + safe auto-fix
+    /// Doctor v2 — extension-aware DB classification (read-only by default)
     Doctor {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
-        /// Skip the safe auto-fix pass (placeholder quarantine + WAL copy-aside)
-        #[arg(long)]
+        /// Execute the safe auto-fix pass (placeholder quarantine + WAL copy-aside)
+        #[arg(long, alias = "apply")]
+        fix: bool,
+        /// Legacy no-op alias; doctor is read-only unless --fix is supplied
+        #[arg(long, hide = true)]
         scan_only: bool,
         /// Override default scan roots (~/.tachi, ~/.openclaw, ~/.sigil, ~/.gemini/antigravity)
         #[arg(long, value_name = "PATH")]
@@ -765,16 +768,16 @@ pub(crate) enum VaultAction {
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
     },
-    /// List all secret names in the vault (does not show values).
+    /// List vault secret metadata only (names/types/descriptions; does not show values).
     List {
-        /// Read password from stdin.
-        #[arg(long)]
+        /// Legacy no-op; listing metadata does not require unlocking.
+        #[arg(long, hide = true)]
         stdin_password: bool,
-        /// Read password from macOS Keychain.
-        #[arg(long)]
+        /// Legacy no-op; listing metadata does not require unlocking.
+        #[arg(long, hide = true)]
         keychain: bool,
-        /// Read password from a local file (first line only).
-        #[arg(long, value_name = "PATH")]
+        /// Legacy no-op; listing metadata does not require unlocking.
+        #[arg(long, value_name = "PATH", hide = true)]
         password_file: Option<PathBuf>,
     },
     /// Lock the vault (clear cached key).

@@ -5,6 +5,14 @@ use crate::error::MemoryError;
 
 use super::common::now_utc_iso;
 
+#[derive(Debug, Clone)]
+pub struct StateRow {
+    pub key: String,
+    pub value_json: String,
+    pub version: u32,
+    pub updated_at: String,
+}
+
 // ─── Hard State Operations ─────────────────────────────────────────────────────
 
 /// Set a key-value pair in the hard_state table. INSERT OR UPDATE with version bump.
@@ -50,6 +58,27 @@ pub fn get_state(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(MemoryError::from(e)),
     }
+}
+
+/// List state rows in a namespace, newest first.
+pub fn list_state(conn: &Connection, namespace: &str) -> Result<Vec<StateRow>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT key, value_json, version, updated_at
+         FROM hard_state
+         WHERE namespace = ?1
+         ORDER BY updated_at DESC, key ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![namespace], |row| {
+            Ok(StateRow {
+                key: row.get(0)?,
+                value_json: row.get(1)?,
+                version: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 /// Save a derived item (causal extraction, distilled rule, etc.)
