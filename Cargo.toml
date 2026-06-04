@@ -3,6 +3,7 @@ members = [
     "crates/memory-core",
     "crates/memory-node",
     "crates/memory-server",
+    "tools/cleaner",
 ]
 default-members = [
     "crates/memory-core",
