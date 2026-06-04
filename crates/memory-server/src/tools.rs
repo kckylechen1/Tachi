@@ -1598,7 +1598,7 @@ impl MemoryServer {
                     .collect::<Vec<_>>();
                 serde_json::to_string(&json!({
                     "query": params.query,
-                    "search_backend": if params.query.as_deref().is_some_and(|q| !q.trim().is_empty()) { "hub_search" } else { "hub_list" },
+                    "search_backend": if params.query.is_some() { "hub_search" } else { "hub_list" },
                     "online_search": false,
                     "source": "local_approved_cache",
                     "count": results.len(),
@@ -1744,6 +1744,11 @@ fn skill_discover_result_is_callable(cap: &Value) -> bool {
         && cap
             .get("health_status")
             .and_then(|v| v.as_str())
-            .map(|status| !status.eq_ignore_ascii_case("open"))
+            .map(|status| {
+                !matches!(
+                    status.to_ascii_lowercase().as_str(),
+                    "open" | "unhealthy" | "failing" | "broken" | "error"
+                )
+            })
             .unwrap_or(true)
 }

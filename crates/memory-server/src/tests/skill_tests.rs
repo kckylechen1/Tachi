@@ -375,6 +375,13 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
         "standard",
     );
     pending.review_status = "pending".to_string();
+    let mut unhealthy = make_skill_capability(
+        "skill:debug-unhealthy",
+        "debug-unhealthy",
+        "Debug workflow with failing health",
+        "standard",
+    );
+    unhealthy.health_status = "unhealthy".to_string();
 
     server
         .with_global_store(|store| {
@@ -389,6 +396,9 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
             store
                 .hub_register(&pending)
                 .map_err(|e| format!("register pending failed: {e}"))?;
+            store
+                .hub_register(&unhealthy)
+                .map_err(|e| format!("register unhealthy failed: {e}"))?;
             Ok::<_, String>(())
         })
         .expect("failed to register skills");
@@ -416,6 +426,7 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
 
     assert!(ids.contains(&"skill:debug-approved"), "{json}");
     assert!(!ids.contains(&"skill:debug-pending"), "{json}");
+    assert!(!ids.contains(&"skill:debug-unhealthy"), "{json}");
     assert!(json["results"].as_array().unwrap().iter().all(|item| {
         item.get("callable").and_then(|value| value.as_bool()) == Some(true)
             && item.get("source").and_then(|value| value.as_str()) == Some("local_approved_cache")
