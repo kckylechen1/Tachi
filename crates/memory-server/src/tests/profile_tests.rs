@@ -43,6 +43,9 @@ async fn runtime_info_reports_identity_and_db_routing() {
     assert!(value["databases"]["global"]["path"].as_str().is_some());
     assert_eq!(value["databases"]["project"], serde_json::Value::Null);
     assert_eq!(value["databases"]["single_db_mode"], json!(true));
+    assert!(value["process"]["pid"].as_u64().is_some());
+    assert!(value["process"]["provider_secret_count"].as_u64().is_some());
+    assert_eq!(value["process"]["vault"]["unlocked"], json!(false));
 }
 
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
