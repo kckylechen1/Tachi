@@ -33,6 +33,6 @@ pub(crate) use kanban_helpers::update_kanban_state;
 pub(crate) use merge::handle_approve_merge;
 #[cfg(test)]
 pub(crate) use merge::{
-    evaluate_delete_worktree_safety, validate_merge_branch_name, validate_static_merge_safety,
-    worktree_equals_repo_root,
+    evaluate_delete_worktree_safety, resolve_tachi_clean_bin, validate_merge_branch_name,
+    validate_static_merge_safety, worktree_equals_repo_root,
 };
