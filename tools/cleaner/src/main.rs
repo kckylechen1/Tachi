@@ -1,9 +1,11 @@
 mod registry;
+mod target_clean;
 mod wt_clean;
 
 use std::path::PathBuf;
 
 use registry::{RegisterOptions, RegisterOutputFormat};
+use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
 
 fn main() {
@@ -26,12 +28,47 @@ fn run() -> Result<(), String> {
 
     let command = args.remove(0);
     match command.as_str() {
+        "target" | "target-clean" => run_target_clean(args),
         "wt-register" => run_wt_register(args),
         "wt-remove" => run_wt_remove(args),
         _ => Err(format!(
-            "unknown command '{command}'. Expected: wt-register or wt-remove"
+            "unknown command '{command}'. Expected: target, wt-register, or wt-remove"
         )),
     }
+}
+
+fn run_target_clean(args: Vec<String>) -> Result<(), String> {
+    let mut force = false;
+    let mut json = false;
+    let mut path: Option<PathBuf> = None;
+
+    for arg in args {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--dry-run" => force = false,
+            "--json" => json = true,
+            "-h" | "--help" => {
+                print_target_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => {
+                if path.replace(PathBuf::from(&arg)).is_some() {
+                    return Err("target accepts at most one path".to_string());
+                }
+            }
+        }
+    }
+
+    target_clean::run_target_clean(TargetCleanOptions {
+        path: path.unwrap_or_else(|| PathBuf::from(".")),
+        force,
+        output: if json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+    })
 }
 
 fn run_wt_register(args: Vec<String>) -> Result<(), String> {
@@ -135,7 +172,13 @@ fn run_wt_remove(args: Vec<String>) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "tachi-clean\n\nUsage:\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+        "tachi-clean\n\nUsage:\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+    );
+}
+
+fn print_target_help() {
+    println!(
+        "Clean Cargo target build artifacts while keeping top-level release outputs.\n\nUsage:\n  tachi-clean target [path] [--dry-run|--force] [--json]\n\nOptions:\n  --dry-run  Preview only (default)\n  --force    Remove target/debug and release build subdirectories\n  --json     Print machine-readable JSON\n"
     );
 }
 
