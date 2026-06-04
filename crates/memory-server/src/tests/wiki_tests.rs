@@ -348,6 +348,76 @@ async fn wiki_search_returns_compact_hits_without_related_entries() {
 }
 
 #[tokio::test]
+async fn tachi_wiki_search_defaults_to_named_wiki_project() {
+    let mut entry = make_entry("wiki-facade-default-project-search");
+    entry.path = "/wiki/agent/tachi/default-search".to_string();
+    entry.summary = "Default facade wiki search".to_string();
+    entry.text =
+        "DefaultFacadeWikiNeedle should be found without passing project=wiki.".to_string();
+    entry.entities = vec!["DefaultFacadeWikiNeedle".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let response = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "search".to_string(),
+            query: Some("DefaultFacadeWikiNeedle".to_string()),
+            category: None,
+            top_k: Some(5),
+            limit: None,
+            title: None,
+            text: None,
+            path: None,
+            topic: None,
+            summary: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: None,
+            force: false,
+        }))
+        .await
+        .expect("tachi_wiki search should succeed");
+
+    assert!(
+        response.contains("DefaultFacadeWikiNeedle") || response.contains("default-search"),
+        "expected default tachi_wiki search to include project:wiki hits, got: {response}"
+    );
+}
+
+#[tokio::test]
+async fn wiki_browse_hides_recall_cache_entries() {
+    let mut visible = make_entry("wiki-visible-debugging");
+    visible.path = "/wiki/engineering/debugging/visible".to_string();
+    visible.summary = "Visible debugging lesson".to_string();
+    visible.text = "Visible debugging lesson for wiki browse.".to_string();
+
+    let mut cache = make_entry("wiki-recall-cache-pollution");
+    cache.path = "/wiki/engineering/debugging/recall-cache/polluted".to_string();
+    cache.summary = "RecallCacheNeedle should stay hidden".to_string();
+    cache.text = "RecallCacheNeedle is an ephemeral recall projection.".to_string();
+    cache.source = "foundry_recall_rerank_cache".to_string();
+
+    let (server, _home) = seed_wiki_project_entries(vec![visible, cache]);
+
+    let response = server
+        .wiki_browse(Parameters(WikiBrowseParams {
+            category: Some("engineering/debugging".to_string()),
+            limit: 10,
+            project: "wiki".to_string(),
+        }))
+        .await
+        .expect("wiki browse should succeed");
+
+    assert!(response.contains("Visible debugging lesson"));
+    assert!(!response.contains("RecallCacheNeedle"));
+    assert!(!response.contains("recall-cache"));
+}
+
+#[tokio::test]
 async fn tachi_search_wiki_scope_honors_explicit_project() {
     let mut entry = make_entry("wiki-default-project-search");
     entry.path = "/wiki/engineering/search-default".to_string();

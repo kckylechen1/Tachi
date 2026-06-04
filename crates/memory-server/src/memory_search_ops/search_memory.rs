@@ -1,7 +1,7 @@
 use super::*;
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
-    normalize_json_relevance, normalize_search_relevance, search_score,
+    named_project_db_exists, normalize_json_relevance, normalize_search_relevance, search_score,
 };
 use std::collections::HashSet;
 
@@ -10,12 +10,11 @@ pub(crate) async fn search_memory_rows(
     mut params: SearchMemoryParams,
     project_only: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    if !params
+    let wiki_path_prefix = params
         .path_prefix
         .as_deref()
-        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"))
-        && memory_core::should_skip_query(&params.query)
-    {
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    if !wiki_path_prefix && memory_core::should_skip_query(&params.query) {
         return Ok(vec![]);
     }
     let top_k = params.top_k.max(1);
@@ -28,11 +27,19 @@ pub(crate) async fn search_memory_rows(
     } else {
         false
     };
+    let default_wiki_vec_available = if params.project.is_none() && wiki_path_prefix {
+        server
+            .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     if params.query_vec.is_none()
         && (server.global_vec_available
             || server.project_vec_available
-            || named_project_vec_available)
+            || named_project_vec_available
+            || default_wiki_vec_available)
     {
         match server.llm.embed_voyage(&params.query, "query").await {
             Ok(query_vec) => {
@@ -72,13 +79,29 @@ pub(crate) async fn search_memory_rows(
         }
     }
 
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+        match server.with_named_project_store_read("wiki", |store| {
+            let vec_avail = store.vec_available;
+            let project_opts = params.to_search_options(vec_avail);
+            store
+                .search(&params.query, Some(project_opts))
+                .map_err(|e| format!("Search failed in default wiki project DB: {e}"))
+        }) {
+            Ok(wiki_results) => {
+                combined_results.extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
+            }
+            Err(e) => {
+                tracing::warn!("Search failed in default wiki project DB: {e}");
+            }
+        }
+    }
+
     if !searched_named {
         if project_only {
             let named_project =
                 crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
             if let Some(ref project_name) = named_project {
-                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
-                {
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
                     let workspace_path = server.project_db_path_buf();
                     let named_path =
                         crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
@@ -91,9 +114,9 @@ pub(crate) async fn search_memory_rows(
                     if !skip_workspace && server.has_project_db() {
                         let project_opts = params.to_search_options(server.project_vec_available);
                         let project_results = server.with_project_store_read(|store| {
-                            store.search(&params.query, Some(project_opts)).map_err(|e| {
-                                format!("Search failed in workspace project DB: {e}")
-                            })
+                            store
+                                .search(&params.query, Some(project_opts))
+                                .map_err(|e| format!("Search failed in workspace project DB: {e}"))
                         })?;
                         combined_results
                             .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -104,11 +127,13 @@ pub(crate) async fn search_memory_rows(
                             server.with_named_project_store_read(project_name, |store| {
                                 let vec_avail = store.vec_available;
                                 let project_opts = params.to_search_options(vec_avail);
-                                store.search(&params.query, Some(project_opts)).map_err(|e| {
-                                    format!(
+                                store
+                                    .search(&params.query, Some(project_opts))
+                                    .map_err(|e| {
+                                        format!(
                                         "Search failed in named project DB '{project_name}': {e}"
                                     )
-                                })
+                                    })
                             })?;
                         combined_results
                             .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -116,9 +141,9 @@ pub(crate) async fn search_memory_rows(
                 } else if server.has_project_db() {
                     let project_opts = params.to_search_options(server.project_vec_available);
                     let project_results = server.with_project_store_read(|store| {
-                        store.search(&params.query, Some(project_opts)).map_err(|e| {
-                            format!("Search failed in workspace project DB: {e}")
-                        })
+                        store
+                            .search(&params.query, Some(project_opts))
+                            .map_err(|e| format!("Search failed in workspace project DB: {e}"))
                     })?;
                     combined_results
                         .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -153,9 +178,11 @@ pub(crate) async fn search_memory_rows(
                 match server.with_named_project_store_read(project_name, |store| {
                     let vec_avail = store.vec_available;
                     let project_opts = params.to_search_options(vec_avail);
-                    store.search(&params.query, Some(project_opts)).map_err(|e| {
-                        format!("Search failed in inferred project DB '{project_name}': {e}")
-                    })
+                    store
+                        .search(&params.query, Some(project_opts))
+                        .map_err(|e| {
+                            format!("Search failed in inferred project DB '{project_name}': {e}")
+                        })
                 }) {
                     Ok(project_results) => {
                         combined_results
