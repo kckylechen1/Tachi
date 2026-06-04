@@ -211,6 +211,16 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 ### Vault (Encrypted Secrets)
 `vault_init`, `vault_unlock`, `vault_lock`, `vault_set`, `vault_get`, `vault_list`, `vault_remove`, `vault_status`, `vault_setup_rotation`
 
+Project-local agent dispatch can reference shared Vault secrets without copying plaintext keys.
+Put aliases in `.tachi/vault.env` under the project root:
+
+```dotenv
+LONGPORT_APP_SECRET=vault:longbridge.1.secret
+GOOGLE_API_KEY=vault:google.1.api_key
+```
+
+When `tachi_dispatch` runs with `cwd` inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
+
 ### Sandbox & Governance
 `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
 *(Aliases: `shell_set_policy`, `shell_get_policy`, `shell_list_policies`, `shell_exec_audit`)*
