@@ -209,6 +209,7 @@ async fn build_evidence(
                 query_vec: None,
                 top_k: query.top_k.max(1),
                 path_prefix: query.path_prefix.clone(),
+                include_training: false,
                 include_archived: false,
                 candidates_per_channel: query.top_k.max(1).max(20),
                 mmr_threshold: None,
@@ -224,7 +225,7 @@ async fn build_evidence(
                 as_of: None,
                 include_metadata: false,
             },
-        false,
+            false,
         )
         .await?;
         if rows.is_empty() {

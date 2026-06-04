@@ -171,8 +171,12 @@ fn list_child_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let entries = std::fs::read_dir(path).map_err(|err| format!("read {}: {err}", path.display()))?;
-    Ok(entries.filter_map(Result::ok).map(|entry| entry.path()).collect())
+    let entries =
+        std::fs::read_dir(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect())
 }
 
 fn file_name_string(path: &Path) -> String {

@@ -134,6 +134,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         error_context: None,
         category: Some("experience".to_string()),
         include_archived: false,
+        include_training: false,
         enable_rerank: false,
         synthesize: false,
         model: None,

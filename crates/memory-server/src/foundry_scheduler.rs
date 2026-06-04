@@ -177,7 +177,6 @@ impl FoundryScheduler {
             handle.cancel.cancel();
         }
     }
-
 }
 
 impl Drop for FoundryScheduler {
@@ -265,10 +264,7 @@ fn reconcile_workers(
             )
             .await;
         });
-        map.insert(
-            path.clone(),
-            WorkerHandle { cancel, join },
-        );
+        map.insert(path.clone(), WorkerHandle { cancel, join });
     }
 }
 

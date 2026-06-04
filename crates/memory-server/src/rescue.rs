@@ -474,11 +474,8 @@ pub fn apply_rescue(
         let source_final = MemorySource::parse_or_external(&row.source).to_string();
         let category_final = MemoryCategory::normalize(&row.category).to_string();
         let entities_final = merge_legacy_persons_into_entities(&row.persons, &row.entities);
-        let path_final = memory_core::types::apply_location_relocation(
-            &row.path,
-            &row.location,
-            &mut meta_val,
-        );
+        let path_final =
+            memory_core::types::apply_location_relocation(&row.path, &row.location, &mut meta_val);
         let meta_str = meta_val.to_string();
 
         let result = if caps.has_domain && caps.has_retention_policy {

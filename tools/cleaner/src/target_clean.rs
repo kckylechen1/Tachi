@@ -119,7 +119,10 @@ fn resolve_target_dir(path: &Path) -> Result<PathBuf, String> {
     if target.is_dir() {
         Ok(target)
     } else {
-        Err(format!("target directory not found under {}", canonical.display()))
+        Err(format!(
+            "target directory not found under {}",
+            canonical.display()
+        ))
     }
 }
 
@@ -224,12 +227,7 @@ mod tests {
         assert!(report.errors.is_empty());
         assert_eq!(
             report.target_dir.as_deref(),
-            Some(
-                std::fs::canonicalize(&target)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            )
+            Some(std::fs::canonicalize(&target).unwrap().to_str().unwrap())
         );
 
         let _ = std::fs::remove_dir_all(&root);

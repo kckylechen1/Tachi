@@ -1092,9 +1092,8 @@ mod tests {
                 "stage {stage} should resolve to SKILL.md, got {}",
                 resolved.display()
             );
-            let content = std::fs::read_to_string(&resolved).unwrap_or_else(|e| {
-                panic!("read superpowers skill for {stage}: {e}")
-            });
+            let content = std::fs::read_to_string(&resolved)
+                .unwrap_or_else(|e| panic!("read superpowers skill for {stage}: {e}"));
             assert!(
                 content.contains("name:") || content.starts_with("# "),
                 "stage {stage} skill should look like a SKILL.md front matter or heading"

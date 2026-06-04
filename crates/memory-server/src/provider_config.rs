@@ -52,10 +52,10 @@ fn provider_env_keys() -> HashSet<String> {
 }
 
 /// Load API keys from an unlocked in-process Vault session.
-pub fn vault_api_key_map_from_server(server: &MemoryServer) -> Result<HashMap<String, String>, String> {
-    Ok(load_unlocked_api_key_secrets(server)?
-        .into_iter()
-        .collect())
+pub fn vault_api_key_map_from_server(
+    server: &MemoryServer,
+) -> Result<HashMap<String, String>, String> {
+    Ok(load_unlocked_api_key_secrets(server)?.into_iter().collect())
 }
 
 /// Load API keys via macOS Keychain + global DB (daemon/CLI when memory unlock is empty).
@@ -66,7 +66,10 @@ pub fn vault_api_key_map_from_keychain(global_db_path: &Path) -> HashMap<String,
         .collect()
 }
 
-fn resolve_vault_map(server: Option<&MemoryServer>, global_db_path: &Path) -> HashMap<String, String> {
+fn resolve_vault_map(
+    server: Option<&MemoryServer>,
+    global_db_path: &Path,
+) -> HashMap<String, String> {
     if let Some(server) = server {
         if let Ok(map) = vault_api_key_map_from_server(server) {
             if !map.is_empty() {
@@ -137,7 +140,10 @@ pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport
     materialize_provider_secrets(server.llm.as_ref(), &vault_map)
 }
 
-pub fn materialize_standalone(llm: &LlmClient, global_db_path: &Path) -> Result<MaterializeReport, String> {
+pub fn materialize_standalone(
+    llm: &LlmClient,
+    global_db_path: &Path,
+) -> Result<MaterializeReport, String> {
     let vault_map = resolve_vault_map(None, global_db_path);
     materialize_provider_secrets(llm, &vault_map)
 }

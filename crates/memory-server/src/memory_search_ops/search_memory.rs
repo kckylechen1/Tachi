@@ -5,6 +5,18 @@ use crate::memory_search_ops::search_helpers::{
 };
 use std::collections::HashSet;
 
+fn is_training_path(path: &str) -> bool {
+    path == "/sft" || path.starts_with("/sft/")
+}
+
+fn training_recall_opted_in(params: &SearchMemoryParams) -> bool {
+    params.include_training
+        || params
+            .path_prefix
+            .as_deref()
+            .is_some_and(|prefix| is_training_path(prefix.trim_end_matches('/')))
+}
+
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
@@ -217,6 +229,10 @@ pub(crate) async fn search_memory_rows(
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         }
+    }
+
+    if !training_recall_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_training_path(&result.entry.path));
     }
 
     apply_guide_context_boosts(

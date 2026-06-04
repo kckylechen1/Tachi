@@ -96,10 +96,7 @@ pub(crate) async fn run_vector_sweep_once(
         match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
             Ok((done, todo)) if todo > 0 => {
                 total_done += done;
-                tracing::info!(
-                    "[vector-sweep] {} embedded {done}/{todo}",
-                    path.display()
-                );
+                tracing::info!("[vector-sweep] {} embedded {done}/{todo}", path.display());
             }
             Ok(_) => {}
             Err(e) => {
@@ -108,9 +105,7 @@ pub(crate) async fn run_vector_sweep_once(
         }
     }
     if total_done > 0 {
-        tracing::info!(
-            "[vector-sweep] run complete, embedded {total_done} row(s)"
-        );
+        tracing::info!("[vector-sweep] run complete, embedded {total_done} row(s)");
     }
     total_done
 }
@@ -173,9 +168,7 @@ impl VectorSweepScheduler {
             }
         });
 
-        Self {
-            _cancel: cancel_tx,
-        }
+        Self { _cancel: cancel_tx }
     }
 }
 

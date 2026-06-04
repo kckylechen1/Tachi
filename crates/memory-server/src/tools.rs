@@ -1229,6 +1229,7 @@ impl MemoryServer {
             error_context: None,
             category: None,
             include_archived: false,
+            include_training: false,
             enable_rerank: false,
             as_of: None,
             synthesize: false,

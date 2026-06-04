@@ -254,8 +254,9 @@ fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
             let mut metadata: serde_json::Value =
                 serde_json::from_str(metadata_raw).unwrap_or_else(|_| json!({}));
             let new_path = apply_location_relocation(path, location, &mut metadata);
-            let metadata_str = serde_json::to_string(&metadata)
-                .map_err(|e| MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}")))?;
+            let metadata_str = serde_json::to_string(&metadata).map_err(|e| {
+                MemoryError::InvalidArg(format!("serialize metadata for {id}: {e}"))
+            })?;
             conn.execute(
                 "UPDATE memories SET path = ?1, metadata = ?2, location = '' WHERE id = ?3",
                 params![new_path, metadata_str, id],
@@ -914,7 +915,9 @@ mod tests {
         let batch = conn.transaction().unwrap();
         {
             let mut stmt = batch
-                .prepare("INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, '{}')")
+                .prepare(
+                    "INSERT INTO memories (id, path, location, metadata) VALUES (?1, ?2, ?3, '{}')",
+                )
                 .unwrap();
             for i in 0..1200 {
                 let id = format!("row-{i:04}");

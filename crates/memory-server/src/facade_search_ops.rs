@@ -56,18 +56,23 @@ pub(crate) async fn collect_tachi_search_sections(
 ) -> (Vec<(String, Value)>, bool, String) {
     let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
-        "wiki" | "memory" | "all" => scope.as_str(),
+        "wiki" | "memory" | "all" | "sft" => scope.as_str(),
         _ => "all",
     };
     let scope_remapped = effective_scope != scope.as_str();
     let mut sections: Vec<(String, Value)> = Vec::new();
 
-    if effective_scope == "memory" || effective_scope == "all" {
+    if effective_scope == "memory" || effective_scope == "all" || effective_scope == "sft" {
         let mem_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
             top_k: params.top_k.saturating_mul(3).max(params.top_k),
-            path_prefix: params.path_prefix.clone(),
+            path_prefix: if effective_scope == "sft" {
+                Some("/sft".to_string())
+            } else {
+                params.path_prefix.clone()
+            },
+            include_training: params.include_training || effective_scope == "sft",
             include_archived: params.include_archived,
             candidates_per_channel: 20,
             mmr_threshold: Some(0.85),
@@ -102,6 +107,7 @@ pub(crate) async fn collect_tachi_search_sections(
             query_vec: None,
             top_k: params.top_k,
             path_prefix: Some(wiki_path_prefix),
+            include_training: params.include_training,
             include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),

@@ -1333,6 +1333,7 @@ pub(crate) async fn handle_wiki_search(
             query_vec: None,
             top_k: params.top_k.max(1).min(50),
             path_prefix,
+            include_training: false,
             include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),

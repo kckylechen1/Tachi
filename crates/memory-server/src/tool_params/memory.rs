@@ -338,6 +338,12 @@ pub(crate) struct SearchMemoryParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
+    /// Include training/distillation corpus entries such as `/sft/...`.
+    /// Defaults to false so normal agent recall stays focused on live memory.
+    /// Explicit `/sft` path_prefix searches are always treated as opt-in.
+    #[serde(default)]
+    pub include_training: bool,
+
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,

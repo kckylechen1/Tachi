@@ -158,6 +158,7 @@ pub(crate) async fn handle_memory_graph(
                 query_vec: None,
                 top_k: params.top_k.max(1),
                 path_prefix: params.path_prefix.clone(),
+                include_training: false,
                 include_archived: false,
                 candidates_per_channel: params.top_k.max(1).max(20),
                 mmr_threshold: None,
@@ -173,7 +174,7 @@ pub(crate) async fn handle_memory_graph(
                 as_of: None,
                 include_metadata: false,
             },
-        false,
+            false,
         )
         .await?;
         seed_ids.extend(rows.into_iter().filter_map(|row| {

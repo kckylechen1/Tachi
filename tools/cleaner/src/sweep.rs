@@ -70,7 +70,10 @@ fn plan_sweep(
 ) -> SweepReport {
     let mut report = SweepReport {
         action: "sweep",
-        roots: roots.iter().map(|root| root.display().to_string()).collect(),
+        roots: roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect(),
         max_age_days,
         dry_run,
         removed: Vec::new(),
@@ -165,13 +168,21 @@ fn execute_sweep(report: &mut SweepReport) {
             continue;
         }
         let Some(repo_root) = &candidate.repo_root else {
-            report
-                .errors
-                .push(format!("missing repo_root in marker for {}", candidate.path));
+            report.errors.push(format!(
+                "missing repo_root in marker for {}",
+                candidate.path
+            ));
             continue;
         };
         match Command::new("git")
-            .args(["-C", repo_root, "worktree", "remove", "--force", &candidate.path])
+            .args([
+                "-C",
+                repo_root,
+                "worktree",
+                "remove",
+                "--force",
+                &candidate.path,
+            ])
             .output()
         {
             Ok(out) if out.status.success() => report.removed.push(candidate.path.clone()),
@@ -282,8 +293,14 @@ mod tests {
         );
 
         assert_eq!(report.candidates.len(), 2);
-        assert!(report.candidates.iter().any(|candidate| candidate.path.ends_with("old/wt")));
-        assert!(report.candidates.iter().any(|candidate| candidate.path.ends_with("fresh/wt")));
+        assert!(report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path.ends_with("old/wt")));
+        assert!(report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.path.ends_with("fresh/wt")));
 
         let _ = std::fs::remove_dir_all(&root);
     }

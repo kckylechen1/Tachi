@@ -439,6 +439,7 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
             error_context: None,
             category: None,
             include_archived: false,
+            include_training: false,
             enable_rerank: false,
             as_of: None,
         }))

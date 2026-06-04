@@ -15,7 +15,7 @@ pub(crate) struct TachiSearchParams {
     /// Search query text
     pub query: String,
 
-    /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "all" searches both (default)
+    /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "all" searches both (default), "sft" searches training/distillation corpus.
     #[serde(default = "default_facade_search_scope")]
     pub scope: String,
 
@@ -54,6 +54,11 @@ pub(crate) struct TachiSearchParams {
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,
+
+    /// Include training/distillation corpus entries such as `/sft/...`.
+    /// Defaults to false for agent recall; use `scope="sft"` or this flag to opt in.
+    #[serde(default)]
+    pub include_training: bool,
 
     /// Enable adaptive Voyage reranking for close top results in memory search.
     #[serde(default)]
@@ -220,7 +225,7 @@ pub(crate) struct TachiMemoryParams {
     pub query: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Recall scope for search/ask: \"all\" (default), \"memory\", or \"wiki\"."
+        description = "Recall scope for search/ask: \"all\" (default), \"memory\", \"wiki\", or \"sft\"."
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
@@ -241,6 +246,11 @@ pub(crate) struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "Include archived wiki/memory entries in search results.")]
     pub include_archived: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Include training/distillation corpus entries such as /sft/ in normal recall. Defaults false; scope='sft' opts in."
+    )]
+    pub include_training: bool,
     #[serde(default)]
     #[schemars(
         description = "Enable adaptive Voyage reranking when top hybrid scores are close (search/ask)."

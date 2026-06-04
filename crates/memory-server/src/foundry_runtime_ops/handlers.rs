@@ -693,6 +693,7 @@ pub(crate) async fn handle_recall_context(
                 query_vec: None,
                 top_k: candidate_top_k,
                 path_prefix: search_prefix.clone(),
+                include_training: false,
                 include_archived: false,
                 candidates_per_channel: candidate_top_k.max(20),
                 mmr_threshold: None,
@@ -708,7 +709,7 @@ pub(crate) async fn handle_recall_context(
                 as_of: None,
                 include_metadata: false,
             },
-        false,
+            false,
         )
         .await?;
         for row in rows {
@@ -775,6 +776,7 @@ pub(crate) async fn handle_recall_context(
                 query_vec: None,
                 top_k: wiki_top_k,
                 path_prefix: Some("/wiki".to_string()),
+                include_training: false,
                 include_archived: false,
                 candidates_per_channel: (wiki_top_k * 3).max(20),
                 mmr_threshold: Some(0.85),
@@ -790,7 +792,7 @@ pub(crate) async fn handle_recall_context(
                 as_of: None,
                 include_metadata: false,
             },
-        false,
+            false,
         )
         .await
         {

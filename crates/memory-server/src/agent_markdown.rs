@@ -30,27 +30,27 @@ pub(crate) fn format_briefing(
 
     let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
     if let Some(project) = project_label.filter(|p| !p.is_empty()) {
-        out.push(format!("Project focus: `{project}` (memories/wiki from this repo)"));
+        out.push(format!(
+            "Project focus: `{project}` (memories/wiki from this repo)"
+        ));
     }
 
     if let Some(handoffs) = cross_project.as_array() {
         if !handoffs.is_empty() {
-            out.push(
-                "\n### Cross-project (global handoffs)".to_string(),
-            );
+            out.push("\n### Cross-project (global handoffs)".to_string());
             out.push(
                 "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')`._".to_string(),
             );
             for row in handoffs.iter().take(cross_cap) {
-                let from = row
-                    .get("from_agent")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
+                let from = row.get("from_agent").and_then(Value::as_str).unwrap_or("?");
                 let summary = row
                     .get("summary")
                     .and_then(Value::as_str)
                     .unwrap_or("(handoff)");
-                let path = row.get("path").and_then(Value::as_str).unwrap_or("/handoff");
+                let path = row
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("/handoff");
                 out.push(format!(
                     "- [handoff] `{path}` from **{from}**: {}",
                     md_escape(&compact_text_line(summary, 120))
@@ -394,7 +394,11 @@ mod tests {
             .find(|l| l.starts_with("- "))
             .expect("at least one bullet");
         assert!(!line.contains('\n'), "checkpoint title must be single-line");
-        assert!(line.len() < 200, "checkpoint title should be truncated; got len {}", line.len());
+        assert!(
+            line.len() < 200,
+            "checkpoint title should be truncated; got len {}",
+            line.len()
+        );
     }
 
     #[test]

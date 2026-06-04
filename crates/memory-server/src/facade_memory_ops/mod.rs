@@ -40,6 +40,7 @@ pub(crate) async fn handle_tachi_memory(
                 error_context: params.error_context.clone(),
                 category: params.category.clone(),
                 include_archived: params.include_archived,
+                include_training: params.include_training,
                 enable_rerank: params.enable_rerank,
                 as_of: params.as_of.clone(),
             };

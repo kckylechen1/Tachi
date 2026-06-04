@@ -542,6 +542,7 @@ pub(crate) async fn handle_tachi_wiki_search(
             query_vec: None,
             top_k: params.top_k.max(1),
             path_prefix: Some(path_prefix.clone()),
+            include_training: false,
             include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: None,
@@ -593,6 +594,7 @@ pub(crate) async fn handle_tachi_task_brief(
             query_vec: None,
             top_k,
             path_prefix: Some("/wiki".to_string()),
+            include_training: false,
             include_archived: false,
             candidates_per_channel: top_k.max(20),
             mmr_threshold: Some(0.85),
@@ -619,6 +621,7 @@ pub(crate) async fn handle_tachi_task_brief(
             query_vec: None,
             top_k,
             path_prefix: params.path_prefix.clone(),
+            include_training: false,
             include_archived: false,
             candidates_per_channel: top_k.max(20),
             mmr_threshold: Some(0.85),
@@ -946,6 +949,7 @@ pub(crate) async fn handle_tachi_progress_check(
             query_vec: None,
             top_k: params.top_k.max(1),
             path_prefix: Some("/wiki".to_string()),
+            include_training: false,
             include_archived: false,
             candidates_per_channel: params.top_k.max(20),
             mmr_threshold: Some(0.85),
@@ -1065,6 +1069,7 @@ async fn build_route_recommendation(
             query_vec: None,
             top_k: 20,
             path_prefix: Some("/eval/".to_string()),
+            include_training: false,
             include_archived: false,
             candidates_per_channel: 40,
             mmr_threshold: None,
@@ -1164,11 +1169,9 @@ mod tests {
         })]);
 
         assert!(checklist[0].contains("schema -> client serialization -> server deserialization"));
-        assert!(
-            checklist
-                .iter()
-                .any(|item| item.contains("failing boundary test at the API boundary"))
-        );
+        assert!(checklist
+            .iter()
+            .any(|item| item.contains("failing boundary test at the API boundary")));
     }
 
     #[test]
@@ -1238,10 +1241,9 @@ mod tests {
         let plan = build_tool_plan(intent);
 
         assert_eq!(intent, "review_request");
-        assert!(
-            sops.iter()
-                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check"))
-        );
+        assert!(sops
+            .iter()
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check")));
         assert!(plan.iter().any(|step| {
             step.get("tool").and_then(|v| v.as_str()) == Some("tachi_task")
                 && step.get("action").and_then(|v| v.as_str()) == Some("board")
@@ -1292,10 +1294,9 @@ mod tests {
         })];
         let sops = build_selected_sops("fix_request", &recommended);
 
-        assert!(
-            sops.iter()
-                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt"))
-        );
+        assert!(sops
+            .iter()
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt")));
         assert!(sops.iter().any(|sop| {
             sop.get("id").and_then(|v| v.as_str()) == Some("skill:mcp-schema-debug")
                 && sop.get("source").and_then(|v| v.as_str()) == Some("hub_recommendation")

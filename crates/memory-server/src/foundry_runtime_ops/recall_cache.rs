@@ -143,6 +143,7 @@ pub(super) async fn process_recall_rerank_cache_job(
                 query_vec: None,
                 top_k: candidate_top_k,
                 path_prefix: path_prefix.clone(),
+                include_training: false,
                 include_archived: false,
                 candidates_per_channel: candidate_top_k.max(20),
                 mmr_threshold: None,

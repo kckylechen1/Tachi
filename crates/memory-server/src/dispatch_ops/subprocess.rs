@@ -276,10 +276,9 @@ mod tests {
         let args = kimi_command_args(&params, "hello");
 
         assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--output-format", "stream-json"])
-        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "stream-json"]));
         assert!(
             !args
                 .windows(2)

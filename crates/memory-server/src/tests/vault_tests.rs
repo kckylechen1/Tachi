@@ -843,8 +843,7 @@ PROJECT_MISSING=vault:missing.secret
     cmd.arg("-c").arg(
         "printf '%s|%s|%s|' \"$PROJECT_LONGPORT_SECRET\" \"$PROJECT_SHARED_API_KEY\" \"$PROJECT_LITERAL\"",
     );
-    let injected =
-        crate::dispatch_ops::apply_unlocked_vault_env(&mut cmd, &server, Some(&nested));
+    let injected = crate::dispatch_ops::apply_unlocked_vault_env(&mut cmd, &server, Some(&nested));
     assert_eq!(injected, 2);
 
     let output = cmd.output().await.expect("env probe command should run");

@@ -26,7 +26,7 @@ use memory_core::MemoryEntry;
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
-use memory_core::{JobStatusHistogram, MemoryStore, job_status_histogram};
+use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
 
 use crate::daemon_lock::{process_alive, read_pid_file};
 use crate::manifest::{DbRole, Manifest};
@@ -640,7 +640,7 @@ pub(crate) fn runtime_observability_json(
         Some(DaemonStatus::Running { pid, .. }) => Some(*pid),
         Some(DaemonStatus::StalePid { pid, .. }) => Some(*pid),
         Some(DaemonStatus::None) => None,
-        None => read_pid_file(&app_home.join("daemon.lock")),
+        None => read_pid_file(app_home.join("daemon.lock")),
     };
     let daemon_running = daemon_pid.map(process_alive).unwrap_or(false);
     let serving_daemon = daemon_pid

@@ -15,6 +15,7 @@ pub(crate) async fn handle_tachi_board(
             query_vec: None,
             top_k: limit,
             path_prefix: Some("/kanban/tasks/".to_string()),
+            include_training: false,
             include_archived: false,
             candidates_per_channel: 20,
             mmr_threshold: Some(0.7),

@@ -57,6 +57,7 @@ pub(crate) async fn handle_memory_briefing(
         query_vec: None,
         top_k: top_k.saturating_mul(2).max(top_k),
         path_prefix: params.path_prefix.clone(),
+        include_training: params.include_training,
         include_archived: params.include_archived,
         candidates_per_channel: 20,
         mmr_threshold: Some(0.85),
@@ -84,6 +85,7 @@ pub(crate) async fn handle_memory_briefing(
                     .clone()
                     .unwrap_or_else(|| "/wiki".to_string()),
             ),
+            include_training: params.include_training,
             include_archived: params.include_archived,
             candidates_per_channel: 20,
             mmr_threshold: Some(0.85),

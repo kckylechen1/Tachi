@@ -54,6 +54,7 @@ pub(crate) async fn handle_memory_ask(
         error_context: params.error_context.clone(),
         category: params.category.clone(),
         include_archived: params.include_archived,
+        include_training: params.include_training,
         enable_rerank: true,
         as_of: params.as_of.clone(),
     };
@@ -112,7 +113,8 @@ pub(crate) async fn handle_memory_ask(
     if cross_store {
         fields.push((
             "cross_store",
-            "evidence spans global and project stores; pin `project=...` to scope to one library".to_string(),
+            "evidence spans global and project stores; pin `project=...` to scope to one library"
+                .to_string(),
         ));
     }
     Ok(format_agent_status(
@@ -173,6 +175,7 @@ pub(crate) async fn handle_memory_consolidate(
         error_context: params.error_context.clone(),
         category: params.category.clone(),
         include_archived: params.include_archived,
+        include_training: params.include_training,
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
     };
@@ -284,7 +287,12 @@ pub(crate) async fn handle_memory_readiness(
         .count();
     let hidden_tools: Vec<&str> = required_tools
         .iter()
-        .filter(|tool| !tool.get("visible").and_then(Value::as_bool).unwrap_or(false))
+        .filter(|tool| {
+            !tool
+                .get("visible")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect();
     let vector_health =

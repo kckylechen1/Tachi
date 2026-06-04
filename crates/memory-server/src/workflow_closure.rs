@@ -51,7 +51,8 @@ pub(crate) async fn handle_workflow(
                 .filter(|s| !s.trim().is_empty())
                 .ok_or_else(|| "wiki_text is required for close_loop".to_string())?;
 
-            let references = build_closure_references(issue_ref, &params.doc_paths, &params.related_issues);
+            let references =
+                build_closure_references(issue_ref, &params.doc_paths, &params.related_issues);
             crate::wiki_ops::validate_references(&references)?;
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
@@ -69,7 +70,10 @@ pub(crate) async fn handle_workflow(
                     keywords: params.wiki_keywords.clone(),
                     entities: params.wiki_entities.clone(),
                     importance: params.wiki_importance.unwrap_or(0.85),
-                    scope: params.wiki_scope.clone().unwrap_or_else(|| "global".to_string()),
+                    scope: params
+                        .wiki_scope
+                        .clone()
+                        .unwrap_or_else(|| "global".to_string()),
                     retention_policy: "permanent".to_string(),
                     domain: params.wiki_domain.clone(),
                     project: params.project.clone(),

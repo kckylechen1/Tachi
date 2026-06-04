@@ -1264,11 +1264,9 @@ mod migration_tests {
         .unwrap();
         init_schema(&conn).expect("bridge should move mistaken domain out of location");
         let domain: Option<String> = conn
-            .query_row(
-                "SELECT domain FROM memories WHERE id='repair-1'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT domain FROM memories WHERE id='repair-1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(domain.as_deref(), Some("finance"));
         let has_location_column: bool = conn

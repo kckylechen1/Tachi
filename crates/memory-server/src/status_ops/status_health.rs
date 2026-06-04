@@ -276,7 +276,7 @@ pub(crate) fn load_keychain_vault_api_key_values(
         return Ok(Vec::new());
     }
 
-    use base64::{Engine, engine::general_purpose::STANDARD as B64};
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     let output = std::process::Command::new("security")
         .args([
@@ -798,12 +798,10 @@ mod tests {
 
         assert_eq!(voyage.status, "configured");
         assert_eq!(voyage.source, "vault+env(same)");
-        assert!(
-            voyage
-                .drift_warning
-                .as_deref()
-                .is_some_and(|warning| warning.starts_with("redundant:"))
-        );
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("redundant:")));
 
         restore_env("VOYAGE_API_KEY", original);
     }
@@ -825,12 +823,10 @@ mod tests {
 
         assert_eq!(voyage.status, "drift");
         assert_eq!(voyage.source, "vault+env");
-        assert!(
-            voyage
-                .drift_warning
-                .as_deref()
-                .is_some_and(|warning| warning.starts_with("drift:"))
-        );
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("drift:")));
 
         restore_env("VOYAGE_API_KEY", original);
     }
@@ -852,12 +848,10 @@ mod tests {
 
         assert_eq!(voyage.status, "configured");
         assert_eq!(voyage.source, "vault+env(unverified)");
-        assert!(
-            voyage
-                .drift_warning
-                .as_deref()
-                .is_some_and(|warning| warning.starts_with("duplicate-unverified:"))
-        );
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
 
         restore_env("VOYAGE_API_KEY", original);
     }
@@ -877,12 +871,10 @@ mod tests {
         assert!(reasoning.deprecated);
         assert_eq!(reasoning.canonical_name, "SILICONFLOW_API_KEY");
         assert_eq!(reasoning.status, "configured");
-        assert!(
-            reasoning
-                .cleanup_hint
-                .as_deref()
-                .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY"))
-        );
+        assert!(reasoning
+            .cleanup_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
 
         restore_env("REASONING_API_KEY", original);
     }

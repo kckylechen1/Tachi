@@ -347,7 +347,6 @@ fn append_log(report: &WtRemoveReport) -> Result<(), String> {
     .map_err(|err| format!("write log: {err}"))
 }
 
-
 fn canonical_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
