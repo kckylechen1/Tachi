@@ -1,10 +1,12 @@
 mod registry;
+mod tachi_clean;
 mod target_clean;
 mod wt_clean;
 
 use std::path::PathBuf;
 
 use registry::{RegisterOptions, RegisterOutputFormat};
+use tachi_clean::TachiCleanOptions;
 use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
 
@@ -28,13 +30,51 @@ fn run() -> Result<(), String> {
 
     let command = args.remove(0);
     match command.as_str() {
+        "tachi" | "tachi-clean" => run_tachi_clean(args),
         "target" | "target-clean" => run_target_clean(args),
         "wt-register" => run_wt_register(args),
         "wt-remove" => run_wt_remove(args),
         _ => Err(format!(
-            "unknown command '{command}'. Expected: target, wt-register, or wt-remove"
+            "unknown command '{command}'. Expected: tachi, target, wt-register, or wt-remove"
         )),
     }
+}
+
+fn run_tachi_clean(args: Vec<String>) -> Result<(), String> {
+    let mut force = false;
+    let mut json = false;
+    let mut home: Option<PathBuf> = None;
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--dry-run" => force = false,
+            "--json" => json = true,
+            "--home" => {
+                home = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| "--home requires a value".to_string())?,
+                ));
+            }
+            "-h" | "--help" => {
+                print_tachi_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => return Err("tachi accepts only options; use --home <path>".to_string()),
+        }
+    }
+
+    tachi_clean::run_tachi_clean(TachiCleanOptions {
+        home,
+        force,
+        output: if json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+    })
 }
 
 fn run_target_clean(args: Vec<String>) -> Result<(), String> {
@@ -172,7 +212,13 @@ fn run_wt_remove(args: Vec<String>) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "tachi-clean\n\nUsage:\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+        "tachi-clean\n\nUsage:\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+    );
+}
+
+fn print_tachi_help() {
+    println!(
+        "Clean Tachi self-maintenance artifacts.\n\nUsage:\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n\nOptions:\n  --home <path>  Tachi home (default: TACHI_HOME or ~/.tachi)\n  --dry-run      Preview only (default)\n  --force        Remove old logs, runs, Claude Code runs, and stale cleanup backups\n  --json         Print machine-readable JSON\n"
     );
 }
 

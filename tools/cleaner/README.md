@@ -5,6 +5,9 @@ Safe cleanup utility for Tachi-managed worktrees and build artifacts.
 Current scope:
 
 ```bash
+tachi-clean tachi                   # dry-run by default
+tachi-clean tachi --force           # remove old Tachi self artifacts
+tachi-clean tachi --home /tmp/tachi --json
 tachi-clean target [path]            # dry-run by default
 tachi-clean target [path] --force    # remove non-release build artifacts
 tachi-clean target [path] --json
@@ -22,3 +25,8 @@ when available, and prefers `git worktree remove` over direct file deletion.
 `target` removes Cargo build intermediates while keeping top-level release
 outputs. It deletes `target/debug` and `target/release/{deps,build,incremental,examples,.fingerprint}`
 only when `--force` is passed.
+
+`tachi` cleans Tachi self-maintenance artifacts under `TACHI_HOME` or
+`~/.tachi`. It keeps the latest two `cleanup-backups` entries by name and
+removes old `logs`, `runs`, and `.agent/claude-code-runs` entries after seven
+days.
