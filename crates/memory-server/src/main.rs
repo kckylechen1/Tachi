@@ -132,7 +132,7 @@ use crate::utils::{
     parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
     write_or_recover,
 };
-use crate::vault_ops::load_unlocked_env_secrets;
+use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
 use clap::Parser;
@@ -691,8 +691,9 @@ impl MemoryServer {
 
     pub(crate) fn unlocked_env_secrets_for_child_env(
         &self,
+        cwd: Option<&std::path::Path>,
     ) -> Result<Vec<(String, String)>, String> {
-        load_unlocked_env_secrets(self)
+        load_unlocked_env_secrets_for_child_env(self, cwd)
     }
 
     /// Clone the foundry maintenance sender so external supervisors

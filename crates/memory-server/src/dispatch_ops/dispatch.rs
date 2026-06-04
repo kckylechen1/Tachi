@@ -24,8 +24,12 @@ pub(crate) struct DispatchResult {
     pub exit_code: Option<i32>,
 }
 
-pub(crate) fn apply_unlocked_vault_env(cmd: &mut Command, server: &MemoryServer) -> usize {
-    let Ok(secrets) = server.unlocked_env_secrets_for_child_env() else {
+pub(crate) fn apply_unlocked_vault_env(
+    cmd: &mut Command,
+    server: &MemoryServer,
+    cwd: Option<&std::path::Path>,
+) -> usize {
+    let Ok(secrets) = server.unlocked_env_secrets_for_child_env(cwd) else {
         return 0;
     };
 
@@ -378,7 +382,11 @@ pub(crate) async fn handle_tachi_dispatch(
             ));
         }
     };
-    let _ = apply_unlocked_vault_env(&mut cmd, server);
+    let _ = apply_unlocked_vault_env(
+        &mut cmd,
+        server,
+        params.cwd.as_deref().map(std::path::Path::new),
+    );
 
     // 6. Spawn background task with Watchdog
     let server_clone = server.clone();

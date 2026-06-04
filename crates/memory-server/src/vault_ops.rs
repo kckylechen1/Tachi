@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
 use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
 use serde_json::json;
+use std::path::{Path, PathBuf};
 
 const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
 const VAULT_UNLOCK_LOCKOUT_SECS: u64 = 300;
@@ -358,6 +359,89 @@ pub(super) fn load_unlocked_env_secrets(
     server: &MemoryServer,
 ) -> Result<Vec<(String, String)>, String> {
     load_unlocked_vault_secrets(server, |entry| is_shell_env_name(&entry.name))
+}
+
+pub(super) fn load_unlocked_env_secrets_for_child_env(
+    server: &MemoryServer,
+    cwd: Option<&Path>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut secrets = load_unlocked_env_secrets(server)?;
+    let Some(cwd) = cwd else {
+        return Ok(secrets);
+    };
+    let Some(bindings_path) = find_project_vault_env_file(cwd) else {
+        return Ok(secrets);
+    };
+
+    let contents = std::fs::read_to_string(&bindings_path)
+        .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
+    for (env_name, secret_name) in parse_project_vault_env_bindings(&contents) {
+        let value = match read_unlocked_vault_secret(server, &secret_name, None, false) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(
+                    "[vault] skipped project env binding {}={} from {}: {}",
+                    env_name,
+                    crate::provider_config::vault_alias_line(&secret_name),
+                    bindings_path.display(),
+                    err
+                );
+                continue;
+            }
+        };
+        upsert_env_secret(&mut secrets, env_name, value);
+    }
+
+    Ok(secrets)
+}
+
+fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {
+    let start = if cwd.is_file() {
+        cwd.parent().unwrap_or(cwd)
+    } else {
+        cwd
+    };
+
+    for dir in start.ancestors() {
+        for rel_path in [".tachi/vault.env", ".tachi/vault-bindings.env"] {
+            let candidate = dir.join(rel_path);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn parse_project_vault_env_bindings(contents: &str) -> Vec<(String, String)> {
+    contents
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let line = line.strip_prefix("export ").unwrap_or(line).trim();
+            let (name, value) = line.split_once('=')?;
+            let name = name.trim();
+            if !is_shell_env_name(name) {
+                return None;
+            }
+            crate::provider_config::parse_vault_alias(value)
+                .map(|secret_name| (name.to_string(), secret_name.to_string()))
+        })
+        .collect()
+}
+
+fn upsert_env_secret(secrets: &mut Vec<(String, String)>, name: String, value: String) {
+    if let Some((_, existing_value)) = secrets
+        .iter_mut()
+        .find(|(existing_name, _)| existing_name == &name)
+    {
+        *existing_value = value;
+    } else {
+        secrets.push((name, value));
+    }
 }
 
 fn attach_provider_refresh_warning(server: &MemoryServer, body: String) -> Result<String, String> {
