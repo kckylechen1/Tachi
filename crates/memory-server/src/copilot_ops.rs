@@ -751,16 +751,14 @@ fn classify_task_intent(task: &str) -> &'static str {
     }
 }
 
-fn task_matches_intent(task: &str, lower: &str, needle: &str) -> bool {
+fn task_matches_intent(_task: &str, lower: &str, needle: &str) -> bool {
     if needle
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
     {
         contains_ascii_word(lower, needle)
-    } else if needle.is_ascii() {
-        lower.contains(needle)
     } else {
-        task.contains(needle)
+        lower.contains(needle)
     }
 }
 
@@ -978,10 +976,7 @@ pub(crate) async fn handle_tachi_progress_check(
             .map(|(idx, attempt)| format!("{}. {}", idx + 1, attempt))
             .collect::<Vec<_>>()
             .join("\n"),
-        params
-            .latest_error
-            .clone()
-            .unwrap_or_else(|| "(none provided)".to_string())
+        params.latest_error.as_deref().unwrap_or("(none provided)")
     );
     let progress_log = if let Some(flow_id) = params.flow_id.as_deref() {
         record_progress_check_event(flow_id, &params, stuck)?
@@ -1284,6 +1279,7 @@ mod tests {
             classify_task_intent("看看这几个 PR 下面 Gemini 的回复"),
             "review_request"
         );
+        assert_eq!(classify_task_intent("看一下 PRs"), "review_request");
     }
 
     #[test]
