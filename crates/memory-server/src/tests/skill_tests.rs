@@ -360,6 +360,66 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
         results.iter().all(|item| item.get("definition").is_none()),
         "skill discover facade should not return full definitions: {json}"
     );
+    assert_eq!(json["source"], json!("local_approved_cache"));
+    assert_eq!(json["search_backend"], json!("hub_search"));
+}
+
+#[tokio::test]
+async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
+    let server = make_server();
+
+    let mut pending = make_skill_capability(
+        "skill:debug-pending",
+        "debug-pending",
+        "Debug workflow that still needs review",
+        "standard",
+    );
+    pending.review_status = "pending".to_string();
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&make_skill_capability(
+                    "skill:debug-approved",
+                    "debug-approved",
+                    "Approved debug workflow",
+                    "standard",
+                ))
+                .map_err(|e| format!("register approved failed: {e}"))?;
+            store
+                .hub_register(&pending)
+                .map_err(|e| format!("register pending failed: {e}"))?;
+            Ok::<_, String>(())
+        })
+        .expect("failed to register skills");
+
+    let response = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "discover".to_string(),
+            query: Some("debug workflow".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: Some(10),
+            skill_id: None,
+            args: None,
+        }))
+        .await
+        .expect("tachi_skill discover should succeed");
+
+    let json: Value = serde_json::from_str(&response).expect("skill discover response json");
+    let ids = json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(ids.contains(&"skill:debug-approved"), "{json}");
+    assert!(!ids.contains(&"skill:debug-pending"), "{json}");
+    assert!(json["results"].as_array().unwrap().iter().all(|item| {
+        item.get("callable").and_then(|value| value.as_bool()) == Some(true)
+            && item.get("source").and_then(|value| value.as_str()) == Some("local_approved_cache")
+    }));
 }
 
 #[tokio::test]

@@ -1573,6 +1573,9 @@ impl MemoryServer {
                 let raw = handle_hub_discover(self, discover_params).await?;
                 let mut capabilities: Vec<Value> =
                     serde_json::from_str(&raw).map_err(|e| format!("parse hub discover: {e}"))?;
+                if params.enabled_only.unwrap_or(true) {
+                    capabilities.retain(skill_discover_result_is_callable);
+                }
                 let limit = params.limit.unwrap_or(10).max(1);
                 capabilities.truncate(limit);
                 let results = capabilities
@@ -1589,11 +1592,15 @@ impl MemoryServer {
                             "visibility": cap.get("visibility").cloned().unwrap_or(Value::Null),
                             "callable": cap.get("callable").cloned().unwrap_or(Value::Null),
                             "db": cap.get("db").cloned().unwrap_or(Value::Null),
+                            "source": "local_approved_cache",
                         })
                     })
                     .collect::<Vec<_>>();
                 serde_json::to_string(&json!({
                     "query": params.query,
+                    "search_backend": if params.query.as_deref().is_some_and(|q| !q.trim().is_empty()) { "hub_search" } else { "hub_list" },
+                    "online_search": false,
+                    "source": "local_approved_cache",
                     "count": results.len(),
                     "results": results,
                 }))
@@ -1724,4 +1731,19 @@ impl MemoryServer {
     ) -> Result<String, String> {
         crate::shell_ops::handle_tachi_shell(self, params).await
     }
+}
+
+fn skill_discover_result_is_callable(cap: &Value) -> bool {
+    cap.get("callable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        && cap
+            .get("review_status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|status| status.eq_ignore_ascii_case("approved"))
+        && cap
+            .get("health_status")
+            .and_then(|v| v.as_str())
+            .map(|status| !status.eq_ignore_ascii_case("open"))
+            .unwrap_or(true)
 }
