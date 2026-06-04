@@ -605,6 +605,11 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         .await
         .expect("status should serialize");
     let parsed: Value = serde_json::from_str(&body).expect("status JSON");
+    assert!(parsed["runtime"]["pid"].as_u64().is_some());
+    assert!(parsed["runtime"]["provider_secret_count"]
+        .as_u64()
+        .is_some());
+    assert_eq!(parsed["runtime"]["vault"]["unlocked"], json!(false));
     assert_eq!(parsed["databases"]["failed_jobs"], json!(1));
     assert_eq!(parsed["distill"]["is_stale"], json!(false));
     assert!(

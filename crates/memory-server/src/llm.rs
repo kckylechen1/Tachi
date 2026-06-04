@@ -258,6 +258,13 @@ impl LlmClient {
             .clear();
     }
 
+    pub fn provider_secret_count(&self) -> usize {
+        self.provider_secrets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+
     fn first_secret(&self, keys: &[&str]) -> Option<String> {
         let vault_value = {
             let secrets = self

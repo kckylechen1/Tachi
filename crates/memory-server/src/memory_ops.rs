@@ -182,6 +182,15 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let binary = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
+    let app_home = std::env::var("TACHI_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".tachi")
+        });
+    let process = crate::status_ops::runtime_observability_json(server, &app_home, None);
 
     let project = server.project_db_path.as_ref().map(|path| {
         json!({
@@ -200,6 +209,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "requested_profile": requested_profile,
             "derivative_identity": derivative_identity,
         },
+        "process": process,
         "databases": {
             "global": {
                 "path": server.global_db_path.display().to_string(),

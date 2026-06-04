@@ -616,6 +616,67 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub(crate) fn runtime_observability_json(
+    server: &crate::MemoryServer,
+    app_home: &Path,
+    daemon: Option<&DaemonStatus>,
+) -> serde_json::Value {
+    let current_pid = std::process::id();
+    let binary = std::env::current_exe()
+        .ok()
+        .map(|path| path.display().to_string());
+    let daemon_pid = match daemon {
+        Some(DaemonStatus::Running { pid, .. }) => Some(*pid),
+        Some(DaemonStatus::StalePid { pid, .. }) => Some(*pid),
+        Some(DaemonStatus::None) => None,
+        None => read_pid_file(&app_home.join("daemon.lock")),
+    };
+    let daemon_running = daemon_pid.map(process_alive).unwrap_or(false);
+    let serving_daemon = daemon_pid
+        .map(|pid| daemon_running && pid as u32 == current_pid)
+        .unwrap_or(false);
+    let mode = if serving_daemon {
+        "daemon"
+    } else if daemon_pid.is_some() {
+        "sidecar_or_stdio"
+    } else {
+        "single_process"
+    };
+
+    let vault = {
+        let state = server.vault_read();
+        let unlocked_for_seconds = state.unlock_time.map(|instant| instant.elapsed().as_secs());
+        let lockout_remaining_seconds = state.failed_attempts.1.map(|until| {
+            until
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+        });
+        json!({
+            "unlocked": state.key.is_some() && unlocked_for_seconds
+                .map(|elapsed| elapsed <= state.auto_lock_after_secs)
+                .unwrap_or(false),
+            "unlocked_for_seconds": unlocked_for_seconds,
+            "auto_lock_after_seconds": state.auto_lock_after_secs,
+            "failed_attempts": state.failed_attempts.0,
+            "lockout_remaining_seconds": lockout_remaining_seconds,
+        })
+    };
+
+    json!({
+        "pid": current_pid,
+        "binary": binary,
+        "mode": mode,
+        "serving_daemon": serving_daemon,
+        "daemon": {
+            "pid": daemon_pid,
+            "running": daemon_running,
+            "matches_current_process": serving_daemon,
+        },
+        "provider_secret_count": server.llm.provider_secret_count(),
+        "vault": vault,
+    })
+}
+
 pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -960,11 +1021,27 @@ async fn handle_tachi_status_detail(
         .collect();
     let readiness = status_health::agent_readiness_json(&app_home, &snapshot);
 
-    let warnings = build_status_warnings(&snapshot, &daemon_state);
+    let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon));
+    let mut warnings = build_status_warnings(&snapshot, &daemon_state);
+    if runtime
+        .pointer("/daemon/running")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && !runtime
+            .pointer("/daemon/matches_current_process")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        warnings.push(
+            "this MCP process is not the registered daemon; restart stale MCP clients if runtime state looks inconsistent"
+                .to_string(),
+        );
+    }
 
     if full {
         serde_json::to_string(&json!({
             "daemon": daemon_state,
+            "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
             "databases": {
@@ -1007,6 +1084,7 @@ async fn handle_tachi_status_detail(
         serde_json::to_string(&json!({
             "detail": "agent",
             "daemon": daemon_state,
+            "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
             "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
