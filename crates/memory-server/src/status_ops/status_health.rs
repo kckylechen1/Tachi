@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde_json::json;
@@ -272,6 +272,19 @@ pub(crate) fn load_keychain_vault_api_key_values(
 }
 
 pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
+    collect_api_key_status_inner(global_db_path, false)
+}
+
+pub(crate) fn collect_api_key_status_with_value_compare(
+    global_db_path: &Path,
+) -> Vec<ApiKeyStatus> {
+    collect_api_key_status_inner(global_db_path, true)
+}
+
+fn collect_api_key_status_inner(
+    global_db_path: &Path,
+    compare_vault_values: bool,
+) -> Vec<ApiKeyStatus> {
     let mut vault_names = HashSet::new();
     if let Some(path) = global_db_path.to_str() {
         if let Ok(store) = memory_core::MemoryStore::open_read_only(path) {
@@ -286,7 +299,23 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
         }
     }
     let config_env = crate::provider_config::collect_config_env_values();
+    let vault_values: HashMap<String, String> = if compare_vault_values {
+        load_keychain_vault_api_key_values(global_db_path)
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
+    } else {
+        HashMap::new()
+    };
 
+    collect_api_key_status_from_sources(vault_names, vault_values, config_env)
+}
+
+fn collect_api_key_status_from_sources(
+    vault_names: HashSet<String>,
+    vault_values: HashMap<String, String>,
+    config_env: HashMap<String, String>,
+) -> Vec<ApiKeyStatus> {
     API_KEY_DEFS
         .iter()
         .map(|def| {
@@ -309,6 +338,30 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
                 .and_then(|value| crate::provider_config::parse_vault_alias(value))
                 .map(|target| vault_names.contains(target))
                 .unwrap_or(false);
+            let env_plaintext = env_value.as_deref().and_then(|value| {
+                let value = value.trim();
+                if value.is_empty() || crate::provider_config::is_vault_alias(value) {
+                    None
+                } else {
+                    Some(value)
+                }
+            });
+            let config_plaintext = config_value.and_then(|value| {
+                let value = value.trim();
+                if value.is_empty() || crate::provider_config::is_vault_alias(value) {
+                    None
+                } else {
+                    Some(value)
+                }
+            });
+            let duplicate_plaintext = env_plaintext
+                .map(|value| ("env", value))
+                .or_else(|| config_plaintext.map(|value| ("config.env", value)));
+            let duplicate_matches_vault = duplicate_plaintext.and_then(|(_, plaintext)| {
+                vault_values
+                    .get(def.key)
+                    .map(|vault_value| plaintext == vault_value.trim())
+            });
             let alias_configured = def.aliases.iter().any(|alias| {
                 vault_names.contains(*alias)
                     || config_env.contains_key(*alias)
@@ -320,59 +373,76 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
             let (status, source) = if vault_configured
                 && (config_is_vault_alias && config_alias_resolves)
             {
-                ("configured", "vault(config.env)")
+                ("configured", "vault(config.env)".to_string())
             } else if vault_configured
                 && (env_is_vault_alias || (file_configured && config_is_vault_alias))
             {
                 if config_alias_resolves || env_is_vault_alias {
-                    ("configured", "vault(config.env)")
+                    ("configured", "vault(config.env)".to_string())
                 } else {
-                    ("missing", "vault-alias-unresolved")
+                    ("missing", "vault-alias-unresolved".to_string())
                 }
             } else if vault_configured && ((env_configured && !env_is_vault_alias) || (file_configured && !config_is_vault_alias))
             {
-                (
-                    "drift",
-                    if env_configured && !env_is_vault_alias {
-                        "vault+env"
-                    } else {
-                        "vault+config.env"
-                    },
-                )
+                let duplicate_source = duplicate_plaintext
+                    .map(|(source, _)| source)
+                    .unwrap_or("plaintext");
+                match duplicate_matches_vault {
+                    Some(false) => ("drift", format!("vault+{duplicate_source}")),
+                    Some(true) => ("configured", format!("vault+{duplicate_source}(same)")),
+                    None => (
+                        "configured",
+                        format!("vault+{duplicate_source}(unverified)"),
+                    ),
+                }
             } else if vault_configured {
-                ("configured", "vault")
+                ("configured", "vault".to_string())
             } else if env_configured || file_configured || alias_configured {
                 (
                     "configured",
                     if env_configured {
                         if env_is_vault_alias {
-                            "vault(config.env)"
+                            "vault(config.env)".to_string()
                         } else {
-                            "env"
+                            "env".to_string()
                         }
                     } else if file_configured {
                         if config_is_vault_alias {
-                            "vault(config.env)"
+                            "vault(config.env)".to_string()
                         } else {
-                            "config.env"
+                            "config.env".to_string()
                         }
                     } else {
-                        "alias"
+                        "alias".to_string()
                     },
                 )
             } else if def.deprecated {
-                ("deprecated-unset", "none")
+                ("deprecated-unset", "none".to_string())
             } else {
-                ("missing", "none")
+                ("missing", "none".to_string())
             };
             let drift_warning = if vault_configured
                 && ((env_configured && !env_is_vault_alias)
                     || (file_configured && !config_is_vault_alias))
             {
-                Some(
-                    "duplicate: plaintext key in env/config.env while Vault also holds this key; use vault:NAME in config.env or remove the plaintext line"
-                        .to_string(),
-                )
+                let duplicate_source = duplicate_plaintext
+                    .map(|(source, _)| source)
+                    .unwrap_or("env/config.env");
+                let message = match duplicate_matches_vault {
+                    Some(false) => format!(
+                        "drift: plaintext key in {duplicate_source} differs from Vault; Vault remains the provider source, but remove or replace the plaintext line with vault:{}",
+                        def.key
+                    ),
+                    Some(true) => format!(
+                        "redundant: plaintext key in {duplicate_source} duplicates Vault; replace it with vault:{} or remove it",
+                        def.key
+                    ),
+                    None => format!(
+                        "duplicate-unverified: plaintext key in {duplicate_source} exists while Vault also holds this key; unlock Vault via Keychain to compare, then use vault:{} or remove the plaintext line",
+                        def.key
+                    ),
+                };
+                Some(message)
             } else {
                 None
             };
@@ -382,7 +452,7 @@ pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus>
                 required: def.required,
                 deprecated: def.deprecated,
                 status: status.to_string(),
-                source: source.to_string(),
+                source,
                 env_configured,
                 vault_configured,
                 drift_warning,
@@ -604,5 +674,99 @@ pub(crate) fn shell_quote(value: &str) -> String {
         value.to_string()
     } else {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
+        rows.iter()
+            .find(|row| row.name == name)
+            .expect("api key row should exist")
+    }
+
+    fn restore_env(name: &str, original: Option<std::ffi::OsString>) {
+        if let Some(value) = original {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("VOYAGE_API_KEY");
+        std::env::set_var("VOYAGE_API_KEY", "same-secret");
+
+        let rows = collect_api_key_status_from_sources(
+            HashSet::from(["VOYAGE_API_KEY".to_string()]),
+            HashMap::from([("VOYAGE_API_KEY".to_string(), "same-secret".to_string())]),
+            HashMap::new(),
+        );
+        let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+        assert_eq!(voyage.status, "configured");
+        assert_eq!(voyage.source, "vault+env(same)");
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("redundant:")));
+
+        restore_env("VOYAGE_API_KEY", original);
+    }
+
+    #[test]
+    fn vault_plaintext_duplicate_with_different_value_is_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("VOYAGE_API_KEY");
+        std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+        let rows = collect_api_key_status_from_sources(
+            HashSet::from(["VOYAGE_API_KEY".to_string()]),
+            HashMap::from([("VOYAGE_API_KEY".to_string(), "vault-secret".to_string())]),
+            HashMap::new(),
+        );
+        let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+        assert_eq!(voyage.status, "drift");
+        assert_eq!(voyage.source, "vault+env");
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("drift:")));
+
+        restore_env("VOYAGE_API_KEY", original);
+    }
+
+    #[test]
+    fn vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("VOYAGE_API_KEY");
+        std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+        let rows = collect_api_key_status_from_sources(
+            HashSet::from(["VOYAGE_API_KEY".to_string()]),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+        assert_eq!(voyage.status, "configured");
+        assert_eq!(voyage.source, "vault+env(unverified)");
+        assert!(voyage
+            .drift_warning
+            .as_deref()
+            .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
+
+        restore_env("VOYAGE_API_KEY", original);
     }
 }
