@@ -79,16 +79,14 @@ const RECALL_QUERY_LLM_MAX_TOKENS: u32 = 80;
 const RECALL_QUERY_LLM_MAX_SOURCES: usize = 6;
 const RECALL_QUERY_LLM_SYSTEM: &str = "You generate ONE short natural-language search query (5–15 words, no quotes, no leading verbs like 'find' or 'search', just the query phrase) that a user would type to retrieve the given memory snippets later. Output ONLY the query phrase on a single line.";
 
-/// Recall-cache rows are ephemeral; avoid writing `/wiki/...` into non-wiki project DBs.
+/// Recall-cache rows are ephemeral; never write them into the user-facing wiki tree.
 fn recall_cache_write_path(
     path_prefix: &str,
     cache_topic: &str,
-    named_project: Option<&str>,
+    _named_project: Option<&str>,
 ) -> String {
     let prefix = path_prefix.trim_end_matches('/');
-    let wiki_prefix_on_other_project = prefix.starts_with("/wiki")
-        && !named_project.is_some_and(|p| p.eq_ignore_ascii_case("wiki"));
-    if wiki_prefix_on_other_project {
+    if prefix.starts_with("/wiki") {
         return format!("/scratch/recall-cache/{cache_topic}");
     }
     format!("{prefix}/recall-cache/{cache_topic}")
@@ -479,9 +477,9 @@ mod tests {
     }
 
     #[test]
-    fn recall_cache_path_keeps_wiki_prefix_for_wiki_project() {
+    fn recall_cache_path_remaps_wiki_prefix_for_wiki_project() {
         let p = recall_cache_write_path("/wiki/engineering", "smoke", Some("wiki"));
-        assert_eq!(p, "/wiki/engineering/recall-cache/smoke");
+        assert_eq!(p, "/scratch/recall-cache/smoke");
     }
 
     #[test]

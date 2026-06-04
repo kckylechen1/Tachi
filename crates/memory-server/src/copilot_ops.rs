@@ -535,7 +535,7 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
-    let rows = search_memory_rows(
+    let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -566,6 +566,7 @@ pub(crate) async fn handle_tachi_wiki_search(
         false,
     )
     .await?;
+    crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
 
     crate::wiki_ops::append_wiki_log(
         server,
@@ -585,7 +586,7 @@ pub(crate) async fn handle_tachi_task_brief(
     params: TaskBriefParams,
 ) -> Result<String, String> {
     let top_k = params.top_k.max(1);
-    let wiki_rows = search_memory_rows(
+    let mut wiki_rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.task.clone(),
@@ -610,6 +611,7 @@ pub(crate) async fn handle_tachi_task_brief(
         false,
     )
     .await?;
+    crate::wiki_ops::filter_user_facing_wiki_rows(&mut wiki_rows);
     let memory_rows = search_memory_rows(
         server,
         SearchMemoryParams {

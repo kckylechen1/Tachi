@@ -269,41 +269,25 @@ fn list_related_candidates(
     project: &str,
     limit: usize,
 ) -> Result<Vec<MemoryEntry>, String> {
-    server
-        .with_named_project_store_read(project, |store| {
-            store
-                .list_by_path("/wiki", limit, false)
-                .map_err(|e| format!("wiki list: {e}"))
-        })
-        .map(|entries| {
-            entries
-                .into_iter()
-                .filter(is_user_facing_wiki_entry)
-                .collect()
-        })
-        .or_else(|_| {
-            server
-                .with_global_store_read(|store| {
-                    store
-                        .list_by_path("/wiki", limit, false)
-                        .map_err(|e| format!("wiki fallback list: {e}"))
-                })
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .filter(is_user_facing_wiki_entry)
-                        .collect()
-                })
-        })
+    list_wiki_entries(server, project, limit).map(|(entries, _)| entries)
 }
 
 fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
     entry.path != "/wiki/_log"
+        && !entry.path.contains("/recall-cache/")
+        && entry.source != "foundry_recall_rerank_cache"
         && !entry
             .metadata
             .get("wiki_log")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+}
+
+pub(crate) fn filter_user_facing_wiki_rows(rows: &mut Vec<Value>) {
+    rows.retain(|row| {
+        let path = row.get("path").and_then(Value::as_str).unwrap_or_default();
+        path != "/wiki/_log" && !path.contains("/recall-cache/")
+    });
 }
 
 fn merge_wiki_store_entries(
@@ -1336,7 +1320,7 @@ pub(crate) async fn handle_wiki_search(
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone())
         .or_else(|| Some("/wiki".to_string()));
-    let rows = search_memory_rows(
+    let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
@@ -1367,6 +1351,7 @@ pub(crate) async fn handle_wiki_search(
         false,
     )
     .await?;
+    filter_user_facing_wiki_rows(&mut rows);
 
     append_wiki_log(
         server,

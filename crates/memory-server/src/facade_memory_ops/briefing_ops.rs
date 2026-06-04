@@ -9,8 +9,8 @@ use super::evidence_format::{
     wants_json,
 };
 use crate::agent_markdown;
-use crate::memory_search_ops::{named_project_db_exists, resolve_workspace_named_project};
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
+use crate::memory_search_ops::{named_project_db_exists, resolve_workspace_named_project};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::json;
@@ -29,9 +29,7 @@ pub(crate) async fn handle_memory_briefing(
     let named_project = params
         .project
         .clone()
-        .or_else(|| {
-            resolve_workspace_named_project().filter(|name| named_project_db_exists(name))
-        });
+        .or_else(|| resolve_workspace_named_project().filter(|name| named_project_db_exists(name)));
     let query = params
         .query
         .clone()
@@ -93,7 +91,10 @@ pub(crate) async fn handle_memory_briefing(
             graph_relation_filter: None,
             weights: None,
             agent_role: None,
-            project: named_project.clone(),
+            // If the caller did not explicitly target a project, keep wiki
+            // search unscoped so the /wiki retrieval path can merge the
+            // canonical project:wiki library with the active workspace.
+            project: params.project.clone(),
             domain: params.domain.clone(),
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
@@ -114,17 +115,14 @@ pub(crate) async fn handle_memory_briefing(
                 Ok(vec![])
             }
         },
-        async {
-            crate::handoff_ops::list_pending_handoffs_for_briefing(
-                server,
-                cross_project_cap,
-            )
-        },
+        async { crate::handoff_ops::list_pending_handoffs_for_briefing(server, cross_project_cap) },
     );
 
     let memories = slim_memory_rows(parse_evidence_array(memories_result?));
     let wiki = if include_wiki {
-        slim_memory_rows(serde_json::Value::Array(wiki_result?))
+        let mut rows = wiki_result?;
+        crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
+        slim_memory_rows(serde_json::Value::Array(rows))
     } else {
         json!([])
     };
