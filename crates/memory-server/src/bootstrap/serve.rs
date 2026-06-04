@@ -1113,7 +1113,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             project_db_path.clone(),
             server.llm.clone(),
         );
-        eprintln!("[daemon] vector sweep scheduled (manifest={})", manifest_path.display());
+        eprintln!(
+            "[daemon] vector sweep scheduled (manifest={})",
+            manifest_path.display()
+        );
 
         {
             let daily_server = server.clone();
@@ -1159,6 +1162,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         let ct_shutdown = ct.clone();
         let port = cli.port;
 
+        let bind_addr = format!("127.0.0.1:{port}");
+        let health_payload = serde_json::json!({
+            "status": "ok",
+            "version": env!("CARGO_PKG_VERSION"),
+            "transport": "http",
+            "mcp": format!("http://{bind_addr}/mcp"),
+        });
+
         let service = StreamableHttpService::new(
             move || Ok(server.clone()),
             Arc::new(LocalSessionManager::default()),
@@ -1169,8 +1180,18 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             },
         );
 
-        let router = axum::Router::new().nest_service("/mcp", service);
-        let bind_addr = format!("127.0.0.1:{port}");
+        let router = axum::Router::new()
+            .route(
+                "/health",
+                axum::routing::get({
+                    let health_payload = health_payload.clone();
+                    move || {
+                        let health_payload = health_payload.clone();
+                        async move { axum::Json(health_payload) }
+                    }
+                }),
+            )
+            .nest_service("/mcp", service);
         let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
 
         eprintln!("Tachi daemon listening on http://{bind_addr}");
