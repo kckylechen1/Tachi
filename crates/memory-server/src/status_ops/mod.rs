@@ -148,6 +148,23 @@ pub(crate) fn collect_snapshot(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> StatusSnapshot {
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, false)
+}
+
+pub(crate) fn collect_snapshot_with_provider_value_compare(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> StatusSnapshot {
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, true)
+}
+
+fn collect_snapshot_inner(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    compare_provider_values: bool,
+) -> StatusSnapshot {
     let lock_path = app_home.join("daemon.lock");
     let daemon = match read_pid_file(&lock_path) {
         Some(pid) if process_alive(pid) => DaemonStatus::Running { pid, lock_path },
@@ -244,7 +261,11 @@ pub(crate) fn collect_snapshot(
     let recent_evals = collect_recent_evals(global_db_path, project_db_path);
     let last_daily_report = find_last_daily_report(app_home);
     let distill_marker = read_distill_marker(app_home);
-    let mut api_keys = status_health::collect_api_key_status(global_db_path);
+    let mut api_keys = if compare_provider_values {
+        status_health::collect_api_key_status_with_value_compare(global_db_path)
+    } else {
+        status_health::collect_api_key_status(global_db_path)
+    };
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
     let health_score = status_health::calculate_health_score(
         &daemon,
@@ -1086,9 +1107,7 @@ fn build_status_warnings(
         } else {
             format!("[{}] across {} db(s)", failed_dbs.join(", "), total_dbs)
         };
-        warnings.push(format!(
-            "{total_failed} foundry job(s) failed {db_list}"
-        ));
+        warnings.push(format!("{total_failed} foundry job(s) failed {db_list}"));
     }
     if auth_failures > 0 {
         warnings.push(format!(
