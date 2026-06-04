@@ -641,6 +641,9 @@ pub(crate) async fn handle_tachi_task_brief(
 
     let route_rec =
         build_route_recommendation(server, &params.task, params.project.as_deref()).await;
+    let intent = routing.intent;
+    let selected_sops = routing.selected_sops;
+    let tool_plan = routing.tool_plan;
 
     serde_json::to_string(&json!({
         "status": "ok",
@@ -649,9 +652,9 @@ pub(crate) async fn handle_tachi_task_brief(
         "project": params.project,
         "wiki_hits": compact_rows(wiki_rows, top_k),
         "memory_hits": compact_rows(memory_rows, top_k),
-        "intent": routing["intent"].clone(),
-        "selected_sops": routing["selected_sops"].clone(),
-        "tool_plan": routing["tool_plan"].clone(),
+        "intent": intent,
+        "selected_sops": selected_sops,
+        "tool_plan": tool_plan,
         "recommended_skills": skills,
         "debug_checklist": debug_checklist,
         "route_recommendation": route_rec,
@@ -665,13 +668,22 @@ pub(crate) async fn handle_tachi_task_brief(
     .map_err(|e| format!("serialize task_brief: {e}"))
 }
 
-pub(crate) fn build_task_brief_routing(task: &str, recommended_skills: &[Value]) -> Value {
+pub(crate) struct TaskBriefRouting {
+    pub(crate) intent: &'static str,
+    pub(crate) selected_sops: Vec<Value>,
+    pub(crate) tool_plan: Vec<Value>,
+}
+
+pub(crate) fn build_task_brief_routing(
+    task: &str,
+    recommended_skills: &[Value],
+) -> TaskBriefRouting {
     let intent = classify_task_intent(task);
-    json!({
-        "intent": intent,
-        "selected_sops": build_selected_sops(intent, recommended_skills),
-        "tool_plan": build_tool_plan(intent),
-    })
+    TaskBriefRouting {
+        intent,
+        selected_sops: build_selected_sops(intent, recommended_skills),
+        tool_plan: build_tool_plan(intent),
+    }
 }
 
 fn classify_task_intent(task: &str) -> &'static str {
