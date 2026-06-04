@@ -29,9 +29,18 @@ pub(crate) fn apply_unlocked_vault_env(cmd: &mut Command, server: &MemoryServer)
         return 0;
     };
 
+    let fill_missing_only = std::env::var("TACHI_VAULT_CHILD_ENV")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "fill_missing" | "missing_only" | "preserve_env"
+            )
+        })
+        .unwrap_or(false);
     let mut injected = 0usize;
     for (name, value) in secrets {
-        if std::env::var_os(&name).is_some() {
+        if fill_missing_only && std::env::var_os(&name).is_some() {
             continue;
         }
         cmd.env(name, value);

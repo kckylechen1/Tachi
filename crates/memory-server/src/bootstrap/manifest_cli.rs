@@ -139,7 +139,11 @@ async fn collect_provider_key_report(
     global_db_path: &std::path::Path,
     probe_keys: bool,
 ) -> ProviderKeyReport {
-    let keys = collect_provider_key_status(global_db_path);
+    let keys = if probe_keys {
+        collect_provider_key_status_with_value_compare(global_db_path)
+    } else {
+        collect_provider_key_status(global_db_path)
+    };
     let probes = if probe_keys {
         crate::status_ops::status_health::run_provider_probes(global_db_path).await
     } else {
@@ -150,6 +154,19 @@ async fn collect_provider_key_report(
 
 fn collect_provider_key_status(global_db_path: &std::path::Path) -> Vec<ProviderKeyStatus> {
     let statuses = crate::status_ops::status_health::provider_key_status_json(global_db_path);
+    collect_provider_key_status_from_value(statuses)
+}
+
+fn collect_provider_key_status_with_value_compare(
+    global_db_path: &std::path::Path,
+) -> Vec<ProviderKeyStatus> {
+    let statuses = serde_json::json!(
+        crate::status_ops::status_health::collect_api_key_status_with_value_compare(global_db_path)
+    );
+    collect_provider_key_status_from_value(statuses)
+}
+
+fn collect_provider_key_status_from_value(statuses: serde_json::Value) -> Vec<ProviderKeyStatus> {
     statuses
         .as_array()
         .cloned()
