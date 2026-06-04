@@ -132,8 +132,18 @@ struct ProviderKeyStatus {
     source: String,
 }
 
-// Use the canonical key definitions from status_ops to avoid divergence.
-use crate::status_ops::status_health::API_KEY_DEFS;
+impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
+    fn from(status: crate::status_ops::ApiKeyStatus) -> Self {
+        Self {
+            name: status.name,
+            label: status.label,
+            required: status.required,
+            deprecated: status.deprecated,
+            status: status.status,
+            source: status.source,
+        }
+    }
+}
 
 async fn collect_provider_key_report(
     global_db_path: &std::path::Path,
@@ -153,49 +163,18 @@ async fn collect_provider_key_report(
 }
 
 fn collect_provider_key_status(global_db_path: &std::path::Path) -> Vec<ProviderKeyStatus> {
-    let statuses = crate::status_ops::status_health::provider_key_status_json(global_db_path);
-    collect_provider_key_status_from_value(statuses)
+    crate::status_ops::status_health::collect_api_key_status(global_db_path)
+        .into_iter()
+        .map(ProviderKeyStatus::from)
+        .collect()
 }
 
 fn collect_provider_key_status_with_value_compare(
     global_db_path: &std::path::Path,
 ) -> Vec<ProviderKeyStatus> {
-    let statuses = serde_json::json!(
-        crate::status_ops::status_health::collect_api_key_status_with_value_compare(global_db_path)
-    );
-    collect_provider_key_status_from_value(statuses)
-}
-
-fn collect_provider_key_status_from_value(statuses: serde_json::Value) -> Vec<ProviderKeyStatus> {
-    statuses
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
+    crate::status_ops::status_health::collect_api_key_status_with_value_compare(global_db_path)
         .into_iter()
-        .filter_map(|value| {
-            let def = API_KEY_DEFS.iter().find(|def| {
-                value
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|name| name == def.key)
-            })?;
-            Some(ProviderKeyStatus {
-                name: def.key.to_string(),
-                label: def.label.to_string(),
-                required: def.required,
-                deprecated: def.deprecated,
-                status: value
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                source: value
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-            })
-        })
+        .map(ProviderKeyStatus::from)
         .collect()
 }
 

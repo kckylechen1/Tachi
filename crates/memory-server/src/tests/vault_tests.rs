@@ -685,7 +685,11 @@ async fn vault_lock_preserves_env_provider_fallback() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
 async fn dispatch_vault_env_injection_overrides_existing_env_by_default() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("TACHI_CHILD_ONLY_API_KEY");
     std::env::remove_var("LONGPORT_APP_SECRET");
     std::env::remove_var("NOT-A-SHELL-NAME");

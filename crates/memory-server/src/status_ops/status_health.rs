@@ -338,22 +338,8 @@ fn collect_api_key_status_from_sources(
                 .and_then(|value| crate::provider_config::parse_vault_alias(value))
                 .map(|target| vault_names.contains(target))
                 .unwrap_or(false);
-            let env_plaintext = env_value.as_deref().and_then(|value| {
-                let value = value.trim();
-                if value.is_empty() || crate::provider_config::is_vault_alias(value) {
-                    None
-                } else {
-                    Some(value)
-                }
-            });
-            let config_plaintext = config_value.and_then(|value| {
-                let value = value.trim();
-                if value.is_empty() || crate::provider_config::is_vault_alias(value) {
-                    None
-                } else {
-                    Some(value)
-                }
-            });
+            let env_plaintext = plaintext_provider_value(env_value.as_deref());
+            let config_plaintext = plaintext_provider_value(config_value.map(String::as_str));
             let duplicate_plaintext = env_plaintext
                 .map(|value| ("env", value))
                 .or_else(|| config_plaintext.map(|value| ("config.env", value)));
@@ -382,7 +368,9 @@ fn collect_api_key_status_from_sources(
                 } else {
                     ("missing", "vault-alias-unresolved".to_string())
                 }
-            } else if vault_configured && ((env_configured && !env_is_vault_alias) || (file_configured && !config_is_vault_alias))
+            } else if vault_configured
+                && ((env_configured && !env_is_vault_alias)
+                    || (file_configured && !config_is_vault_alias))
             {
                 let duplicate_source = duplicate_plaintext
                     .map(|(source, _)| source)
@@ -460,6 +448,15 @@ fn collect_api_key_status_from_sources(
             }
         })
         .collect()
+}
+
+fn plaintext_provider_value(value: Option<&str>) -> Option<&str> {
+    let value = value?.trim();
+    if value.is_empty() || crate::provider_config::is_vault_alias(value) {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 pub(crate) fn calculate_health_score(

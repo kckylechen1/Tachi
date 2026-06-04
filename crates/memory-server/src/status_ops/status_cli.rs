@@ -67,21 +67,20 @@ async fn render_one(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut snapshot =
-        crate::status_ops::collect_snapshot(app_home, global_db_path, project_db_path);
+    let snapshot = if probe_keys {
+        crate::status_ops::collect_snapshot_with_provider_value_compare(
+            app_home,
+            global_db_path,
+            project_db_path,
+        )
+    } else {
+        crate::status_ops::collect_snapshot(app_home, global_db_path, project_db_path)
+    };
     let provider_probes = if probe_keys {
         super::status_health::run_provider_probes(global_db_path).await
     } else {
         Vec::new()
     };
-    if probe_keys {
-        snapshot.api_keys =
-            super::status_health::collect_api_key_status_with_value_compare(global_db_path);
-        super::status_health::apply_inferred_provider_failures(
-            &mut snapshot.api_keys,
-            &snapshot.dbs,
-        );
-    }
 
     if json_out {
         let mut v = serde_json::to_value(&snapshot)?;
