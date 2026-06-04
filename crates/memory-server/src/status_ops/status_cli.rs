@@ -67,6 +67,14 @@ async fn render_one(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let provider_probes = if probe_keys {
+        super::status_health::refresh_provider_probe_cache(app_home, global_db_path)
+            .await
+            .map(|cache| cache.probes)
+            .map_err(|e| format!("provider probes failed: {e}"))?
+    } else {
+        Vec::new()
+    };
     let snapshot = if probe_keys {
         crate::status_ops::collect_snapshot_with_provider_value_compare(
             app_home,
@@ -75,11 +83,6 @@ async fn render_one(
         )
     } else {
         crate::status_ops::collect_snapshot(app_home, global_db_path, project_db_path)
-    };
-    let provider_probes = if probe_keys {
-        super::status_health::run_provider_probes(global_db_path).await
-    } else {
-        Vec::new()
     };
 
     if json_out {
@@ -310,6 +313,25 @@ async fn render_one(
     if probe_keys {
         println!("  live probes:");
         for probe in &provider_probes {
+            println!(
+                "    {}: {}{}",
+                probe.name,
+                probe.status,
+                probe
+                    .message
+                    .as_ref()
+                    .map(|msg| format!(" ({})", crate::status_ops::truncate(msg, 96)))
+                    .unwrap_or_default()
+            );
+        }
+    } else if let Some(cache) = &snapshot.provider_probe_cache {
+        let marker = if cache.is_stale() { "[!]" } else { "[OK]" };
+        println!(
+            "  {marker} cached probes: last={} ttl={}h",
+            cache.last_probe_at,
+            cache.ttl_seconds / 3600
+        );
+        for probe in &cache.probes {
             println!(
                 "    {}: {}{}",
                 probe.name,

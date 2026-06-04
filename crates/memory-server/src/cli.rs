@@ -391,7 +391,7 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "DAYS", num_args = 0..=1, default_missing_value = "14", global = true)]
         purge_failed: Option<u64>,
     },
-    /// Vault secret management (init, unlock, set, get, list, lock, status).
+    /// Vault secret management (init, unlock, set, get, remove, list, lock, status).
     Vault {
         #[command(subcommand)]
         action: VaultAction,
@@ -739,6 +739,20 @@ pub(crate) enum VaultAction {
     },
     /// Get a secret value from the vault.
     Get {
+        /// Secret name.
+        name: String,
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+    },
+    /// Remove a secret from the vault.
+    Remove {
         /// Secret name.
         name: String,
         /// Read password from stdin.
