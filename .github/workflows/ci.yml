@@ -1,12 +1,9 @@
-name: CI
+name: Full CI
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
+  schedule:
+    # Nightly full regression. Small PRs rely on targeted local verification.
+    - cron: "0 20 * * *"
   workflow_dispatch:
 
 permissions:
