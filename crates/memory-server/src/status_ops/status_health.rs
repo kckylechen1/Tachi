@@ -12,6 +12,7 @@ pub(crate) struct ApiKeyDef {
     pub(crate) label: &'static str,
     pub(crate) required: bool,
     pub(crate) deprecated: bool,
+    pub(crate) canonical_key: &'static str,
     pub(crate) aliases: &'static [&'static str],
 }
 
@@ -21,6 +22,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "Voyage embeddings",
         required: true,
         deprecated: false,
+        canonical_key: "VOYAGE_API_KEY",
         aliases: &[],
     },
     ApiKeyDef {
@@ -28,6 +30,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "Voyage rerank",
         required: false,
         deprecated: false,
+        canonical_key: "VOYAGE_RERANK_API_KEY",
         aliases: &["VOYAGE_API_KEY"],
     },
     ApiKeyDef {
@@ -35,6 +38,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "SiliconFlow/Qwen background LLM",
         required: true,
         deprecated: false,
+        canonical_key: "SILICONFLOW_API_KEY",
         aliases: &[
             "EXTRACT_API_KEY",
             "SUMMARY_API_KEY",
@@ -47,6 +51,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "MiniMax legacy distill",
         required: false,
         deprecated: true,
+        canonical_key: "SILICONFLOW_API_KEY",
         aliases: &[],
     },
     ApiKeyDef {
@@ -54,6 +59,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "Legacy reasoning lane",
         required: false,
         deprecated: true,
+        canonical_key: "SILICONFLOW_API_KEY",
         aliases: &["ZAI_API_KEY", "BIGMODEL_API_KEY"],
     },
 ];
@@ -491,20 +497,46 @@ fn collect_api_key_status_from_sources(
             } else {
                 None
             };
+            let cleanup_hint =
+                cleanup_hint_for_key(def, vault_configured || env_configured || file_configured);
             ApiKeyStatus {
                 name: def.key.to_string(),
                 label: def.label.to_string(),
                 required: def.required,
                 deprecated: def.deprecated,
+                canonical_name: def.canonical_key.to_string(),
+                alias_names: def.aliases.iter().map(|alias| alias.to_string()).collect(),
                 status: status.to_string(),
                 source,
                 env_configured,
                 vault_configured,
+                cleanup_hint,
                 drift_warning,
                 inferred_invalid_provider: None,
             }
         })
         .collect()
+}
+
+fn cleanup_hint_for_key(def: &ApiKeyDef, configured: bool) -> Option<String> {
+    if def.deprecated {
+        if configured {
+            Some(format!(
+                "{} is deprecated; migrate this secret to {} and remove {} from Vault/env/config.env after confirming the canonical key probes OK.",
+                def.key, def.canonical_key, def.key
+            ))
+        } else {
+            None
+        }
+    } else if !def.aliases.is_empty() {
+        Some(format!(
+            "canonical key: {}; accepted aliases/fallbacks: {}",
+            def.canonical_key,
+            def.aliases.join(", ")
+        ))
+    } else {
+        None
+    }
 }
 
 fn plaintext_provider_value(value: Option<&str>) -> Option<&str> {
@@ -822,6 +854,48 @@ mod tests {
             .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
 
         restore_env("VOYAGE_API_KEY", original);
+    }
+
+    #[test]
+    fn deprecated_configured_key_reports_canonical_cleanup_hint() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("REASONING_API_KEY");
+        std::env::set_var("REASONING_API_KEY", "legacy-secret");
+
+        let rows =
+            collect_api_key_status_from_sources(HashSet::new(), HashMap::new(), HashMap::new());
+        let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+
+        assert!(reasoning.deprecated);
+        assert_eq!(reasoning.canonical_name, "SILICONFLOW_API_KEY");
+        assert_eq!(reasoning.status, "configured");
+        assert!(reasoning
+            .cleanup_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
+
+        restore_env("REASONING_API_KEY", original);
+    }
+
+    #[test]
+    fn deprecated_unset_key_has_no_cleanup_hint() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("REASONING_API_KEY");
+        std::env::remove_var("REASONING_API_KEY");
+
+        let rows =
+            collect_api_key_status_from_sources(HashSet::new(), HashMap::new(), HashMap::new());
+        let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+
+        assert!(reasoning.deprecated);
+        assert_eq!(reasoning.status, "deprecated-unset");
+        assert!(reasoning.cleanup_hint.is_none());
+
+        restore_env("REASONING_API_KEY", original);
     }
 
     #[test]

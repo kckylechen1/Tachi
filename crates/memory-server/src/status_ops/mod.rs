@@ -45,10 +45,13 @@ pub(crate) struct ApiKeyStatus {
     pub(crate) label: String,
     pub(crate) required: bool,
     pub(crate) deprecated: bool,
+    pub(crate) canonical_name: String,
+    pub(crate) alias_names: Vec<String>,
     pub(crate) status: String,
     pub(crate) source: String,
     pub(crate) env_configured: bool,
     pub(crate) vault_configured: bool,
+    pub(crate) cleanup_hint: Option<String>,
     pub(crate) drift_warning: Option<String>,
     pub(crate) inferred_invalid_provider: Option<String>,
 }

@@ -128,6 +128,9 @@ struct ProviderKeyStatus {
     label: String,
     required: bool,
     deprecated: bool,
+    canonical_name: String,
+    alias_names: Vec<String>,
+    cleanup_hint: Option<String>,
     status: String,
     source: String,
 }
@@ -139,6 +142,9 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
             label: status.label,
             required: status.required,
             deprecated: status.deprecated,
+            canonical_name: status.canonical_name,
+            alias_names: status.alias_names,
+            cleanup_hint: status.cleanup_hint,
             status: status.status,
             source: status.source,
         }
