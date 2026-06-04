@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::registry;
+
 #[derive(Debug, Clone, Copy)]
 pub enum OutputFormat {
     Text,
@@ -173,6 +175,15 @@ fn execute_wt_remove(mut report: WtRemoveReport) -> WtRemoveReport {
         Ok(out) if out.status.success() => {
             report.removed = true;
             report.dry_run = false;
+            match registry::remove_registry_entry(Path::new(&path)) {
+                Ok(true) => {}
+                Ok(false) => report
+                    .warnings
+                    .push("worktree was not present in registry".to_string()),
+                Err(err) => report
+                    .warnings
+                    .push(format!("registry cleanup failed: {err}")),
+            }
             if let Err(err) = append_log(&report) {
                 report
                     .warnings
@@ -241,7 +252,8 @@ fn repo_root_from_worktree(worktree_root: &Path) -> Result<PathBuf, String> {
 }
 
 fn is_registered_or_marked(worktree_root: &Path) -> bool {
-    worktree_root.join(".tachi-worktree.json").exists() || registry_contains(worktree_root)
+    worktree_root.join(".tachi-worktree.json").exists()
+        || registry::registry_contains(worktree_root)
 }
 
 fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
@@ -269,38 +281,6 @@ fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, S
             }
         })
         .collect())
-}
-
-fn registry_contains(worktree_root: &Path) -> bool {
-    let Some(home) = std::env::var_os("HOME") else {
-        return false;
-    };
-    let registry = PathBuf::from(home).join(".tachi").join("worktrees.json");
-    let Ok(raw) = std::fs::read_to_string(registry) else {
-        return false;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return false;
-    };
-    let needle = canonical_string(worktree_root);
-    value_contains_path(&value, &needle)
-}
-
-fn value_contains_path(value: &serde_json::Value, needle: &str) -> bool {
-    match value {
-        serde_json::Value::String(s) => paths_equal(Path::new(s), Path::new(needle)),
-        serde_json::Value::Array(items) => {
-            items.iter().any(|item| value_contains_path(item, needle))
-        }
-        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
-            (key == "path"
-                && value
-                    .as_str()
-                    .is_some_and(|s| paths_equal(Path::new(s), Path::new(needle))))
-                || value_contains_path(value, needle)
-        }),
-        _ => false,
-    }
 }
 
 enum ActiveProcessCheck {
@@ -381,23 +361,4 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 
 fn canonical_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nested_registry_path_is_detected() {
-        let value = serde_json::json!({
-            "worktrees": [
-                {"path": "/tmp/a"},
-                {"metadata": {"path": "/tmp/b"}}
-            ]
-        });
-
-        assert!(value_contains_path(&value, "/tmp/a"));
-        assert!(value_contains_path(&value, "/tmp/b"));
-        assert!(!value_contains_path(&value, "/tmp/c"));
-    }
 }

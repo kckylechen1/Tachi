@@ -90,6 +90,34 @@ pub(crate) fn evaluate_delete_worktree_safety(
     safety
 }
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct CleanerRemoveReport {
+    removed: bool,
+    #[serde(default)]
+    warnings: Vec<String>,
+    #[serde(default)]
+    errors: Vec<String>,
+}
+
+pub(crate) fn resolve_tachi_clean_bin() -> std::path::PathBuf {
+    if let Some(bin) = std::env::var_os("TACHI_CLEAN_BIN") {
+        return std::path::PathBuf::from(bin);
+    }
+
+    let bin_name = format!("tachi-clean{}", std::env::consts::EXE_SUFFIX);
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(dir) = current_exe.parent() {
+            let sibling = dir.join(&bin_name);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+
+    std::path::PathBuf::from(bin_name)
+}
+
 async fn resolve_worktree_top_level(worktree: &str) -> Result<String, String> {
     let out = Command::new("git")
         .args([
@@ -233,6 +261,39 @@ async fn detect_branch_safety_signals(worktree: &str) -> DeleteWorktreeSafety {
         safety.safety_warnings.extend(extra_warnings);
     }
     safety
+}
+
+async fn remove_worktree_with_cleaner(worktree: &str) -> Result<CleanerRemoveReport, String> {
+    let cleaner_bin = resolve_tachi_clean_bin();
+    let out = Command::new(&cleaner_bin)
+        .args(["wt-remove", worktree, "--force", "--json"])
+        .output()
+        .await
+        .map_err(|err| format!("failed to run {}: {err}", cleaner_bin.display()))?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match serde_json::from_str::<CleanerRemoveReport>(stdout.trim()) {
+        Ok(report) => Ok(report),
+        Err(err) => {
+            if out.status.success() {
+                return Err(format!(
+                    "cleaner succeeded but returned invalid JSON: {err}. Output: {}",
+                    stdout.trim()
+                ));
+            }
+
+            let mut message = stderr.trim().to_string();
+            if message.is_empty() {
+                message = stdout.trim().to_string();
+            }
+            Err(if message.is_empty() {
+                format!("{} exited with {}", cleaner_bin.display(), out.status)
+            } else {
+                format!("{} failed: {message}", cleaner_bin.display())
+            })
+        }
+    }
 }
 
 pub(crate) async fn handle_approve_merge(
@@ -409,6 +470,8 @@ pub(crate) async fn handle_approve_merge(
 
     let mut worktree_removed = false;
     let mut auto_delete_skipped = false;
+    let mut cleanup_error = None::<String>;
+    let mut cleanup_warnings = Vec::<String>::new();
     if params.delete_worktree {
         if worktree_equals_repo_root(&worktree, &repo_root) {
             return Err(format!(
@@ -416,11 +479,18 @@ pub(crate) async fn handle_approve_merge(
             ));
         }
         if safety.allow_delete_worktree {
-            let rm_out = Command::new("git")
-                .args(["-C", &repo_root, "worktree", "remove", &worktree])
-                .output()
-                .await;
-            worktree_removed = rm_out.map(|o| o.status.success()).unwrap_or(false);
+            match remove_worktree_with_cleaner(&worktree).await {
+                Ok(report) => {
+                    worktree_removed = report.removed;
+                    cleanup_warnings = report.warnings;
+                    if !report.errors.is_empty() {
+                        cleanup_error = Some(report.errors.join("; "));
+                    }
+                }
+                Err(err) => {
+                    cleanup_error = Some(err);
+                }
+            }
         } else {
             auto_delete_skipped = true;
         }
@@ -432,6 +502,8 @@ pub(crate) async fn handle_approve_merge(
         "repo_root": repo_root,
         "worktree_removed": worktree_removed,
         "auto_delete_skipped": auto_delete_skipped,
+        "cleanup_warnings": cleanup_warnings,
+        "cleanup_error": cleanup_error,
         "delete_worktree_requested": params.delete_worktree,
         "delete_worktree_allowed": safety.allow_delete_worktree,
         "safety_warnings": safety_warnings,
