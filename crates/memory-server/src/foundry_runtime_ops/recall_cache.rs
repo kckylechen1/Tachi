@@ -86,7 +86,7 @@ fn recall_cache_write_path(
     _named_project: Option<&str>,
 ) -> String {
     let prefix = path_prefix.trim_end_matches('/');
-    if prefix.starts_with("/wiki") {
+    if prefix == "/wiki" || prefix.starts_with("/wiki/") {
         return format!("/scratch/recall-cache/{cache_topic}");
     }
     format!("{prefix}/recall-cache/{cache_topic}")
@@ -480,6 +480,12 @@ mod tests {
     fn recall_cache_path_remaps_wiki_prefix_for_wiki_project() {
         let p = recall_cache_write_path("/wiki/engineering", "smoke", Some("wiki"));
         assert_eq!(p, "/scratch/recall-cache/smoke");
+    }
+
+    #[test]
+    fn recall_cache_path_keeps_non_wiki_prefix_with_wiki_substring() {
+        let p = recall_cache_write_path("/wikipedia/engineering", "smoke", Some("wiki"));
+        assert_eq!(p, "/wikipedia/engineering/recall-cache/smoke");
     }
 
     #[test]

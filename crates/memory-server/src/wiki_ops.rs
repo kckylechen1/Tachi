@@ -286,7 +286,13 @@ fn is_user_facing_wiki_entry(entry: &MemoryEntry) -> bool {
 pub(crate) fn filter_user_facing_wiki_rows(rows: &mut Vec<Value>) {
     rows.retain(|row| {
         let path = row.get("path").and_then(Value::as_str).unwrap_or_default();
-        path != "/wiki/_log" && !path.contains("/recall-cache/")
+        let source = row
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        path != "/wiki/_log"
+            && !path.contains("/recall-cache/")
+            && source != "foundry_recall_rerank_cache"
     });
 }
 

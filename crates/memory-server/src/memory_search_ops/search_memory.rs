@@ -27,13 +27,16 @@ pub(crate) async fn search_memory_rows(
     } else {
         false
     };
-    let default_wiki_vec_available = if params.project.is_none() && wiki_path_prefix {
-        server
-            .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let default_wiki_vec_available =
+        if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+            server
+                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+    let mut searched_default_wiki = false;
 
     if params.query_vec.is_none()
         && (server.global_vec_available
@@ -89,6 +92,7 @@ pub(crate) async fn search_memory_rows(
         }) {
             Ok(wiki_results) => {
                 combined_results.extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
+                searched_default_wiki = true;
             }
             Err(e) => {
                 tracing::warn!("Search failed in default wiki project DB: {e}");
@@ -101,7 +105,9 @@ pub(crate) async fn search_memory_rows(
             let named_project =
                 crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
             if let Some(ref project_name) = named_project {
-                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
+                    && (project_name != "wiki" || !searched_default_wiki)
+                {
                     let workspace_path = server.project_db_path_buf();
                     let named_path =
                         crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
@@ -175,23 +181,30 @@ pub(crate) async fn search_memory_rows(
             combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
             if let Some(ref project_name) = inferred_project {
-                match server.with_named_project_store_read(project_name, |store| {
-                    let vec_avail = store.vec_available;
-                    let project_opts = params.to_search_options(vec_avail);
-                    store
-                        .search(&params.query, Some(project_opts))
-                        .map_err(|e| {
-                            format!("Search failed in inferred project DB '{project_name}': {e}")
-                        })
-                }) {
-                    Ok(project_results) => {
-                        combined_results
-                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Search failed in inferred project DB '{project_name}': {e}"
-                        );
+                if project_name == "wiki" && searched_default_wiki {
+                    // Already searched the canonical wiki store above for
+                    // unscoped /wiki queries.
+                } else {
+                    match server.with_named_project_store_read(project_name, |store| {
+                        let vec_avail = store.vec_available;
+                        let project_opts = params.to_search_options(vec_avail);
+                        store
+                            .search(&params.query, Some(project_opts))
+                            .map_err(|e| {
+                                format!(
+                                    "Search failed in inferred project DB '{project_name}': {e}"
+                                )
+                            })
+                    }) {
+                        Ok(project_results) => {
+                            combined_results
+                                .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Search failed in inferred project DB '{project_name}': {e}"
+                            );
+                        }
                     }
                 }
             } else if server.has_project_db() && !skip_workspace {
