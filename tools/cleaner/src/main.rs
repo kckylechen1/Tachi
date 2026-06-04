@@ -1,4 +1,5 @@
 mod registry;
+mod sweep;
 mod tachi_clean;
 mod target_clean;
 mod wt_clean;
@@ -6,6 +7,7 @@ mod wt_clean;
 use std::path::PathBuf;
 
 use registry::{RegisterOptions, RegisterOutputFormat};
+use sweep::{SweepOptions, DEFAULT_SWEEP_MAX_AGE_DAYS};
 use tachi_clean::TachiCleanOptions;
 use target_clean::TargetCleanOptions;
 use wt_clean::{OutputFormat, WtRemoveOptions};
@@ -30,14 +32,60 @@ fn run() -> Result<(), String> {
 
     let command = args.remove(0);
     match command.as_str() {
+        "sweep" | "wt-sweep" => run_sweep(args),
         "tachi" | "tachi-clean" => run_tachi_clean(args),
         "target" | "target-clean" => run_target_clean(args),
         "wt-register" => run_wt_register(args),
         "wt-remove" => run_wt_remove(args),
         _ => Err(format!(
-            "unknown command '{command}'. Expected: tachi, target, wt-register, or wt-remove"
+            "unknown command '{command}'. Expected: sweep, tachi, target, wt-register, or wt-remove"
         )),
     }
+}
+
+fn run_sweep(args: Vec<String>) -> Result<(), String> {
+    let mut force = false;
+    let mut json = false;
+    let mut max_age_days = DEFAULT_SWEEP_MAX_AGE_DAYS;
+    let mut roots = Vec::new();
+    let mut iter = args.into_iter();
+
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--force" => force = true,
+            "--dry-run" => force = false,
+            "--json" => json = true,
+            "--root" => roots.push(PathBuf::from(
+                iter.next()
+                    .ok_or_else(|| "--root requires a value".to_string())?,
+            )),
+            "--max-age-days" => {
+                let raw = iter
+                    .next()
+                    .ok_or_else(|| "--max-age-days requires a value".to_string())?;
+                max_age_days = raw
+                    .parse::<u64>()
+                    .map_err(|_| "--max-age-days must be a positive integer".to_string())?;
+            }
+            "-h" | "--help" => {
+                print_sweep_help();
+                return Ok(());
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown option '{arg}'")),
+            _ => return Err("sweep accepts only options; use --root <path>".to_string()),
+        }
+    }
+
+    sweep::run_sweep(SweepOptions {
+        roots,
+        max_age_days,
+        force,
+        output: if json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Text
+        },
+    })
 }
 
 fn run_tachi_clean(args: Vec<String>) -> Result<(), String> {
@@ -212,7 +260,13 @@ fn run_wt_remove(args: Vec<String>) -> Result<(), String> {
 
 fn print_help() {
     println!(
-        "tachi-clean\n\nUsage:\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+        "tachi-clean\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n  tachi-clean target [path] [--dry-run|--force] [--json]\n  tachi-clean wt-register <path> --repo <repo-root> --branch <branch> [--dispatch-id <id>] [--pr <number>] [--json]\n  tachi-clean wt-remove <path> [--dry-run|--force] [--json]\n"
+    );
+}
+
+fn print_sweep_help() {
+    println!(
+        "Sweep stale Tachi-managed worktrees with .tachi-worktree.json markers.\n\nUsage:\n  tachi-clean sweep [--root <path>] [--max-age-days <days>] [--dry-run|--force] [--json]\n\nOptions:\n  --root <path>          Root to scan (repeatable; default: TMPDIR, /private/tmp, temp_dir)\n  --max-age-days <days>  Minimum worktree age (default: 7)\n  --dry-run              Preview only (default)\n  --force                Remove candidates with git worktree remove --force\n  --json                 Print machine-readable JSON\n"
     );
 }
 
