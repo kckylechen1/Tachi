@@ -403,7 +403,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, lightweight skill suggestions, and debugging checklist."
+        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, intent, selected_sops, tool_plan, lightweight skill suggestions, and debugging checklist."
     )]
     pub(crate) async fn tachi_task_brief(
         &self,
@@ -1366,7 +1366,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, lightweight skill suggestions, and debugging checklist. (Alias: tachi_task_brief)"
+        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, intent, selected_sops, tool_plan, lightweight skill suggestions, and debugging checklist. (Alias: tachi_task_brief)"
     )]
     pub(crate) async fn tachi_plan(
         &self,
