@@ -41,6 +41,9 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
         parts.push(overlay);
     }
 
+    let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+    parts.push(render_task_route_overlay(&route));
+
     // Resolve skills with stage defaults
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
 
@@ -74,7 +77,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
                 as_of: None,
                 include_metadata: false,
             },
-        false,
+            false,
         )
         .await
         {
@@ -180,4 +183,49 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     }
 
     prompt
+}
+
+fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRouting) -> String {
+    let intent = route.intent;
+    let mut lines = vec![
+        "## Tachi task route".to_string(),
+        format!("- intent: {intent}"),
+    ];
+
+    let labels = route
+        .selected_sops
+        .iter()
+        .take(4)
+        .filter_map(|sop| {
+            let id = sop.get("id").and_then(|v| v.as_str())?;
+            let reason = sop.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            Some(if reason.is_empty() {
+                format!("  - {id}")
+            } else {
+                format!("  - {id}: {reason}")
+            })
+        })
+        .collect::<Vec<_>>();
+    if !labels.is_empty() {
+        lines.push("- selected_sops:".to_string());
+        lines.extend(labels);
+    }
+
+    let steps = route
+        .tool_plan
+        .iter()
+        .take(5)
+        .filter_map(|step| {
+            let tool = step.get("tool").and_then(|v| v.as_str())?;
+            let action = step.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let when = step.get("when").and_then(|v| v.as_str()).unwrap_or("");
+            Some(format!("  - {tool}({action}): {when}"))
+        })
+        .collect::<Vec<_>>();
+    if !steps.is_empty() {
+        lines.push("- tool_plan:".to_string());
+        lines.extend(steps);
+    }
+
+    lines.join("\n")
 }
