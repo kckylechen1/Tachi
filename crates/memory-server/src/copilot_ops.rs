@@ -690,15 +690,20 @@ pub(crate) fn build_task_brief_routing(
 
 fn classify_task_intent(task: &str) -> &'static str {
     let lower = task.to_ascii_lowercase();
-    let contains_any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+    let contains_any = |needles: &[&str]| {
+        needles
+            .iter()
+            .any(|needle| task_matches_intent(task, &lower, needle))
+    };
 
     if contains_any(&[
         "review",
         "code review",
+        "pull request",
+        "pr",
         "审查",
         "看看 pr",
         "看一下 pr",
-        "看看",
     ]) {
         "review_request"
     } else if contains_any(&["refactor", "cleanup", "deslop", "重构", "清理"]) {
@@ -744,6 +749,32 @@ fn classify_task_intent(task: &str) -> &'static str {
     } else {
         "other"
     }
+}
+
+fn task_matches_intent(task: &str, lower: &str, needle: &str) -> bool {
+    if needle
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        contains_ascii_word(lower, needle)
+    } else if needle.is_ascii() {
+        lower.contains(needle)
+    } else {
+        task.contains(needle)
+    }
+}
+
+fn contains_ascii_word(haystack: &str, needle: &str) -> bool {
+    haystack.match_indices(needle).any(|(start, matched)| {
+        let end = start + matched.len();
+        let before = haystack[..start].chars().next_back();
+        let after = haystack[end..].chars().next();
+        !before.is_some_and(is_ascii_word_char) && !after.is_some_and(is_ascii_word_char)
+    })
+}
+
+fn is_ascii_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value> {
@@ -947,7 +978,10 @@ pub(crate) async fn handle_tachi_progress_check(
             .map(|(idx, attempt)| format!("{}. {}", idx + 1, attempt))
             .collect::<Vec<_>>()
             .join("\n"),
-        params.latest_error.clone().unwrap_or_else(|| "(none provided)".to_string())
+        params
+            .latest_error
+            .clone()
+            .unwrap_or_else(|| "(none provided)".to_string())
     );
     let progress_log = if let Some(flow_id) = params.flow_id.as_deref() {
         record_progress_check_event(flow_id, &params, stuck)?
@@ -1135,9 +1169,11 @@ mod tests {
         })]);
 
         assert!(checklist[0].contains("schema -> client serialization -> server deserialization"));
-        assert!(checklist
-            .iter()
-            .any(|item| item.contains("failing boundary test at the API boundary")));
+        assert!(
+            checklist
+                .iter()
+                .any(|item| item.contains("failing boundary test at the API boundary"))
+        );
     }
 
     #[test]
@@ -1207,9 +1243,10 @@ mod tests {
         let plan = build_tool_plan(intent);
 
         assert_eq!(intent, "review_request");
-        assert!(sops
-            .iter()
-            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check")));
+        assert!(
+            sops.iter()
+                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check"))
+        );
         assert!(plan.iter().any(|step| {
             step.get("tool").and_then(|v| v.as_str()) == Some("tachi_task")
                 && step.get("action").and_then(|v| v.as_str()) == Some("board")
@@ -1228,6 +1265,28 @@ mod tests {
     }
 
     #[test]
+    fn task_brief_router_avoids_ascii_substring_false_positives() {
+        assert_eq!(
+            classify_task_intent("explain why this failed"),
+            "explain_request"
+        );
+        assert_eq!(
+            classify_task_intent("decide whether this is specific enough"),
+            "other"
+        );
+        assert_eq!(classify_task_intent("run ci checks"), "test_request");
+    }
+
+    #[test]
+    fn task_brief_router_generic_kankan_is_not_always_review() {
+        assert_eq!(classify_task_intent("看看这个报错"), "fix_request");
+        assert_eq!(
+            classify_task_intent("看看这几个 PR 下面 Gemini 的回复"),
+            "review_request"
+        );
+    }
+
+    #[test]
     fn task_brief_router_appends_hub_skill_recommendations() {
         let recommended = vec![json!({
             "id": "skill:mcp-schema-debug",
@@ -1237,9 +1296,10 @@ mod tests {
         })];
         let sops = build_selected_sops("fix_request", &recommended);
 
-        assert!(sops
-            .iter()
-            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt")));
+        assert!(
+            sops.iter()
+                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt"))
+        );
         assert!(sops.iter().any(|sop| {
             sop.get("id").and_then(|v| v.as_str()) == Some("skill:mcp-schema-debug")
                 && sop.get("source").and_then(|v| v.as_str()) == Some("hub_recommendation")
