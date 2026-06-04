@@ -309,6 +309,9 @@ async fn render_one(
         if let Some(warning) = &key.drift_warning {
             println!("       [i] {warning}");
         }
+        if let Some(hint) = &key.cleanup_hint {
+            println!("       [i] {hint}");
+        }
     }
     if probe_keys {
         println!("  live probes:");
