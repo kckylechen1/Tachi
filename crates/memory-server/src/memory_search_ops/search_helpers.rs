@@ -246,7 +246,9 @@ pub(crate) fn list_available_named_projects() -> Vec<String> {
 }
 
 pub(crate) fn named_project_db_exists(name: &str) -> bool {
-    crate::MemoryServer::resolve_named_project_db_path(name).is_ok()
+    crate::MemoryServer::resolve_named_project_db_path(name)
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 /// Infer a named project library from query text when the caller omitted `project`.

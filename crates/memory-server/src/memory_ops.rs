@@ -182,14 +182,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let binary = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let app_home = std::env::var("TACHI_HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".tachi")
-        });
+    let app_home = crate::status_ops::resolve_app_home();
     let process = crate::status_ops::runtime_observability_json(server, &app_home, None);
 
     let project = server.project_db_path.as_ref().map(|path| {

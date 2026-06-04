@@ -26,7 +26,7 @@ use memory_core::MemoryEntry;
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
-use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
+use memory_core::{JobStatusHistogram, MemoryStore, job_status_histogram};
 
 use crate::daemon_lock::{process_alive, read_pid_file};
 use crate::manifest::{DbRole, Manifest};
@@ -387,7 +387,7 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
             return json!({
                 "path": db_path.display().to_string(),
                 "error": "non-utf8 path",
-            })
+            });
         }
     };
     match MemoryStore::open_read_only(path_str) {
@@ -616,6 +616,17 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub(crate) fn resolve_app_home() -> PathBuf {
+    std::env::var("TACHI_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".tachi")
+        })
+}
+
 pub(crate) fn runtime_observability_json(
     server: &crate::MemoryServer,
     app_home: &Path,
@@ -637,7 +648,7 @@ pub(crate) fn runtime_observability_json(
         .unwrap_or(false);
     let mode = if serving_daemon {
         "daemon"
-    } else if daemon_pid.is_some() {
+    } else if daemon_running {
         "sidecar_or_stdio"
     } else {
         "single_process"
@@ -908,14 +919,7 @@ async fn handle_tachi_status_detail(
     server: &crate::MemoryServer,
     full: bool,
 ) -> Result<String, String> {
-    let app_home: PathBuf = std::env::var("TACHI_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".tachi")
-        });
+    let app_home = resolve_app_home();
     let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
 
@@ -1023,13 +1027,9 @@ async fn handle_tachi_status_detail(
 
     let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon));
     let mut warnings = build_status_warnings(&snapshot, &daemon_state);
-    if runtime
-        .pointer("/daemon/running")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        && !runtime
-            .pointer("/daemon/matches_current_process")
-            .and_then(serde_json::Value::as_bool)
+    if runtime["daemon"]["running"].as_bool().unwrap_or(false)
+        && !runtime["daemon"]["matches_current_process"]
+            .as_bool()
             .unwrap_or(false)
     {
         warnings.push(
@@ -1112,14 +1112,7 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
     let global_db = server.global_db_path_buf();
     let project_db = server.project_db_path_buf();
     tokio::task::spawn_blocking(move || {
-        let app_home: PathBuf = std::env::var("TACHI_HOME")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".tachi")
-            });
+        let app_home = resolve_app_home();
         let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
         let daemon_state = match &snapshot.daemon {
             DaemonStatus::Running { .. } => json!({ "running": true }),

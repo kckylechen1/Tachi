@@ -69,18 +69,15 @@ fn plan_wt_remove(path: &Path, dry_run: bool) -> WtRemoveReport {
     };
     report.canonical_path = Some(canonical.display().to_string());
 
-    let worktree_root = match git_output(&[
-        "-C",
-        &canonical_string(&canonical),
-        "rev-parse",
-        "--show-toplevel",
-    ]) {
-        Ok(root) => PathBuf::from(root),
-        Err(err) => {
-            report.errors.push(format!("not a git worktree: {err}"));
-            return report;
-        }
-    };
+    let canonical_str = canonical_string(&canonical);
+    let worktree_root =
+        match git_output(&["-C", canonical_str.as_str(), "rev-parse", "--show-toplevel"]) {
+            Ok(root) => PathBuf::from(root),
+            Err(err) => {
+                report.errors.push(format!("not a git worktree: {err}"));
+                return report;
+            }
+        };
     let worktree_root = match std::fs::canonicalize(&worktree_root) {
         Ok(path) => path,
         Err(err) => {
@@ -101,7 +98,7 @@ fn plan_wt_remove(path: &Path, dry_run: bool) -> WtRemoveReport {
     };
     report.repo_root = Some(repo_root.display().to_string());
 
-    if paths_equal(&worktree_root, &repo_root) {
+    if worktree_root == repo_root {
         report
             .errors
             .push("refusing to remove repository root/main worktree".to_string());
@@ -237,9 +234,10 @@ fn emit_report(report: &WtRemoveReport, output: OutputFormat) -> Result<(), Stri
 }
 
 fn repo_root_from_worktree(worktree_root: &Path) -> Result<PathBuf, String> {
+    let worktree_str = canonical_string(worktree_root);
     let common_dir = git_output(&[
         "-C",
-        &canonical_string(worktree_root),
+        worktree_str.as_str(),
         "rev-parse",
         "--path-format=absolute",
         "--git-common-dir",
@@ -257,13 +255,9 @@ fn is_registered_or_marked(worktree_root: &Path) -> bool {
 }
 
 fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
+    let worktree_str = canonical_string(worktree_root);
     let out = Command::new("git")
-        .args([
-            "-C",
-            &canonical_string(worktree_root),
-            "status",
-            "--porcelain",
-        ])
+        .args(["-C", worktree_str.as_str(), "status", "--porcelain"])
         .output()
         .map_err(|err| format!("failed to run git status: {err}"))?;
     if !out.status.success() {
@@ -353,11 +347,6 @@ fn append_log(report: &WtRemoveReport) -> Result<(), String> {
     .map_err(|err| format!("write log: {err}"))
 }
 
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    let a = std::fs::canonicalize(a).unwrap_or_else(|_| a.to_path_buf());
-    let b = std::fs::canonicalize(b).unwrap_or_else(|_| b.to_path_buf());
-    a == b
-}
 
 fn canonical_string(path: &Path) -> String {
     path.to_string_lossy().to_string()

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use memory_core::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
+use memory_core::{MemoryStore, PerDbConfig, get_foundry_config, set_foundry_config};
 
 use crate::cli::{DaemonAction, FoundryAction, WatcherAction};
 use crate::daemon_lock::{process_alive, read_pid_file};
@@ -68,10 +68,12 @@ async fn render_one(
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let provider_probes = if probe_keys {
-        super::status_health::refresh_provider_probe_cache(app_home, global_db_path)
-            .await
-            .map(|cache| cache.probes)
-            .map_err(|e| format!("provider probes failed: {e}"))?
+        let probes = super::status_health::run_provider_probes(global_db_path).await;
+        if let Err(err) = super::status_health::write_provider_probe_cache(app_home, probes.clone())
+        {
+            eprintln!("[!] provider probe cache write failed: {err}");
+        }
+        probes
     } else {
         Vec::new()
     };

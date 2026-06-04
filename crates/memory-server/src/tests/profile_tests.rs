@@ -48,6 +48,20 @@ async fn runtime_info_reports_identity_and_db_routing() {
     assert_eq!(value["process"]["vault"]["unlocked"], json!(false));
 }
 
+#[tokio::test]
+async fn runtime_observability_treats_stale_daemon_pid_as_single_process() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let app_home = temp_home.temp_home.join(".tachi");
+    std::fs::create_dir_all(&app_home).expect("app home");
+    std::fs::write(app_home.join("daemon.lock"), "999999").expect("daemon lock");
+
+    let runtime = crate::status_ops::runtime_observability_json(&server, &app_home, None);
+
+    assert_eq!(runtime["daemon"]["pid"], json!(999999));
+    assert_eq!(runtime["daemon"]["running"], json!(false));
+    assert_eq!(runtime["mode"], json!("single_process"));
+}
+
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]
