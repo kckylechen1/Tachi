@@ -637,6 +637,9 @@ pub(crate) async fn handle_tachi_task_brief(
     .await?;
     let skills = recommend_skills_light(server, &params.task, 5).unwrap_or_default();
     let debug_checklist = build_debug_checklist(&wiki_rows);
+    let intent = classify_task_intent(&params.task);
+    let selected_sops = build_selected_sops(intent, &skills);
+    let tool_plan = build_tool_plan(intent);
 
     let route_rec =
         build_route_recommendation(server, &params.task, params.project.as_deref()).await;
@@ -648,6 +651,9 @@ pub(crate) async fn handle_tachi_task_brief(
         "project": params.project,
         "wiki_hits": compact_rows(wiki_rows, top_k),
         "memory_hits": compact_rows(memory_rows, top_k),
+        "intent": intent,
+        "selected_sops": selected_sops,
+        "tool_plan": tool_plan,
         "recommended_skills": skills,
         "debug_checklist": debug_checklist,
         "route_recommendation": route_rec,
@@ -659,6 +665,199 @@ pub(crate) async fn handle_tachi_task_brief(
         ],
     }))
     .map_err(|e| format!("serialize task_brief: {e}"))
+}
+
+fn classify_task_intent(task: &str) -> &'static str {
+    let lower = task.to_ascii_lowercase();
+    let contains_any = |needles: &[&str]| needles.iter().any(|needle| lower.contains(needle));
+
+    if contains_any(&[
+        "review",
+        "code review",
+        "审查",
+        "看看 pr",
+        "看一下 pr",
+        "看看",
+    ]) {
+        "review_request"
+    } else if contains_any(&["refactor", "cleanup", "deslop", "重构", "清理"]) {
+        "refactor_request"
+    } else if contains_any(&[
+        "test",
+        "测试",
+        "验证",
+        "ci",
+        "clippy",
+        "build",
+        "compile",
+        "编译",
+        "跑起来",
+    ]) {
+        "test_request"
+    } else if contains_any(&[
+        "debug",
+        "bug",
+        "error",
+        "failure",
+        "排查",
+        "报错",
+        "不工作",
+        "修好",
+    ]) {
+        "fix_request"
+    } else if contains_any(&[
+        "research",
+        "investigate",
+        "学习",
+        "研究",
+        "查一下",
+        "看一下资料",
+    ]) {
+        "research_request"
+    } else if contains_any(&["migration", "migrate", "迁移", "schema"]) {
+        "migration_request"
+    } else if contains_any(&["plan", "design", "architecture", "方案", "规划", "设计"]) {
+        "plan_request"
+    } else if contains_any(&["explain", "why", "解释", "为什么"]) {
+        "explain_request"
+    } else {
+        "other"
+    }
+}
+
+fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value> {
+    let mut sops = match intent {
+        "review_request" => vec![sop(
+            "skill:check",
+            "check",
+            "Review PRs/diffs with findings first and verification evidence.",
+            "Use before merge or when asked to inspect PR quality.",
+        )],
+        "refactor_request" => vec![sop(
+            "skill:ai-slop-cleaner",
+            "ai-slop-cleaner",
+            "Write a cleanup plan, preserve behavior, then make narrow cleanup passes.",
+            "Use for cleanup/refactor/deslop work.",
+        )],
+        "test_request" => vec![sop(
+            "workflow:targeted-verification",
+            "targeted-verification",
+            "Run the smallest tests that prove the touched behavior, then rely on CI for broad gates.",
+            "Use for small scoped changes and PR fixups.",
+        )],
+        "fix_request" => vec![sop(
+            "skill:hunt",
+            "hunt",
+            "Find root cause before patching another layer; add a boundary test when possible.",
+            "Use for bugs, regressions, crashes, and repeated failures.",
+        )],
+        "research_request" => vec![sop(
+            "skill:learn",
+            "learn",
+            "Gather sources and synthesize a durable brief before implementation decisions.",
+            "Use for unfamiliar domains or multi-source research.",
+        )],
+        "migration_request" => vec![sop(
+            "workflow:migration-safety",
+            "migration-safety",
+            "Check compatibility, data preservation, rollback shape, and targeted migration tests.",
+            "Use before schema or storage changes.",
+        )],
+        "plan_request" => vec![sop(
+            "skill:think",
+            "think",
+            "Turn rough requirements into a decision-complete plan before coding.",
+            "Use for design, architecture, and broad feature planning.",
+        )],
+        "explain_request" => vec![sop(
+            "workflow:explain-from-evidence",
+            "explain-from-evidence",
+            "Read the concrete files/state first, then explain with references.",
+            "Use when the user asks why or how something works.",
+        )],
+        _ => vec![sop(
+            "skill:tachi",
+            "tachi",
+            "Start from briefing, then save decisions/checkpoints around meaningful milestones.",
+            "Use for non-trivial Tachi-backed work.",
+        )],
+    };
+
+    for skill in recommended_skills.iter().take(3) {
+        let id = skill.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty()
+            || sops
+                .iter()
+                .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
+            continue;
+        }
+        sops.push(json!({
+            "id": id,
+            "name": skill.get("name").and_then(|v| v.as_str()).unwrap_or(id),
+            "source": "hub_recommendation",
+            "reason": skill.get("description").and_then(|v| v.as_str()).unwrap_or("Recommended by local skill matching."),
+            "activation_hint": "Call tachi_skill(action='discover') or run the corresponding host skill when available.",
+        }));
+    }
+    sops
+}
+
+fn sop(id: &str, name: &str, reason: &str, activation_hint: &str) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "source": "task_brief_router",
+        "reason": reason,
+        "activation_hint": activation_hint,
+    })
+}
+
+fn build_tool_plan(intent: &str) -> Vec<Value> {
+    let mut plan = vec![
+        json!({
+            "step": "brief",
+            "tool": "tachi_memory",
+            "action": "briefing",
+            "when": "before starting non-trivial work",
+        }),
+        json!({
+            "step": "discover_sop",
+            "tool": "tachi_skill",
+            "action": "discover",
+            "when": "when selected_sops includes a skill not already active in the host",
+        }),
+    ];
+
+    match intent {
+        "plan_request" | "research_request" => plan.push(json!({
+            "step": "plan",
+            "tool": "tachi_task",
+            "action": "plan",
+            "when": "before dispatching implementation work",
+        })),
+        "review_request" => plan.push(json!({
+            "step": "review",
+            "tool": "tachi_task",
+            "action": "board",
+            "when": "inspect active/completed delegated work before merge",
+        })),
+        "fix_request" | "test_request" => plan.push(json!({
+            "step": "progress_check",
+            "tool": "tachi_progress_check",
+            "action": "check",
+            "when": "after repeated failed attempts or unclear root cause",
+        })),
+        _ => {}
+    }
+
+    plan.push(json!({
+        "step": "checkpoint",
+        "tool": "tachi_memory",
+        "action": "checkpoint",
+        "when": "before handoff or after a meaningful milestone",
+    }));
+    plan
 }
 
 pub(crate) async fn handle_tachi_progress_check(
@@ -978,5 +1177,51 @@ mod tests {
             score_capability(&tokens, &mcp) >= 3,
             "expected MCP-specific skill to match task tokens"
         );
+    }
+
+    #[test]
+    fn task_brief_router_selects_review_sop_for_pr_review() {
+        let intent = classify_task_intent("看看这几个 PR 下面 Gemini 的回复");
+        let sops = build_selected_sops(intent, &[]);
+        let plan = build_tool_plan(intent);
+
+        assert_eq!(intent, "review_request");
+        assert!(sops
+            .iter()
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check")));
+        assert!(plan.iter().any(|step| {
+            step.get("tool").and_then(|v| v.as_str()) == Some("tachi_task")
+                && step.get("action").and_then(|v| v.as_str()) == Some("board")
+        }));
+    }
+
+    #[test]
+    fn task_brief_router_selects_targeted_verification_for_build_run() {
+        let intent = classify_task_intent("帮我编译二进制并且跑起来验证功能");
+        let sops = build_selected_sops(intent, &[]);
+
+        assert_eq!(intent, "test_request");
+        assert!(sops.iter().any(|sop| {
+            sop.get("id").and_then(|v| v.as_str()) == Some("workflow:targeted-verification")
+        }));
+    }
+
+    #[test]
+    fn task_brief_router_appends_hub_skill_recommendations() {
+        let recommended = vec![json!({
+            "id": "skill:mcp-schema-debug",
+            "name": "mcp-schema-debug",
+            "description": "Debug MCP schema arguments",
+            "score": 5
+        })];
+        let sops = build_selected_sops("fix_request", &recommended);
+
+        assert!(sops
+            .iter()
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt")));
+        assert!(sops.iter().any(|sop| {
+            sop.get("id").and_then(|v| v.as_str()) == Some("skill:mcp-schema-debug")
+                && sop.get("source").and_then(|v| v.as_str()) == Some("hub_recommendation")
+        }));
     }
 }
