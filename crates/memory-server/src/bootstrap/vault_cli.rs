@@ -241,6 +241,44 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::Remove {
+            name,
+            stdin_password,
+            keychain,
+            password_file,
+        } => {
+            crate::vault_crypto::validate_secret_name(&name)?;
+
+            let store_ro = open_cli_store_read_only(global_db_path)?;
+            let config = store_ro
+                .vault_get_config()
+                .map_err(|e| format!("vault_get_config: {e}"))?
+                .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+            drop(store_ro);
+
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let salt = B64
+                .decode(&config.salt)
+                .map_err(|e| format!("Invalid vault salt: {e}"))?;
+            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+
+            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+                return Err("Wrong password".into());
+            }
+
+            let store = open_cli_store(global_db_path)?;
+            let removed = store
+                .vault_delete_entry(&name)
+                .map_err(|e| format!("vault_delete_entry: {e}"))?;
+
+            if removed {
+                println!("Secret '{name}' removed.");
+            } else {
+                println!("Secret '{name}' was not found.");
+            }
+            Ok(())
+        }
+
         VaultAction::List {
             stdin_password,
             keychain,

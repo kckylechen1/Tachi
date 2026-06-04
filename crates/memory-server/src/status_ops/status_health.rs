@@ -5,6 +5,8 @@ use serde_json::json;
 
 use super::{ApiKeyStatus, DbStatus, EXPECTED_EMBEDDING_DIM};
 
+const PROVIDER_PROBE_CACHE_TTL_SECS: i64 = 24 * 60 * 60;
+
 pub(crate) struct ApiKeyDef {
     pub(crate) key: &'static str,
     pub(crate) label: &'static str,
@@ -56,11 +58,28 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
     },
 ];
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ProviderProbeResult {
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) message: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProviderProbeCache {
+    pub(crate) last_probe_at: String,
+    pub(crate) ttl_seconds: i64,
+    pub(crate) probes: Vec<ProviderProbeResult>,
+}
+
+impl ProviderProbeCache {
+    pub(crate) fn is_stale(&self) -> bool {
+        let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&self.last_probe_at) else {
+            return true;
+        };
+        let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+        age.num_seconds() > self.ttl_seconds
+    }
 }
 
 pub(crate) fn provider_key_status_json(global_db_path: &Path) -> serde_json::Value {
@@ -204,6 +223,44 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
         },
     });
     out
+}
+
+pub(crate) async fn refresh_provider_probe_cache(
+    app_home: &Path,
+    global_db_path: &Path,
+) -> Result<ProviderProbeCache, String> {
+    let probes = run_provider_probes(global_db_path).await;
+    write_provider_probe_cache(app_home, probes)
+}
+
+pub(crate) fn read_provider_probe_cache(app_home: &Path) -> Option<ProviderProbeCache> {
+    let raw = std::fs::read_to_string(provider_probe_cache_path(app_home)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_provider_probe_cache(
+    app_home: &Path,
+    probes: Vec<ProviderProbeResult>,
+) -> Result<ProviderProbeCache, String> {
+    let cache = ProviderProbeCache {
+        last_probe_at: chrono::Utc::now().to_rfc3339(),
+        ttl_seconds: PROVIDER_PROBE_CACHE_TTL_SECS,
+        probes,
+    };
+    let path = provider_probe_cache_path(app_home);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create probe cache dir: {e}"))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let serialized = serde_json::to_string_pretty(&cache)
+        .map_err(|e| format!("serialize provider probe cache: {e}"))?;
+    std::fs::write(&tmp, serialized).map_err(|e| format!("write provider probe cache: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename provider probe cache: {e}"))?;
+    Ok(cache)
+}
+
+fn provider_probe_cache_path(app_home: &Path) -> std::path::PathBuf {
+    app_home.join("status").join("provider-probes.json")
 }
 
 pub(crate) fn load_keychain_vault_api_key_values(
@@ -765,5 +822,26 @@ mod tests {
             .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
 
         restore_env("VOYAGE_API_KEY", original);
+    }
+
+    #[test]
+    fn provider_probe_cache_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = write_provider_probe_cache(
+            dir.path(),
+            vec![ProviderProbeResult {
+                name: "voyage_embed".to_string(),
+                status: "ok".to_string(),
+                message: Some("1024 dims".to_string()),
+            }],
+        )
+        .expect("write cache");
+
+        let loaded = read_provider_probe_cache(dir.path()).expect("read cache");
+        assert_eq!(loaded.last_probe_at, cache.last_probe_at);
+        assert_eq!(loaded.ttl_seconds, 24 * 60 * 60);
+        assert!(!loaded.is_stale());
+        assert_eq!(loaded.probes.len(), 1);
+        assert_eq!(loaded.probes[0].status, "ok");
     }
 }

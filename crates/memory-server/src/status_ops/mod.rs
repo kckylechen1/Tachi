@@ -63,6 +63,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) last_daily_report: Option<String>,
     pub(crate) distill_marker: Option<DistillMarkerStatus>,
     pub(crate) api_keys: Vec<ApiKeyStatus>,
+    pub(crate) provider_probe_cache: Option<status_health::ProviderProbeCache>,
     pub(crate) health_score: u8,
 }
 
@@ -261,18 +262,23 @@ fn collect_snapshot_inner(
     let recent_evals = collect_recent_evals(global_db_path, project_db_path);
     let last_daily_report = find_last_daily_report(app_home);
     let distill_marker = read_distill_marker(app_home);
+    let provider_probe_cache = status_health::read_provider_probe_cache(app_home);
     let mut api_keys = if compare_provider_values {
         status_health::collect_api_key_status_with_value_compare(global_db_path)
     } else {
         status_health::collect_api_key_status(global_db_path)
     };
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
+    let cached_probe_results = provider_probe_cache
+        .as_ref()
+        .filter(|cache| !cache.is_stale())
+        .map(|cache| cache.probes.as_slice());
     let health_score = status_health::calculate_health_score(
         &daemon,
         &dbs,
         distill_marker.as_ref(),
         &api_keys,
-        None,
+        cached_probe_results,
     );
 
     StatusSnapshot {
@@ -284,6 +290,7 @@ fn collect_snapshot_inner(
         last_daily_report,
         distill_marker,
         api_keys,
+        provider_probe_cache,
         health_score,
     }
 }
@@ -972,6 +979,7 @@ async fn handle_tachi_status_detail(
             "daily_pipeline": snapshot.last_daily_report,
             "distill": snapshot.distill_marker,
             "api_keys": snapshot.api_keys,
+            "provider_probe_cache": snapshot.provider_probe_cache,
             "models": status_health::model_lanes_json(),
             "agent_readiness": readiness,
         }))
@@ -1011,6 +1019,7 @@ async fn handle_tachi_status_detail(
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
             },
+            "provider_probe_cache": snapshot.provider_probe_cache,
             "doctor_hint": readiness.get("doctor_hint"),
         }))
         .map_err(|e| e.to_string())
@@ -1115,6 +1124,26 @@ fn build_status_warnings(
             auth_failure_dbs.join(", ")
         ));
     }
+    if let Some(cache) = &snapshot.provider_probe_cache {
+        if cache.is_stale() {
+            warnings.push(format!(
+                "provider key probe cache is older than {}h; run `tachi status --probe-keys` or wait for the daily pipeline",
+                cache.ttl_seconds / 3600
+            ));
+        } else {
+            for probe in cache.probes.iter().filter(|probe| probe.status != "ok") {
+                let message = probe
+                    .message
+                    .as_deref()
+                    .map(truncate_probe_warning)
+                    .unwrap_or_else(|| "no detail".to_string());
+                warnings.push(format!(
+                    "provider probe {} is {} ({message})",
+                    probe.name, probe.status
+                ));
+            }
+        }
+    }
     if total_stuck > 0 {
         let stuck_dbs: Vec<&str> = snapshot
             .dbs
@@ -1154,6 +1183,10 @@ fn build_status_warnings(
         }
     }
     warnings
+}
+
+fn truncate_probe_warning(message: &str) -> String {
+    truncate(message, 120)
 }
 
 pub(crate) fn vector_dimension_mismatch(db: &DbStatus) -> bool {
@@ -1333,6 +1366,7 @@ mod tests {
             last_daily_report: None,
             distill_marker: None,
             api_keys: Vec::new(),
+            provider_probe_cache: None,
             health_score: 95,
         }
     }
