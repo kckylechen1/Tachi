@@ -118,13 +118,6 @@ fn list_state_rows(server: &MemoryServer) -> Result<Vec<memory_core::db::StateRo
     })
 }
 
-fn task_id_from_key(key: &str) -> Option<String> {
-    key.strip_prefix("handoff:")
-        .or_else(|| key.strip_prefix("todos:"))
-        .map(str::to_string)
-        .filter(|task_id| !task_id.trim().is_empty())
-}
-
 fn has_incomplete_todos(list: &OrchestratorTodoList) -> bool {
     list.todos.iter().any(|todo| {
         !matches!(
@@ -144,7 +137,10 @@ fn infer_active_task_id(server: &MemoryServer) -> Result<Option<String>, String>
             return Ok(Some(list.task_id));
         }
     }
-    Ok(rows.iter().find_map(|row| task_id_from_key(&row.key)))
+    Ok(rows
+        .iter()
+        .filter_map(|row| row.key.strip_prefix("handoff:").map(str::to_string))
+        .find(|task_id| !task_id.trim().is_empty()))
 }
 
 pub(crate) async fn handle_orchestrator(
@@ -166,12 +162,17 @@ pub(crate) async fn handle_orchestrator(
             }
         });
     let Some(task_id) = task_id else {
-        return Err(if action == "recovery_briefing" {
-            "task_id is required, or write a handoff/TODO first so Tachi can infer the active task"
-                .to_string()
-        } else {
-            "task_id is required".to_string()
-        });
+        if action == "recovery_briefing" {
+            return serde_json::to_string(&serde_json::json!({
+                "task_id": null,
+                "handoff": null,
+                "todos": null,
+                "incomplete_todos": [],
+                "hint": "No active task found. Write a handoff or TODO to make recovery_briefing resumable.",
+            }))
+            .map_err(|e| format!("serialize recovery_briefing: {e}"));
+        }
+        return Err("task_id is required".to_string());
     };
 
     match action.as_str() {

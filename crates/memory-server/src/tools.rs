@@ -1937,12 +1937,69 @@ fn local_skill_roots() -> Vec<std::path::PathBuf> {
 }
 
 fn skill_query_tokens(query: &str) -> Vec<String> {
-    query
+    let mut tokens = Vec::new();
+    for raw in query
         .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
         .map(str::trim)
-        .filter(|token| token.len() >= 3)
-        .map(str::to_ascii_lowercase)
-        .collect()
+        .filter(|token| !token.is_empty())
+    {
+        let token = raw.to_ascii_lowercase();
+        if matches!(
+            token.as_str(),
+            "中文" | "英文" | "chinese" | "english" | "zh" | "en"
+        ) {
+            continue;
+        }
+        if token.len() >= 3 || matches!(token.as_str(), "pr" | "ui" | "ux") {
+            tokens.push(token.clone());
+        }
+        append_skill_query_aliases(raw, &mut tokens);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn append_skill_query_aliases(raw: &str, tokens: &mut Vec<String>) {
+    let lower = raw.to_ascii_lowercase();
+    let mut add = |aliases: &[&str]| {
+        tokens.extend(aliases.iter().map(|alias| (*alias).to_string()));
+    };
+
+    if raw.contains("代码审查") || raw.contains("审查") || raw.contains("评审") {
+        add(&["check", "code-review"]);
+    }
+    if raw.contains("修复") || raw.contains("修") || raw.contains("报错") {
+        add(&["fix", "gh-fix-ci", "hunt", "repair"]);
+    }
+    if raw.contains("排查") || raw.contains("调试") || raw.contains("不工作") {
+        add(&["debug", "hunt", "investigate"]);
+    }
+    if raw.contains("计划")
+        || raw.contains("规划")
+        || raw.contains("方案")
+        || raw.contains("设计一下")
+    {
+        add(&["brainstorm", "plan", "think"]);
+    }
+    if raw.contains("设计") || raw.contains("前端") || raw.contains("页面") {
+        add(&["design", "ui", "ux"]);
+    }
+    if raw.contains("合并") || raw.contains("提交") || raw.contains("推送") {
+        add(&["check", "commit", "merge", "push"]);
+    }
+    if raw.contains("测试") || raw.contains("验证") {
+        add(&["test", "verify"]);
+    }
+    if raw.contains("文档") || raw.contains("润色") {
+        add(&["docs", "read", "write"]);
+    }
+    if lower == "ci" {
+        add(&["fix", "gh-fix-ci"]);
+    }
+    if lower == "pr" {
+        add(&["check", "pr", "review"]);
+    }
 }
 
 fn collect_local_skills(root: &std::path::Path, query_tokens: &[String], out: &mut Vec<Value>) {
@@ -2098,6 +2155,42 @@ mod tests {
         assert_eq!(
             found[0].get("source").and_then(Value::as_str),
             Some("host_skill_dir")
+        );
+    }
+
+    #[test]
+    fn local_skill_discovery_expands_common_chinese_queries() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let temp_home = std::env::temp_dir().join(format!(
+            "tachi-local-skill-zh-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let skill_dir = temp_home.join(".codex/skills/gh-fix-ci");
+        std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: gh-fix-ci\ndescription: Inspect GitHub PR checks and fix failing CI workflows\n---\n# GH Fix CI\n",
+        )
+        .expect("write skill");
+        std::env::set_var("HOME", &temp_home);
+
+        let found = discover_local_host_skills("中文 代码审查 修复 CI", 5);
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&temp_home);
+
+        assert!(
+            found
+                .iter()
+                .any(|cap| cap.get("name").and_then(Value::as_str) == Some("gh-fix-ci")),
+            "expected Chinese query aliases to find gh-fix-ci: {found:?}"
         );
     }
 }

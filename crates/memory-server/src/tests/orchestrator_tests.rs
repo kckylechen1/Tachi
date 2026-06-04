@@ -50,6 +50,29 @@ async fn orchestrator_recovery_briefing_infers_active_task() {
 }
 
 #[tokio::test]
+async fn orchestrator_recovery_briefing_ignores_completed_todo_without_handoff() {
+    let server = make_server();
+    let mut update = orchestrator_params("todo_update", "completed-task-001");
+    update.todo_id = Some("t1".to_string());
+    update.todo_content = Some("Already done".to_string());
+    update.todo_status = Some("done".to_string());
+    server
+        .tachi_orchestrator(Parameters(update))
+        .await
+        .expect("todo_update");
+
+    let mut recovery = orchestrator_params("recovery_briefing", "unused");
+    recovery.task_id = None;
+    let err = server
+        .tachi_orchestrator(Parameters(recovery))
+        .await
+        .expect("completed-only task should return empty recovery, not an MCP error");
+    let json: Value = serde_json::from_str(&err).expect("json");
+    assert!(json["task_id"].is_null());
+    assert_eq!(json["incomplete_todos"].as_array().map(Vec::len), Some(0));
+}
+
+#[tokio::test]
 async fn orchestrator_todos_and_handoff_persist() {
     let server = make_server();
     let task_id = "dispatch-test-001";
