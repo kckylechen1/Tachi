@@ -519,11 +519,15 @@ fn collect_api_key_status_from_sources(
 }
 
 fn cleanup_hint_for_key(def: &ApiKeyDef, configured: bool) -> Option<String> {
-    if def.deprecated && configured {
-        Some(format!(
-            "{} is deprecated; migrate this secret to {} and remove {} from Vault/env/config.env after confirming the canonical key probes OK.",
-            def.key, def.canonical_key, def.key
-        ))
+    if def.deprecated {
+        if configured {
+            Some(format!(
+                "{} is deprecated; migrate this secret to {} and remove {} from Vault/env/config.env after confirming the canonical key probes OK.",
+                def.key, def.canonical_key, def.key
+            ))
+        } else {
+            None
+        }
     } else if !def.aliases.is_empty() {
         Some(format!(
             "canonical key: {}; accepted aliases/fallbacks: {}",
@@ -871,6 +875,25 @@ mod tests {
             .cleanup_hint
             .as_deref()
             .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
+
+        restore_env("REASONING_API_KEY", original);
+    }
+
+    #[test]
+    fn deprecated_unset_key_has_no_cleanup_hint() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("REASONING_API_KEY");
+        std::env::remove_var("REASONING_API_KEY");
+
+        let rows =
+            collect_api_key_status_from_sources(HashSet::new(), HashMap::new(), HashMap::new());
+        let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+
+        assert!(reasoning.deprecated);
+        assert_eq!(reasoning.status, "deprecated-unset");
+        assert!(reasoning.cleanup_hint.is_none());
 
         restore_env("REASONING_API_KEY", original);
     }
