@@ -1,9 +1,7 @@
 name: Full CI
 
 on:
-  schedule:
-    # Nightly full regression. Small PRs rely on targeted local verification.
-    - cron: "0 20 * * *"
+  # Keep full CI manual while GitHub Actions minutes are constrained.
   workflow_dispatch:
 
 permissions:

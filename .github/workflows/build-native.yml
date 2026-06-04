@@ -1,9 +1,7 @@
 name: Build & Publish Native Module
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # Keep this manual while GitHub Actions minutes are constrained.
   workflow_dispatch:
     inputs:
       version:
