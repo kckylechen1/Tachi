@@ -420,19 +420,47 @@ fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn is_sft_training_entry(entry: &MemoryEntry) -> bool {
+    metadata_bool(entry, "training_sample")
+        || entry.path.starts_with("/sft/")
+        || entry.topic.eq_ignore_ascii_case("sft-memory")
+}
+
+fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
+    entry
+        .source
+        .eq_ignore_ascii_case("foundry_recall_rerank_cache")
+        || entry
+            .topic
+            .eq_ignore_ascii_case("foundry_recall_rerank_cache")
+        || entry.topic.eq_ignore_ascii_case("recall_rerank_cache")
+        || entry.id.starts_with("foundry:recall-cache:")
+        || entry.path.contains("/recall-cache/")
+        || entry.path.contains("foundry_recall_rerank_cache")
+        || metadata_bool(entry, "recall_rerank_cache")
+        || entry
+            .metadata
+            .get("cache_key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("foundry_recall_rerank_cache"))
+}
+
+fn is_openclaw_low_signal_entry(entry: &MemoryEntry) -> bool {
+    entry.path == "/openclaw/legacy"
+        || entry.path.contains("/unnamed")
+        || entry.topic.trim().is_empty() && entry.path.starts_with("/openclaw/")
+}
+
 fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
     let wiki_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/wiki"));
+    let recall_cache_scoped = path_prefix.is_some_and(|prefix| prefix.contains("/recall-cache"));
     (!wiki_scoped
         && (entry.path == "/wiki/_log"
             || metadata_bool(entry, "wiki_log")
             || entry.topic.eq_ignore_ascii_case("wiki_log")))
-        || entry
-            .source
-            .eq_ignore_ascii_case("foundry_recall_rerank_cache")
-        || entry.id.starts_with("foundry:recall-cache:")
-        || entry.path.starts_with("/agent/checkpoints/recall-cache/")
+        || (!recall_cache_scoped && is_recall_cache_entry(entry))
         || (!kanban_scoped
             && (entry.path.starts_with("/kanban/")
                 || entry.category.eq_ignore_ascii_case("kanban")))
@@ -442,7 +470,11 @@ fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {
-    let base = if entry.is_foundry_distill() {
+    let base = if is_sft_training_entry(entry) {
+        0.45
+    } else if is_openclaw_low_signal_entry(entry) {
+        0.55
+    } else if entry.is_foundry_distill() {
         0.75
     } else if entry.is_wiki() {
         1.15
@@ -454,8 +486,15 @@ fn quality_multiplier(entry: &MemoryEntry) -> f64 {
         1.0
     };
     // High-importance entries get a floor of 1.0 so they aren't suppressed,
-    // but foundry_distill entries stay penalized regardless of importance
-    if entry.importance >= 0.9 && base < 1.0 && !entry.is_foundry_distill() {
+    // but foundry_distill and SFT training examples stay penalized regardless
+    // of importance. Training examples are useful references when explicitly
+    // scoped, but they should not crowd out distilled operational memory.
+    if entry.importance >= 0.9
+        && base < 1.0
+        && !entry.is_foundry_distill()
+        && !is_sft_training_entry(entry)
+        && !is_openclaw_low_signal_entry(entry)
+    {
         1.0
     } else {
         base
@@ -1128,6 +1167,67 @@ mod tests {
         assert!(!results
             .iter()
             .any(|result| result.entry.id == "wiki-operation-log"));
+    }
+
+    #[test]
+    fn quality_multiplier_demotes_sft_training_samples() {
+        let mut sample = memory_entry(
+            "sft-sample",
+            "DaemonAdapterTimeoutFix root cause and verified production fix",
+            &["daemon", "timeout", "fix"],
+        );
+        sample.importance = 0.95;
+        sample.path = "/sft/v4/strict/engineering/123".to_string();
+        sample.topic = "sft-memory".to_string();
+        sample.metadata = json!({"training_sample": true});
+        assert_eq!(quality_multiplier(&sample), 0.45);
+
+        let mut handoff = memory_entry(
+            "handoff",
+            "DaemonAdapterTimeoutFix operational handoff",
+            &["daemon", "timeout", "fix"],
+        );
+        handoff.category = "handoff".to_string();
+        handoff.importance = 0.95;
+        assert_eq!(quality_multiplier(&handoff), 1.0);
+    }
+
+    #[test]
+    fn quality_multiplier_demotes_openclaw_low_signal_entries() {
+        let mut legacy = memory_entry(
+            "openclaw-legacy",
+            "Legacy migrated raw session note",
+            &["openclaw", "legacy"],
+        );
+        legacy.importance = 0.95;
+        legacy.path = "/openclaw/legacy".to_string();
+        assert_eq!(quality_multiplier(&legacy), 0.55);
+
+        let mut unnamed = memory_entry(
+            "openclaw-unnamed",
+            "Unnamed migrated memory should not dominate recall",
+            &["openclaw", "unnamed"],
+        );
+        unnamed.importance = 0.95;
+        unnamed.path = "/openclaw/agent-main/unnamed".to_string();
+        assert_eq!(quality_multiplier(&unnamed), 0.55);
+    }
+
+    #[test]
+    fn recall_cache_variants_are_search_noise_by_default() {
+        let mut cache = memory_entry(
+            "openclaw-recall-cache",
+            "Recall rerank cache for query: Scout pipeline fixes",
+            &["recall", "cache"],
+        );
+        cache.path = "/openclaw/agent-main/recall-cache/Scout_pipeline".to_string();
+        cache.topic = "recall_rerank_cache".to_string();
+        assert!(is_search_noise_entry(&cache, None));
+        assert!(is_search_noise_entry(&cache, Some("/openclaw/agent-main")));
+        assert!(!is_search_noise_entry(
+            &cache,
+            Some("/openclaw/agent-main/recall-cache")
+        ));
     }
 
     #[test]
