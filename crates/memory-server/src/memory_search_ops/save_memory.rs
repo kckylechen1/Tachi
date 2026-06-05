@@ -1,5 +1,5 @@
 use super::*;
-use crate::memory_search_ops::auto_link::spawn_auto_linking;
+use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::contradiction::apply_auto_contradiction_detection;
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
 
@@ -357,9 +357,11 @@ pub(crate) async fn handle_save_memory(
         secret_redactions,
     );
 
-    if auto_link && !entry.entities.is_empty() {
+    if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {
         spawn_auto_linking(server, &entry, target_db, named_project);
         response.insert("auto_link".into(), json!("pending"));
+    } else if auto_link && !entry.entities.is_empty() && is_training_seed(&entry) {
+        response.insert("auto_link".into(), json!("skipped_training_seed"));
     }
 
     serde_json::to_string(&serde_json::Value::Object(response))

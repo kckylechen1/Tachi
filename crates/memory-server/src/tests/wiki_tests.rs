@@ -589,6 +589,18 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
             entry.tier = "pattern".to_string();
             store.upsert(&entry).map_err(|e| e.to_string())?;
         }
+        let mut sft_entry = make_entry("pattern-sft-seed");
+        sft_entry.path = "/sft/v4/strict/engineering/recall-gate".to_string();
+        sft_entry.summary = "SFT recall gate exemplar".to_string();
+        sft_entry.text =
+            "SFT exemplar should not be promoted into REM wiki synthesis.".to_string();
+        sft_entry.importance = 0.99;
+        sft_entry.topic = "recall-gate".to_string();
+        sft_entry.keywords = vec!["recall".to_string(), "promotion".to_string()];
+        sft_entry.source = "sft_seed".to_string();
+        sft_entry.tier = "pattern".to_string();
+        sft_entry.metadata = json!({"training_sample": true});
+        store.upsert(&sft_entry).map_err(|e| e.to_string())?;
         Ok(())
     }).expect("seed patterns");
     let seeded_count: i64 = server
@@ -601,8 +613,8 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         })
         .expect("count seeded patterns");
     assert_eq!(
-        seeded_count, 2,
-        "expected two pattern memories before REM run"
+        seeded_count, 3,
+        "expected two live pattern memories plus one SFT seed before REM run"
     );
 
     let report = crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(&server)
@@ -617,6 +629,22 @@ async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
         ).map_err(|e| e.to_string())
     }).expect("read wiki draft metadata");
     assert_eq!(review_status.as_deref(), Some("pending"));
+    let sft_processed: Option<i64> = server
+        .with_project_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT json_extract(metadata, '$.rem.processed') FROM memories WHERE id = 'pattern-sft-seed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())
+        })
+        .expect("read SFT pattern metadata");
+    assert_eq!(
+        sft_processed, None,
+        "SFT pattern seeds must not be consumed by REM wiki evolution"
+    );
 
     server_task.abort();
     if let Some(value) = original_home {

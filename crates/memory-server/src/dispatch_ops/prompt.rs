@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_params::GetMemoryParams;
 
 // ─── Prompt assembly (v2) ─────────────────────────────────────────────────
 
@@ -30,6 +31,56 @@ pub(super) fn resolve_effective_skills(
     };
 
     (skills, auto_instruction)
+}
+
+fn compact_example_text(text: &str, max_chars: usize) -> String {
+    let mut out = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if out.chars().count() > max_chars {
+        out = out.chars().take(max_chars).collect::<String>();
+        out.push_str("...");
+    }
+    out
+}
+
+async fn prompt_row_text(
+    server: &MemoryServer,
+    row: &serde_json::Value,
+    project: Option<&str>,
+) -> Option<String> {
+    if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
+        if !text.trim().is_empty() {
+            return Some(text.to_string());
+        }
+    }
+
+    if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+        let raw = crate::memory_ops::handle_get_memory(
+            server,
+            GetMemoryParams {
+                id: id.to_string(),
+                include_archived: false,
+                project: project.map(str::to_string),
+            },
+        )
+        .await
+        .ok()?;
+        let full: serde_json::Value = serde_json::from_str(&raw).ok()?;
+        if let Some(text) = full.get("text").and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return Some(text.to_string());
+            }
+        }
+    }
+
+    row.get("summary")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
@@ -85,12 +136,66 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
             if !rows.is_empty() {
                 parts.push("## Relevant context from Tachi memory/wiki".to_string());
                 for row in &rows {
-                    if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
+                    if let Some(text) =
+                        prompt_row_text(server, row, params.project.as_deref()).await
+                    {
                         let path = row
                             .get("path")
                             .and_then(|v| v.as_str())
                             .unwrap_or("unknown");
                         parts.push(format!("### {}\n{}", path, text));
+                    }
+                }
+                parts.push(String::new());
+            }
+        }
+
+        if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: context_query.clone(),
+                query_vec: None,
+                top_k: 2,
+                path_prefix: Some("/sft".to_string()),
+                include_training: true,
+                include_archived: false,
+                candidates_per_channel: 12,
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 0,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: None,
+                project: params.project.clone(),
+                domain: None,
+                file_context: None,
+                error_context: None,
+                enable_rerank: false,
+                as_of: None,
+                include_metadata: false,
+            },
+            false,
+        )
+        .await
+        {
+            if !rows.is_empty() {
+                parts.push("## SFT gold examples (style only, not live facts)".to_string());
+                parts.push(
+                    "Use these as answer-shape references. Do not treat historical SFT samples as current project truth."
+                        .to_string(),
+                );
+                for row in &rows {
+                    if let Some(text) =
+                        prompt_row_text(server, row, params.project.as_deref()).await
+                    {
+                        let path = row
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        parts.push(format!(
+                            "### {}\n{}",
+                            path,
+                            compact_example_text(&text, 900)
+                        ));
                     }
                 }
                 parts.push(String::new());

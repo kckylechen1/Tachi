@@ -41,6 +41,8 @@ const BASE_BUCKETS: &[&str] = &[
     "code-review",
     "trading",
     "agent",
+    "sft",
+    "eval",
     "checkpoints",
     "foundry",
     "ghost",
@@ -301,6 +303,27 @@ mod tests {
         let d = evaluate_warn(&"x".repeat(300), "/random/path", Some("equity_trading"));
         assert!(!d.accept);
         assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::PathBucketDisallowed));
+    }
+
+    #[test]
+    fn allows_sft_and_eval_buckets_with_domain() {
+        let sft = evaluate_warn(
+            &"x".repeat(300),
+            "/sft/v4/strict/engineering/1",
+            Some("coding"),
+        );
+        assert!(sft.accept, "SFT bucket should be accepted: {sft:?}");
+        assert!(!sft
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::PathBucketDisallowed));
+
+        let eval = evaluate_warn(&"x".repeat(300), "/eval/2026-06-05/task", Some("coding"));
+        assert!(eval.accept, "eval bucket should be accepted: {eval:?}");
+        assert!(!eval
             .violations
             .iter()
             .any(|v| v.code == GateViolationCode::PathBucketDisallowed));

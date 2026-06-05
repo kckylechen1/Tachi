@@ -11,6 +11,18 @@ pub(crate) fn path_root(path: &str) -> &str {
     path.trim_matches('/').split('/').next().unwrap_or("")
 }
 
+pub(crate) fn is_training_seed(entry: &MemoryEntry) -> bool {
+    entry.path == "/sft"
+        || entry.path.starts_with("/sft/")
+        || entry.topic.eq_ignore_ascii_case("sft-memory")
+        || entry.source.eq_ignore_ascii_case("sft_seed")
+        || entry
+            .metadata
+            .get("training_sample")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+}
+
 pub(crate) fn is_newer_than(new_ts: &str, old_ts: &str) -> bool {
     let new = chrono::DateTime::parse_from_rfc3339(new_ts);
     let old = chrono::DateTime::parse_from_rfc3339(old_ts);
@@ -71,6 +83,10 @@ pub(crate) fn spawn_auto_linking(
     target_db: DbScope,
     named_project: Option<String>,
 ) {
+    if is_training_seed(entry) {
+        return;
+    }
+
     let auto_link_server = server.clone();
     let auto_link_id = entry.id.clone();
     let auto_link_entry = entry.clone();
@@ -103,6 +119,9 @@ pub(crate) fn spawn_auto_linking(
             if let Ok(results) = search_res {
                 for result in results {
                     if result.entry.id == auto_link_id {
+                        continue;
+                    }
+                    if is_training_seed(&result.entry) {
                         continue;
                     }
                     let shared: Vec<String> = result
@@ -238,6 +257,24 @@ mod tests {
         assert_eq!(path_root("/wiki/entry"), "wiki");
         assert_eq!(path_root("no-slash"), "no-slash");
         assert_eq!(path_root("/"), "");
+    }
+
+    #[test]
+    fn is_training_seed_detects_sft_boundaries() {
+        let mut by_path = test_entry("sft-path", "training sample");
+        by_path.path = "/sft/v4/strict/engineering/1".to_string();
+        assert!(is_training_seed(&by_path));
+
+        let mut by_source = test_entry("sft-source", "training sample");
+        by_source.source = "sft_seed".to_string();
+        assert!(is_training_seed(&by_source));
+
+        let mut by_metadata = test_entry("sft-metadata", "training sample");
+        by_metadata.metadata = json!({"training_sample": true});
+        assert!(is_training_seed(&by_metadata));
+
+        let live = test_entry("live", "current operational memory");
+        assert!(!is_training_seed(&live));
     }
 
     #[test]

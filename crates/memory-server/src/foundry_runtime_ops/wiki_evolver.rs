@@ -155,6 +155,11 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<MemoryEntry>, S
                  FROM memories
                  WHERE archived = 0
                    AND tier = 'pattern'
+                   AND path != '/sft'
+                   AND path NOT LIKE '/sft/%'
+                   AND topic != 'sft-memory'
+                   AND source != 'sft_seed'
+                   AND COALESCE(json_extract(metadata, '$.training_sample'), 0) = 0
                    AND created_at > datetime('now', '-7 day')
                    AND (json_extract(metadata, '$.rem.processed') IS NULL
                         OR json_extract(metadata, '$.rem.processed') = 0)
