@@ -360,8 +360,14 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
         results.iter().all(|item| item.get("definition").is_none()),
         "skill discover facade should not return full definitions: {json}"
     );
-    assert_eq!(json["source"], json!("local_approved_cache"));
-    assert_eq!(json["search_backend"], json!("hub_search"));
+    assert_eq!(
+        json["source"],
+        json!("local_approved_cache+host_skill_dirs")
+    );
+    assert_eq!(
+        json["search_backend"],
+        json!("hub_search+local_skill_index")
+    );
 }
 
 #[tokio::test]
@@ -427,10 +433,21 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
     assert!(ids.contains(&"skill:debug-approved"), "{json}");
     assert!(!ids.contains(&"skill:debug-pending"), "{json}");
     assert!(!ids.contains(&"skill:debug-unhealthy"), "{json}");
-    assert!(json["results"].as_array().unwrap().iter().all(|item| {
-        item.get("callable").and_then(|value| value.as_bool()) == Some(true)
-            && item.get("source").and_then(|value| value.as_str()) == Some("local_approved_cache")
-    }));
+    assert!(json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|item| { item.get("callable").and_then(|value| value.as_bool()) == Some(true) }));
+    let approved = json["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item.get("id").and_then(|id| id.as_str()) == Some("skill:debug-approved"))
+        .expect("approved skill result should be present");
+    assert_eq!(
+        approved.get("source").and_then(|value| value.as_str()),
+        Some("local_approved_cache")
+    );
 }
 
 #[tokio::test]
@@ -913,7 +930,7 @@ async fn synthesize_agent_evolution_dry_run_loads_paths_and_memory_queries() {
 
 #[tokio::test]
 async fn compact_session_memory_persists_rollup_and_signal_entries() {
-    let server = make_server();
+    let (server, _temp_home) = make_server_with_temp_home();
     let result = server
         .compact_session_memory(Parameters(CompactSessionMemoryParams {
             agent_id: "main".to_string(),
