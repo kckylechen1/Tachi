@@ -669,7 +669,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         .ok();
     if let Some(sql) = existing_sql.as_deref() {
         let has_source_check = sql.contains("CHECK (source") || sql.contains("CHECK(source");
-        let has_latest_category_values = sql.contains("'guide'");
+        let has_latest_category_values = sql.contains("'eval'");
         let has_latest_source_values = sql.contains("'foundry_recall_rerank_cache'");
         if has_source_check && has_latest_category_values && has_latest_source_values {
             // Already migrated; nothing to do.
@@ -809,7 +809,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         conn.execute(
         "UPDATE memories SET category = 'other'
          WHERE category IS NULL OR category = ''
-            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')",
+            OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')",
         [],
     )?;
 
@@ -902,7 +902,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
              recall_count    INTEGER NOT NULL DEFAULT 0,
              query_diversity INTEGER NOT NULL DEFAULT 0,
              tier            TEXT NOT NULL DEFAULT 'raw',
-             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide')),
+             CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')),
             CHECK (scope IN ('user','project','general')),
             CHECK (retention_policy IS NULL OR retention_policy IN ('ephemeral','durable','permanent','pinned')),
             CHECK (
@@ -1246,7 +1246,7 @@ mod migration_tests {
                     'foundry_recall_rerank_cache','handoff','kanban','wiki','ghost','ingest_event')
                     OR source LIKE 'external:%'),
                 CHECK (category IN ('fact','decision','experience','preference','entity',
-                    'other','kanban','handoff','ghost','wiki','guide')),
+                    'other','kanban','handoff','ghost','wiki','guide','eval')),
                 CHECK (scope IN ('user','project','general'))
             );
             CREATE VIRTUAL TABLE memories_fts USING fts5(
@@ -1427,7 +1427,7 @@ mod migration_tests {
                 metadata     TEXT NOT NULL DEFAULT '{}',
                 retention_policy TEXT,
                 domain       TEXT,
-                CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
+                CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')),
                 CHECK (scope IN ('user','project','general')),
                 CHECK (
                     source IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')
@@ -1506,7 +1506,7 @@ mod migration_tests {
                 metadata     TEXT NOT NULL DEFAULT '{}',
                 retention_policy TEXT,
                 domain       TEXT,
-                CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki')),
+                CHECK (category IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')),
                 CHECK (scope IN ('user','project','general')),
                 CHECK (
                     source IN ('manual','extraction','migration','auto','foundry_distill','handoff','kanban','wiki','ghost','ingest_event')

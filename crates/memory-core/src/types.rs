@@ -225,6 +225,7 @@ pub enum MemoryCategory {
     Ghost,
     Wiki,
     Guide,
+    Eval,
 }
 
 impl MemoryCategory {
@@ -241,6 +242,7 @@ impl MemoryCategory {
             Self::Ghost => "ghost",
             Self::Wiki => "wiki",
             Self::Guide => "guide",
+            Self::Eval => "eval",
         }
     }
 
@@ -257,6 +259,7 @@ impl MemoryCategory {
             "ghost" => Self::Ghost,
             "wiki" => Self::Wiki,
             "guide" => Self::Guide,
+            "eval" => Self::Eval,
             _ => Self::Other,
         }
     }
@@ -1023,6 +1026,7 @@ mod tests {
         assert_eq!(MemoryCategory::normalize("GHOST"), "ghost");
         assert_eq!(MemoryCategory::normalize("wiki"), "wiki");
         assert_eq!(MemoryCategory::normalize("Guide"), "guide");
+        assert_eq!(MemoryCategory::normalize("eval"), "eval");
     }
 
     #[test]

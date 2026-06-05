@@ -10,6 +10,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             task: "Refactor auth middleware".to_string(),
             agent: "claude-code".to_string(),
             outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
             duration_ms: Some(5420),
             skills_used: vec!["skill:superpowers".to_string()],
             cost_tokens: Some(1234),
@@ -24,13 +25,22 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
                 agent: "kimi".to_string(),
                 model: Some("kimi-for-coding".to_string()),
                 task: Some("Review eval-ledger architecture".to_string()),
+                task_type: Some("plan_request".to_string()),
                 outcome: Some("useful".to_string()),
                 usefulness_score: Some(0.82),
                 failure_mode: None,
                 verification_impact: Some("changed_plan".to_string()),
+                verification_present: true,
+                evaluator: Some("leader".to_string()),
+                plan_delta: Some("modified".to_string()),
+                human_override: false,
+                retry_count: 0,
                 notes: Some(
                     "Recommended concise structured summaries over raw transcripts.".to_string(),
                 ),
+                latency_ms: Some(2100),
+                input_tokens: Some(1200),
+                output_tokens: Some(240),
                 cost_tokens: Some(321),
                 cost_usd: None,
             }],
@@ -64,19 +74,20 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     // Confirm the memory entry is actually retrievable with correct metadata.
     let fetched_str = server
         .get_memory(Parameters(GetMemoryParams {
-            id,
+            id: id.clone(),
             include_archived: false,
             project: None,
         }))
         .await
         .expect("get_memory should succeed");
     let fetched: serde_json::Value = serde_json::from_str(&fetched_str).expect("memory JSON");
-    assert_eq!(fetched["category"], serde_json::json!("experience"));
+    assert_eq!(fetched["category"], serde_json::json!("eval"));
     let keywords = fetched["keywords"].as_array().expect("keywords array");
     assert!(keywords.iter().any(|k| k == "eval"));
     let metadata = &fetched["metadata"];
     assert_eq!(metadata["agent"], serde_json::json!("claude-code"));
     assert_eq!(metadata["outcome"], serde_json::json!("success"));
+    assert_eq!(metadata["task_type"], serde_json::json!("fix_request"));
     assert_eq!(metadata["cost_tokens"], serde_json::json!(1234));
     assert_eq!(metadata["subagent_eval"], serde_json::json!(true));
     assert_eq!(metadata["subagent_count"], serde_json::json!(1));
@@ -90,10 +101,105 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     );
     assert_eq!(metadata["subagents"][0]["agent"], serde_json::json!("kimi"));
     assert_eq!(
+        metadata["subagents"][0]["task_type"],
+        serde_json::json!("plan_request")
+    );
+    assert_eq!(
+        metadata["subagents"][0]["evaluator"],
+        serde_json::json!("leader")
+    );
+    assert_eq!(
+        metadata["subagents"][0]["latency_ms"],
+        serde_json::json!(2100)
+    );
+    assert_eq!(
         metadata["skills_used"][0],
         serde_json::json!("skill:superpowers")
     );
     assert!(metadata["diff"].as_str().unwrap().contains("+bar"));
+
+    let default_search = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "Refactor auth middleware".to_string(),
+            query_vec: None,
+            top_k: 10,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("default search should succeed");
+    let default_rows: Vec<serde_json::Value> =
+        serde_json::from_str(&default_search).expect("default search JSON");
+    assert!(
+        default_rows.iter().all(|row| row["id"] != id),
+        "ordinary search should exclude eval entries by default"
+    );
+
+    let eval_search = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "Refactor auth middleware".to_string(),
+            query_vec: None,
+            top_k: 10,
+            path_prefix: Some("/eval".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("eval search should succeed");
+    let eval_rows: Vec<serde_json::Value> =
+        serde_json::from_str(&eval_search).expect("eval search JSON");
+    assert!(
+        eval_rows.iter().any(|row| row["id"] == id),
+        "explicit /eval search should include eval entries"
+    );
+
+    let aggregate_live = server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            action: "aggregate_live".to_string(),
+            fixture_path: None,
+            limit: Some(50),
+        }))
+        .await
+        .expect("aggregate_live should succeed");
+    let aggregate: serde_json::Value =
+        serde_json::from_str(&aggregate_live).expect("aggregate_live JSON");
+    assert_eq!(aggregate["source"], serde_json::json!("live_memory"));
+    assert_eq!(aggregate["row_count"], serde_json::json!(1));
+    assert_eq!(
+        aggregate["subagent_scores"][0]["agent"],
+        serde_json::json!("kimi")
+    );
+    assert_eq!(
+        aggregate["subagent_scores"][0]["task_type"],
+        serde_json::json!("plan_request")
+    );
 }
 
 #[test]

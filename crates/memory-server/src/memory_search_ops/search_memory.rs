@@ -9,12 +9,27 @@ fn is_training_path(path: &str) -> bool {
     path == "/sft" || path.starts_with("/sft/")
 }
 
+fn is_eval_path(path: &str) -> bool {
+    path == "/eval" || path.starts_with("/eval/")
+}
+
+fn is_eval_entry(entry: &memory_core::MemoryEntry) -> bool {
+    entry.category == "eval" || is_eval_path(&entry.path)
+}
+
 fn training_recall_opted_in(params: &SearchMemoryParams) -> bool {
     params.include_training
         || params
             .path_prefix
             .as_deref()
             .is_some_and(|prefix| is_training_path(prefix.trim_end_matches('/')))
+}
+
+fn eval_recall_opted_in(params: &SearchMemoryParams) -> bool {
+    params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| is_eval_path(prefix.trim_end_matches('/')))
 }
 
 pub(crate) async fn search_memory_rows(
@@ -233,6 +248,9 @@ pub(crate) async fn search_memory_rows(
 
     if !training_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_training_path(&result.entry.path));
+    }
+    if !eval_recall_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
     }
 
     apply_guide_context_boosts(

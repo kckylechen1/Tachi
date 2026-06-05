@@ -74,35 +74,6 @@ pub(crate) async fn handle_tachi_complete(
             summary_lines.push(format!("Notes: {}", notes));
         }
     }
-    let subagent_summaries: Vec<String> = params
-        .subagents
-        .iter()
-        .map(|s| {
-            let mut label = format!("{}/{}", s.role, s.agent);
-            if let Some(model) = &s.model {
-                if !model.is_empty() {
-                    label.push_str(&format!("({model})"));
-                }
-            }
-            if let Some(outcome) = &s.outcome {
-                if !outcome.is_empty() {
-                    label.push_str(&format!("={outcome}"));
-                }
-            }
-            if let Some(score) = s.usefulness_score {
-                label.push_str(&format!(":{score:.2}"));
-            }
-            if let Some(impact) = &s.verification_impact {
-                if !impact.is_empty() {
-                    label.push_str(&format!(" impact={impact}"));
-                }
-            }
-            label
-        })
-        .collect();
-    if !subagent_summaries.is_empty() {
-        summary_lines.push(format!("Subagents: {}", subagent_summaries.join("; ")));
-    }
     let text = summary_lines.join("\n");
 
     let mut keywords: Vec<String> = Vec::new();
@@ -112,34 +83,20 @@ pub(crate) async fn handle_tachi_complete(
     for skill in &params.skills_used {
         keywords.push(skill.clone());
     }
+    let entities = params.skills_used.clone();
     if !params.subagents.is_empty() {
-        keywords.push("subagent".to_string());
         keywords.push("subagent_eval".to_string());
-        for subagent in &params.subagents {
-            keywords.push(subagent.role.clone());
-            keywords.push(subagent.agent.clone());
-            if let Some(model) = &subagent.model {
-                if !model.is_empty() {
-                    keywords.push(model.clone());
-                }
-            }
-        }
-    }
-
-    let mut entities = params.skills_used.clone();
-    for subagent in &params.subagents {
-        entities.push(subagent.agent.clone());
-        if let Some(model) = &subagent.model {
-            if !model.is_empty() {
-                entities.push(model.clone());
-            }
-        }
     }
 
     let mut metadata_map = serde_json::Map::new();
     metadata_map.insert("task_id".into(), serde_json::json!(task_id));
     metadata_map.insert("agent".into(), serde_json::json!(params.agent));
     metadata_map.insert("outcome".into(), serde_json::json!(outcome_norm));
+    if let Some(task_type) = &params.task_type {
+        if !task_type.is_empty() {
+            metadata_map.insert("task_type".into(), serde_json::json!(task_type));
+        }
+    }
     if let Some(ms) = params.duration_ms {
         metadata_map.insert("duration_ms".into(), serde_json::json!(ms));
     }
@@ -200,7 +157,7 @@ pub(crate) async fn handle_tachi_complete(
             "aborted" => 0.5,
             _ => 0.5,
         },
-        category: "experience".to_string(),
+        category: "eval".to_string(),
         topic: params.task.clone(),
         keywords,
         persons: Vec::new(),

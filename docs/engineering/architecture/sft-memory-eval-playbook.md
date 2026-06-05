@@ -85,9 +85,15 @@ row instead of saving raw child transcripts:
       "role": "architect",
       "agent": "kimi",
       "model": "kimi-for-coding",
+      "task_type": "plan_request",
       "outcome": "useful",
       "usefulness_score": 0.82,
-      "verification_impact": "changed_plan"
+      "verification_impact": "changed_plan",
+      "verification_present": true,
+      "evaluator": "leader",
+      "plan_delta": "modified",
+      "latency_ms": 2100,
+      "retry_count": 0
     },
     {
       "role": "explore",
@@ -101,8 +107,15 @@ row instead of saving raw child transcripts:
 ```
 
 Subagent records are for routing evidence. They should include role, provider,
-model, bounded task slice, outcome, usefulness, verification impact, and failure
-mode. Do not store prompts, chain-of-thought, or uncompressed logs in memory.
+model, bounded task slice, task type, outcome, latency, evaluator, usefulness,
+verification impact, plan delta, retry count, and failure mode. Do not store
+prompts, chain-of-thought, or uncompressed logs in memory.
+
+Live eval records are memory-first. `tachi_complete` writes them under
+`/eval/...` with `category="eval"`, and ordinary memory search should exclude
+them unless the caller explicitly scopes to `/eval`. Use
+`tachi_agent_eval(action="aggregate_live")` to aggregate production eval memory;
+use `action="aggregate"` only for fixture JSONL replay.
 
 Leader workflow:
 
@@ -112,8 +125,8 @@ Leader workflow:
 3. Integrate child outputs into the final decision; the leader owns the patch.
 4. Run the real verification gate.
 5. Call `tachi_complete` with `subagents=[...]`.
-6. Use `tachi_agent_eval(action="aggregate", fixture_path=...)` or live eval
-   exports to update routing policy from evidence.
+6. Use `tachi_agent_eval(action="aggregate_live")` to update routing policy
+   from live evidence, or `action="aggregate"` for fixture replay.
 
 Use fixture JSONL for benchmark replay. Keep fixture source explicit; never
 aggregate fixture rows with live `/eval/YYYY-MM-DD/...` records unless the

@@ -543,6 +543,10 @@ pub(crate) struct TachiSubagentEvalParams {
     #[serde(default)]
     pub task: Option<String>,
 
+    /// Standard task type, e.g. fix_request, plan_request, research_request
+    #[serde(default)]
+    pub task_type: Option<String>,
+
     /// Outcome: useful | partial | failed | not_used
     #[serde(default)]
     pub outcome: Option<String>,
@@ -562,9 +566,50 @@ pub(crate) struct TachiSubagentEvalParams {
     #[serde(default)]
     pub verification_impact: Option<String>,
 
+    /// Whether the leader verified this subagent output with independent evidence
+    #[serde(default)]
+    pub verification_present: bool,
+
+    /// Who assigned the usefulness score: leader | human | self | auto_verifier
+    #[serde(default)]
+    pub evaluator: Option<String>,
+
+    /// How the subagent changed the final plan: accepted | modified | rejected | superseded
+    #[serde(default)]
+    pub plan_delta: Option<String>,
+
+    /// Whether the human overrode or materially corrected the subagent output
+    #[serde(default)]
+    pub human_override: bool,
+
+    /// Number of retries or re-prompts needed for this subagent slice
+    #[serde(default)]
+    pub retry_count: u32,
+
     /// Short leader-facing summary; do not store raw transcript
     #[serde(default)]
     pub notes: Option<String>,
+
+    /// Execution latency in milliseconds for this subagent if known
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub latency_ms: Option<u64>,
+
+    /// Input tokens/context tokens for this subagent if known
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub input_tokens: Option<u64>,
+
+    /// Output tokens for this subagent if known
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub output_tokens: Option<u64>,
 
     /// Cost in tokens for this subagent if known
     #[serde(
@@ -595,6 +640,10 @@ pub(crate) struct TachiCompleteParams {
 
     /// Outcome: "success" | "failure" | "partial" | "aborted"
     pub outcome: String,
+
+    /// Standard task type for eval aggregation, e.g. fix_request or plan_request
+    #[serde(default)]
+    pub task_type: Option<String>,
 
     /// Execution duration in milliseconds
     #[serde(
@@ -993,10 +1042,12 @@ pub(crate) struct TachiOrchestratorParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiAgentEvalParams {
-    /// aggregate (more actions later)
+    /// aggregate | aggregate_live
     pub action: String,
     #[serde(default)]
     pub fixture_path: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 // ─── Facade: agent registry / router ─────────────────────────────────────────
