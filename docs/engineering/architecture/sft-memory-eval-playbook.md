@@ -8,6 +8,9 @@ the base model learned new weights. SFT is an external behavior library: it can
 provide prompt exemplars, eval fixtures, and memory seeds, but it must not become
 live project truth by default.
 
+For the standalone subagent operating and evaluation contract, see
+`docs/engineering/architecture/subagent-eval-system.md`.
+
 ## Operating Model
 
 Use SFT in four lanes:
