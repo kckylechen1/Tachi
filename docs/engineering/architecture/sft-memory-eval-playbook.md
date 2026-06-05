@@ -70,6 +70,51 @@ Use production eval rows for actual agent outcomes:
 }
 ```
 
+When a leader uses child agents, record concise subagent evals on the completion
+row instead of saving raw child transcripts:
+
+```json
+{
+  "agent": "codex-leader",
+  "model": "gpt-5.4",
+  "task_type": "fix_request",
+  "completion_status": "completed",
+  "verification_present": true,
+  "subagents": [
+    {
+      "role": "architect",
+      "agent": "kimi",
+      "model": "kimi-for-coding",
+      "outcome": "useful",
+      "usefulness_score": 0.82,
+      "verification_impact": "changed_plan"
+    },
+    {
+      "role": "explore",
+      "agent": "deepseek",
+      "model": "deepseek-v4-flash",
+      "outcome": "partial",
+      "failure_mode": "missed_contract"
+    }
+  ]
+}
+```
+
+Subagent records are for routing evidence. They should include role, provider,
+model, bounded task slice, outcome, usefulness, verification impact, and failure
+mode. Do not store prompts, chain-of-thought, or uncompressed logs in memory.
+
+Leader workflow:
+
+1. Start with `tachi_memory(action="briefing")`.
+2. Delegate bounded slices: explore maps files, architect checks design, critic
+   challenges risks, verifier checks completion evidence.
+3. Integrate child outputs into the final decision; the leader owns the patch.
+4. Run the real verification gate.
+5. Call `tachi_complete` with `subagents=[...]`.
+6. Use `tachi_agent_eval(action="aggregate", fixture_path=...)` or live eval
+   exports to update routing policy from evidence.
+
 Use fixture JSONL for benchmark replay. Keep fixture source explicit; never
 aggregate fixture rows with live `/eval/YYYY-MM-DD/...` records unless the
 report says it is a mixed benchmark.
@@ -93,6 +138,7 @@ Treat this as an initial policy, not a final leaderboard:
 | search/explore/librarian | DeepSeek V4 Flash | Kimi K2P6 |
 | execution/worker | GLM 5.1 | DeepSeek V4 Pro |
 | quick | Kimi K2P6 | GPT Spark |
+| architecture/long-context challenge | Kimi K2P6 / kimi-for-coding | GPT frontier |
 | critic/reviewer | DeepSeek V4 Pro | GPT frontier |
 | planner/architect/final integrator | GPT frontier | none by default |
 

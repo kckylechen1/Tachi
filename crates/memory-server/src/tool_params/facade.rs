@@ -527,6 +527,60 @@ pub(crate) struct TachiApproveMergeParams {
 
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub(crate) struct TachiSubagentEvalParams {
+    /// Subagent role: explore | critic | specialist | executor | verifier | other
+    pub role: String,
+
+    /// Agent/provider name, e.g. kimi, deepseek, glm, codex
+    pub agent: String,
+
+    /// Concrete model name when known
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Bounded task slice assigned to this subagent
+    #[serde(default)]
+    pub task: Option<String>,
+
+    /// Outcome: useful | partial | failed | not_used
+    #[serde(default)]
+    pub outcome: Option<String>,
+
+    /// Usefulness score 0.0-1.0 as judged by the leader
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub usefulness_score: Option<f64>,
+
+    /// Failure mode when this subagent was unhelpful or wrong
+    #[serde(default)]
+    pub failure_mode: Option<String>,
+
+    /// How this subagent affected final verification or plan quality
+    #[serde(default)]
+    pub verification_impact: Option<String>,
+
+    /// Short leader-facing summary; do not store raw transcript
+    #[serde(default)]
+    pub notes: Option<String>,
+
+    /// Cost in tokens for this subagent if known
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub cost_tokens: Option<u64>,
+
+    /// Cost in USD for this subagent if known
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub cost_usd: Option<f64>,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiCompleteParams {
     /// Task ID (if absent, one is generated from timestamp + agent)
@@ -589,6 +643,11 @@ pub(crate) struct TachiCompleteParams {
     /// Worktree path (if dispatched via tachi_dispatch with isolation)
     #[serde(default)]
     pub worktree: Option<String>,
+
+    /// Structured subagent usage/eval records captured by the leader.
+    /// Store concise summaries only; raw child transcripts should stay out of memory.
+    #[serde(default)]
+    pub subagents: Vec<TachiSubagentEvalParams>,
 
     /// Parent dispatch ID (links back to tachi_dispatch record)
     #[serde(default)]

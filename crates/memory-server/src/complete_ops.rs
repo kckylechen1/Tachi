@@ -74,6 +74,35 @@ pub(crate) async fn handle_tachi_complete(
             summary_lines.push(format!("Notes: {}", notes));
         }
     }
+    let subagent_summaries: Vec<String> = params
+        .subagents
+        .iter()
+        .map(|s| {
+            let mut label = format!("{}/{}", s.role, s.agent);
+            if let Some(model) = &s.model {
+                if !model.is_empty() {
+                    label.push_str(&format!("({model})"));
+                }
+            }
+            if let Some(outcome) = &s.outcome {
+                if !outcome.is_empty() {
+                    label.push_str(&format!("={outcome}"));
+                }
+            }
+            if let Some(score) = s.usefulness_score {
+                label.push_str(&format!(":{score:.2}"));
+            }
+            if let Some(impact) = &s.verification_impact {
+                if !impact.is_empty() {
+                    label.push_str(&format!(" impact={impact}"));
+                }
+            }
+            label
+        })
+        .collect();
+    if !subagent_summaries.is_empty() {
+        summary_lines.push(format!("Subagents: {}", subagent_summaries.join("; ")));
+    }
     let text = summary_lines.join("\n");
 
     let mut keywords: Vec<String> = Vec::new();
@@ -82,6 +111,29 @@ pub(crate) async fn handle_tachi_complete(
     keywords.push("eval".to_string());
     for skill in &params.skills_used {
         keywords.push(skill.clone());
+    }
+    if !params.subagents.is_empty() {
+        keywords.push("subagent".to_string());
+        keywords.push("subagent_eval".to_string());
+        for subagent in &params.subagents {
+            keywords.push(subagent.role.clone());
+            keywords.push(subagent.agent.clone());
+            if let Some(model) = &subagent.model {
+                if !model.is_empty() {
+                    keywords.push(model.clone());
+                }
+            }
+        }
+    }
+
+    let mut entities = params.skills_used.clone();
+    for subagent in &params.subagents {
+        entities.push(subagent.agent.clone());
+        if let Some(model) = &subagent.model {
+            if !model.is_empty() {
+                entities.push(model.clone());
+            }
+        }
     }
 
     let mut metadata_map = serde_json::Map::new();
@@ -114,6 +166,25 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(wt) = &params.worktree {
         metadata_map.insert("worktree".into(), serde_json::json!(wt));
     }
+    if !params.subagents.is_empty() {
+        let roles: Vec<String> = params.subagents.iter().map(|s| s.role.clone()).collect();
+        let models: Vec<String> = params
+            .subagents
+            .iter()
+            .filter_map(|s| s.model.clone())
+            .filter(|s| !s.is_empty())
+            .collect();
+        metadata_map.insert("subagent_eval".into(), serde_json::json!(true));
+        metadata_map.insert(
+            "subagent_count".into(),
+            serde_json::json!(params.subagents.len()),
+        );
+        metadata_map.insert("subagent_roles".into(), serde_json::json!(roles));
+        if !models.is_empty() {
+            metadata_map.insert("subagent_models".into(), serde_json::json!(models));
+        }
+        metadata_map.insert("subagents".into(), serde_json::json!(&params.subagents));
+    }
     if let Some(did) = &params.dispatch_id {
         metadata_map.insert("dispatch_id".into(), serde_json::json!(did));
     }
@@ -133,7 +204,7 @@ pub(crate) async fn handle_tachi_complete(
         topic: params.task.clone(),
         keywords,
         persons: Vec::new(),
-        entities: params.skills_used.clone(),
+        entities,
         location: String::new(),
         scope: params
             .scope
@@ -414,6 +485,8 @@ pub(crate) async fn handle_tachi_complete(
         "task_id": task_id,
         "path": path,
         "outcome": outcome_norm,
+        "subagent_count": params.subagents.len(),
+        "subagents": params.subagents,
         "eval_entry": save_json,
         "next_steps": [
             "Use tachi_search with 'eval' keyword to find related outcomes.",

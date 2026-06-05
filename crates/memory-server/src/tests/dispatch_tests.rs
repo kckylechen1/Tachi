@@ -19,6 +19,21 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             trajectory: None,
             diff: Some("diff --git a/foo b/foo\n+bar\n".to_string()),
             worktree: None,
+            subagents: vec![TachiSubagentEvalParams {
+                role: "architect".to_string(),
+                agent: "kimi".to_string(),
+                model: Some("kimi-for-coding".to_string()),
+                task: Some("Review eval-ledger architecture".to_string()),
+                outcome: Some("useful".to_string()),
+                usefulness_score: Some(0.82),
+                failure_mode: None,
+                verification_impact: Some("changed_plan".to_string()),
+                notes: Some(
+                    "Recommended concise structured summaries over raw transcripts.".to_string(),
+                ),
+                cost_tokens: Some(321),
+                cost_usd: None,
+            }],
             dispatch_id: None,
             scope: Some("project".to_string()),
             project: None,
@@ -63,6 +78,17 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert_eq!(metadata["agent"], serde_json::json!("claude-code"));
     assert_eq!(metadata["outcome"], serde_json::json!("success"));
     assert_eq!(metadata["cost_tokens"], serde_json::json!(1234));
+    assert_eq!(metadata["subagent_eval"], serde_json::json!(true));
+    assert_eq!(metadata["subagent_count"], serde_json::json!(1));
+    assert_eq!(
+        metadata["subagent_roles"][0],
+        serde_json::json!("architect")
+    );
+    assert_eq!(
+        metadata["subagent_models"][0],
+        serde_json::json!("kimi-for-coding")
+    );
+    assert_eq!(metadata["subagents"][0]["agent"], serde_json::json!("kimi"));
     assert_eq!(
         metadata["skills_used"][0],
         serde_json::json!("skill:superpowers")
