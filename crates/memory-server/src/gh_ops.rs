@@ -496,9 +496,10 @@ fn first_meaningful_line(body: &str) -> String {
         .collect()
 }
 
-fn lower_contains_any(haystack: &str, needles: &[&str]) -> bool {
-    let lower = haystack.to_ascii_lowercase();
-    needles.iter().any(|needle| lower.contains(needle))
+fn lower_contains_any(lower_haystack: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|needle| lower_haystack.contains(needle))
 }
 
 fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
@@ -506,8 +507,9 @@ fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
         Some(path) => format!("{body}\n{path}"),
         None => body.to_string(),
     };
+    let lower = combined.to_ascii_lowercase();
     if lower_contains_any(
-        &combined,
+        &lower,
         &[
             "security",
             "secret",
@@ -520,7 +522,7 @@ fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
     ) {
         "security"
     } else if lower_contains_any(
-        &combined,
+        &lower,
         &[
             "panic",
             "bug",
@@ -536,12 +538,12 @@ fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
     ) {
         "correctness"
     } else if lower_contains_any(
-        &combined,
+        &lower,
         &["test", "coverage", "assert", "fixture", "mock", "case"],
     ) {
         "tests"
     } else if lower_contains_any(
-        &combined,
+        &lower,
         &[
             "api",
             "schema",
@@ -554,7 +556,7 @@ fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
     ) {
         "api-contract"
     } else if lower_contains_any(
-        &combined,
+        &lower,
         &[
             "maintain",
             "duplicate",
@@ -565,22 +567,21 @@ fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
         ],
     ) {
         "maintainability"
-    } else if lower_contains_any(&combined, &["nit", "style", "format", "typo", "naming"]) {
+    } else if lower_contains_any(&lower, &["nit", "style", "format", "typo", "naming"]) {
         "style"
     } else {
         "unclassified"
     }
 }
 
-fn author_matches_filter(comment: &Value, author_filter: &str) -> bool {
-    let filter = author_filter.trim().to_ascii_lowercase();
-    if filter.is_empty() {
+fn author_matches_filter(comment: &Value, lower_filter: &str) -> bool {
+    if lower_filter.is_empty() {
         return true;
     }
     comment
         .get("author")
         .and_then(Value::as_str)
-        .map(|author| author.to_ascii_lowercase().contains(&filter))
+        .map(|author| author.to_ascii_lowercase().contains(lower_filter))
         .unwrap_or(false)
 }
 
@@ -608,10 +609,11 @@ fn build_pr_review_digest(
     let mut items = Vec::new();
     let mut memory_candidates = Vec::new();
     let mut handbook_candidates = Vec::new();
+    let lower_filter = author_filter.trim().to_ascii_lowercase();
 
     for comment in comments
         .iter()
-        .filter(|comment| author_matches_filter(comment, author_filter))
+        .filter(|comment| author_matches_filter(comment, &lower_filter))
     {
         let body = comment_text(comment, "body").unwrap_or_default();
         if body.is_empty() {
