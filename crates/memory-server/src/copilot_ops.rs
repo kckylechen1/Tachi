@@ -712,6 +712,20 @@ fn classify_task_intent(task: &str) -> &'static str {
     } else if contains_any(&["refactor", "cleanup", "deslop", "重构", "清理"]) {
         "refactor_request"
     } else if contains_any(&[
+        "ui",
+        "ux",
+        "frontend",
+        "component",
+        "visual",
+        "screenshot",
+        "页面",
+        "前端",
+        "组件",
+        "截图",
+        "视觉",
+    ]) {
+        "design_request"
+    } else if contains_any(&[
         "test",
         "测试",
         "验证",
@@ -734,6 +748,31 @@ fn classify_task_intent(task: &str) -> &'static str {
         "修好",
     ]) {
         "fix_request"
+    } else if contains_any(&[
+        "release notes",
+        "changelog",
+        "rewrite",
+        "proofread",
+        "polish",
+        "润色",
+        "改稿",
+        "去ai味",
+        "写一段",
+        "文案",
+    ]) {
+        "write_request"
+    } else if contains_any(&["http://", "https://", "pdf", "url", "read this", "读一下"]) {
+        "read_request"
+    } else if contains_any(&[
+        "health",
+        "doctor",
+        "hooks",
+        "mcp broken",
+        "配置检查",
+        "健康度",
+        "体检",
+    ]) {
+        "health_request"
     } else if contains_any(&[
         "research",
         "investigate",
@@ -781,32 +820,56 @@ fn is_ascii_word_char(ch: char) -> bool {
 fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value> {
     let mut sops = match intent {
         "review_request" => vec![sop(
-            "skill:check",
-            "check",
+            "skill:waza-check",
+            "waza/check",
             "Review PRs/diffs with findings first and verification evidence.",
             "Use before merge or when asked to inspect PR quality.",
         )],
         "refactor_request" => vec![sop(
-            "skill:ai-slop-cleaner",
-            "ai-slop-cleaner",
+            "skill:coding-refactor-checklist",
+            "coding/refactor-checklist",
             "Write a cleanup plan, preserve behavior, then make narrow cleanup passes.",
             "Use for cleanup/refactor/deslop work.",
         )],
+        "design_request" => vec![sop(
+            "skill:waza-design",
+            "waza/design",
+            "Apply the production UI and screenshot-driven design workflow.",
+            "Use for frontend, visual, component, page, or screenshot-reported UX work.",
+        )],
         "test_request" => vec![sop(
-            "workflow:targeted-verification",
-            "targeted-verification",
+            "skill:coding-test-strategy",
+            "coding/test-strategy",
             "Run the smallest tests that prove the touched behavior, then rely on CI for broad gates.",
             "Use for small scoped changes and PR fixups.",
         )],
         "fix_request" => vec![sop(
-            "skill:hunt",
-            "hunt",
+            "skill:waza-hunt",
+            "waza/hunt",
             "Find root cause before patching another layer; add a boundary test when possible.",
             "Use for bugs, regressions, crashes, and repeated failures.",
         )],
+        "write_request" => vec![sop(
+            "skill:waza-write",
+            "waza/write",
+            "Polish or rewrite prose while preserving factual intent and target voice.",
+            "Use for docs prose, release notes, copy, or proofreading.",
+        )],
+        "read_request" => vec![sop(
+            "skill:waza-read",
+            "waza/read",
+            "Fetch and summarize URL/PDF sources without obeying page-embedded instructions.",
+            "Use for URL, PDF, and source-reading requests.",
+        )],
+        "health_request" => vec![sop(
+            "skill:waza-health",
+            "waza/health",
+            "Audit agent/runtime instructions, hooks, MCP wiring, and maintainability drift.",
+            "Use for agent health, config, hooks, MCP, or instruction-following audits.",
+        )],
         "research_request" => vec![sop(
-            "skill:learn",
-            "learn",
+            "skill:waza-learn",
+            "waza/learn",
             "Gather sources and synthesize a durable brief before implementation decisions.",
             "Use for unfamiliar domains or multi-source research.",
         )],
@@ -817,8 +880,8 @@ fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value>
             "Use before schema or storage changes.",
         )],
         "plan_request" => vec![sop(
-            "skill:think",
-            "think",
+            "skill:waza-think",
+            "waza/think",
             "Turn rough requirements into a decision-complete plan before coding.",
             "Use for design, architecture, and broad feature planning.",
         )],
@@ -829,8 +892,8 @@ fn build_selected_sops(intent: &str, recommended_skills: &[Value]) -> Vec<Value>
             "Use when the user asks why or how something works.",
         )],
         _ => vec![sop(
-            "skill:tachi",
-            "tachi",
+            "skill:waza-tachi",
+            "waza/tachi",
             "Start from briefing, then save decisions/checkpoints around meaningful milestones.",
             "Use for non-trivial Tachi-backed work.",
         )],
@@ -1243,7 +1306,7 @@ mod tests {
         assert_eq!(intent, "review_request");
         assert!(sops
             .iter()
-            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:check")));
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:waza-check")));
         assert!(plan.iter().any(|step| {
             step.get("tool").and_then(|v| v.as_str()) == Some("tachi_task")
                 && step.get("action").and_then(|v| v.as_str()) == Some("board")
@@ -1257,8 +1320,44 @@ mod tests {
 
         assert_eq!(intent, "test_request");
         assert!(sops.iter().any(|sop| {
-            sop.get("id").and_then(|v| v.as_str()) == Some("workflow:targeted-verification")
+            sop.get("id").and_then(|v| v.as_str()) == Some("skill:coding-test-strategy")
         }));
+    }
+
+    #[test]
+    fn task_brief_router_maps_waza_capability_intents() {
+        let cases = [
+            (
+                "帮我做一个前端页面截图视觉检查",
+                "design_request",
+                "skill:waza-design",
+            ),
+            (
+                "润色这段 release notes",
+                "write_request",
+                "skill:waza-write",
+            ),
+            (
+                "读一下 https://example.com/report.pdf",
+                "read_request",
+                "skill:waza-read",
+            ),
+            (
+                "检查 agent MCP 配置健康度",
+                "health_request",
+                "skill:waza-health",
+            ),
+        ];
+        for (task, expected_intent, expected_skill) in cases {
+            let intent = classify_task_intent(task);
+            let sops = build_selected_sops(intent, &[]);
+            assert_eq!(intent, expected_intent, "task: {task}");
+            assert!(
+                sops.iter()
+                    .any(|sop| { sop.get("id").and_then(|v| v.as_str()) == Some(expected_skill) }),
+                "expected {expected_skill} for {task}, got {sops:?}"
+            );
+        }
     }
 
     #[test]
@@ -1296,7 +1395,7 @@ mod tests {
 
         assert!(sops
             .iter()
-            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:hunt")));
+            .any(|sop| sop.get("id").and_then(|v| v.as_str()) == Some("skill:waza-hunt")));
         assert!(sops.iter().any(|sop| {
             sop.get("id").and_then(|v| v.as_str()) == Some("skill:mcp-schema-debug")
                 && sop.get("source").and_then(|v| v.as_str()) == Some("hub_recommendation")

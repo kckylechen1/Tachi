@@ -49,6 +49,8 @@ pub(crate) fn run(action: &HubAction, db_path: &PathBuf, app_home: &Path) -> Res
         HubAction::Stats { json: false } => cmd_stats(db_path).map_err(|e| e.to_string()),
         HubAction::Doctor { fix } => cmd_doctor(app_home, *fix).map_err(|e| e.to_string()),
         HubAction::Register { .. }
+        | HubAction::PackRegister { .. }
+        | HubAction::PackProject { .. }
         | HubAction::Enable { .. }
         | HubAction::Disable { .. }
         | HubAction::Stats { json: true } => Err("handled by MemoryStore in cli_tool".into()),

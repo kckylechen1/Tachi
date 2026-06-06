@@ -7,8 +7,54 @@ fn current_exposed_tool_patterns() -> Option<Vec<String>> {
         .filter(|patterns| !patterns.is_empty())
 }
 
-fn tool_not_found_error() -> rmcp::ErrorData {
-    rmcp::ErrorData::invalid_request("tool not found".to_string(), None)
+fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
+    rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(format!(
+        "tool not found: '{tool_name}'. Call tachi_tools() or tools/list and use an exact visible tool name for the current TACHI_PROFILE."
+    ))])
+}
+
+fn annotate_tool(tool: &mut rmcp::model::Tool) {
+    use rmcp::model::ToolAnnotations;
+
+    let name = tool.name.as_ref();
+    let read_only = matches!(
+        name,
+        "runtime_info"
+            | "tachi_status"
+            | "tachi_tools"
+            | "tachi_briefing"
+            | "tachi_web_search"
+            | "vault_status"
+    );
+    let destructive = matches!(
+        name,
+        "delete_memory"
+            | "archive_memory"
+            | "memory_gc"
+            | "tachi_task"
+            | "tachi_shell"
+            | "tachi_orchestrator"
+            | "tachi_arena"
+            | "tachi_workflow"
+            | "tachi_gh"
+    );
+    let idempotent = matches!(
+        name,
+        "runtime_info" | "tachi_status" | "tachi_tools" | "vault_status"
+    );
+    let open_world = matches!(
+        name,
+        "tachi_web_search" | "tachi_gh" | "hub_call" | "hub_discover"
+    );
+
+    let existing = tool.annotations.take().unwrap_or_default();
+    let mut annotations = ToolAnnotations::default();
+    annotations.title = existing.title;
+    annotations.read_only_hint = existing.read_only_hint.or(Some(read_only));
+    annotations.destructive_hint = existing.destructive_hint.or(Some(destructive));
+    annotations.idempotent_hint = existing.idempotent_hint.or(Some(idempotent));
+    annotations.open_world_hint = existing.open_world_hint.or(Some(open_world));
+    tool.annotations = Some(annotations);
 }
 
 impl ServerHandler for MemoryServer {
@@ -80,6 +126,9 @@ impl ServerHandler for MemoryServer {
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
             );
+            for tool in &mut tools {
+                annotate_tool(tool);
+            }
 
             Ok(rmcp::model::ListToolsResult {
                 tools,
@@ -105,7 +154,7 @@ impl ServerHandler for MemoryServer {
             );
 
             if !visible {
-                return Err(tool_not_found_error());
+                return Ok(tool_not_found_result(name));
             }
 
             // ─── Rate Limiter: throttle and loop detection ───────────────
@@ -215,7 +264,7 @@ impl ServerHandler for MemoryServer {
                             .await
                     }
                 } else {
-                    Err(tool_not_found_error())
+                    Ok(tool_not_found_result(name))
                 }
             };
 

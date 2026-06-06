@@ -668,6 +668,34 @@ pub(crate) enum HubAction {
         #[arg(long)]
         all: bool,
     },
+    /// Register a local skill pack directory in the Hub pack registry
+    PackRegister {
+        /// Pack id, e.g. "waza/skills"
+        id: String,
+        /// Local filesystem path containing SKILL.md files and optionally tachi-pack.json
+        #[arg(long, value_name = "DIR")]
+        local_path: PathBuf,
+        /// Display name
+        #[arg(long)]
+        name: Option<String>,
+        /// Source URI, e.g. "local:~/.agents/skills"
+        #[arg(long)]
+        source: Option<String>,
+        /// Version string
+        #[arg(long)]
+        version: Option<String>,
+        /// Short description
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// Project a registered skill pack to one or more agent host directories
+    PackProject {
+        /// Pack id to project
+        pack_id: String,
+        /// Agent kind to project to. Repeat for multiple agents.
+        #[arg(long = "agent", value_name = "AGENT")]
+        agents: Vec<String>,
+    },
     /// List virtual capability bindings
     Bindings,
     Register {

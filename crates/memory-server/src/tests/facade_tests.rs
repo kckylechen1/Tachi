@@ -183,6 +183,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
     assert!(body.contains("Saved ->"));
     assert!(body.contains("status: saved"));
     assert!(body.contains("id: `"));
+    assert!(body.contains("Summary: Status diagnostics checkpoint"));
 }
 
 #[tokio::test]
@@ -350,8 +351,27 @@ async fn tachi_memory_readiness_can_return_operational_json() {
     assert_eq!(parsed["status"], json!("completed"));
     assert!(parsed["runtime"].is_object());
     assert!(parsed["health"].is_object());
-    assert!(parsed["required_tools"].is_array());
+    assert!(parsed["tools"].is_array());
+    assert!(parsed["tool_visibility_summary"].is_object());
+    assert!(parsed["suggestions"].is_array());
     assert!(parsed["vector_health"].is_object());
+}
+
+#[test]
+fn tachi_memory_action_schema_declares_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiMemoryParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("briefing")));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("readiness")));
 }
 
 #[allow(clippy::await_holding_lock)]
