@@ -378,6 +378,47 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
 }
 
 #[tokio::test]
+async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
+    let server = make_server();
+    let prompt = crate::dispatch_ops::assemble_prompt(
+        &server,
+        &TachiDispatchParams {
+            agent: "codex".to_string(),
+            task: "Split this implementation plan into worker slices and run review gates"
+                .to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            project: None,
+            stage: Some("dispatch".to_string()),
+        },
+    )
+    .await;
+
+    assert!(
+        prompt.contains("### skill:superpowers-subagent-driven-development"),
+        "dispatch stage should invoke the worker factory skill: {prompt}"
+    );
+    assert!(
+        prompt.contains("### skill:superpowers-executing-plans"),
+        "dispatch stage should still carry the execution skill: {prompt}"
+    );
+    assert!(
+        prompt.contains("### skill:waza-tachi"),
+        "dispatch stage should carry the Tachi workflow skill: {prompt}"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_prompt_injects_sft_examples_as_style_only_context() {
     let server = make_server();
     server

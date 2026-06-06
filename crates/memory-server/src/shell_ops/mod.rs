@@ -325,6 +325,28 @@ fn build_instruction_md(
     s.push_str("## Task\n\n");
     s.push_str(task.trim());
     s.push_str("\n\n");
+
+    let lifecycle_skills = crate::skill_policy::shell_stage_skills(stage);
+    s.push_str("## Native Lifecycle Policy\n\n");
+    s.push_str(
+        "- Treat Superpowers and Waza as native workflow gates, not optional Hub suggestions.\n",
+    );
+    s.push_str("- Leader owns mode choice, worker slicing, integration, final verification, and the user-facing completion claim.\n");
+    s.push_str("- Use native child agents or external lanes only for bounded, independent, verifiable work; max 6 concurrent workers.\n");
+    s.push_str("- Give every worker goal, allowed scope, forbidden scope when relevant, required skills, validation commands, and report-back contract.\n");
+    s.push_str("- Keep dependent work serial: plan-before-code, same-file edits, chained transforms, and reviewer gates.\n");
+    s.push_str("- Inject MCP/tool permissions by worker role/profile; fail or report impact when required MCP access is missing.\n");
+    s.push_str("- Workers must report back; child output is draft evidence until the leader reviews and verifies it.\n\n");
+    if lifecycle_skills.is_empty() {
+        s.push_str("Required leader skills: (none)\n\n");
+    } else {
+        s.push_str("Required leader skills:\n");
+        for skill in &lifecycle_skills {
+            s.push_str(&format!("- `{}`\n", skill));
+        }
+        s.push('\n');
+    }
+
     s.push_str("## Required Reading (Injected SOP)\n\n");
     if let Some(p) = injection.injected_path.as_deref() {
         s.push_str(&format!("- `{}`", p));
@@ -449,6 +471,7 @@ async fn handle_stage_action(
     std::fs::write(&instr_path, instruction).map_err(|e| format!("write instruction.md: {e}"))?;
 
     advance_stage(&run_dir, &flow_id, stage, &task, &injection, created)?;
+    let required_skills = crate::skill_policy::shell_stage_skills(stage);
 
     let resp = json!({
         "flow_id": flow_id,
@@ -456,6 +479,7 @@ async fn handle_stage_action(
         "run_dir": run_dir.to_string_lossy(),
         "instruction_path": instr_path.to_string_lossy(),
         "injected_skill": injection_to_json(&injection),
+        "native_skill_policy": crate::skill_policy::native_policy_summary(stage, &required_skills),
         "async": false,
         "created": created,
     });
@@ -486,6 +510,7 @@ async fn handle_dispatch_action(
     std::fs::write(&instr_path, &instruction).map_err(|e| format!("write instruction.md: {e}"))?;
 
     advance_stage(&run_dir, &flow_id, "dispatch", &task, &injection, created)?;
+    let required_skills = crate::skill_policy::shell_stage_skills("dispatch");
 
     if !params.slices.is_empty() {
         return handle_convoy_dispatch_action(
@@ -581,6 +606,7 @@ async fn handle_dispatch_action(
         "run_dir": run_dir.to_string_lossy(),
         "instruction_path": instr_path.to_string_lossy(),
         "injected_skill": injection_to_json(&injection),
+        "native_skill_policy": crate::skill_policy::native_policy_summary("dispatch", &required_skills),
         "async": async_fired,
         "dispatch_id": dispatch_id,
         "dispatch_error": dispatch_error,
@@ -603,14 +629,14 @@ async fn handle_convoy_dispatch_action(
         .as_deref()
         .ok_or_else(|| "'task' is required for action='dispatch'".to_string())?;
     let convoy_superpowers = vec![
-        "skill:superpowers-executing-plans",
-        "skill:superpowers-requesting-code-review",
+        crate::skill_policy::SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT.to_string(),
+        crate::skill_policy::SUPERPOWER_EXECUTING_PLANS.to_string(),
+        crate::skill_policy::SUPERPOWER_REQUESTING_CODE_REVIEW.to_string(),
     ];
-    let convoy_worker_skills = vec![
-        "skill:superpowers-executing-plans",
-        "skill:superpowers-requesting-code-review",
-        "skill:waza-tachi",
-    ];
+    let parent_worker_skills = crate::skill_policy::worker_skills_for_convoy_slice(parent_task, "");
+    let mut convoy_worker_skills = convoy_superpowers.clone();
+    convoy_worker_skills.extend(parent_worker_skills);
+    crate::skill_policy::dedupe_preserve_order(&mut convoy_worker_skills);
     let mut parent_instruction = build_instruction_md(
         flow_id,
         "dispatch",
@@ -625,6 +651,12 @@ async fn handle_convoy_dispatch_action(
         parent_instruction.push_str(&format!("- `{}`\n", contract));
     }
     parent_instruction.push('\n');
+    parent_instruction.push_str("## Worker Factory Contract\n\n");
+    parent_instruction.push_str("- Split only independent, bounded, verifiable slices; keep dependent or same-file work serial.\n");
+    parent_instruction.push_str("- Prefer read-only sidecars for inventory/review, and writable workers only with explicit scope.\n");
+    parent_instruction.push_str(
+        "- Require each worker to report back; leader reviews results before integration.\n\n",
+    );
     std::fs::write(parent_instr_path, parent_instruction)
         .map_err(|e| format!("write convoy parent instruction.md: {e}"))?;
     let mut seen = std::collections::HashSet::new();
@@ -643,6 +675,8 @@ async fn handle_convoy_dispatch_action(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(parent_task);
+        let slice_worker_skills =
+            crate::skill_policy::worker_skills_for_convoy_slice(parent_task, slice_task);
         let slice_agent = slice
             .agent
             .clone()
@@ -685,10 +719,14 @@ async fn handle_convoy_dispatch_action(
             &slice_allowed_scope,
         );
         instruction.push_str("## Required Worker Skills\n\n");
-        for contract in &convoy_worker_skills {
+        for contract in &slice_worker_skills {
             instruction.push_str(&format!("- `{}`\n", contract));
         }
         instruction.push('\n');
+        instruction.push_str("## Worker Report-Back Contract\n\n");
+        instruction.push_str("- Start final output with `Using skills: <ids>`.\n");
+        instruction.push_str("- Report changed files, verification commands and outcomes, blockers, and recommended handoff.\n");
+        instruction.push_str("- Do not claim the parent flow is complete; the leader owns integration and final verification.\n\n");
         let slice_instr_path = slice_dir.join("instruction.md");
         std::fs::write(&slice_instr_path, instruction)
             .map_err(|e| format!("write convoy slice instruction.md: {e}"))?;
@@ -779,7 +817,7 @@ async fn handle_convoy_dispatch_action(
             "cwd": slice_cwd,
             "instruction_path": slice_instr_path.to_string_lossy(),
             "required_superpowers": convoy_superpowers.clone(),
-            "required_worker_skills": convoy_worker_skills.clone(),
+            "required_worker_skills": slice_worker_skills,
             "dispatch_id": dispatch_id,
             "dispatch_error": dispatch_error,
         }));
@@ -800,6 +838,7 @@ async fn handle_convoy_dispatch_action(
                 "slice_count": slice_records.len(),
                 "required_superpowers": convoy_superpowers.clone(),
                 "required_worker_skills": convoy_worker_skills.clone(),
+                "native_skill_policy": crate::skill_policy::native_policy_summary("dispatch", &convoy_worker_skills),
                 "slices": slice_records,
                 "updated_at": Utc::now().to_rfc3339(),
             }),
@@ -813,6 +852,7 @@ async fn handle_convoy_dispatch_action(
         "run_dir": run_dir.to_string_lossy(),
         "instruction_path": parent_instr_path.to_string_lossy(),
         "injected_skill": injection_to_json(injection),
+        "native_skill_policy": crate::skill_policy::native_policy_summary("dispatch", &convoy_worker_skills),
         "async": async_fired,
         "convoy": true,
         "dispatch_ids": dispatch_ids,
@@ -1130,6 +1170,10 @@ mod tests {
         assert!(s.contains("Stage: **plan**"));
         assert!(s.contains("do the thing"));
         assert!(s.contains("superpowers-plan.md"));
+        assert!(s.contains("## Native Lifecycle Policy"));
+        assert!(s.contains("skill:superpowers-writing-plans"));
+        assert!(s.contains("skill:waza-think"));
+        assert!(s.contains("max 6 concurrent workers"));
         assert!(s.contains("cargo test"));
         assert!(s.contains("crates/memory-server/**"));
         assert!(s.contains("be careful"));
@@ -1404,7 +1448,7 @@ mod tests {
             action: "dispatch".into(),
             format: None,
             flow_id: None,
-            task: Some("parent task".into()),
+            task: Some("parent task: review GitHub PRs and issues".into()),
             title: Some("convoy test".into()),
             agent: None,
             cwd: None,
@@ -1418,7 +1462,7 @@ mod tests {
             slices: vec![
                 TachiShellDispatchSliceParams {
                     id: Some("alpha".into()),
-                    task: Some("slice alpha task".into()),
+                    task: Some("slice alpha task: inspect the new PR".into()),
                     title: Some("Alpha Slice".into()),
                     agent: None,
                     cwd: None,
@@ -1458,6 +1502,25 @@ mod tests {
         let run_dir = PathBuf::from(v.get("run_dir").unwrap().as_str().unwrap());
         assert!(run_dir.join("slices/alpha/instruction.md").exists());
         assert!(run_dir.join("slices/beta/instruction.md").exists());
+        let parent_instruction = std::fs::read_to_string(run_dir.join("instruction.md")).unwrap();
+        assert!(
+            parent_instruction.contains("skill:superpowers-subagent-driven-development"),
+            "{parent_instruction}"
+        );
+        assert!(
+            parent_instruction.contains("## Worker Factory Contract"),
+            "{parent_instruction}"
+        );
+        let alpha_instruction =
+            std::fs::read_to_string(run_dir.join("slices/alpha/instruction.md")).unwrap();
+        assert!(
+            alpha_instruction.contains("skill:waza-check"),
+            "{alpha_instruction}"
+        );
+        assert!(
+            alpha_instruction.contains("## Worker Report-Back Contract"),
+            "{alpha_instruction}"
+        );
 
         let status = read_status(&run_dir);
         let convoy = status.get("convoy").unwrap();
@@ -1466,6 +1529,13 @@ mod tests {
             Some("parallel")
         );
         assert_eq!(convoy.get("slice_count").and_then(|x| x.as_u64()), Some(2));
+        assert_eq!(
+            convoy
+                .get("native_skill_policy")
+                .and_then(|x| x.get("policy"))
+                .and_then(|x| x.as_str()),
+            Some("native")
+        );
 
         let events_raw = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
         let prepared_count = events_raw

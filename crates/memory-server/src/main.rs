@@ -92,6 +92,7 @@ mod server_methods;
 mod shared_defs;
 mod shell_ops;
 mod skill_chain_ops;
+mod skill_policy;
 mod status_ops;
 mod tool_params;
 mod tools;
