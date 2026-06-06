@@ -33,6 +33,11 @@ pub(crate) fn format_briefing(
         out.push(format!(
             "Project focus: `{project}` (memories/wiki from this repo)"
         ));
+    } else {
+        out.push(
+            "Project focus: _unscoped_ (no git project detected; pass `project='name'` for a named DB or `scope='all'` when looking for global/wiki entries)"
+                .to_string(),
+        );
     }
 
     if let Some(handoffs) = cross_project.as_array() {
@@ -127,8 +132,13 @@ pub(crate) fn format_briefing(
         }
     }
 
+    out.push("\n### Suggested next step".to_string());
+    out.push(format!(
+        "- {}",
+        briefing_next_step(query, wiki, health_summary, kanban)
+    ));
     out.push(
-        "\n> **Session end**: save decisions/outcomes → `tachi_memory(action='save', text=…, keywords=[…], project='…')`. Windsurf/Cursor have no auto-capture."
+        "\n> Save only new decisions/outcomes as they happen → `tachi_memory(action='save', text=…, keywords=[…], project='…')`. Windsurf/Cursor have no auto-capture."
             .to_string(),
     );
 
@@ -161,9 +171,42 @@ pub(crate) fn format_alerts(warnings: &[String], wiki_counts: &Value) -> String 
         out.push(format!(
             "\n### Wiki hygiene\n- Orphans: {orphans} | Stale: {stale} | Duplicates: {duplicates}"
         ));
+        out.push(
+            "- Next: run `tachi tidy --dry-run` to inspect DB fragmentation, or use `wiki_lint`/admin profile for wiki graph cleanup before applying changes."
+                .to_string(),
+        );
     }
 
     out.join("\n")
+}
+
+fn briefing_next_step(query: &str, wiki: &Value, health_summary: &Value, kanban: &Value) -> String {
+    let has_warnings = health_summary
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(|warnings| !warnings.is_empty());
+    if has_warnings {
+        return "`tachi_memory(action='alerts')` to inspect operational warnings before deeper work."
+            .to_string();
+    }
+    if kanban
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| !tasks.is_empty())
+    {
+        return "`tachi_task(action='board')` to review active work before dispatching new tasks."
+            .to_string();
+    }
+    if wiki.as_array().is_some_and(|rows| !rows.is_empty()) {
+        return format!(
+            "`tachi_wiki(action='search', query='{}')` for reusable lessons related to this briefing.",
+            compact_text_line(query, 80).replace('\'', "")
+        );
+    }
+    format!(
+        "`tachi_memory(action='search', scope='all', query='{}')` if project-scoped results look sparse.",
+        compact_text_line(query, 80).replace('\'', "")
+    )
 }
 
 pub(crate) fn format_wiki_search(query: &str, count: usize, results: &Value) -> String {

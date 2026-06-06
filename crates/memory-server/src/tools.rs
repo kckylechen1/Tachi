@@ -208,6 +208,46 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "List the native Tachi tools visible to the current profile. Use before calling unfamiliar tools instead of guessing tool names."
+    )]
+    pub(crate) async fn tachi_tools(&self) -> Result<String, String> {
+        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
+            .ok()
+            .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+            .filter(|patterns| !patterns.is_empty());
+        let profile = self.active_tool_profile();
+        let mut tools = crate::profiles::filter_tool_defs(
+            self.tool_router.list_all(),
+            profile,
+            env_patterns.as_deref(),
+        );
+        tools.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let rows = tools
+            .iter()
+            .map(|tool| {
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(|text| crate::utils::compact_text_line(text.as_ref(), 96))
+                    .unwrap_or_default();
+                format!("- `{}` — {}", tool.name, description)
+            })
+            .collect::<Vec<_>>();
+        Ok(format!(
+            "## Tachi tools\nprofile: `{}`\ncount: {}\n\n{}\n\nUse exact names from this list; unknown tool names are treated as not connected/unsupported by some MCP hosts.",
+            profile
+                .map(|p| p.as_str())
+                .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str()),
+            names.len(),
+            rows.join("\n")
+        ))
+    }
+
+    #[tool(
         description = "Doctor v2 — scan known memory.db roots, classify each (healthy / vec_extension_missing / wal_orphan / corrupt / legacy_schema / placeholder / backup), return JSON report. Read-only; no mutations."
     )]
     pub(crate) async fn tachi_doctor_scan(&self) -> Result<String, String> {
