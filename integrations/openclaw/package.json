@@ -1,6 +1,6 @@
 {
   "name": "tachi",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "private": true,
   "description": "OpenClaw lifecycle plugin for Tachi memory and hub access",
   "license": "AGPL-3.0-only",

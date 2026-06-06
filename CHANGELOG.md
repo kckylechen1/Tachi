@@ -7,9 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-07
+
+Release focused on turning Tachi into a more complete agent engineering surface: native multi-agent coordination, auditable worker runs, skill policy, cleanup utilities, runtime observability, and release-ready package alignment.
+
+### Added
+
+- `tachi_arena` / arena-backed worker tracking for auditable external-agent runs, status board reads, and recovery-oriented delegation.
+- Native skill policy and embedded Superpowers/Waza SOP routing so shell stages, PR review, issue handling, docs, release, and audit workflows can invoke approved skills instead of relying on prompt memory.
+- Agent eval harness and documentation for measuring multi-agent work, including task memory hygiene and SFT-safe capture boundaries.
+- Dispatch profile and prompt-envelope support for four-agent fleet routing, backend model tiers, Kimi output handling, and mixed-case intent routing.
+- `tachi clean` in the main CLI, reusing `tachi-clean` for safe target cleanup, marked worktree cleanup, stale temp sweeps, and Tachi self-maintenance cleanup. Cleanup is dry-run by default and destructive only with `--force`.
+- Runtime observability for daemon/stdio authority, sidecar health, provider-key drift hints, and hidden/visible tool readiness.
+- Wiki write references, orchestrator TODO/handoff state, and issue-document-memory workflow closure primitives.
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, `@chaoxlabs/tachi-node`, OpenClaw plugin, and TypeScript CLI package versions are aligned to `1.5.0`.
+- Installer URLs across READMEs and `docs/INSTALL.md` now point at the `v1.5.0` release tag.
+- SFT/training data is kept out of live recall by default, and low-signal memory is less likely to crowd normal recall.
+- Full CI is no longer run automatically for every small PR while GitHub Actions minutes are constrained.
+
+### Fixed
+
+- Vector sweep startup, schema v9 batch migration, and Foundry shadow-write behavior.
+- Default wiki recall cache pollution and Gemini follow-up issues around wiki recall, runtime, and routing.
+- Agent recovery and skill lookup dead ends, mixed-case task intent routing, and Kimi dispatch output formatting.
+- Vault/provider-key drift handling, stale provider key surfacing without live probes, and daemon health readiness.
+
 ### Removed
 
-- **`memory-python` crate**: legacy PyO3 binding for the scrapped `memory-mcp` prototype; Tachi uses `memory-server` + `memory-node` only.
+- Legacy `memory-python` PyO3 crate and dead/zombie code paths that were no longer part of the active Tachi architecture.
 
 ## [1.4.3] - 2026-06-02
 
