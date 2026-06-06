@@ -227,6 +227,7 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         "id": row.get("id"),
         "path": row.get("path"),
         "summary": row.get("summary"),
+        "excerpt": row.get("excerpt"),
         "topic": row.get("topic"),
         "relevance": relevance,
     })

@@ -192,6 +192,10 @@ fn remap_daemon_tool(
             args.insert("action".into(), serde_json::json!("search"));
             ("tachi_memory".into(), args)
         }
+        "get_memory" => {
+            args.insert("action".into(), serde_json::json!("get"));
+            ("tachi_memory".into(), args)
+        }
         "tachi_wiki_search" | "wiki_search" => {
             args.insert("action".into(), serde_json::json!("search"));
             ("tachi_wiki".into(), args)

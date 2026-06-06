@@ -801,6 +801,93 @@ pub fn search_fts(
         .collect())
 }
 
+// ─── SYMBOLIC CANDIDATE SEARCH ───────────────────────────────────────────────
+
+/// Pull a small lexical candidate set for exact IDs, path slugs, keywords, and
+/// short technical terms that FTS tokenization may miss.
+pub fn search_symbolic_candidates(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let mut terms: Vec<String> = crate::scorer::tokenize(query)
+        .into_iter()
+        .filter(|term| term.len() >= 3)
+        .collect();
+    terms.extend(
+        query
+            .split_whitespace()
+            .map(|term| {
+                term.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && !matches!(c, '-' | '_' | '/' | '.')
+                })
+                .to_ascii_lowercase()
+            })
+            .filter(|term| term.len() >= 3),
+    );
+    terms.sort();
+    terms.dedup();
+    terms.truncate(12);
+
+    if terms.is_empty() && path_prefix.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
+    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
+    let mut sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS} FROM memories
+         WHERE (?1 = 1 OR archived = 0)
+           AND (?2 = 1 OR superseded_by IS NULL)
+           AND (?3 IS NULL OR path LIKE ?3)
+           AND (?4 IS NULL OR (COALESCE(NULLIF(valid_from, ''), timestamp) <= ?4 AND (valid_until IS NULL OR valid_until > ?4)))"
+    );
+
+    let mut params: Vec<rusqlite::types::Value> = vec![
+        (include_archived as i64).into(),
+        (include_superseded as i64).into(),
+        path_like.into(),
+        as_of_utc.clone().into(),
+    ];
+
+    if !terms.is_empty() {
+        let mut term_clauses = Vec::new();
+        for term in &terms {
+            let pattern = format!("%{term}%");
+            params.push(pattern.into());
+            let idx = params.len();
+            term_clauses.push(format!(
+                "(lower(id) LIKE ?{idx}
+                  OR lower(path) LIKE ?{idx}
+                  OR lower(summary) LIKE ?{idx}
+                  OR lower(text) LIKE ?{idx}
+                  OR lower(keywords) LIKE ?{idx}
+                  OR lower(entities) LIKE ?{idx}
+                  OR lower(topic) LIKE ?{idx})"
+            ));
+        }
+        sql.push_str(" AND (");
+        sql.push_str(&term_clauses.join(" OR "));
+        sql.push(')');
+    }
+
+    params.push((limit.max(1) as i64).into());
+    let limit_idx = params.len();
+    sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ?{limit_idx}"));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 // ─── BULK FETCH ───────────────────────────────────────────────────────────────
 
 /// Maximum IDs per batch for IN clause queries (SQLite has a 999 parameter limit).

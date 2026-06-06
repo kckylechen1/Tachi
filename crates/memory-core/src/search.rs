@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     db::{
         fetch_by_ids, get_access_times, get_superseded_ids, graph_expand, record_access,
-        search_fts, search_vec,
+        search_fts, search_symbolic_candidates, search_vec,
     },
     error::MemoryError,
     scorer::{
@@ -24,6 +24,7 @@ use crate::{
 const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
 const MAX_EXPANDED_FTS_QUERIES: usize = 6;
 const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
+const SYMBOLIC_CANDIDATE_MULTIPLIER: usize = 10;
 
 /// Options for a hybrid search query.
 pub struct SearchOptions {
@@ -66,6 +67,19 @@ fn env_truthy(key: &str) -> bool {
         std::env::var(key).ok().as_deref(),
         Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
     )
+}
+
+fn scoped_path_can_surface_superseded(path_prefix: Option<&str>) -> bool {
+    let Some(prefix) = path_prefix
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty())
+    else {
+        return false;
+    };
+    if prefix == "/" || prefix.starts_with("/wiki") || prefix.starts_with("/kanban") {
+        return false;
+    }
+    prefix.trim_matches('/').split('/').count() >= 3
 }
 
 impl Default for SearchOptions {
@@ -333,6 +347,13 @@ fn search_fts_with_expansion(
     Ok(merged)
 }
 
+fn symbolic_match_text(entry: &MemoryEntry) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{}",
+        entry.id, entry.path, entry.topic, entry.summary, entry.text
+    )
+}
+
 /// MMR-inspired diversity filter: greedily select results that are both
 /// relevant (high score) and diverse (low similarity to already-selected).
 ///
@@ -540,8 +561,9 @@ pub fn hybrid_search(
         .as_deref()
         .map(crate::db::normalize_utc_iso)
         .transpose()?;
-    let include_superseded =
-        opts.include_superseded || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED");
+    let include_superseded = opts.include_superseded
+        || env_truthy("TACHI_SEARCH_INCLUDE_SUPERSEDED")
+        || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
 
     // ── Channel 1: Vector ─────────────────────────────────────────────────────
     let vec_scores: HashMap<String, f64> = if opts.vec_available {
@@ -573,10 +595,26 @@ pub fn hybrid_search(
         as_of_utc.as_deref(),
     )?;
 
+    // ── Channel 3 seed: exact symbolic candidates ────────────────────────────
+    // FTS5 can miss hyphenated slugs, exact ids, and short technical tokens
+    // (`clean-cli`, `dry-run`, `RECALL_PROBE_*`). Pull a bounded lexical set so
+    // symbolic scoring can add candidates instead of merely re-ranking FTS/vec.
+    let symbolic_candidate_entries = search_symbolic_candidates(
+        conn,
+        query,
+        n.saturating_mul(SYMBOLIC_CANDIDATE_MULTIPLIER)
+            .max(opts.top_k),
+        opts.include_archived,
+        include_superseded,
+        opts.path_prefix.as_deref(),
+        as_of_utc.as_deref(),
+    )?;
+
     // ── Collect all candidate IDs ──────────────────────────────────────────────
     let candidate_ids: Vec<String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
+        .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
         .cloned()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -596,7 +634,7 @@ pub fn hybrid_search(
         .map(|(id, entry)| {
             let score = symbolic_score(
                 &symbolic_query,
-                &entry.text,
+                &symbolic_match_text(entry),
                 &entry.keywords,
                 &entry.entities,
             );
@@ -878,6 +916,10 @@ mod tests {
         upsert(conn, &e, false).unwrap();
     }
 
+    fn insert_entry(conn: &mut Connection, entry: MemoryEntry) {
+        upsert(conn, &entry, false).unwrap();
+    }
+
     fn memory_entry(id: &str, text: &str, keywords: &[&str]) -> MemoryEntry {
         MemoryEntry {
             id: id.to_string(),
@@ -908,6 +950,70 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    #[test]
+    fn hybrid_symbolic_candidates_can_seed_path_scoped_short_technical_terms() {
+        let mut conn = setup();
+        let mut target = memory_entry(
+            "clean-cli-memory",
+            "The memory-server CLI clean bridge defaults to dry-run and requires --force for deletion.",
+            &["clean-cli", "target-clean", "dry-run"],
+        );
+        target.path = "/scratch/tachi/clean-cli-integration".to_string();
+        insert_entry(&mut conn, target);
+
+        let mut other = memory_entry(
+            "other-clean-memory",
+            "Another cleanup note mentions dry-run but belongs elsewhere.",
+            &["cleanup", "dry-run"],
+        );
+        other.path = "/scratch/other".to_string();
+        insert_entry(&mut conn, other);
+
+        let opts = SearchOptions {
+            top_k: 3,
+            candidates_per_channel: 0,
+            path_prefix: Some("/scratch/tachi/clean-cli-integration".to_string()),
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "clean-cli-memory");
+        assert!(results[0].score.symbolic > 0.0);
+    }
+
+    #[test]
+    fn hybrid_symbolic_candidates_rank_exact_probe_token_above_siblings() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "alpha",
+            "RECALL_PROBE_ALPHA_20260607 clean-cli bridge dry-run force-delete subcommands",
+            &["recall-probe", "clean-cli", "dry-run"],
+        );
+        insert(
+            &mut conn,
+            "beta",
+            "RECALL_PROBE_BETA_20260607 cleanup defaults preview before deletion",
+            &["recall-probe", "cleanup"],
+        );
+        insert(
+            &mut conn,
+            "delta",
+            "RECALL_PROBE_DELTA_20260607 profile routing requested_profile tool_profile",
+            &["recall-probe", "profile"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 3,
+            candidates_per_channel: 0,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "RECALL_PROBE_ALPHA_20260607", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "alpha");
+        assert!(results[0].score.symbolic > results[1].score.symbolic);
     }
 
     #[test]
@@ -1089,6 +1195,36 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(ids.contains(&"new".to_string()));
         assert!(!ids.contains(&"old".to_string()));
+    }
+
+    #[test]
+    fn hybrid_surfaces_superseded_when_explicitly_scoped_to_deep_path() {
+        let mut conn = setup();
+        let mut old = memory_entry(
+            "old-path-memory",
+            "clean-cli integration defaults to dry-run and requires --force",
+            &["clean-cli", "dry-run"],
+        );
+        old.path = "/scratch/tachi/clean-cli-integration".to_string();
+        insert_entry(&mut conn, old);
+        let mut new = memory_entry(
+            "new-release-memory",
+            "release prep summary for tachi version bump",
+            &["release-prep"],
+        );
+        new.path = "/scratch/tachi/v1.5-release-prep".to_string();
+        insert_entry(&mut conn, new);
+        crate::db::supersede_memory(&conn, "old-path-memory", "new-release-memory").unwrap();
+
+        let opts = SearchOptions {
+            top_k: 5,
+            path_prefix: Some("/scratch/tachi/clean-cli-integration".to_string()),
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
+        assert_eq!(results[0].entry.id, "old-path-memory");
+        assert!(results[0].score.final_score < 1.0);
     }
 
     #[test]

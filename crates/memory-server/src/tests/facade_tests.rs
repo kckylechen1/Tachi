@@ -1,5 +1,48 @@
 use super::*;
 
+fn tachi_memory_params(action: &str) -> TachiMemoryParams {
+    TachiMemoryParams {
+        action: action.to_string(),
+        format: None,
+        query: None,
+        scope: None,
+        top_k: 6,
+        path_prefix: None,
+        file_context: None,
+        error_context: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        synthesize: false,
+        model: None,
+        text: None,
+        title: None,
+        summary: None,
+        topic: None,
+        keywords: Vec::new(),
+        entities: Vec::new(),
+        importance: None,
+        retention_policy: None,
+        kind: None,
+        path: None,
+        id: None,
+        force: false,
+        source: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        files: Vec::new(),
+        flow_id: None,
+        event: None,
+        state: None,
+        project: None,
+        domain: None,
+        compact: false,
+    }
+}
+
 // ─── cli_client: daemon detection + in-process fallback ─────────────────────
 
 #[tokio::test]
@@ -256,6 +299,41 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
 }
 
 #[tokio::test]
+async fn tachi_memory_get_action_returns_saved_entry() {
+    let server = make_server();
+    let mem_id = "facade-get-action-001";
+
+    let mut save = tachi_memory_params("save");
+    save.format = Some("json".to_string());
+    save.scope = Some("project".to_string());
+    save.text = Some("Facade get action should return the full saved memory text.".to_string());
+    save.summary = Some("Facade get action".to_string());
+    save.path = Some("/scratch/tachi/facade-get-action".to_string());
+    save.id = Some(mem_id.to_string());
+    save.force = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, save)
+        .await
+        .expect("save should succeed");
+
+    let mut get = tachi_memory_params("get");
+    get.format = Some("json".to_string());
+    get.id = Some(mem_id.to_string());
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, get)
+        .await
+        .expect("get should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("get response json");
+
+    assert_eq!(parsed["id"], json!(mem_id));
+    assert_eq!(parsed["path"], json!("/scratch/tachi/facade-get-action"));
+    assert!(
+        parsed["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("full saved memory text")),
+        "expected full text in get response: {body}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_memory_ask_returns_evidence_contract() {
     let server = make_server();
 
@@ -368,6 +446,10 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .as_array()
         .expect("action enum")
         .contains(&json!("briefing")));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("get")));
     assert!(action["enum"]
         .as_array()
         .expect("action enum")

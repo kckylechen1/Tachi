@@ -150,6 +150,20 @@ fn is_pure_emoji(s: &str) -> bool {
         .all(|c| c.is_whitespace() || (!c.is_alphanumeric() && !is_cjk(c)))
 }
 
+fn has_compound_technical_token(s: &str) -> bool {
+    s.split_whitespace().any(|token| {
+        let has_joiner = token.contains('-') || token.contains('_') || token.contains('/');
+        if !has_joiner {
+            return false;
+        }
+        token
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|part| part.chars().count() >= 2)
+            .count()
+            >= 2
+    })
+}
+
 /// Determine if a query should skip memory retrieval.
 /// Returns `true` if retrieval should be skipped (query is not worth searching).
 pub fn should_skip_query(query: &str) -> bool {
@@ -200,7 +214,7 @@ pub fn should_skip_query(query: &str) -> bool {
     let default_min_length = if has_cjk { 4 } else { 10 };
     let has_question = trimmed.contains('?') || trimmed.contains('？');
 
-    if char_count < default_min_length && !has_question {
+    if char_count < default_min_length && !has_question && !has_compound_technical_token(trimmed) {
         return true;
     }
 
@@ -309,6 +323,13 @@ mod tests {
     fn skip_short_non_question() {
         assert!(should_skip_query("do it"));
         assert!(should_skip_query("test"));
+    }
+
+    #[test]
+    fn technical_compound_queries_are_not_skipped() {
+        assert!(!should_skip_query("dry-run"));
+        assert!(!should_skip_query("clean-cli"));
+        assert!(!should_skip_query("pre_commit"));
     }
 
     #[test]
