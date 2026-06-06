@@ -10,6 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
 
+use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
     handle_recommend_toolchain,
@@ -110,6 +111,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "save_memory",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_save_memory(self, params).await
     }
 
@@ -195,6 +205,46 @@ impl MemoryServer {
     )]
     pub(crate) async fn tachi_status(&self) -> Result<String, String> {
         crate::status_ops::handle_tachi_status_agent(self).await
+    }
+
+    #[tool(
+        description = "List the native Tachi tools visible to the current profile. Use before calling unfamiliar tools instead of guessing tool names."
+    )]
+    pub(crate) async fn tachi_tools(&self) -> Result<String, String> {
+        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
+            .ok()
+            .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+            .filter(|patterns| !patterns.is_empty());
+        let profile = self.active_tool_profile();
+        let mut tools = crate::profiles::filter_tool_defs(
+            self.tool_router.list_all(),
+            profile,
+            env_patterns.as_deref(),
+        );
+        tools.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_ref().to_string())
+            .collect::<Vec<_>>();
+        let rows = tools
+            .iter()
+            .map(|tool| {
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(|text| crate::utils::compact_text_line(text.as_ref(), 96))
+                    .unwrap_or_default();
+                format!("- `{}` — {}", tool.name, description)
+            })
+            .collect::<Vec<_>>();
+        Ok(format!(
+            "## Tachi tools\nprofile: `{}`\ncount: {}\n\n{}\n\nUse exact names from this list; unknown tool names are treated as not connected/unsupported by some MCP hosts.",
+            profile
+                .map(|p| p.as_str())
+                .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str()),
+            names.len(),
+            rows.join("\n")
+        ))
     }
 
     #[tool(
@@ -1607,10 +1657,18 @@ impl MemoryServer {
                         .filter_map(|cap| cap.get("id").and_then(Value::as_str))
                         .map(str::to_string)
                         .collect::<std::collections::HashSet<_>>();
+                    let hub_skill_names = results
+                        .iter()
+                        .filter_map(canonical_skill_name)
+                        .collect::<std::collections::HashSet<_>>();
                     local.retain(|cap| {
-                        cap.get("id")
+                        let id_unseen = cap
+                            .get("id")
                             .and_then(Value::as_str)
-                            .is_none_or(|id| !seen.contains(id))
+                            .is_none_or(|id| !seen.contains(id));
+                        let name_unseen = canonical_skill_name(cap)
+                            .is_none_or(|name| !hub_skill_names.contains(&name));
+                        id_unseen && name_unseen
                     });
                     results.extend(local);
                 }
@@ -1758,13 +1816,33 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, safe_merge. safe_merge defaults to dry-run unless confirm=true. Requires GH_TOKEN in Vault or environment."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates that require leader verdict before promotion. safe_merge defaults to dry-run unless confirm=true. Requires GH_TOKEN in Vault or environment."
     )]
     pub(crate) async fn tachi_gh(
         &self,
         Parameters(params): Parameters<TachiGhParams>,
     ) -> Result<String, String> {
         handle_tachi_gh(self, params).await
+    }
+
+    // ─── Tachi Arena: tracked worker mission document ledger ────────────────
+
+    #[tool(
+        description = "Tracked worker mission ledger. action='open' creates .tachi/arena/<arena_id>/; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt for a harness; action='board' lists arenas or missions; action='collect' reads worker result.md; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
+    )]
+    pub(crate) async fn tachi_arena(
+        &self,
+        Parameters(params): Parameters<TachiArenaParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        let format = params.format.clone();
+        let raw = handle_tachi_arena(self, params).await?;
+        Ok(format_facade_response(
+            &format!("Tachi arena {}", action),
+            &action,
+            &raw,
+            format.as_deref(),
+        ))
     }
 
     // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────
@@ -1803,11 +1881,15 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
     };
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
+    append_known_field(&mut lines, &value, "arena_id");
+    append_known_field(&mut lines, &value, "mission_id");
     append_known_field(&mut lines, &value, "flow_id");
     append_known_field(&mut lines, &value, "dispatch_id");
     append_known_field(&mut lines, &value, "stage");
     append_known_field(&mut lines, &value, "state");
     append_known_field(&mut lines, &value, "run_dir");
+    append_known_field(&mut lines, &value, "arena_dir");
+    append_known_field(&mut lines, &value, "mission_dir");
     append_known_field(&mut lines, &value, "instruction_path");
     append_known_field(&mut lines, &value, "prompt_file");
     append_known_field(&mut lines, &value, "trajectory_file");
@@ -1904,6 +1986,21 @@ fn skill_discover_result_is_callable(cap: &Value) -> bool {
                 )
             })
             .unwrap_or(true)
+}
+
+fn canonical_skill_name(cap: &Value) -> Option<String> {
+    let raw = cap
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| cap.get("name").and_then(Value::as_str))?;
+    let without_kind = raw
+        .strip_prefix("host-skill:")
+        .or_else(|| raw.strip_prefix("skill:waza-"))
+        .or_else(|| raw.strip_prefix("skill:"))
+        .unwrap_or(raw);
+    let trimmed = without_kind.strip_prefix("waza/").unwrap_or(without_kind);
+    let normalized = trimmed.trim().to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {

@@ -17,21 +17,27 @@ pub(crate) async fn handle_memory_checkpoint(
     params: TachiMemoryParams,
 ) -> Result<String, String> {
     let return_json = wants_json(params.format.as_deref());
-    let (body, display_path, already_formatted) = save_memory_checkpoint(server, params).await?;
+    let (body, display_path, already_formatted, echo) =
+        save_memory_checkpoint(server, params).await?;
     if return_json {
-        return json_string(&parse_json_or_empty(body));
+        let mut payload = parse_json_or_empty(body);
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("echo".to_string(), json!(echo));
+        }
+        return json_string(&payload);
     }
     Ok(checkpoint_message(
         &body,
         display_path.as_deref(),
         already_formatted,
+        echo.as_deref(),
     ))
 }
 
 pub(crate) async fn save_memory_checkpoint(
     server: &MemoryServer,
     mut params: TachiMemoryParams,
-) -> Result<(String, Option<String>, bool), String> {
+) -> Result<(String, Option<String>, bool, Option<String>), String> {
     if let Some(body) = crate::cli_client::maybe_forward_write(
         server.global_db_path.as_path(),
         "tachi_memory",
@@ -39,7 +45,7 @@ pub(crate) async fn save_memory_checkpoint(
     )
     .await
     {
-        return Ok((body, None, true));
+        return Ok((body, None, true, params.summary.clone()));
     }
 
     let text = params
@@ -55,6 +61,7 @@ pub(crate) async fn save_memory_checkpoint(
         "Checkpoint: {title}\n\n{text}\n\nRecorded at: {}",
         Utc::now().to_rfc3339()
     );
+    let echo = params.summary.clone().or_else(|| Some(text.clone()));
     let path = params.path.take().or_else(|| {
         Some(format!(
             "/agent/checkpoints/{}",
@@ -102,7 +109,7 @@ pub(crate) async fn save_memory_checkpoint(
         files: Vec::new(),
     };
     let body = handle_tachi_save(server, save_params).await?;
-    Ok((body, display_path, false))
+    Ok((body, display_path, false, echo))
 }
 
 pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
@@ -163,12 +170,14 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         files: Vec::new(),
         compact: false,
     };
-    let (saved, display_path, already_formatted) = save_memory_checkpoint(server, params).await?;
+    let (saved, display_path, already_formatted, echo) =
+        save_memory_checkpoint(server, params).await?;
     Ok(Some(json!({
         "status": "captured",
         "path": path,
         "saved": checkpoint_saved_payload(&saved, already_formatted),
-        "message": checkpoint_message(&saved, display_path.as_deref(), already_formatted),
+        "echo": echo.clone(),
+        "message": checkpoint_message(&saved, display_path.as_deref(), already_formatted, echo.as_deref()),
     })))
 }
 
@@ -341,7 +350,7 @@ mod tests {
         let body = "Saved -> `/agent/checkpoints/2026-05-31` (id: `cp-123`, status: saved)";
 
         assert_eq!(
-            checkpoint_message(body, None, true),
+            checkpoint_message(body, None, true, Some("ignored forwarded echo")),
             "Saved -> `/agent/checkpoints/2026-05-31` (id: `cp-123`, status: saved)"
         );
     }

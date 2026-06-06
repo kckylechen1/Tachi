@@ -99,6 +99,52 @@ Do not count a helper as useful just because it produced text. Count it as
 useful when it changed the plan, found a real risk, saved time, improved
 verification, or produced a bounded patch the leader accepted.
 
+## Native Skill Policy
+
+Superpowers and Waza are native workflow gates for subagent orchestration, not
+only Hub-discoverable skills.
+
+Tachi applies lifecycle skills by stage:
+
+| Stage | Native gates |
+|---|---|
+| `brainstorm` | `skill:superpowers-brainstorming`, `skill:waza-think` |
+| `plan` | `skill:superpowers-writing-plans`, `skill:waza-think` |
+| `dispatch` | `skill:superpowers-subagent-driven-development`, `skill:superpowers-executing-plans`, `skill:waza-tachi` |
+| `execute` worker | `skill:superpowers-executing-plans` plus task-routed Waza/coding skills |
+| `review` | `skill:superpowers-requesting-code-review`, `skill:superpowers-verification-before-completion`, `skill:waza-check` |
+| `ship` | `skill:superpowers-verification-before-completion`, `skill:superpowers-finishing-a-development-branch`, `skill:waza-check` |
+
+Worker role bindings:
+
+| Worker task shape | Native skill |
+|---|---|
+| PR, issue, diff, release, merge review | `skill:waza-check` |
+| Bug, crash, regression, repeated failure | `skill:waza-hunt` |
+| UI, frontend, screenshot, component design | `skill:waza-design` |
+| Multi-source research | `skill:waza-learn` |
+| URL or PDF reading | `skill:waza-read` |
+| Docs, release notes, prose | `skill:waza-write` |
+| MCP, hooks, config, agent health | `skill:waza-health` |
+| Tachi memory/task work | `skill:waza-tachi` |
+
+The instruction packet must include the worker factory contract: leader-owned
+integration, max six concurrent helpers, independent slices only, explicit
+scope and validation, role-scoped MCP/tool permission injection, and mandatory
+report-back. Child output remains draft evidence until the leader verifies it.
+
+This follows the useful parts of the observed external systems:
+
+- Amp: separate Oracle, Task, and Codebase Search lanes; prompt every worker
+  with goal, deliverables, procedure, validation, constraints, and context.
+- Codex native subagents: leader owns integration and final verification; model
+  inheritance is the default; bounded children should not recursively
+  orchestrate.
+- OpenCode/OMO: typed adapters should be explicit, not hidden behind `custom`;
+  default to read-only workers, deny nested delegation unless a team policy
+  enables it, and treat child-idle/TODO completion as liveness rather than
+  quality proof.
+
 ## Current Routing Hypothesis
 
 This is a starting hypothesis, not a leaderboard:
@@ -138,4 +184,3 @@ The relevant commits are:
 - `010b77a` Make subagent work measurable in eval memory
 - `29ada83` Close the live subagent eval loop
 - `e0744ca` Make memory-server package tests deterministic
-

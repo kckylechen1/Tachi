@@ -3,11 +3,11 @@ use super::*;
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read", "safe_merge"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read", "pr_comments", "pr_review_digest", "safe_merge"
     pub action: String,
     /// Repository in "owner/repo" format
     pub repo: String,
-    /// Issue or PR number (required for issue_read, pr_read, safe_merge)
+    /// Issue or PR number (required for issue_read, pr_read, pr_comments, pr_review_digest, safe_merge)
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
@@ -47,6 +47,12 @@ pub(crate) struct TachiGhParams {
     /// Merge gate policy mode: permissive | standard | strict. Defaults to standard.
     #[serde(default)]
     pub merge_policy: Option<String>,
+    /// Optional author/login substring for pr_review_digest. Defaults to "gemini".
+    #[serde(default)]
+    pub author_filter: Option<String>,
+    /// Write pr_review_digest artifacts under .tachi/reviews. Defaults to true.
+    #[serde(default)]
+    pub write_digest: Option<bool>,
 }
 
 /// Parameters for reading a GitHub issue
@@ -92,6 +98,15 @@ pub(crate) struct GhIssueCreateParams {
 /// Parameters for reading a GitHub PR
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct GhPrReadParams {
+    /// Repository in "owner/repo" format
+    pub repo: String,
+    /// PR number
+    pub pr_number: u64,
+}
+
+/// Parameters for reading GitHub PR review submissions and inline comments
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct GhPrCommentsParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// PR number

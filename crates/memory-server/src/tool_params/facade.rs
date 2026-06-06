@@ -10,6 +10,124 @@ fn default_facade_top_k() -> usize {
     6
 }
 
+fn string_enum_schema(
+    values: &[&str],
+    description: &str,
+    _: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    rmcp::schemars::json_schema!({
+        "type": "string",
+        "enum": values,
+        "description": description
+    })
+}
+
+fn tachi_memory_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "search",
+            "save",
+            "extract_facts",
+            "briefing",
+            "checkpoint",
+            "alerts",
+            "ask",
+            "consolidate",
+            "progress",
+            "readiness",
+        ],
+        "Required Tachi memory facade action.",
+        generator,
+    )
+}
+
+fn tachi_wiki_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["search", "browse", "read", "write"],
+        "Required Tachi wiki facade action.",
+        generator,
+    )
+}
+
+fn tachi_skill_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["discover", "run"],
+        "Required Tachi skill facade action.",
+        generator,
+    )
+}
+
+fn tachi_task_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "plan",
+            "recommend",
+            "dispatch",
+            "profiles",
+            "profile",
+            "card",
+            "board",
+            "merge",
+        ],
+        "Required Tachi task facade action.",
+        generator,
+    )
+}
+
+fn tachi_arena_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "open", "spawn", "board", "collect", "abort", "reap", "close",
+        ],
+        "Required Tachi arena action.",
+        generator,
+    )
+}
+
+fn tachi_shell_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "brainstorm",
+            "plan",
+            "dispatch",
+            "kanban",
+            "status",
+            "review",
+            "ship",
+        ],
+        "Required Tachi shell workflow stage.",
+        generator,
+    )
+}
+
+fn tachi_orchestrator_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "todo_list",
+            "todo_update",
+            "handoff_write",
+            "handoff_read",
+            "recovery_briefing",
+        ],
+        "Required Tachi orchestrator action.",
+        generator,
+    )
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiSearchParams {
     /// Search query text
@@ -210,6 +328,7 @@ fn default_memory_top_k() -> usize {
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiMemoryParams {
     #[schemars(
+        schema_with = "tachi_memory_action_schema",
         description = "Required. One of: search (hybrid vector+FTS+symbolic recall), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
     )]
     pub action: String,
@@ -822,6 +941,7 @@ pub(crate) struct TachiCompleteParams {
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiWikiParams {
     /// Action: "search", "browse", "read", or "write"
+    #[schemars(schema_with = "tachi_wiki_action_schema")]
     pub action: String,
     #[serde(default)]
     pub query: Option<String>,
@@ -918,6 +1038,7 @@ pub(crate) struct TachiWorkflowParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiSkillParams {
     /// Action: "discover" or "run"
+    #[schemars(schema_with = "tachi_skill_action_schema")]
     pub action: String,
     #[serde(default)]
     pub query: Option<String>,
@@ -940,9 +1061,7 @@ pub(crate) struct TachiTaskParams {
     /// Action: "plan", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
     /// from the task, risk, and live eval evidence.
-    #[schemars(
-        description = "Action: plan | recommend | dispatch | profiles | profile | card | board | merge. Use recommend before external worker dispatch to choose a dispatch profile from task, risk, and live eval evidence."
-    )]
+    #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: String,
     /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
     #[serde(default)]
@@ -1040,6 +1159,86 @@ pub(crate) struct TachiTaskParams {
     pub confirm: bool,
 }
 
+// ─── Facade: tachi_arena (tracked worker mission ledger) ────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiArenaParams {
+    /// Action: "open", "spawn", "board", "collect", "abort", "reap", or "close"
+    #[schemars(schema_with = "tachi_arena_action_schema")]
+    pub action: String,
+
+    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Existing arena id for spawn/board/collect/abort/reap/close.
+    #[serde(default)]
+    pub arena_id: Option<String>,
+
+    /// Existing or requested mission id for spawn/collect/abort.
+    #[serde(default)]
+    pub mission_id: Option<String>,
+
+    /// Human-readable arena title for open.
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Arena objective for open.
+    #[serde(default)]
+    pub objective: Option<String>,
+
+    /// Mission prompt for spawn, or objective fallback for open.
+    #[serde(default)]
+    pub prompt: Option<String>,
+
+    /// Harness lane hint. Golden lanes: "opencode" (default worker), "claude"/"claude-code" (MCP-capable worker), "gemini-advisor"/"ask-gemini" (brainstorm artifact advisor), or "manual" (document-only fallback). Unknown values are treated as manual tracked-document missions.
+    #[serde(default)]
+    pub harness: Option<String>,
+
+    /// Worker role/lane, e.g. "explore", "critic", "executor", "verifier".
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// Working directory hint for a future harness adapter.
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Required skill ids the worker must invoke/report.
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    /// Allowed file/module scope for the worker mission.
+    #[serde(default)]
+    pub scope: Vec<String>,
+
+    /// Permission notes or tool names granted to this mission.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+
+    /// Mission timeout hint for a future harness adapter.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub timeout_secs: Option<u64>,
+
+    /// Reason for abort/reap.
+    #[serde(default)]
+    pub reason: Option<String>,
+
+    /// For reap, defaults to true.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+
+    /// Close even when active/uncollected missions remain.
+    #[serde(default)]
+    pub force: bool,
+
+    /// Close requires written results to have been collected. Defaults to true.
+    #[serde(default)]
+    pub require_collected: Option<bool>,
+}
+
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1073,6 +1272,7 @@ pub(crate) struct TachiShellDispatchSliceParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiShellParams {
     /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
+    #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
 
     /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
@@ -1157,6 +1357,7 @@ pub(crate) struct TachiShellParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiOrchestratorParams {
     /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
+    #[schemars(schema_with = "tachi_orchestrator_action_schema")]
     pub action: String,
     #[serde(default)]
     pub task_id: Option<String>,
