@@ -75,24 +75,8 @@ pub(crate) fn dispatch_stage_skills(stage_key: &str) -> Vec<String> {
 
 pub(crate) fn shell_stage_skills(stage: &str) -> Vec<String> {
     match stage {
-        "brainstorm" => ids(&[SUPERPOWER_BRAINSTORMING, WAZA_THINK]),
-        "plan" => ids(&[SUPERPOWER_WRITING_PLANS, WAZA_THINK]),
-        "dispatch" => ids(&[
-            SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT,
-            SUPERPOWER_EXECUTING_PLANS,
-            WAZA_TACHI,
-        ]),
-        "review" => ids(&[
-            SUPERPOWER_REQUESTING_CODE_REVIEW,
-            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-            WAZA_CHECK,
-        ]),
-        "ship" => ids(&[
-            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-            SUPERPOWER_FINISHING_BRANCH,
-            WAZA_CHECK,
-        ]),
-        _ => Vec::new(),
+        "auto" | "execute" => Vec::new(),
+        other => dispatch_stage_skills(other),
     }
 }
 
@@ -105,10 +89,7 @@ pub(crate) fn worker_skills_for_task(task: &str) -> Vec<String> {
 }
 
 pub(crate) fn worker_skills_for_convoy_slice(parent_task: &str, slice_task: &str) -> Vec<String> {
-    let mut combined = String::new();
-    combined.push_str(parent_task);
-    combined.push('\n');
-    combined.push_str(slice_task);
+    let combined = format!("{parent_task}\n{slice_task}");
     let mut skills = ids(&[
         SUPERPOWER_EXECUTING_PLANS,
         SUPERPOWER_REQUESTING_CODE_REVIEW,
@@ -200,5 +181,11 @@ mod tests {
         let skills = shell_stage_skills("ship");
         assert!(skills.contains(&SUPERPOWER_VERIFICATION_BEFORE_COMPLETION.to_string()));
         assert!(skills.contains(&SUPERPOWER_FINISHING_BRANCH.to_string()));
+    }
+
+    #[test]
+    fn shell_policy_rejects_dispatch_only_stages() {
+        assert!(shell_stage_skills("auto").is_empty());
+        assert!(shell_stage_skills("execute").is_empty());
     }
 }

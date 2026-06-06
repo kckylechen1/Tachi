@@ -4,13 +4,13 @@ use crate::gh_safe_merge::{
 };
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
-    GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrListParams, GhPrReadParams,
-    GhRepoViewParams, TachiGhParams,
+    GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrCommentsParams, GhPrListParams,
+    GhPrReadParams, GhRepoViewParams, TachiGhParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::process::Command;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
@@ -202,6 +202,28 @@ fn run_gh(mut cmd: Command, token: &str) -> Result<String, String> {
     Ok(result)
 }
 
+fn run_gh_json(mut cmd: Command, token: &str) -> Result<String, String> {
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to execute `gh`: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let sanitized_stdout = sanitize_output(&stdout, token);
+    let sanitized_stderr = sanitize_output(&stderr, token);
+
+    if !output.status.success() {
+        return Err(format!(
+            "gh failed (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            sanitized_stderr.chars().take(1000).collect::<String>()
+        ));
+    }
+
+    Ok(sanitized_stdout)
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 pub(crate) async fn handle_gh_issue_read(
@@ -302,6 +324,149 @@ pub(crate) async fn handle_gh_pr_read(
         "repo": params.repo,
         "pr_number": params.pr_number,
         "result": serde_json::from_str::<serde_json::Value>(&output).unwrap_or(json!(output)),
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+fn run_gh_api_paginated(server: &MemoryServer, endpoint: &str) -> Result<Value, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.args(["api", "--paginate", "--slurp"]).arg(endpoint);
+
+    let output = run_gh_json(cmd, &token)?;
+    serde_json::from_str::<Value>(&output).map_err(|e| {
+        format!(
+            "parse gh api response from '{}': {e}; raw={}",
+            endpoint,
+            output.chars().take(500).collect::<String>()
+        )
+    })
+}
+
+fn flatten_paginated_array(value: Value, label: &str) -> Result<Vec<Value>, String> {
+    match value {
+        Value::Array(items) if items.iter().all(Value::is_array) => {
+            let mut flattened = Vec::new();
+            for page in items {
+                if let Value::Array(page_items) = page {
+                    flattened.extend(page_items);
+                }
+            }
+            Ok(flattened)
+        }
+        Value::Array(items) => Ok(items),
+        other => Err(format!("{label} response was not an array: {other}")),
+    }
+}
+
+fn normalize_review_entry(entry: Value) -> Value {
+    json!({
+        "kind": "review",
+        "id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "review_id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "author": entry
+            .get("user")
+            .and_then(|user| user.get("login"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "body": entry.get("body").cloned().unwrap_or(Value::Null),
+        "state": entry.get("state").cloned().unwrap_or(Value::Null),
+        "submitted_at": entry.get("submitted_at").cloned().unwrap_or(Value::Null),
+        "created_at": entry.get("submitted_at").cloned().unwrap_or(Value::Null),
+        "url": entry.get("html_url").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn normalize_inline_comment_entry(entry: Value) -> Value {
+    json!({
+        "kind": "inline_comment",
+        "id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "comment_id": entry.get("id").cloned().unwrap_or(Value::Null),
+        "review_id": entry
+            .get("pull_request_review_id")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "in_reply_to_id": entry.get("in_reply_to_id").cloned().unwrap_or(Value::Null),
+        "author": entry
+            .get("user")
+            .and_then(|user| user.get("login"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "path": entry.get("path").cloned().unwrap_or(Value::Null),
+        "line": entry.get("line").cloned().unwrap_or(Value::Null),
+        "start_line": entry.get("start_line").cloned().unwrap_or(Value::Null),
+        "side": entry.get("side").cloned().unwrap_or(Value::Null),
+        "body": entry.get("body").cloned().unwrap_or(Value::Null),
+        "created_at": entry.get("created_at").cloned().unwrap_or(Value::Null),
+        "updated_at": entry.get("updated_at").cloned().unwrap_or(Value::Null),
+        "url": entry.get("html_url").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn comment_entry_time(entry: &Value) -> Option<&str> {
+    entry
+        .get("created_at")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("submitted_at").and_then(Value::as_str))
+}
+
+fn merge_pr_comment_entries(
+    mut reviews: Vec<Value>,
+    mut inline_comments: Vec<Value>,
+) -> Vec<Value> {
+    let mut comments = Vec::with_capacity(reviews.len() + inline_comments.len());
+    comments.append(&mut reviews);
+    comments.append(&mut inline_comments);
+    comments.sort_by(|left, right| {
+        comment_entry_time(left)
+            .unwrap_or("")
+            .cmp(comment_entry_time(right).unwrap_or(""))
+            .then_with(|| {
+                left.get("id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    .cmp(&right.get("id").and_then(Value::as_i64).unwrap_or_default())
+            })
+    });
+    comments
+}
+
+pub(crate) async fn handle_gh_pr_comments(
+    server: &MemoryServer,
+    params: GhPrCommentsParams,
+) -> Result<String, String> {
+    validate_repo(&params.repo)?;
+
+    let reviews_endpoint = format!(
+        "repos/{}/pulls/{}/reviews?per_page=100",
+        params.repo, params.pr_number
+    );
+    let inline_comments_endpoint = format!(
+        "repos/{}/pulls/{}/comments?per_page=100",
+        params.repo, params.pr_number
+    );
+    let reviews =
+        flatten_paginated_array(run_gh_api_paginated(server, &reviews_endpoint)?, "reviews")?
+            .into_iter()
+            .map(normalize_review_entry)
+            .collect::<Vec<_>>();
+    let inline_comments = flatten_paginated_array(
+        run_gh_api_paginated(server, &inline_comments_endpoint)?,
+        "inline_comments",
+    )?
+    .into_iter()
+    .map(normalize_inline_comment_entry)
+    .collect::<Vec<_>>();
+    let comments = merge_pr_comment_entries(reviews.clone(), inline_comments.clone());
+
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_pr_comments",
+        "repo": params.repo,
+        "pr_number": params.pr_number,
+        "result": {
+            "reviews": reviews,
+            "inline_comments": inline_comments,
+            "comments": comments,
+        },
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
@@ -426,6 +591,19 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await
         }
+        "pr_comments" => {
+            let number = params
+                .number
+                .ok_or("pr_comments requires 'number' parameter (PR number)")?;
+            handle_gh_pr_comments(
+                server,
+                GhPrCommentsParams {
+                    repo: params.repo,
+                    pr_number: number,
+                },
+            )
+            .await
+        }
         "safe_merge" => {
             let number = params
                 .number
@@ -443,7 +621,7 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, safe_merge",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, safe_merge",
             other
         )),
     }
@@ -892,6 +1070,42 @@ mod safe_merge_tests {
             mergeable: Mergeable::Unknown,
             ..ready_pr()
         }
+    }
+
+    #[test]
+    fn pr_comments_merge_preserves_chronological_order() {
+        let reviews = vec![json!({
+            "kind": "review",
+            "id": 2,
+            "created_at": "2026-06-06T10:10:00Z",
+            "body": "summary",
+        })];
+        let inline_comments = vec![json!({
+            "kind": "inline_comment",
+            "id": 1,
+            "created_at": "2026-06-06T10:05:00Z",
+            "body": "line comment",
+        })];
+
+        let merged = merge_pr_comment_entries(reviews, inline_comments);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0]["kind"], "inline_comment");
+        assert_eq!(merged[1]["kind"], "review");
+    }
+
+    #[test]
+    fn pr_comments_flatten_paginated_arrays() {
+        let pages = json!([
+            [{"id": 1}],
+            [{"id": 2}, {"id": 3}]
+        ]);
+
+        let flattened = flatten_paginated_array(pages, "comments").expect("flat");
+
+        assert_eq!(flattened.len(), 3);
+        assert_eq!(flattened[0]["id"], 1);
+        assert_eq!(flattened[2]["id"], 3);
     }
 
     #[tokio::test]
