@@ -44,6 +44,24 @@ async fn runtime_info_reports_identity_and_db_routing() {
     assert_eq!(value["databases"]["project"], serde_json::Value::Null);
     assert_eq!(value["databases"]["single_db_mode"], json!(true));
     assert!(value["process"]["pid"].as_u64().is_some());
+    let process_role = value["process"]["process_role"]
+        .as_str()
+        .expect("process_role");
+    assert!(
+        matches!(process_role, "embedded_stdio" | "stdio_daemon_client"),
+        "unexpected process_role: {process_role}"
+    );
+    let authoritative_runtime = value["process"]["authoritative_runtime"]
+        .as_str()
+        .expect("authoritative_runtime");
+    assert!(
+        matches!(authoritative_runtime, "current_process" | "daemon"),
+        "unexpected authoritative_runtime: {authoritative_runtime}"
+    );
+    assert_eq!(value["process"]["stdio_adapter"], json!(true));
+    assert!(value["process"]["write_forwarding"]["expected"]
+        .as_bool()
+        .is_some());
     assert!(value["process"]["provider_secret_count"].as_u64().is_some());
     assert_eq!(value["process"]["vault"]["unlocked"], json!(false));
 }
@@ -60,6 +78,36 @@ async fn runtime_observability_treats_stale_daemon_pid_as_single_process() {
     assert_eq!(runtime["daemon"]["pid"], json!(999999));
     assert_eq!(runtime["daemon"]["running"], json!(false));
     assert_eq!(runtime["mode"], json!("single_process"));
+    assert_eq!(runtime["process_role"], json!("embedded_stdio"));
+    assert_eq!(runtime["authoritative_runtime"], json!("current_process"));
+    assert_eq!(runtime["write_forwarding"]["expected"], json!(false));
+}
+
+#[tokio::test]
+async fn runtime_observability_marks_stdio_daemon_client_when_daemon_is_alive() {
+    let server = make_server();
+    let app_home = tempfile::tempdir().expect("app home");
+    let mut child = std::process::Command::new("python3")
+        .args(["-c", "import time; time.sleep(30)"])
+        .spawn()
+        .expect("spawn live daemon stand-in");
+    let runtime = crate::status_ops::runtime_observability_json(
+        &server,
+        app_home.path(),
+        Some(&crate::status_ops::DaemonStatus::Running {
+            pid: child.id() as i32,
+            lock_path: app_home.path().join("daemon.lock"),
+        }),
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(runtime["mode"], json!("sidecar_or_stdio"));
+    assert_eq!(runtime["process_role"], json!("stdio_daemon_client"));
+    assert_eq!(runtime["authoritative_runtime"], json!("daemon"));
+    assert_eq!(runtime["stdio_adapter"], json!(true));
+    assert_eq!(runtime["write_forwarding"]["expected"], json!(true));
+    assert_eq!(runtime["write_forwarding"]["target"], json!("daemon"));
 }
 
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────

@@ -110,6 +110,15 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) = crate::cli_client::maybe_forward_write(
+            self.global_db_path.as_path(),
+            "save_memory",
+            &params,
+        )
+        .await
+        {
+            return Ok(body);
+        }
         handle_save_memory(self, params).await
     }
 
@@ -1607,10 +1616,18 @@ impl MemoryServer {
                         .filter_map(|cap| cap.get("id").and_then(Value::as_str))
                         .map(str::to_string)
                         .collect::<std::collections::HashSet<_>>();
+                    let hub_skill_names = results
+                        .iter()
+                        .filter_map(canonical_skill_name)
+                        .collect::<std::collections::HashSet<_>>();
                     local.retain(|cap| {
-                        cap.get("id")
+                        let id_unseen = cap
+                            .get("id")
                             .and_then(Value::as_str)
-                            .is_none_or(|id| !seen.contains(id))
+                            .is_none_or(|id| !seen.contains(id));
+                        let name_unseen = canonical_skill_name(cap)
+                            .is_none_or(|name| !hub_skill_names.contains(&name));
+                        id_unseen && name_unseen
                     });
                     results.extend(local);
                 }
@@ -1881,6 +1898,21 @@ fn skill_discover_result_is_callable(cap: &Value) -> bool {
                 )
             })
             .unwrap_or(true)
+}
+
+fn canonical_skill_name(cap: &Value) -> Option<String> {
+    let raw = cap
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| cap.get("name").and_then(Value::as_str))?;
+    let without_kind = raw
+        .strip_prefix("host-skill:")
+        .or_else(|| raw.strip_prefix("skill:waza-"))
+        .or_else(|| raw.strip_prefix("skill:"))
+        .unwrap_or(raw);
+    let trimmed = without_kind.strip_prefix("waza/").unwrap_or(without_kind);
+    let normalized = trimmed.trim().to_ascii_lowercase();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {

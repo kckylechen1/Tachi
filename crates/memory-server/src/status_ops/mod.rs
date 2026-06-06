@@ -653,6 +653,24 @@ pub(crate) fn runtime_observability_json(
     } else {
         "single_process"
     };
+    let process_role = if serving_daemon {
+        "daemon_authority"
+    } else if daemon_running {
+        "stdio_daemon_client"
+    } else {
+        "embedded_stdio"
+    };
+    let authoritative_runtime = if daemon_running {
+        "daemon"
+    } else {
+        "current_process"
+    };
+    let stdio_adapter = !serving_daemon;
+    let write_forwarding = json!({
+        "expected": daemon_running && !serving_daemon,
+        "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
+        "fallback": if daemon_running && !serving_daemon { "in_process_on_forward_failure" } else { "none" },
+    });
 
     let vault = {
         let state = server.vault_read();
@@ -677,6 +695,10 @@ pub(crate) fn runtime_observability_json(
         "pid": current_pid,
         "binary": binary,
         "mode": mode,
+        "process_role": process_role,
+        "authoritative_runtime": authoritative_runtime,
+        "stdio_adapter": stdio_adapter,
+        "write_forwarding": write_forwarding,
         "serving_daemon": serving_daemon,
         "daemon": {
             "pid": daemon_pid,
@@ -1033,7 +1055,7 @@ async fn handle_tachi_status_detail(
             .unwrap_or(false)
     {
         warnings.push(
-            "this MCP process is not the registered daemon; restart stale MCP clients if runtime state looks inconsistent"
+            "this MCP process is a stdio adapter while a daemon is running; supported writes should forward to the daemon, otherwise restart stale MCP clients if runtime state looks inconsistent"
                 .to_string(),
         );
     }

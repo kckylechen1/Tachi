@@ -139,6 +139,43 @@ pub(super) async fn run_cli_command(
                         .map_err(std::io::Error::other)?;
                     Ok(())
                 }
+                HubAction::PackRegister {
+                    id,
+                    local_path,
+                    name,
+                    source,
+                    version,
+                    description,
+                } => {
+                    let server = crate::cli_client::build_in_process_server(&hub_db, None)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    let out = crate::pack_ops::handle_pack_register(
+                        &server,
+                        PackRegisterParams {
+                            id,
+                            name,
+                            source,
+                            version,
+                            description,
+                            local_path: Some(local_path.display().to_string()),
+                            metadata: None,
+                        },
+                    )
+                    .await
+                    .map_err(std::io::Error::other)?;
+                    print_pretty_json(&serde_json::from_str(&out)?)
+                }
+                HubAction::PackProject { pack_id, agents } => {
+                    let server = crate::cli_client::build_in_process_server(&hub_db, None)
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    let out = crate::pack_ops::handle_pack_project(
+                        &server,
+                        PackProjectParams { pack_id, agents },
+                    )
+                    .await
+                    .map_err(std::io::Error::other)?;
+                    print_pretty_json(&serde_json::from_str(&out)?)
+                }
                 HubAction::Bindings => {
                     crate::hub_cli::run(&HubAction::Bindings, &hub_db, app_home)
                         .map_err(std::io::Error::other)?;

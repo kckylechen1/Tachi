@@ -117,6 +117,11 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let vision = server
         .with_global_store_read(|store| store.hub_get("mcp:vision").map_err(|e| e.to_string()))
         .expect("lookup vision builtin");
+    let waza_check = server
+        .with_global_store_read(|store| {
+            store.hub_get("skill:waza-check").map_err(|e| e.to_string())
+        })
+        .expect("lookup waza check builtin");
 
     let trajectory = trajectory.expect("trajectory-distiller builtin should exist");
     let coding = coding.expect("coding builtin should exist");
@@ -124,6 +129,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let mcp = mcp.expect("mcp builtin should exist");
     let zread = zread.expect("zread builtin should exist");
     let vision = vision.expect("vision builtin should exist");
+    let waza_check = waza_check.expect("waza check builtin should exist");
 
     let trajectory_def: Value =
         serde_json::from_str(&trajectory.definition).expect("trajectory definition json");
@@ -135,10 +141,17 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let zread_def: Value = serde_json::from_str(&zread.definition).expect("zread definition json");
     let vision_def: Value =
         serde_json::from_str(&vision.definition).expect("vision definition json");
+    let waza_check_def: Value =
+        serde_json::from_str(&waza_check.definition).expect("waza check definition json");
 
     assert_eq!(trajectory_def["retention_policy"], "permanent");
     assert_eq!(coding_def["retention_policy"], "permanent");
     assert_eq!(trading_def["retention_policy"], "ephemeral");
+    assert_eq!(waza_check_def["retention_policy"], "permanent");
+    assert_eq!(waza_check_def["policy"]["visibility"], "discoverable");
+    assert!(waza_check_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Review Before You Ship")));
     assert_eq!(mcp_def["auto_ingest"], true);
     assert!(mcp_def.get("auth_header").is_none());
     assert_eq!(mcp_def["auth"]["type"], "bearer");
@@ -447,6 +460,65 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
     assert_eq!(
         approved.get("source").and_then(|value| value.as_str()),
         Some("local_approved_cache")
+    );
+}
+
+#[test]
+fn tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_home = std::env::var_os("HOME");
+    let temp_home =
+        std::env::temp_dir().join(format!("tachi-waza-dedup-test-{}", uuid::Uuid::new_v4()));
+    let skill_dir = temp_home.join(".agents/skills/check");
+    std::fs::create_dir_all(&skill_dir).expect("create host check skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: check\ndescription: Review Before You Ship duplicate host skill\n---\n# Check\n",
+    )
+    .expect("write host check skill");
+    std::env::set_var("HOME", &temp_home);
+
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let response = runtime
+        .block_on(async {
+            let server = make_server();
+            server
+                .tachi_skill(Parameters(TachiSkillParams {
+                    action: "discover".to_string(),
+                    query: Some("check review ship".to_string()),
+                    cap_type: None,
+                    enabled_only: Some(true),
+                    limit: Some(10),
+                    skill_id: None,
+                    args: None,
+                }))
+                .await
+        })
+        .expect("tachi_skill discover should succeed");
+
+    if let Some(home) = original_home {
+        std::env::set_var("HOME", home);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    let _ = std::fs::remove_dir_all(&temp_home);
+
+    let json: Value = serde_json::from_str(&response).expect("skill discover response json");
+    let ids = json["results"]
+        .as_array()
+        .expect("results array")
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&"skill:waza-check"),
+        "expected Hub Waza skill in discover results: {json}"
+    );
+    assert!(
+        !ids.contains(&"host-skill:check"),
+        "host duplicate should be suppressed when Hub Waza skill exists: {json}"
     );
 }
 
