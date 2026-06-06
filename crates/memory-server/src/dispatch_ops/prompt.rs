@@ -258,7 +258,7 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     // 2. Skill invocation contract (effective = explicit + stage/intent defaults)
     let mut skill_sections = Vec::new();
     for skill_id in &effective_skills {
-        if let Ok(cap) = server.get_capability(skill_id).map_err(|e| format!("{e}")) {
+        if let Ok(cap) = server.get_capability(skill_id) {
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             skill_sections.push(render_skill_invocation_contract(skill_id, &cap, &def));
         } else {
