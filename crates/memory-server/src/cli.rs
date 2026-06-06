@@ -108,6 +108,12 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "PATH")]
         target_db: Option<PathBuf>,
     },
+    /// Clean build artifacts, Tachi-managed worktrees, and Tachi runtime leftovers.
+    /// Dry-run by default; pass --force on a subcommand to delete.
+    Clean {
+        #[command(subcommand)]
+        action: CleanAction,
+    },
     /// Doctor v2 — extension-aware DB classification (read-only by default)
     Doctor {
         /// Emit machine-readable JSON instead of the human summary
@@ -423,6 +429,74 @@ pub(crate) enum Commands {
         /// Useful on Linux/Windows with OS/container secret mounts.
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum CleanAction {
+    /// Clean Cargo target artifacts while preserving top-level release binaries.
+    Target {
+        /// Repository root or target directory. Defaults to the current directory.
+        #[arg(value_name = "PATH")]
+        path: Option<PathBuf>,
+        /// Delete planned artifacts. Without this flag, only prints the plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a Tachi-managed git worktree after safety checks.
+    #[command(alias = "wt-remove")]
+    Worktree {
+        /// Worktree path to remove.
+        path: PathBuf,
+        /// Actually remove the worktree. Without this flag, only prints the plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Sweep stale Tachi-managed worktrees under temp roots.
+    Sweep {
+        /// Root to scan. Repeatable; defaults to TMPDIR, /private/tmp, and temp_dir.
+        #[arg(long, value_name = "PATH")]
+        root: Vec<PathBuf>,
+        /// Minimum age in days before a marked worktree is considered stale.
+        #[arg(long, default_value_t = tachi_clean::sweep::DEFAULT_SWEEP_MAX_AGE_DAYS)]
+        max_age_days: u64,
+        /// Remove candidates with git worktree remove --force.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clean Tachi self-maintenance artifacts under TACHI_HOME or ~/.tachi.
+    #[command(name = "tachi")]
+    Tachi {
+        /// Tachi home. Defaults to TACHI_HOME or ~/.tachi.
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Delete planned artifacts. Without this flag, only prints the plan.
+        #[arg(long, conflicts_with = "dry_run")]
+        force: bool,
+        /// Preview only (default).
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 

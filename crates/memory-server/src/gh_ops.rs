@@ -498,9 +498,7 @@ fn first_meaningful_line(body: &str) -> String {
 }
 
 fn lower_contains_any(lower_haystack: &str, needles: &[&str]) -> bool {
-    needles
-        .iter()
-        .any(|needle| lower_haystack.contains(needle))
+    needles.iter().any(|needle| lower_haystack.contains(needle))
 }
 
 fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
