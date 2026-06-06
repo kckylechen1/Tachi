@@ -8,7 +8,6 @@ use crate::{MemoryServer, TachiArenaParams};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 struct HarnessLane {
@@ -97,28 +96,23 @@ fn harness_lane(requested: Option<&str>) -> HarnessLane {
     }
 }
 
-fn cached_git_root() -> Option<&'static PathBuf> {
-    static GIT_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GIT_ROOT
-        .get_or_init(|| {
-            std::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| String::from_utf8(out.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .as_ref()
+fn current_git_root() -> Option<PathBuf> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 pub(crate) fn arena_root() -> PathBuf {
     if let Ok(p) = std::env::var("TACHI_ARENA_ROOT") {
         return PathBuf::from(p);
     }
-    if let Some(root) = cached_git_root() {
+    if let Some(root) = current_git_root() {
         return root.join(".tachi").join("arena");
     }
     if let Ok(home) = std::env::var("TACHI_HOME") {
