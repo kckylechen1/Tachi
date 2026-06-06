@@ -240,19 +240,27 @@ pub(crate) async fn handle_memory_readiness(
 ) -> Result<String, String> {
     let status = parse_json_or_empty(crate::status_ops::handle_tachi_status_full(server).await?);
     let runtime = parse_json_or_empty(crate::memory_ops::handle_runtime_info(server).await?);
-    let tools = [
+    let core_tools = [
+        "tachi_tools",
+        "runtime_info",
         "tachi_status",
         "tachi_memory",
-        "tachi_task",
+        "tachi_save",
         "tachi_wiki",
-        "tachi_doctor_scan",
-        "runtime_info",
     ];
+    let recommended_tools = ["tachi_briefing", "tachi_task", "tachi_arena", "tachi_skill"];
+    let advanced_tools = ["tachi_shell", "tachi_orchestrator", "tachi_doctor_scan"];
+    let tools = core_tools
+        .iter()
+        .chain(recommended_tools.iter())
+        .chain(advanced_tools.iter())
+        .copied()
+        .collect::<Vec<_>>();
     let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
         .ok()
         .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
         .filter(|patterns| !patterns.is_empty());
-    let required_tools = tools
+    let tool_rows = tools
         .iter()
         .map(|tool| {
             let visible = crate::profiles::tool_visible(
@@ -260,8 +268,16 @@ pub(crate) async fn handle_memory_readiness(
                 server.active_tool_profile(),
                 env_patterns.as_deref(),
             );
+            let tier = if core_tools.contains(tool) {
+                "core"
+            } else if recommended_tools.contains(tool) {
+                "recommended"
+            } else {
+                "advanced"
+            };
             json!({
                 "name": tool,
+                "tier": tier,
                 "visible": visible,
                 "reason": if visible {
                     "exposed by active profile/TACHI_EXPOSED_TOOLS".to_string()
@@ -277,7 +293,7 @@ pub(crate) async fn handle_memory_readiness(
         .get("health_score")
         .map(Value::to_string)
         .unwrap_or_else(|| "?".to_string());
-    let visible_tools = required_tools
+    let visible_tools = tool_rows
         .iter()
         .filter(|tool| {
             tool.get("visible")
@@ -285,7 +301,7 @@ pub(crate) async fn handle_memory_readiness(
                 .unwrap_or(false)
         })
         .count();
-    let hidden_tools: Vec<&str> = required_tools
+    let hidden_tools: Vec<&str> = tool_rows
         .iter()
         .filter(|tool| {
             !tool
@@ -295,6 +311,33 @@ pub(crate) async fn handle_memory_readiness(
         })
         .filter_map(|tool| tool.get("name").and_then(Value::as_str))
         .collect();
+    let hidden_core_tools: Vec<&str> = tool_rows
+        .iter()
+        .filter(|tool| tool.get("tier").and_then(Value::as_str) == Some("core"))
+        .filter(|tool| {
+            !tool
+                .get("visible")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    let hidden_advanced_tools: Vec<&str> = tool_rows
+        .iter()
+        .filter(|tool| tool.get("tier").and_then(Value::as_str) == Some("advanced"))
+        .filter(|tool| {
+            !tool
+                .get("visible")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
+    let tool_profile = server
+        .active_tool_profile()
+        .map(|profile| profile.as_str())
+        .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str());
+    let suggestions = readiness_suggestions(&hidden_core_tools, &hidden_advanced_tools);
     let vector_health =
         crate::status_ops::database_vector_health_json(&server.global_db_path_buf());
     let pending_vectors = vector_health
@@ -307,12 +350,16 @@ pub(crate) async fn handle_memory_readiness(
             "status": "completed",
             "health": status,
             "runtime": runtime,
-            "required_tools": required_tools,
-            "required_tools_summary": {
+            "tool_profile": tool_profile,
+            "tools": tool_rows,
+            "tool_visibility_summary": {
                 "visible_count": visible_tools,
                 "total_count": tools.len(),
                 "hidden": hidden_tools,
+                "hidden_core": hidden_core_tools,
+                "hidden_advanced": hidden_advanced_tools,
             },
+            "suggestions": suggestions,
             "vector_health": vector_health,
             "recent_kanban": recent_kanban,
         }));
@@ -326,12 +373,25 @@ pub(crate) async fn handle_memory_readiness(
             hidden_tools.join(", ")
         )
     };
+    let core_summary = if hidden_core_tools.is_empty() {
+        "ok".to_string()
+    } else {
+        format!("missing: {}", hidden_core_tools.join(", "))
+    };
+    let advanced_summary = if hidden_advanced_tools.is_empty() {
+        "visible".to_string()
+    } else {
+        format!("hidden by profile: {}", hidden_advanced_tools.join(", "))
+    };
     Ok(format_agent_status(
         "Tachi readiness",
         &[
             ("status", "completed".to_string()),
             ("health_score", health_score),
-            ("required_tools", tool_summary),
+            ("tool_profile", tool_profile),
+            ("tool_visibility", tool_summary),
+            ("core_tools", core_summary),
+            ("advanced_tools", advanced_summary),
             ("pending_vectors", pending_vectors.to_string()),
             ("recent_kanban", kanban_count.to_string()),
             (
@@ -347,8 +407,34 @@ pub(crate) async fn handle_memory_readiness(
             ),
         ],
         None,
-        None,
+        Some(&suggestions.join("\n")),
     ))
+}
+
+fn readiness_suggestions(
+    hidden_core_tools: &[&str],
+    hidden_advanced_tools: &[&str],
+) -> Vec<String> {
+    let mut suggestions = Vec::new();
+    if !hidden_core_tools.is_empty() {
+        suggestions.push(format!(
+            "- Core tools are hidden: {}. Check TACHI_PROFILE/TACHI_EXPOSED_TOOLS or run `tachi setup`.",
+            hidden_core_tools.join(", ")
+        ));
+    }
+    if !hidden_advanced_tools.is_empty() {
+        suggestions.push(
+            "- Heavy coordination tools are intentionally hidden in minimal profiles; use `TACHI_PROFILE=coordinate` or `admin` for shell/orchestrator workflows."
+                .to_string(),
+        );
+    }
+    if suggestions.is_empty() {
+        suggestions.push(
+            "- Start with `tachi_briefing()` or `tachi_memory(action='briefing')`; call `tachi_tools()` before unfamiliar tool names."
+                .to_string(),
+        );
+    }
+    suggestions
 }
 
 // ---------------------------------------------------------------------------

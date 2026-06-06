@@ -34,6 +34,7 @@
 mod agent_eval;
 mod agent_markdown;
 mod agent_registry;
+mod arena_ops;
 mod backend_tier;
 mod bootstrap;
 mod builtins;
@@ -327,6 +328,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
+    "tachi_arena",
     "tachi_shell",
 ];
 

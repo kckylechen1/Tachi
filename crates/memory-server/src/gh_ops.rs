@@ -11,10 +11,14 @@ use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::process::Command;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
+const DEFAULT_REVIEW_AUTHOR_FILTER: &str = "gemini";
+type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 const GH_ENV_ALLOWLIST: &[&str] = &[
     "PATH",
     "HOME",
@@ -430,20 +434,366 @@ fn merge_pr_comment_entries(
     comments
 }
 
-pub(crate) async fn handle_gh_pr_comments(
-    server: &MemoryServer,
-    params: GhPrCommentsParams,
-) -> Result<String, String> {
-    validate_repo(&params.repo)?;
+fn review_digest_root() -> PathBuf {
+    if let Ok(root) = std::env::var("TACHI_REVIEW_ROOT") {
+        return PathBuf::from(root);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        return cwd.join(".tachi").join("reviews");
+    }
+    std::env::temp_dir().join("tachi").join("reviews")
+}
 
-    let reviews_endpoint = format!(
-        "repos/{}/pulls/{}/reviews?per_page=100",
-        params.repo, params.pr_number
+fn safe_path_segment(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "unknown".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn repo_review_segment(repo: &str) -> String {
+    repo.split('/')
+        .map(safe_path_segment)
+        .collect::<Vec<_>>()
+        .join("__")
+}
+
+fn comment_text(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn first_meaningful_line(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.starts_with("```")
+                && !line.starts_with("---")
+                && !line.starts_with("<!--")
+                && !line.starts_with("![")
+        })
+        .unwrap_or(body.trim())
+        .chars()
+        .take(220)
+        .collect()
+}
+
+fn lower_contains_any(lower_haystack: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .any(|needle| lower_haystack.contains(needle))
+}
+
+fn classify_review_comment(body: &str, path: Option<&str>) -> &'static str {
+    let combined = match path {
+        Some(path) => format!("{body}\n{path}"),
+        None => body.to_string(),
+    };
+    let lower = combined.to_ascii_lowercase();
+    if lower_contains_any(
+        &lower,
+        &[
+            "security",
+            "secret",
+            "token",
+            "credential",
+            "injection",
+            "permission",
+            "auth",
+        ],
+    ) {
+        "security"
+    } else if lower_contains_any(
+        &lower,
+        &[
+            "panic",
+            "bug",
+            "incorrect",
+            "wrong",
+            "race",
+            "deadlock",
+            "lock",
+            "fail",
+            "regression",
+            "root cause",
+        ],
+    ) {
+        "correctness"
+    } else if lower_contains_any(
+        &lower,
+        &["test", "coverage", "assert", "fixture", "mock", "case"],
+    ) {
+        "tests"
+    } else if lower_contains_any(
+        &lower,
+        &[
+            "api",
+            "schema",
+            "contract",
+            "compat",
+            "breaking",
+            "parameter",
+            "field",
+        ],
+    ) {
+        "api-contract"
+    } else if lower_contains_any(
+        &lower,
+        &[
+            "maintain",
+            "duplicate",
+            "complex",
+            "refactor",
+            "simpl",
+            "readability",
+        ],
+    ) {
+        "maintainability"
+    } else if lower_contains_any(&lower, &["nit", "style", "format", "typo", "naming"]) {
+        "style"
+    } else {
+        "unclassified"
+    }
+}
+
+fn author_matches_filter(comment: &Value, lower_filter: &str) -> bool {
+    if lower_filter.is_empty() {
+        return true;
+    }
+    comment
+        .get("author")
+        .and_then(Value::as_str)
+        .map(|author| author.to_ascii_lowercase().contains(lower_filter))
+        .unwrap_or(false)
+}
+
+fn infer_future_rule(category: &str, path: Option<&str>, body: &str) -> String {
+    let scope = path.unwrap_or("similar code");
+    let line = first_meaningful_line(body);
+    match category {
+        "security" => format!("When changing {scope}, verify trust boundaries and secret handling: {line}"),
+        "correctness" => format!("When changing {scope}, check this failure mode before shipping: {line}"),
+        "tests" => format!("When changing {scope}, add or update regression coverage for: {line}"),
+        "api-contract" => format!("When changing {scope}, preserve or explicitly migrate the API/schema contract: {line}"),
+        "maintainability" => format!("When changing {scope}, keep the simpler local pattern and avoid this maintainability trap: {line}"),
+        "style" => format!("Style-only review signal for {scope}; do not promote unless it repeats: {line}"),
+        _ => format!("Review signal for {scope}; leader must triage before promotion: {line}"),
+    }
+}
+
+fn build_pr_review_digest(
+    repo: &str,
+    pr_number: u64,
+    author_filter: &str,
+    comments: &[Value],
+) -> Value {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut items = Vec::new();
+    let mut memory_candidates = Vec::new();
+    let mut handbook_candidates = Vec::new();
+    let lower_filter = author_filter.trim().to_ascii_lowercase();
+
+    for comment in comments
+        .iter()
+        .filter(|comment| author_matches_filter(comment, &lower_filter))
+    {
+        let body = comment_text(comment, "body").unwrap_or_default();
+        if body.is_empty() {
+            continue;
+        }
+        let path = comment_text(comment, "path");
+        let category = classify_review_comment(&body, path.as_deref());
+        *counts.entry(category.to_string()).or_insert(0) += 1;
+        let summary = first_meaningful_line(&body);
+        let future_rule = infer_future_rule(category, path.as_deref(), &body);
+        let source = json!({
+            "kind": comment.get("kind").cloned().unwrap_or(Value::Null),
+            "id": comment.get("id").cloned().unwrap_or(Value::Null),
+            "review_id": comment.get("review_id").cloned().unwrap_or(Value::Null),
+            "author": comment.get("author").cloned().unwrap_or(Value::Null),
+            "path": path,
+            "line": comment.get("line").cloned().unwrap_or(Value::Null),
+            "url": comment.get("url").cloned().unwrap_or(Value::Null),
+            "created_at": comment.get("created_at").cloned().unwrap_or(Value::Null),
+        });
+        let item = json!({
+            "source": source,
+            "category": category,
+            "verdict": "needs_leader_verdict",
+            "summary": summary,
+            "body": body,
+            "future_rule": future_rule,
+        });
+
+        memory_candidates.push(json!({
+            "source": "github_pr_review",
+            "repo": repo,
+            "pr_number": pr_number,
+            "category": category,
+            "verdict": "needs_leader_verdict",
+            "comment_id": item["source"]["id"],
+            "path": item["source"]["path"],
+            "line": item["source"]["line"],
+            "summary": item["summary"],
+            "future_rule": item["future_rule"],
+        }));
+        if !matches!(category, "style" | "unclassified") {
+            handbook_candidates.push(json!({
+                "category": category,
+                "requires_verdict": true,
+                "rule": item["future_rule"],
+                "source": {
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "comment_id": item["source"]["id"],
+                    "path": item["source"]["path"],
+                    "line": item["source"]["line"],
+                    "url": item["source"]["url"],
+                },
+            }));
+        }
+        items.push(item);
+    }
+
+    json!({
+        "repo": repo,
+        "pr_number": pr_number,
+        "author_filter": author_filter,
+        "comment_count": items.len(),
+        "counts": counts,
+        "items": items,
+        "memory_candidates": memory_candidates,
+        "handbook_candidates": handbook_candidates,
+        "promotion_policy": {
+            "raw": "keep raw/digest artifacts as evidence",
+            "memory": "promote only valid or useful false-positive cases after leader verdict",
+            "wiki": "promote repeated valid patterns into handbook/checklist rules",
+        },
+    })
+}
+
+fn render_pr_review_digest_markdown(digest: &Value) -> String {
+    let repo = digest.get("repo").and_then(Value::as_str).unwrap_or("");
+    let pr_number = digest
+        .get("pr_number")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let author_filter = digest
+        .get("author_filter")
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_REVIEW_AUTHOR_FILTER);
+    let mut out = format!(
+        "# PR Review Digest\n\nRepo: `{repo}`\nPR: `#{pr_number}`\nAuthor filter: `{author_filter}`\n\n\
+         ## Triage Contract\n\n\
+         - Mark each item as `valid`, `partially_valid`, `false_positive`, or `unresolved` before promoting.\n\
+         - Store raw review artifacts here; save only distilled conclusions to memory.\n\
+         - Promote repeated valid patterns to the Gemini PR review handbook or worker checklist.\n\n"
     );
-    let inline_comments_endpoint = format!(
-        "repos/{}/pulls/{}/comments?per_page=100",
-        params.repo, params.pr_number
-    );
+
+    out.push_str("## Counts\n\n");
+    if let Some(counts) = digest.get("counts").and_then(Value::as_object) {
+        for (category, count) in counts {
+            out.push_str(&format!("- `{category}`: {count}\n"));
+        }
+    }
+
+    out.push_str("\n## Items\n\n");
+    if let Some(items) = digest.get("items").and_then(Value::as_array) {
+        for (idx, item) in items.iter().enumerate() {
+            let category = item
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap_or("unclassified");
+            let summary = item.get("summary").and_then(Value::as_str).unwrap_or("");
+            let path = item
+                .pointer("/source/path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let line = item.pointer("/source/line").and_then(Value::as_u64);
+            let url = item
+                .pointer("/source/url")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let future_rule = item
+                .get("future_rule")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            out.push_str(&format!(
+                "### {}. `{}`\n\nVerdict: `needs_leader_verdict`\n\n",
+                idx + 1,
+                category
+            ));
+            if !path.is_empty() {
+                match line {
+                    Some(line) => out.push_str(&format!("Location: `{path}:{line}`\n\n")),
+                    None => out.push_str(&format!("Location: `{path}`\n\n")),
+                }
+            }
+            if !url.is_empty() {
+                out.push_str(&format!("Source: {url}\n\n"));
+            }
+            out.push_str(&format!("Summary: {summary}\n\n"));
+            out.push_str(&format!("Future rule candidate: {future_rule}\n\n"));
+        }
+    }
+    out
+}
+
+fn write_pr_review_digest_artifacts(digest: &Value) -> Result<Value, String> {
+    let repo = digest
+        .get("repo")
+        .and_then(Value::as_str)
+        .ok_or("digest missing repo")?;
+    let pr_number = digest
+        .get("pr_number")
+        .and_then(Value::as_u64)
+        .ok_or("digest missing pr_number")?;
+    let dir = review_digest_root()
+        .join(repo_review_segment(repo))
+        .join(format!("pr-{pr_number}"));
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create review digest dir {}: {e}", dir.display()))?;
+    let digest_json_path = dir.join("digest.json");
+    let digest_md_path = dir.join("digest.md");
+    let serialized =
+        serde_json::to_string_pretty(digest).map_err(|e| format!("serialize digest: {e}"))?;
+    std::fs::write(&digest_json_path, format!("{serialized}\n"))
+        .map_err(|e| format!("write {}: {e}", digest_json_path.display()))?;
+    std::fs::write(&digest_md_path, render_pr_review_digest_markdown(digest))
+        .map_err(|e| format!("write {}: {e}", digest_md_path.display()))?;
+    Ok(json!({
+        "digest_dir": dir,
+        "digest_json_path": digest_json_path,
+        "digest_md_path": digest_md_path,
+    }))
+}
+
+fn fetch_gh_pr_comments(
+    server: &MemoryServer,
+    repo: &str,
+    pr_number: u64,
+) -> Result<GhPrCommentsBundle, String> {
+    let reviews_endpoint = format!("repos/{}/pulls/{}/reviews?per_page=100", repo, pr_number);
+    let inline_comments_endpoint =
+        format!("repos/{}/pulls/{}/comments?per_page=100", repo, pr_number);
     let reviews =
         flatten_paginated_array(run_gh_api_paginated(server, &reviews_endpoint)?, "reviews")?
             .into_iter()
@@ -457,6 +807,16 @@ pub(crate) async fn handle_gh_pr_comments(
     .map(normalize_inline_comment_entry)
     .collect::<Vec<_>>();
     let comments = merge_pr_comment_entries(reviews.clone(), inline_comments.clone());
+    Ok((reviews, inline_comments, comments))
+}
+
+pub(crate) async fn handle_gh_pr_comments(
+    server: &MemoryServer,
+    params: GhPrCommentsParams,
+) -> Result<String, String> {
+    validate_repo(&params.repo)?;
+    let (reviews, inline_comments, comments) =
+        fetch_gh_pr_comments(server, &params.repo, params.pr_number)?;
 
     serde_json::to_string(&json!({
         "tool": "tachi_gh_pr_comments",
@@ -467,6 +827,37 @@ pub(crate) async fn handle_gh_pr_comments(
             "inline_comments": inline_comments,
             "comments": comments,
         },
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(crate) async fn handle_gh_pr_review_digest(
+    server: &MemoryServer,
+    params: GhPrCommentsParams,
+    author_filter: Option<String>,
+    write_digest: bool,
+) -> Result<String, String> {
+    validate_repo(&params.repo)?;
+    let (_, _, comments) = fetch_gh_pr_comments(server, &params.repo, params.pr_number)?;
+    let author_filter = author_filter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_REVIEW_AUTHOR_FILTER);
+    let digest = build_pr_review_digest(&params.repo, params.pr_number, author_filter, &comments);
+    let artifacts = if write_digest {
+        write_pr_review_digest_artifacts(&digest)?
+    } else {
+        Value::Null
+    };
+
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_pr_review_digest",
+        "repo": params.repo,
+        "pr_number": params.pr_number,
+        "write_digest": write_digest,
+        "artifacts": artifacts,
+        "result": digest,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
@@ -604,6 +995,21 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await
         }
+        "pr_review_digest" => {
+            let number = params
+                .number
+                .ok_or("pr_review_digest requires 'number' parameter (PR number)")?;
+            handle_gh_pr_review_digest(
+                server,
+                GhPrCommentsParams {
+                    repo: params.repo,
+                    pr_number: number,
+                },
+                params.author_filter,
+                params.write_digest.unwrap_or(true),
+            )
+            .await
+        }
         "safe_merge" => {
             let number = params
                 .number
@@ -621,7 +1027,7 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, safe_merge",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge",
             other
         )),
     }
@@ -1106,6 +1512,96 @@ mod safe_merge_tests {
         assert_eq!(flattened.len(), 3);
         assert_eq!(flattened[0]["id"], 1);
         assert_eq!(flattened[2]["id"], 3);
+    }
+
+    #[test]
+    fn pr_review_digest_filters_gemini_and_builds_candidates() {
+        let comments = vec![
+            json!({
+                "kind": "inline_comment",
+                "id": 11,
+                "author": "gemini-code-assist",
+                "path": "crates/memory-server/src/gh_ops.rs",
+                "line": 42,
+                "body": "![medium](https://www.gstatic.com/codereviewagent/medium-priority.svg)\nPlease add coverage for paginated comments.",
+                "created_at": "2026-06-06T10:05:00Z",
+                "url": "https://example.test/comment/11",
+            }),
+            json!({
+                "kind": "inline_comment",
+                "id": 12,
+                "author": "human-reviewer",
+                "path": "README.md",
+                "line": 1,
+                "body": "Looks good.",
+            }),
+        ];
+
+        let digest = build_pr_review_digest("o/r", 202, "gemini", &comments);
+
+        assert_eq!(digest["comment_count"], 1);
+        assert_eq!(digest["counts"]["tests"], 1);
+        assert_eq!(digest["items"][0]["verdict"], "needs_leader_verdict");
+        assert_eq!(
+            digest["items"][0]["summary"],
+            "Please add coverage for paginated comments."
+        );
+        assert_eq!(digest["memory_candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(digest["handbook_candidates"].as_array().unwrap().len(), 1);
+        assert!(digest["handbook_candidates"][0]["rule"]
+            .as_str()
+            .unwrap()
+            .contains("regression coverage"));
+    }
+
+    #[test]
+    fn pr_review_digest_keeps_style_out_of_handbook_candidates() {
+        let comments = vec![json!({
+            "kind": "inline_comment",
+            "id": 21,
+            "author": "gemini-code-assist",
+            "path": "src/lib.rs",
+            "line": 7,
+            "body": "Nit: this naming is a little unclear.",
+        })];
+
+        let digest = build_pr_review_digest("o/r", 7, "gemini", &comments);
+
+        assert_eq!(digest["counts"]["style"], 1);
+        assert_eq!(digest["memory_candidates"].as_array().unwrap().len(), 1);
+        assert_eq!(digest["handbook_candidates"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn pr_review_digest_artifacts_write_json_and_markdown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_REVIEW_ROOT");
+        std::env::set_var("TACHI_REVIEW_ROOT", tmp.path());
+        let comments = vec![json!({
+            "kind": "inline_comment",
+            "id": 31,
+            "author": "gemini-code-assist",
+            "path": "src/lib.rs",
+            "line": 9,
+            "body": "Incorrect state handling can cause a regression.",
+        })];
+        let digest = build_pr_review_digest("owner/repo", 31, "gemini", &comments);
+
+        let artifacts = write_pr_review_digest_artifacts(&digest).unwrap();
+
+        let md_path = PathBuf::from(artifacts["digest_md_path"].as_str().unwrap());
+        let json_path = PathBuf::from(artifacts["digest_json_path"].as_str().unwrap());
+        assert!(md_path.exists());
+        assert!(json_path.exists());
+        let markdown = std::fs::read_to_string(md_path).unwrap();
+        assert!(markdown.contains("Triage Contract"));
+        assert!(markdown.contains("needs_leader_verdict"));
+        if let Some(v) = original {
+            std::env::set_var("TACHI_REVIEW_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_REVIEW_ROOT");
+        }
     }
 
     #[tokio::test]
