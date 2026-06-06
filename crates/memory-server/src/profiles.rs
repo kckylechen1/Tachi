@@ -175,6 +175,7 @@ pub(super) const fn default_tool_profile() -> ToolProfile {
 }
 
 const OBSERVE_TOOL_PATTERNS: &[&str] = &[
+    "tachi_tools",
     "tachi_task_brief",
     "tachi_progress_check",
     "tachi_wiki_search",
@@ -249,6 +250,8 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Tachi Shell — coordination/orchestration facade
     "tachi_shell",
+    // Tachi Arena - tracked worker mission ledger
+    "tachi_arena",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -281,18 +284,18 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
 /// Standard profile allow-list. Intersected with all bundles
 /// so the IDE/CLI tool tray stays small and focused.
 const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Active tool discovery for the current profile
+    "tachi_tools",
     // Runtime identity / DB routing self-check for embedded clients
     "runtime_info",
     // Health check: daemon status, vector coverage, foundry queue
     "tachi_status",
-    // Tachi Shell — skill-gated flow orchestration (primary user entry)
-    "tachi_shell",
     // Task facade (plan / dispatch / board / merge)
     "tachi_task",
+    // Tachi Arena - focused tracked worker/advisor mission ledger for leaders.
+    "tachi_arena",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
-    // Persistent cross-session TODO / handoff state
-    "tachi_orchestrator",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
     "tachi_briefing",
     // Direct notepad/conclusion saver facade (high-frequency)
@@ -312,6 +315,7 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
 /// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
 const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    "tachi_tools",
     "runtime_info",
     // Unified memory facade (search + save)
     "tachi_memory",
@@ -409,6 +413,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",
+    "tachi_arena",
     "tachi_save",
     "tachi_wiki_write",
     "update_card",
@@ -871,7 +876,9 @@ mod tests {
         // tachi_gh is always visible (token checked at call time, not list time)
         let filtered = filter_tool_defs(
             vec![
+                test_tool("tachi_tools"),
                 test_tool("tachi_task"),
+                test_tool("tachi_arena"),
                 test_tool("tachi_memory"),
                 test_tool("tachi_briefing"),
                 test_tool("tachi_save"),
@@ -910,7 +917,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "tachi_tools".to_string(),
                 "tachi_task".to_string(),
+                "tachi_arena".to_string(),
                 "tachi_memory".to_string(),
                 "tachi_briefing".to_string(),
                 "tachi_save".to_string(),

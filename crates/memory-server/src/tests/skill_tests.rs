@@ -124,6 +124,20 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
                 .map_err(|e| e.to_string())
         })
         .expect("lookup superpowers executing builtin");
+    let subagent_driven = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:superpowers-subagent-driven-development")
+                .map_err(|e| e.to_string())
+        })
+        .expect("lookup subagent-driven builtin");
+    let verification = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:superpowers-verification-before-completion")
+                .map_err(|e| e.to_string())
+        })
+        .expect("lookup verification builtin");
     let waza_check = server
         .with_global_store_read(|store| {
             store.hub_get("skill:waza-check").map_err(|e| e.to_string())
@@ -138,6 +152,8 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let vision = vision.expect("vision builtin should exist");
     let superpowers_execute =
         superpowers_execute.expect("superpowers executing builtin should exist");
+    let subagent_driven = subagent_driven.expect("subagent-driven builtin should exist");
+    let verification = verification.expect("verification builtin should exist");
     let waza_check = waza_check.expect("waza check builtin should exist");
 
     let trajectory_def: Value =
@@ -152,6 +168,10 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
         serde_json::from_str(&vision.definition).expect("vision definition json");
     let superpowers_execute_def: Value = serde_json::from_str(&superpowers_execute.definition)
         .expect("superpowers executing definition json");
+    let subagent_driven_def: Value =
+        serde_json::from_str(&subagent_driven.definition).expect("subagent-driven definition json");
+    let verification_def: Value =
+        serde_json::from_str(&verification.definition).expect("verification definition json");
     let waza_check_def: Value =
         serde_json::from_str(&waza_check.definition).expect("waza check definition json");
 
@@ -166,6 +186,12 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert!(superpowers_execute_def["content"]
         .as_str()
         .is_some_and(|content| content.contains("Executing Plans")));
+    assert!(subagent_driven_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Subagent-Driven Development")));
+    assert!(verification_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Verification Before Completion")));
     assert_eq!(waza_check_def["retention_policy"], "permanent");
     assert_eq!(waza_check_def["policy"]["visibility"], "discoverable");
     assert!(waza_check_def["content"]

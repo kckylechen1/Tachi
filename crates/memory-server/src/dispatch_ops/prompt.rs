@@ -8,81 +8,22 @@ use crate::tool_params::GetMemoryParams;
 pub(super) fn resolve_effective_skills(
     params: &TachiDispatchParams,
 ) -> (Vec<String>, Option<String>) {
-    let stage = params.stage.as_deref().unwrap_or("").to_ascii_lowercase();
-    let stage_key = stage.split(':').next().unwrap_or("").trim();
-    let auto_instruction = if stage_key == "auto" {
-        Some(
-            "IMPORTANT: Produce a plan first. Do NOT execute directly. \
-             Wait for the operator to review the plan and trigger the execute stage."
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    let stage_key = crate::skill_policy::dispatch_stage_key(params.stage.as_deref());
+    let auto_instruction = crate::skill_policy::dispatch_stage_instruction(&stage_key);
 
     if !params.skills.is_empty() {
         return (params.skills.clone(), auto_instruction);
     }
 
-    let mut skills = match stage_key {
-        "brainstorm" => vec!["skill:superpowers-brainstorming".to_string()],
-        "plan" => vec![
-            "skill:superpowers-writing-plans".to_string(),
-            "skill:waza-think".to_string(),
-        ],
-        "dispatch" | "execute" => vec!["skill:superpowers-executing-plans".to_string()],
-        "review" => vec![
-            "skill:superpowers-requesting-code-review".to_string(),
-            "skill:waza-check".to_string(),
-        ],
-        "ship" => vec![
-            "skill:superpowers-finishing-a-development-branch".to_string(),
-            "skill:waza-check".to_string(),
-        ],
-        "auto" => vec![
-            "skill:superpowers-writing-plans".to_string(),
-            "skill:waza-think".to_string(),
-        ],
-        _ => Vec::new(),
-    };
+    let mut skills = crate::skill_policy::dispatch_stage_skills(&stage_key);
 
     if stage_key != "brainstorm" {
         let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
-        for sop in route.selected_sops {
-            let Some(id) = sop.get("id").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if id.starts_with("skill:") && skill_id_is_dispatch_builtin(id) {
-                skills.push(id.to_string());
-            }
-        }
+        crate::skill_policy::append_builtin_sops(&mut skills, route.selected_sops.into_iter());
     }
 
-    dedupe_preserve_order(&mut skills);
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
     (skills, auto_instruction)
-}
-
-fn dedupe_preserve_order(items: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|item| seen.insert(item.clone()));
-}
-
-fn skill_id_is_dispatch_builtin(id: &str) -> bool {
-    matches!(
-        id,
-        "skill:waza-check"
-            | "skill:waza-design"
-            | "skill:waza-health"
-            | "skill:waza-hunt"
-            | "skill:waza-learn"
-            | "skill:waza-read"
-            | "skill:waza-tachi"
-            | "skill:waza-think"
-            | "skill:waza-write"
-            | "skill:coding-refactor-checklist"
-            | "skill:coding-test-strategy"
-            | "skill:coding-architecture-decision"
-    )
 }
 
 fn compact_example_text(text: &str, max_chars: usize) -> String {
