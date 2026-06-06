@@ -526,6 +526,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .await;
     }
 
+    if let Commands::Clean { action } = &command {
+        return super::clean_cli::run_clean_command(action.clone()).await;
+    }
+
     if let Commands::Doctor {
         json,
         fix,

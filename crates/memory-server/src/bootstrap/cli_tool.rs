@@ -100,6 +100,9 @@ pub(super) async fn run_cli_command(
         Commands::Tidy { .. } => {
             unreachable!("Tidy is handled in async context before generic CLI dispatch")
         }
+        Commands::Clean { .. } => {
+            unreachable!("Clean is handled in async context before generic CLI dispatch")
+        }
         Commands::Hub { action } => {
             let hub_db = crate::hub_cli::resolve_hub_db(None, app_home);
             match action {

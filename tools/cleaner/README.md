@@ -2,7 +2,23 @@
 
 Safe cleanup utility for Tachi-managed worktrees and build artifacts.
 
-Current scope:
+Preferred Tachi CLI entrypoint:
+
+```bash
+tachi clean target [path]             # dry-run by default
+tachi clean target [path] --force     # remove non-release build artifacts
+tachi clean target [path] --json
+tachi clean worktree <path>           # dry-run by default
+tachi clean worktree <path> --force   # remove after safety checks
+tachi clean sweep                     # dry-run stale marked worktrees
+tachi clean sweep --root /tmp --json
+tachi clean sweep --force             # remove candidates with git worktree remove
+tachi clean tachi                     # dry-run by default
+tachi clean tachi --force             # remove old Tachi self artifacts
+tachi clean tachi --home /tmp/tachi --json
+```
+
+Standalone maintenance binary:
 
 ```bash
 tachi-clean sweep                   # dry-run stale marked worktrees

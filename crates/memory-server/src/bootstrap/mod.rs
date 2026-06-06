@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::io::IsTerminal;
 
 mod backfill;
+mod clean_cli;
 mod cli_tool;
 mod env_cmd;
 mod manifest_cli;
