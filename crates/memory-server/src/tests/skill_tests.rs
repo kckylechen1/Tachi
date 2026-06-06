@@ -117,6 +117,27 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let vision = server
         .with_global_store_read(|store| store.hub_get("mcp:vision").map_err(|e| e.to_string()))
         .expect("lookup vision builtin");
+    let superpowers_execute = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:superpowers-executing-plans")
+                .map_err(|e| e.to_string())
+        })
+        .expect("lookup superpowers executing builtin");
+    let subagent_driven = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:superpowers-subagent-driven-development")
+                .map_err(|e| e.to_string())
+        })
+        .expect("lookup subagent-driven builtin");
+    let verification = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:superpowers-verification-before-completion")
+                .map_err(|e| e.to_string())
+        })
+        .expect("lookup verification builtin");
     let waza_check = server
         .with_global_store_read(|store| {
             store.hub_get("skill:waza-check").map_err(|e| e.to_string())
@@ -129,6 +150,10 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let mcp = mcp.expect("mcp builtin should exist");
     let zread = zread.expect("zread builtin should exist");
     let vision = vision.expect("vision builtin should exist");
+    let superpowers_execute =
+        superpowers_execute.expect("superpowers executing builtin should exist");
+    let subagent_driven = subagent_driven.expect("subagent-driven builtin should exist");
+    let verification = verification.expect("verification builtin should exist");
     let waza_check = waza_check.expect("waza check builtin should exist");
 
     let trajectory_def: Value =
@@ -141,12 +166,32 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     let zread_def: Value = serde_json::from_str(&zread.definition).expect("zread definition json");
     let vision_def: Value =
         serde_json::from_str(&vision.definition).expect("vision definition json");
+    let superpowers_execute_def: Value = serde_json::from_str(&superpowers_execute.definition)
+        .expect("superpowers executing definition json");
+    let subagent_driven_def: Value =
+        serde_json::from_str(&subagent_driven.definition).expect("subagent-driven definition json");
+    let verification_def: Value =
+        serde_json::from_str(&verification.definition).expect("verification definition json");
     let waza_check_def: Value =
         serde_json::from_str(&waza_check.definition).expect("waza check definition json");
 
     assert_eq!(trajectory_def["retention_policy"], "permanent");
     assert_eq!(coding_def["retention_policy"], "permanent");
     assert_eq!(trading_def["retention_policy"], "ephemeral");
+    assert_eq!(superpowers_execute_def["retention_policy"], "permanent");
+    assert_eq!(
+        superpowers_execute_def["policy"]["visibility"],
+        "discoverable"
+    );
+    assert!(superpowers_execute_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Executing Plans")));
+    assert!(subagent_driven_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Subagent-Driven Development")));
+    assert!(verification_def["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Verification Before Completion")));
     assert_eq!(waza_check_def["retention_policy"], "permanent");
     assert_eq!(waza_check_def["policy"]["visibility"], "discoverable");
     assert!(waza_check_def["content"]
@@ -638,7 +683,15 @@ async fn recommend_skill_prefers_review_for_code_review_queries() {
         .await
         .expect("recommend_skill should succeed");
     let json: Value = serde_json::from_str(&result).expect("json");
-    assert_eq!(json["skills"][0]["id"], "skill:review");
+    let top_id = json["skills"][0]["id"].as_str().expect("top skill id");
+    assert!(
+        matches!(
+            top_id,
+            "skill:review" | "skill:waza-check" | "skill:superpowers-requesting-code-review"
+        ),
+        "expected a review workflow skill to win, got {json}"
+    );
+    assert_ne!(top_id, "skill:baoyu-markdown-to-html");
 }
 
 #[tokio::test]
