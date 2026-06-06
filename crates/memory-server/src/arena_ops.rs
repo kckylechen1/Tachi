@@ -8,30 +8,111 @@ use crate::{MemoryServer, TachiArenaParams};
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-fn cached_git_root() -> Option<&'static PathBuf> {
-    static GIT_ROOT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    GIT_ROOT
-        .get_or_init(|| {
-            std::process::Command::new("git")
-                .args(["rev-parse", "--show-toplevel"])
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| String::from_utf8(out.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
-        })
-        .as_ref()
+#[derive(Debug, Clone)]
+struct HarnessLane {
+    id: &'static str,
+    label: &'static str,
+    kind: &'static str,
+    launch_mode: &'static str,
+    command_hint: &'static str,
+    mcp_support: &'static str,
+    artifact_contract: &'static str,
+    notes: &'static [&'static str],
+}
+
+fn harness_lane(requested: Option<&str>) -> HarnessLane {
+    let normalized = requested
+        .unwrap_or("manual")
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match normalized.as_str() {
+        "" | "manual" | "tracked-document" | "document" => HarnessLane {
+            id: "manual",
+            label: "Manual tracked document",
+            kind: "manual",
+            launch_mode: "tracked_document",
+            command_hint: "Give tracked_prompt to any worker and require plan.md/result.md writes.",
+            mcp_support: "external",
+            artifact_contract: "Worker writes plan.md and result.md in the mission directory.",
+            notes: &[
+                "Fallback lane for harnesses Tachi does not launch natively.",
+                "Leader owns process start, permissions, and completion review.",
+            ],
+        },
+        "opencode" | "omo" => HarnessLane {
+            id: "opencode",
+            label: "OpenCode worker",
+            kind: "worker",
+            launch_mode: "opencode_worker",
+            command_hint: "opencode --pure run --model <provider/model> \"<tracked_prompt>\"",
+            mcp_support: "profile/config dependent",
+            artifact_contract: "OpenCode must write mission plan.md and result.md; stdout is advisory.",
+            notes: &[
+                "Default execution lane for external subagents.",
+                "Prefer for explore, implementation drafts, critic passes, and verifier work.",
+            ],
+        },
+        "claude" | "claude-code" => HarnessLane {
+            id: "claude",
+            label: "Claude Code worker",
+            kind: "worker",
+            launch_mode: "claude_worker",
+            command_hint: "claude --print \"<tracked_prompt>\" --mcp-config <config.json>",
+            mcp_support: "json mcp config",
+            artifact_contract: "Claude must write mission plan.md and result.md; use MCP when granted.",
+            notes: &[
+                "Use when the mission needs strong MCP/tool execution.",
+                "Good fallback when OpenCode provider routing is unavailable.",
+            ],
+        },
+        "gemini" | "gemini-advisor" | "ask-gemini" => HarnessLane {
+            id: "gemini-advisor",
+            label: "Gemini advisor",
+            kind: "advisor",
+            launch_mode: "advisor_artifact",
+            command_hint: "gemini -p \"<advisor_prompt>\"; save output as .omx/artifacts/gemini-<slug>-<timestamp>.md",
+            mcp_support: "not required",
+            artifact_contract: "Advisor output is captured as an artifact and linked back into result.md; Gemini is not expected to edit arena files directly.",
+            notes: &[
+                "Brainstorm, design feedback, process critique, and second opinions only.",
+                "Do not treat this lane as a normal worker harness.",
+            ],
+        },
+        _ => HarnessLane {
+            id: "manual",
+            label: "Manual tracked document",
+            kind: "manual",
+            launch_mode: "tracked_document",
+            command_hint: "Unsupported harness hint; use tracked_prompt manually or choose opencode, claude, gemini-advisor, or manual.",
+            mcp_support: "external",
+            artifact_contract: "Worker writes plan.md and result.md in the mission directory.",
+            notes: &[
+                "Unknown harness hints are intentionally treated as manual document missions.",
+                "Tachi keeps the mission contract stable instead of launching arbitrary adapters.",
+            ],
+        },
+    }
+}
+
+fn current_git_root() -> Option<PathBuf> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 pub(crate) fn arena_root() -> PathBuf {
     if let Ok(p) = std::env::var("TACHI_ARENA_ROOT") {
         return PathBuf::from(p);
     }
-    if let Some(root) = cached_git_root() {
+    if let Some(root) = current_git_root() {
         return root.join(".tachi").join("arena");
     }
     if let Ok(home) = std::env::var("TACHI_HOME") {
@@ -94,9 +175,17 @@ fn validate_id(id: &str, prefix: &str, label: &str) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("Invalid {label}: '{id}'"));
+        return Err(format!(
+            "Invalid {label}: '{id}'. Expected prefix '{prefix}' and only ASCII letters, numbers, '_' or '-' with no path traversal."
+        ));
     }
     Ok(())
+}
+
+fn nonempty_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 fn arena_dir(arena_id: &str) -> Result<PathBuf, String> {
@@ -127,13 +216,17 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
 fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
     use std::io::Write;
     let path = run_dir.join("events.jsonl");
-    let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?
+    );
     let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(|e| format!("open events.jsonl: {e}"))?;
-    writeln!(f, "{line}").map_err(|e| format!("write events.jsonl: {e}"))
+    f.write_all(line.as_bytes())
+        .map_err(|e| format!("write events.jsonl: {e}"))
 }
 
 fn update_mission_status(arena_id: &str, mission_id: &str, patch: Value) -> Result<Value, String> {
@@ -149,11 +242,11 @@ fn update_mission_status(arena_id: &str, mission_id: &str, patch: Value) -> Resu
         obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
         obj.insert(
             "plan_written".to_string(),
-            json!(dir.join("plan.md").exists()),
+            json!(nonempty_file(&dir.join("plan.md"))),
         );
         obj.insert(
             "result_written".to_string(),
-            json!(dir.join("result.md").exists()),
+            json!(nonempty_file(&dir.join("result.md"))),
         );
     }
     write_json_file(&status_path, &status)?;
@@ -173,7 +266,19 @@ fn mission_statuses(arena_id: &str) -> Result<Vec<Value>, String> {
         let entry = entry.map_err(|e| format!("read mission dir entry: {e}"))?;
         let status_path = entry.path().join("status.json");
         if status_path.exists() {
-            out.push(read_json_file(&status_path)?);
+            let mut status = read_json_file(&status_path)?;
+            if let Some(obj) = status.as_object_mut() {
+                let dir = entry.path();
+                obj.insert(
+                    "plan_written".to_string(),
+                    json!(nonempty_file(&dir.join("plan.md"))),
+                );
+                obj.insert(
+                    "result_written".to_string(),
+                    json!(nonempty_file(&dir.join("result.md"))),
+                );
+            }
+            out.push(status);
         }
     }
     out.sort_by(|a, b| {
@@ -189,12 +294,22 @@ fn active_state(state: &str) -> bool {
     matches!(state, "ready" | "running")
 }
 
-fn tracked_worker_prompt(prompt_path: &Path, plan_path: &Path, result_path: &Path) -> String {
+fn tracked_worker_prompt(
+    lane: &HarnessLane,
+    prompt_path: &Path,
+    plan_path: &Path,
+    result_path: &Path,
+) -> String {
     format!(
         "You are executing a tracked Tachi Arena mission.\n\n\
+         Harness lane: {} ({})\n\
+         Launch mode: {}\n\
+         Command hint: {}\n\
+\n\
          Read the mission prompt from:\n{}\n\n\
          Before substantive work, write a concise plan to:\n{}\n\n\
          When finished, blocked, or partially complete, write a completion report to:\n{}\n\n\
+         Artifact contract: {}\n\n\
          The completion report must include:\n\
          - Summary\n\
          - Files changed\n\
@@ -202,9 +317,14 @@ fn tracked_worker_prompt(prompt_path: &Path, plan_path: &Path, result_path: &Pat
          - Verification performed\n\
          - Remaining risks or blockers\n\n\
          Return a concise summary and mention the report path.",
+        lane.id,
+        lane.kind,
+        lane.launch_mode,
+        lane.command_hint,
         prompt_path.display(),
         plan_path.display(),
-        result_path.display()
+        result_path.display(),
+        lane.artifact_contract
     )
 }
 
@@ -222,13 +342,21 @@ fn render_arena_md(arena_id: &str, title: &str, objective: &str) -> String {
 fn render_prompt_md(params: &TachiArenaParams, arena_id: &str, mission_id: &str) -> String {
     let prompt = params.prompt.as_deref().unwrap_or("");
     let role = params.role.as_deref().unwrap_or("worker");
-    let harness = params.harness.as_deref().unwrap_or("manual");
+    let requested_harness = params.harness.as_deref().unwrap_or("manual");
+    let lane = harness_lane(params.harness.as_deref());
     format!(
         "# Arena Mission\n\n\
          Arena: `{arena_id}`\n\
          Mission: `{mission_id}`\n\
-         Harness: `{harness}`\n\
+         Requested harness: `{requested_harness}`\n\
+         Harness lane: `{}` ({})\n\
+         Launch mode: `{}`\n\
          Role: `{role}`\n\n\
+         ## Lane Guidance\n\n\
+         - Command hint: `{}`\n\
+         - MCP support: `{}`\n\
+         - Artifact contract: {}\n\
+{}\n\
          ## Task\n\n{prompt}\n\n\
          ## Skills\n\n{}\n\n\
          ## Scope\n\n{}\n\n\
@@ -236,6 +364,19 @@ fn render_prompt_md(params: &TachiArenaParams, arena_id: &str, mission_id: &str)
          ## Worker Report Contract\n\n\
          Write `plan.md` before substantive work. Write `result.md` when finished, blocked, or partially complete.\n\
          Include Summary, Files changed, Commands run, Verification performed, and Remaining risks or blockers.\n",
+        lane.id,
+        lane.label,
+        lane.launch_mode,
+        lane.command_hint,
+        lane.mcp_support,
+        lane.artifact_contract,
+        list_lines(
+            &lane
+                .notes
+                .iter()
+                .map(|note| note.to_string())
+                .collect::<Vec<_>>()
+        ),
         list_lines(&params.skills),
         list_lines(&params.scope),
         list_lines(&params.permissions)
@@ -351,6 +492,8 @@ fn handle_spawn(params: TachiArenaParams) -> Result<String, String> {
     let stderr_path = dir.join("stderr.log");
     let status_path = dir.join("status.json");
     let now = Utc::now().to_rfc3339();
+    let lane = harness_lane(params.harness.as_deref());
+    let requested_harness = params.harness.as_deref().unwrap_or("manual");
     std::fs::write(
         &prompt_path,
         render_prompt_md(&params, arena_id, &mission_id),
@@ -360,7 +503,18 @@ fn handle_spawn(params: TachiArenaParams) -> Result<String, String> {
         "arena_id": arena_id,
         "mission_id": mission_id,
         "state": "ready",
-        "harness": params.harness.as_deref().unwrap_or("manual"),
+        "harness": lane.id,
+        "requested_harness": requested_harness,
+        "harness_lane": {
+            "id": lane.id,
+            "label": lane.label,
+            "kind": lane.kind,
+            "launch_mode": lane.launch_mode,
+            "command_hint": lane.command_hint,
+            "mcp_support": lane.mcp_support,
+            "artifact_contract": lane.artifact_contract,
+            "notes": lane.notes,
+        },
         "role": params.role.as_deref().unwrap_or("worker"),
         "cwd": params.cwd,
         "skills": params.skills,
@@ -377,7 +531,7 @@ fn handle_spawn(params: TachiArenaParams) -> Result<String, String> {
         "plan_written": false,
         "result_written": false,
         "launched": false,
-        "launch_mode": "tracked_document",
+        "launch_mode": lane.launch_mode,
     });
     write_json_file(&status_path, &status)?;
     append_event(
@@ -387,7 +541,9 @@ fn handle_spawn(params: TachiArenaParams) -> Result<String, String> {
             "arena_id": arena_id,
             "mission_id": mission_id,
             "timestamp": now,
-            "launch_mode": "tracked_document",
+            "harness": lane.id,
+            "requested_harness": requested_harness,
+            "launch_mode": lane.launch_mode,
         }),
     )?;
     refresh_board(arena_id)?;
@@ -398,12 +554,24 @@ fn handle_spawn(params: TachiArenaParams) -> Result<String, String> {
         "arena_id": arena_id,
         "mission_id": mission_id,
         "state": "ready",
+        "harness": lane.id,
+        "requested_harness": requested_harness,
+        "harness_lane": {
+            "id": lane.id,
+            "label": lane.label,
+            "kind": lane.kind,
+            "launch_mode": lane.launch_mode,
+            "command_hint": lane.command_hint,
+            "mcp_support": lane.mcp_support,
+            "artifact_contract": lane.artifact_contract,
+            "notes": lane.notes,
+        },
         "mission_dir": dir,
         "prompt_path": prompt_path,
         "plan_path": plan_path,
         "result_path": result_path,
         "status_path": status_path,
-        "tracked_prompt": tracked_worker_prompt(&prompt_path, &plan_path, &result_path),
+        "tracked_prompt": tracked_worker_prompt(&lane, &prompt_path, &plan_path, &result_path),
     }))
     .map_err(|e| format!("serialize arena spawn: {e}"))
 }
@@ -490,6 +658,7 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
         let result = std::fs::read_to_string(&result_path).unwrap_or_default();
         let plan = std::fs::read_to_string(&plan_path).unwrap_or_default();
         let result_written = !result.is_empty();
+        let plan_written = !plan.is_empty();
         let state = if result_written {
             "collected"
         } else {
@@ -506,7 +675,7 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
         collected.push(json!({
             "mission_id": mission_id,
             "state": state,
-            "plan_written": !plan.is_empty(),
+            "plan_written": plan_written,
             "result_written": result_written,
             "plan_path": plan_path,
             "result_path": result_path,
@@ -594,6 +763,7 @@ fn handle_reap(params: TachiArenaParams) -> Result<String, String> {
     };
     let mut stale = Vec::new();
     for arena_id in arenas {
+        let mut changed = false;
         for status in mission_statuses(&arena_id)? {
             let state = status.get("state").and_then(Value::as_str).unwrap_or("");
             if !active_state(state) {
@@ -617,8 +787,11 @@ fn handle_reap(params: TachiArenaParams) -> Result<String, String> {
                         "reap_reason": params.reason.as_deref().unwrap_or("arena reap"),
                     }),
                 )?;
-                refresh_board(&arena_id)?;
+                changed = true;
             }
+        }
+        if changed {
+            refresh_board(&arena_id)?;
         }
     }
     serde_json::to_string(&json!({
@@ -679,10 +852,7 @@ fn handle_close(params: TachiArenaParams) -> Result<String, String> {
         obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
     }
     write_json_file(&dir.join("manifest.json"), &manifest)?;
-    let summary = format!(
-        "# Arena Summary\n\nArena: `{arena_id}`\n\nMissions: {}\n\nState: closed\n",
-        missions.len()
-    );
+    let summary = render_summary_md(arena_id, &missions);
     std::fs::write(dir.join("summary.md"), summary)
         .map_err(|e| format!("write summary.md: {e}"))?;
     append_event(
@@ -703,6 +873,59 @@ fn handle_close(params: TachiArenaParams) -> Result<String, String> {
         "summary_path": dir.join("summary.md"),
     }))
     .map_err(|e| format!("serialize arena close: {e}"))
+}
+
+fn mission_result_preview(arena_id: &str, mission_id: &str) -> String {
+    let Ok(dir) = mission_dir(arena_id, mission_id) else {
+        return String::new();
+    };
+    let raw = std::fs::read_to_string(dir.join("result.md")).unwrap_or_default();
+    raw.lines()
+        .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(180)
+        .collect()
+}
+
+fn render_summary_md(arena_id: &str, missions: &[Value]) -> String {
+    let mut out = format!(
+        "# Arena Summary\n\nArena: `{arena_id}`\n\nMissions: {}\n\nState: closed\n\n## Mission Results\n\n",
+        missions.len()
+    );
+    if missions.is_empty() {
+        out.push_str("- none\n");
+        return out;
+    }
+    for mission in missions {
+        let mission_id = mission
+            .get("mission_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let harness = mission
+            .get("harness")
+            .and_then(Value::as_str)
+            .unwrap_or("manual");
+        let role = mission
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("worker");
+        let state = mission
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let preview = mission_result_preview(arena_id, mission_id);
+        out.push_str(&format!(
+            "- `{mission_id}` [{harness}/{role}] {state}: {}\n",
+            if preview.is_empty() {
+                "no result preview"
+            } else {
+                preview.as_str()
+            }
+        ));
+    }
+    out
 }
 
 pub(crate) async fn handle_tachi_arena(
@@ -845,7 +1068,7 @@ mod tests {
 
         let mut collect = params("collect");
         collect.arena_id = Some(arena_id.clone());
-        collect.mission_id = Some(mission_id);
+        collect.mission_id = Some(mission_id.clone());
         let raw = handle_tachi_arena(&server, collect).await.unwrap();
         let collected: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(collected["missions"][0]["state"], "collected");
@@ -857,6 +1080,78 @@ mod tests {
         let closed: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(closed["state"], "closed");
         assert!(arena_dir.join("summary.md").exists());
+        let summary = std::fs::read_to_string(arena_dir.join("summary.md")).unwrap();
+        assert!(summary.contains(&mission_id));
+        assert!(summary.contains("Summary: done"));
+    }
+
+    #[tokio::test]
+    async fn arena_spawn_normalizes_golden_harness_lanes() {
+        let _root = temp_arena_root();
+        let server = server();
+        let mut open = params("open");
+        open.objective = Some("golden lanes".into());
+        let opened: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+        let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+        let mut spawn = params("spawn");
+        spawn.arena_id = Some(arena_id.clone());
+        spawn.prompt = Some("brainstorm the design".into());
+        spawn.harness = Some("gemini".into());
+        let spawned: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+        assert_eq!(spawned["harness"], "gemini-advisor");
+        assert_eq!(spawned["harness_lane"]["kind"], "advisor");
+        assert_eq!(spawned["harness_lane"]["launch_mode"], "advisor_artifact");
+        assert!(spawned["tracked_prompt"]
+            .as_str()
+            .unwrap()
+            .contains("Advisor output is captured as an artifact"));
+        let prompt = std::fs::read_to_string(spawned["prompt_path"].as_str().unwrap()).unwrap();
+        assert!(prompt.contains("Gemini advisor"));
+        assert!(prompt.contains("Advisor output is captured as an artifact"));
+
+        let mut spawn = params("spawn");
+        spawn.arena_id = Some(arena_id);
+        spawn.prompt = Some("unknown harness stays document-only".into());
+        spawn.harness = Some("experimental-harness".into());
+        let spawned: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+        assert_eq!(spawned["harness"], "manual");
+        assert_eq!(spawned["requested_harness"], "experimental-harness");
+        assert!(spawned["harness_lane"]["command_hint"]
+            .as_str()
+            .unwrap()
+            .contains("Unsupported harness hint"));
+    }
+
+    #[tokio::test]
+    async fn arena_board_refreshes_external_plan_and_result_writes() {
+        let _root = temp_arena_root();
+        let server = server();
+        let mut open = params("open");
+        open.objective = Some("refresh board".into());
+        let opened: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+        let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+        let mut spawn = params("spawn");
+        spawn.arena_id = Some(arena_id.clone());
+        spawn.prompt = Some("write files externally".into());
+        let spawned: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+        let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+        std::fs::write(mission_dir.join("plan.md"), "Plan: external write\n").unwrap();
+        std::fs::write(mission_dir.join("result.md"), "Summary: external result\n").unwrap();
+
+        let mut board = params("board");
+        board.arena_id = Some(arena_id);
+        let board: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, board).await.unwrap()).unwrap();
+        let mission = &board["result"]["missions"][0];
+        assert_eq!(mission["plan_written"], true);
+        assert_eq!(mission["result_written"], true);
     }
 
     #[tokio::test]
@@ -900,6 +1195,7 @@ mod tests {
         }
         assert!(validate_arena_id("arena_20260606T000000Z_demo_deadbeef").is_ok());
         assert!(validate_mission_id("mission_explore_deadbeef").is_ok());
-        assert!(validate_mission_id("mission_bad/name").is_err());
+        let err = validate_mission_id("bad/name").unwrap_err();
+        assert!(err.contains("Expected prefix 'mission_'"));
     }
 }

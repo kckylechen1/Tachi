@@ -110,11 +110,19 @@ pub(crate) fn checkpoint_message(
     raw: &str,
     display_path: Option<&str>,
     already_formatted: bool,
+    echo: Option<&str>,
 ) -> String {
     if already_formatted {
         raw.to_string()
     } else {
-        format_save_result(raw, display_path)
+        let mut msg = format_save_result(raw, display_path);
+        if let Some(echo) = echo.filter(|text| !text.trim().is_empty()) {
+            msg.push_str(&format!(
+                "\nSummary: {}",
+                compact_text_line(echo.trim(), 220)
+            ));
+        }
+        msg
     }
 }
 
