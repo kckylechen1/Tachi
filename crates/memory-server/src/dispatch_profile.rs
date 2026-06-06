@@ -294,7 +294,7 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
             "selected DispatchProfile '{}' ({})",
             profile.name, profile.role
         ));
-        if params.agent.is_none() {
+        if requested_agent.is_none() {
             params.agent = Some(profile.backend.to_string());
             route_explanation.push(format!("profile selected backend '{}'", profile.backend));
         } else if requested_agent.as_deref() != Some(profile.backend) {
@@ -397,8 +397,7 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
     };
     let mcp_access = params
         .mcp_access
-        .clone()
-        .unwrap_or_else(|| DispatchMcpAccessParams {
+        .get_or_insert_with(|| DispatchMcpAccessParams {
             inject_tachi_mcp: params.inject_tachi_mcp,
             inject_hub_mcps: params.inject_hub_mcps,
             allowed_facades: Vec::new(),
@@ -411,7 +410,8 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
                 "Use leader-provided context if GitHub/MCP issue reads are unavailable."
                     .to_string(),
             ),
-        });
+        })
+        .clone();
     let evidence_required = profile
         .map(|p| p.evidence_required.iter().map(|s| s.to_string()).collect())
         .unwrap_or_else(Vec::new);
@@ -723,6 +723,37 @@ mod tests {
             vec!["kckylechen1/tachi#194".to_string()]
         );
         assert!(resolved.auto_capability_bundle);
+    }
+
+    #[test]
+    fn dispatch_profile_treats_blank_agent_as_missing() {
+        let mut params = params();
+        params.agent = Some("   ".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        assert_eq!(params.agent.as_deref(), Some("claude"));
+        assert_eq!(resolved.agent, "claude");
+    }
+
+    #[test]
+    fn dispatch_profile_writes_fallback_mcp_access_back_to_params() {
+        let mut params = params();
+        params.profile = None;
+        params.agent = Some("claude".to_string());
+        params.inject_tachi_mcp = Some(true);
+        params.allowed_mcp_servers = vec!["github".to_string()];
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+        assert_eq!(
+            params
+                .mcp_access
+                .as_ref()
+                .map(|access| access.allowed_mcp_servers.as_slice()),
+            Some(&["github".to_string()][..])
+        );
+        assert_eq!(
+            resolved.mcp_access.allowed_mcp_servers,
+            vec!["github".to_string()]
+        );
     }
 
     #[test]

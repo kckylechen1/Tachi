@@ -127,7 +127,10 @@ impl MergeGatePolicy {
             require_review_approval: true,
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: true,
-            require_head_consistency: true,
+            // PrState does not yet carry independent check/review head SHAs.
+            // Keep strict mergeable when all observable gates are green; callers
+            // that provide a stronger consistency surface can opt in explicitly.
+            require_head_consistency: false,
         }
     }
 
@@ -602,9 +605,19 @@ mod tests {
     }
 
     #[test]
-    fn gate_strict_waits_when_head_consistency_is_unavailable() {
+    fn gate_strict_ready_when_all_observable_gates_are_green() {
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&open_pr(), MergeGatePolicy::strict()),
+            MergeDecision::Ready
+        );
+    }
+
+    #[test]
+    fn gate_waits_when_head_consistency_is_explicitly_required() {
         let pr = open_pr();
-        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
+        let mut policy = MergeGatePolicy::strict();
+        policy.require_head_consistency = true;
+        match evaluate_merge_gate_with_policy(&pr, policy) {
             MergeDecision::Pending { waiting_on } => {
                 assert!(waiting_on
                     .iter()
