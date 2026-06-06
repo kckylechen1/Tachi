@@ -530,7 +530,13 @@ async fn handle_dispatch_action(
     let mut dispatch_error: Option<String> = None;
     let mut async_fired = false;
     if params.async_dispatch {
-        let agent = params.agent.clone().unwrap_or_else(|| "claude".to_string());
+        let agent = params.agent.clone().or_else(|| {
+            if params.profile.is_some() {
+                None
+            } else {
+                Some("claude".to_string())
+            }
+        });
         // Prefix the subagent prompt with a pointer to the instruction packet
         // so the clanker reads from disk rather than chat context.
         let prompt = format!(
@@ -547,6 +553,7 @@ async fn handle_dispatch_action(
         );
         let dp = TachiDispatchParams {
             agent,
+            profile: params.profile.clone(),
             task: prompt,
             cwd: params.cwd.clone(),
             skills: Vec::new(),
@@ -562,6 +569,13 @@ async fn handle_dispatch_action(
             command: Vec::new(),
             project: params.project.clone(),
             stage: Some("execute".to_string()),
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: Some(flow_id.to_string()),
+            tool_profile: params.tool_profile.clone(),
+            auto_capability_bundle: None,
+            mcp_access: params.mcp_access.clone(),
+            allowed_mcp_servers: params.allowed_mcp_servers.clone(),
         };
         match crate::dispatch_ops::handle_tachi_dispatch(server, dp).await {
             Ok(s) => {
@@ -681,8 +695,28 @@ async fn handle_convoy_dispatch_action(
             .agent
             .clone()
             .or_else(|| params.agent.clone())
-            .unwrap_or_else(|| "claude".to_string());
+            .or_else(|| {
+                if slice.profile.is_some() || params.profile.is_some() {
+                    None
+                } else {
+                    Some("claude".to_string())
+                }
+            });
+        let slice_profile = slice.profile.clone().or_else(|| params.profile.clone());
         let slice_cwd = slice.cwd.clone().or_else(|| params.cwd.clone());
+        let slice_tool_profile = slice
+            .tool_profile
+            .clone()
+            .or_else(|| params.tool_profile.clone());
+        let slice_mcp_access = slice
+            .mcp_access
+            .clone()
+            .or_else(|| params.mcp_access.clone());
+        let slice_allowed_mcp_servers = if slice.allowed_mcp_servers.is_empty() {
+            params.allowed_mcp_servers.clone()
+        } else {
+            slice.allowed_mcp_servers.clone()
+        };
         let slice_validation = if slice.validation.is_empty() {
             params.validation.clone()
         } else {
@@ -737,7 +771,8 @@ async fn handle_convoy_dispatch_action(
                 "event": "convoy_slice_prepared",
                 "flow_id": flow_id,
                 "slice_id": slice_id,
-                "agent": slice_agent,
+                "agent": slice_agent.clone(),
+                "profile": slice_profile.clone(),
                 "cwd": slice_cwd,
                 "instruction_path": slice_instr_path.to_string_lossy(),
                 "timestamp": Utc::now().to_rfc3339(),
@@ -765,6 +800,7 @@ async fn handle_convoy_dispatch_action(
             );
             let dp = TachiDispatchParams {
                 agent: slice_agent.clone(),
+                profile: slice_profile.clone(),
                 task: prompt,
                 cwd: slice_cwd.clone(),
                 skills: Vec::new(),
@@ -780,6 +816,13 @@ async fn handle_convoy_dispatch_action(
                 command: Vec::new(),
                 project: params.project.clone(),
                 stage: Some(format!("execute:{}", slice_id)),
+                issue_ref: None,
+                pr_ref: None,
+                flow_id: Some(flow_id.to_string()),
+                tool_profile: slice_tool_profile.clone(),
+                auto_capability_bundle: None,
+                mcp_access: slice_mcp_access.clone(),
+                allowed_mcp_servers: slice_allowed_mcp_servers.clone(),
             };
             match crate::dispatch_ops::handle_tachi_dispatch(server, dp).await {
                 Ok(s) => {
@@ -813,7 +856,9 @@ async fn handle_convoy_dispatch_action(
         slice_records.push(json!({
             "slice_id": slice_id,
             "title": slice.title,
-            "agent": slice_agent,
+            "agent": slice_agent.clone(),
+            "profile": slice_profile.clone(),
+            "tool_profile": slice_tool_profile.clone(),
             "cwd": slice_cwd,
             "instruction_path": slice_instr_path.to_string_lossy(),
             "required_superpowers": convoy_superpowers.clone(),
@@ -1217,7 +1262,11 @@ mod tests {
             task: Some("hello".into()),
             title: Some("hello".into()),
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
             project: None,
             state_filter: None,
@@ -1243,7 +1292,11 @@ mod tests {
             task: Some("t".into()),
             title: Some("t".into()),
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
             project: None,
             state_filter: None,
@@ -1304,7 +1357,11 @@ mod tests {
             task: None,
             title: None,
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
             project: None,
             state_filter: None,
@@ -1337,7 +1394,11 @@ mod tests {
             task: None,
             title: None,
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
             project: None,
             state_filter: None,
@@ -1370,7 +1431,11 @@ mod tests {
             task: Some("do thing".into()),
             title: Some("My Slice".into()),
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             notes: None,
             validation: Vec::new(),
             allowed_scope: Vec::new(),
@@ -1385,7 +1450,11 @@ mod tests {
             task: Some("do thing".into()),
             title: Some("Hello World".into()),
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             notes: None,
             validation: Vec::new(),
             allowed_scope: Vec::new(),
@@ -1400,7 +1469,11 @@ mod tests {
             task: Some("Refactor Core".into()),
             title: None,
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             notes: None,
             validation: Vec::new(),
             allowed_scope: Vec::new(),
@@ -1415,7 +1488,11 @@ mod tests {
             task: None,
             title: None,
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             notes: None,
             validation: Vec::new(),
             allowed_scope: Vec::new(),
@@ -1451,7 +1528,11 @@ mod tests {
             task: Some("parent task: review GitHub PRs and issues".into()),
             title: Some("convoy test".into()),
             agent: None,
+            profile: None,
             cwd: None,
+            tool_profile: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
             async_dispatch: false,
             project: None,
             state_filter: None,
@@ -1465,7 +1546,11 @@ mod tests {
                     task: Some("slice alpha task: inspect the new PR".into()),
                     title: Some("Alpha Slice".into()),
                     agent: None,
+                    profile: None,
                     cwd: None,
+                    tool_profile: None,
+                    mcp_access: None,
+                    allowed_mcp_servers: Vec::new(),
                     notes: None,
                     validation: Vec::new(),
                     allowed_scope: Vec::new(),
@@ -1475,7 +1560,11 @@ mod tests {
                     task: Some("slice beta task".into()),
                     title: None,
                     agent: None,
+                    profile: None,
                     cwd: None,
+                    tool_profile: None,
+                    mcp_access: None,
+                    allowed_mcp_servers: Vec::new(),
                     notes: None,
                     validation: Vec::new(),
                     allowed_scope: Vec::new(),

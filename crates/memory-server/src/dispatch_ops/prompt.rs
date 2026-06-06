@@ -79,8 +79,9 @@ async fn prompt_row_text(
 pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
     let mut parts: Vec<String> = Vec::new();
 
+    let agent = params.agent.as_deref().unwrap_or("unknown");
     if let Some(overlay) =
-        crate::prompt_envelope::render_envelope_overlay(&params.agent, params.stage.as_deref())
+        crate::prompt_envelope::render_envelope_overlay(agent, params.stage.as_deref())
     {
         parts.push(overlay);
     }
@@ -88,8 +89,45 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
     parts.push(render_task_route_overlay(&route));
 
+    if params.profile.is_some()
+        || params.tool_profile.is_some()
+        || params.mcp_access.is_some()
+        || params.issue_ref.is_some()
+        || params.pr_ref.is_some()
+        || params.flow_id.is_some()
+    {
+        parts.push(render_dispatch_profile_overlay(params));
+    }
+
     // Resolve skills with stage defaults
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
+
+    if params.auto_capability_bundle.unwrap_or(false) {
+        if let Ok(raw) = crate::capability_ops::handle_prepare_capability_bundle(
+            server,
+            crate::tool_params::PrepareCapabilityBundleParams {
+                query: params.task.clone(),
+                host: Some(agent.to_string()),
+                skill_limit: 2,
+                capability_limit: 2,
+                pack_limit: 1,
+                include_section: true,
+            },
+        )
+        .await
+        {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(block) = value
+                    .get("bundle")
+                    .and_then(|bundle| bundle.get("section"))
+                    .and_then(|section| section.get("block"))
+                    .and_then(|block| block.as_str())
+                {
+                    parts.push(block.to_string());
+                }
+            }
+        }
+    }
 
     // 1. Context from memory/wiki (v2: default query = task if none provided)
     let context_query = params
@@ -402,5 +440,47 @@ fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRouting) -> St
         lines.extend(steps);
     }
 
+    lines.join("\n")
+}
+
+fn render_dispatch_profile_overlay(params: &TachiDispatchParams) -> String {
+    let mut lines = vec!["## Dispatch profile".to_string()];
+    if let Some(profile) = params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- profile: {profile}"));
+    }
+    if let Some(agent) = params.agent.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- backend: {agent}"));
+    }
+    if let Some(stage) = params.stage.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- stage: {stage}"));
+    }
+    if let Some(tool_profile) = params
+        .tool_profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        lines.push(format!("- tachi_tool_profile: {tool_profile}"));
+    }
+    if let Some(flow_id) = params.flow_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- flow_id: {flow_id}"));
+    }
+    if let Some(issue_ref) = params.issue_ref.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- issue_ref: {issue_ref}"));
+    }
+    if let Some(pr_ref) = params.pr_ref.as_deref().filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("- pr_ref: {pr_ref}"));
+    }
+    if let Some(access) = params.mcp_access.as_ref() {
+        if let Ok(compact) = serde_json::to_string(access) {
+            lines.push(format!("- tool_access: {compact}"));
+        }
+    }
+    if !params.allowed_mcp_servers.is_empty() {
+        lines.push(format!(
+            "- allowed_mcp_servers: {}",
+            params.allowed_mcp_servers.join(", ")
+        ));
+    }
+    lines.push("- evidence: report files changed, tests run, blockers, and any unavailable MCP/GitHub context explicitly.".to_string());
     lines.join("\n")
 }

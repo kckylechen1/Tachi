@@ -9,9 +9,10 @@ pub(super) async fn init_kanban_task(
     params: &TachiDispatchParams,
     plan_path: Option<&str>,
 ) -> Result<(), String> {
+    let agent = params.agent.as_deref().unwrap_or("unknown");
     let text = format!(
         "Dispatch Task\nAgent: {}\nTask: {}\nPlan: {}",
-        params.agent,
+        agent,
         params.task,
         plan_path.unwrap_or("inline"),
     );
@@ -19,7 +20,15 @@ pub(super) async fn init_kanban_task(
         "type": "a2a_task",
         "dispatch_id": dispatch_id,
         "a2a_state": "TASK_STATE_WORKING",
-        "agent": params.agent,
+        "agent": agent,
+        "profile": params.profile,
+        "tool_profile": params.tool_profile,
+        "mcp_access": params.mcp_access,
+        "allowed_mcp_servers": params.allowed_mcp_servers,
+        "issue_ref": params.issue_ref,
+        "pr_ref": params.pr_ref,
+        "flow_id": params.flow_id,
+        "auto_capability_bundle": params.auto_capability_bundle,
         "plan_file": plan_path,
         "eval_ledger_id": null,
     });
@@ -31,7 +40,7 @@ pub(super) async fn init_kanban_task(
             summary: format!(
                 "Kanban: {} via {}",
                 params.task.chars().take(80).collect::<String>(),
-                params.agent
+                agent
             ),
             path: format!("/kanban/tasks/{}", dispatch_id),
             importance: 0.7,
@@ -40,7 +49,7 @@ pub(super) async fn init_kanban_task(
             keywords: vec![
                 "kanban".to_string(),
                 "dispatch".to_string(),
-                params.agent.clone(),
+                agent.to_string(),
             ],
             persons: Vec::new(),
             entities: Vec::new(),

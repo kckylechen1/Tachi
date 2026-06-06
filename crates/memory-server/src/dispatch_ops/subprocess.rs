@@ -174,7 +174,7 @@ pub(super) fn build_custom_command(
     let binary = &params.command[0];
     if !crate::utils::is_trusted_command(binary) {
         return Err(format!(
-            "Command '{}' is not in the trusted allowlist. Allowed: npx, node, bun, deno, python3, python, uv, cargo, rustup, docker, podman, tachi, or paths under /opt/homebrew/, /usr/local/bin/, ~/.cargo/bin/, ~/.local/bin/",
+            "Command '{}' is not in the trusted allowlist. Allowed: npx, node, bun, deno, python3, python, uv, cargo, rustup, docker, podman, tachi, opencode, or paths under /opt/homebrew/, /usr/local/bin/, ~/.cargo/bin/, ~/.local/bin/",
             binary
         ));
     }
@@ -251,7 +251,8 @@ mod tests {
 
     fn dispatch_params(agent: &str) -> TachiDispatchParams {
         TachiDispatchParams {
-            agent: agent.to_string(),
+            agent: Some(agent.to_string()),
+            profile: None,
             task: "noop".to_string(),
             cwd: None,
             skills: Vec::new(),
@@ -267,6 +268,13 @@ mod tests {
             command: Vec::new(),
             project: None,
             stage: None,
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
         }
     }
 

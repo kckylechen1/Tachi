@@ -44,6 +44,9 @@ pub(crate) struct TachiGhParams {
     /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// Merge gate policy mode: permissive | standard | strict. Defaults to standard.
+    #[serde(default)]
+    pub merge_policy: Option<String>,
     /// Optional author/login substring for pr_review_digest. Defaults to "gemini".
     #[serde(default)]
     pub author_filter: Option<String>,

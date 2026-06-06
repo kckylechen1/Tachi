@@ -67,7 +67,16 @@ fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["plan", "dispatch", "board", "merge"],
+        &[
+            "plan",
+            "recommend",
+            "dispatch",
+            "profiles",
+            "profile",
+            "card",
+            "board",
+            "merge",
+        ],
         "Required Tachi task facade action.",
         generator,
     )
@@ -535,10 +544,55 @@ fn default_dispatch_timeout() -> u64 {
     600
 }
 
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub(crate) struct DispatchMcpAccessParams {
+    /// Whether the resolved dispatch contract should inject Tachi MCP when the backend supports it.
+    #[serde(default)]
+    pub inject_tachi_mcp: Option<bool>,
+
+    /// Whether Hub MCPs should be injected when the backend supports it.
+    #[serde(default)]
+    pub inject_hub_mcps: Option<bool>,
+
+    /// Facade tools this profile expects the subagent to be able to use.
+    #[serde(default)]
+    pub allowed_facades: Vec<String>,
+
+    /// Hub MCP server ids this profile may inject. Empty means no extra Hub MCP filter.
+    #[serde(default)]
+    pub allowed_mcp_servers: Vec<String>,
+
+    /// Whether issue/PR reads are allowed for this dispatch.
+    #[serde(default)]
+    pub github_read: Option<bool>,
+
+    /// Whether public write actions such as comments, merges, or pushes are allowed.
+    #[serde(default)]
+    pub write_actions: Option<bool>,
+
+    /// GitHub issue references available to the subagent, e.g. owner/repo#194.
+    #[serde(default)]
+    pub issue_refs: Vec<String>,
+
+    /// GitHub PR references available to the subagent.
+    #[serde(default)]
+    pub pr_refs: Vec<String>,
+
+    /// Required fallback behavior if MCP/GitHub reads are unavailable.
+    #[serde(default)]
+    pub fallback: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiDispatchParams {
     /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
-    pub agent: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Dispatch profile: routes agent/backend, context, MCP/tool access, and evidence requirements.
+    /// Distinct from the server ToolProfile, which only gates visible tools.
+    #[serde(default, alias = "dispatch_profile")]
+    pub profile: Option<String>,
 
     /// Task description / prompt for the agent
     pub task: String,
@@ -607,6 +661,35 @@ pub(crate) struct TachiDispatchParams {
     /// Empty/unset = no automatic skill injection (backward compatible).
     #[serde(default)]
     pub stage: Option<String>,
+
+    /// GitHub issue reference bound to this dispatch, e.g. owner/repo#194.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference bound to this dispatch.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Tachi flow id for feature-scoped briefing/dispatch/eval linkage.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Tool surface expected by the selected dispatch profile. This does not mutate the
+    /// server's active ToolProfile; it is part of the child-agent contract.
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+
+    /// Include a capability bundle in the dispatch prompt when supported.
+    #[serde(default, alias = "include_capability_bundle")]
+    pub auto_capability_bundle: Option<bool>,
+
+    /// Explicit MCP/tool access contract for the child agent. Profiles populate this by default.
+    #[serde(default)]
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+
+    /// Hub MCP server ids allowed when inject_hub_mcps=true. Empty preserves current all-enabled behavior.
+    #[serde(default)]
+    pub allowed_mcp_servers: Vec<String>,
 }
 
 // ─── Facade: worktree merge ──────────────────────────────────────────────────
@@ -755,6 +838,14 @@ pub(crate) struct TachiCompleteParams {
     #[serde(default)]
     pub task_type: Option<String>,
 
+    /// Dispatch profile used for this completion, if any.
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Risk class used by routing: low | medium | high | critical.
+    #[serde(default)]
+    pub risk: Option<String>,
+
     /// Execution duration in milliseconds
     #[serde(
         default,
@@ -811,6 +902,30 @@ pub(crate) struct TachiCompleteParams {
     /// Parent dispatch ID (links back to tachi_dispatch record)
     #[serde(default)]
     pub dispatch_id: Option<String>,
+
+    /// Feature flow id linked to this completion.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// GitHub issue reference linked to this completion.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference linked to this completion.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Evidence references used to verify the outcome (files, issue refs, run artifacts).
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+
+    /// Verification commands run by the leader or subagent.
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+
+    /// Whether a code diff was present. If absent, inferred from `diff`.
+    #[serde(default)]
+    pub diff_present: Option<bool>,
 
     /// Target database scope for the eval entry: "global" or "project" (default)
     #[serde(default)]
@@ -939,11 +1054,13 @@ pub(crate) struct TachiSkillParams {
     pub args: Option<serde_json::Value>,
 }
 
-// ─── Facade: task (plan / dispatch / board / merge) ──────────────────────────
+// ─── Facade: task (plan / recommend / dispatch / board / merge) ──────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "dispatch", "board", or "merge"
+    /// Action: "plan", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
+    /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
+    /// from the task, risk, and live eval evidence.
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: String,
     /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
@@ -997,6 +1114,33 @@ pub(crate) struct TachiTaskParams {
     pub project: Option<String>,
     #[serde(default)]
     pub stage: Option<String>,
+    #[serde(default, alias = "dispatch_profile")]
+    #[schemars(
+        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
+    )]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+    #[serde(default)]
+    pub flow_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Risk override for recommendation/routing: low | medium | high | critical."
+    )]
+    pub risk: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Expected child-agent tool surface, e.g. readonly, delegate, reviewer."
+    )]
+    pub tool_profile: Option<String>,
+    #[serde(default, alias = "include_capability_bundle")]
+    pub auto_capability_bundle: Option<bool>,
+    #[serde(default)]
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+    #[serde(default)]
+    pub allowed_mcp_servers: Vec<String>,
     // board fields
     #[serde(default)]
     pub state_filter: Option<String>,
@@ -1107,8 +1251,16 @@ pub(crate) struct TachiShellDispatchSliceParams {
     pub title: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
+    #[serde(default, alias = "dispatch_profile")]
+    pub profile: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+    #[serde(default)]
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+    #[serde(default)]
+    pub allowed_mcp_servers: Vec<String>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -1146,9 +1298,25 @@ pub(crate) struct TachiShellParams {
     #[serde(default)]
     pub agent: Option<String>,
 
+    /// Optional dispatch profile forwarded to the underlying tachi_dispatch.
+    #[serde(default, alias = "dispatch_profile")]
+    pub profile: Option<String>,
+
     /// Optional cwd override for downstream dispatch.
     #[serde(default)]
     pub cwd: Option<String>,
+
+    /// Tachi MCP ToolProfile for async-dispatched workers.
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+
+    /// Optional explicit MCP/tool access contract for async-dispatched workers.
+    #[serde(default)]
+    pub mcp_access: Option<DispatchMcpAccessParams>,
+
+    /// Hub MCP allowlist for async-dispatched workers.
+    #[serde(default)]
+    pub allowed_mcp_servers: Vec<String>,
 
     /// When true, attempt to spawn the underlying async dispatch immediately
     /// (Phase 4). When false (MVP default), only the instruction.md artifact is

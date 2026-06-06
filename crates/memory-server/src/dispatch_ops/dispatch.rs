@@ -16,6 +16,7 @@ use super::subprocess::{
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
 };
+use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
@@ -60,26 +61,55 @@ pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String
     format!("{}-{}-{}", timestamp, sanitized, suffix)
 }
 
+fn suggested_complete_payload(
+    dispatch_id: &str,
+    agent: &str,
+    params: &TachiDispatchParams,
+) -> serde_json::Value {
+    json!({
+        "tool": "tachi_complete",
+        "arguments": {
+            "dispatch_id": dispatch_id,
+            "task": params.task,
+            "agent": agent,
+            "outcome": "success|failure|partial|aborted",
+            "profile": params.profile,
+            "flow_id": params.flow_id,
+            "issue_ref": params.issue_ref,
+            "pr_ref": params.pr_ref,
+            "evidence_refs": [],
+            "tests_run": [],
+            "diff_present": null,
+        }
+    })
+}
+
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
 pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
-    params: TachiDispatchParams,
+    mut params: TachiDispatchParams,
 ) -> Result<String, String> {
     let now = Utc::now();
-    let dispatch_id = new_dispatch_id(now, &params.agent);
+    let resolved_profile = resolve_and_apply_dispatch_profile(&mut params)?;
+    let mut agent_norm = resolved_profile.agent.clone();
+    let dispatch_id = new_dispatch_id(now, &agent_norm);
 
-    let agent_norm = if params.agent.eq_ignore_ascii_case("custom") {
+    agent_norm = if agent_norm.eq_ignore_ascii_case("custom") {
         "custom".to_string()
-    } else if let Some(def) = resolve_dispatch_agent(&params.agent) {
+    } else if let Some(def) = resolve_dispatch_agent(&agent_norm) {
         def.name.to_string()
     } else {
+        let agent = params.agent.as_deref().unwrap_or("");
         return Err(format!(
             "Unknown agent '{}'. Supported: {}",
-            params.agent.trim(),
+            agent.trim(),
             dispatch_agent_help_list()
         ));
     };
+    params.agent = Some(agent_norm.clone());
+    let profile_payload =
+        serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
     let timeout = Duration::from_secs(params.timeout_secs);
 
     // 1. Create isolated workspace directory
@@ -126,7 +156,15 @@ pub(crate) async fn handle_tachi_dispatch(
         }
     }
     let mcp_config_path = if inject_tachi || inject_hub {
-        generate_mcp_config(server, &dispatch_id, inject_tachi, inject_hub).await?
+        generate_mcp_config(
+            server,
+            &dispatch_id,
+            inject_tachi,
+            inject_hub,
+            params.tool_profile.as_deref(),
+            &params.allowed_mcp_servers,
+        )
+        .await?
     } else {
         None
     };
@@ -162,7 +200,24 @@ pub(crate) async fn handle_tachi_dispatch(
     let context_summary = {
         let mut sections = Vec::new();
         sections.push(format!("# Dispatch Context: {}", dispatch_id));
-        sections.push(format!("Agent: {}", params.agent));
+        sections.push(format!("Agent: {}", agent_norm));
+        sections.push(format!(
+            "Dispatch profile: {}",
+            params.profile.as_deref().unwrap_or("none")
+        ));
+        sections.push(format!(
+            "Tool profile: {}",
+            params.tool_profile.as_deref().unwrap_or("none")
+        ));
+        if let Some(flow_id) = params.flow_id.as_deref() {
+            sections.push(format!("Flow: {}", flow_id));
+        }
+        if let Some(issue_ref) = params.issue_ref.as_deref() {
+            sections.push(format!("Issue: {}", issue_ref));
+        }
+        if let Some(pr_ref) = params.pr_ref.as_deref() {
+            sections.push(format!("PR: {}", pr_ref));
+        }
         sections.push(format!(
             "Stage: {}",
             params.stage.as_deref().unwrap_or("none")
@@ -183,8 +238,16 @@ pub(crate) async fn handle_tachi_dispatch(
         let started_event = json!({
             "event": "dispatch_started",
             "dispatch_id": dispatch_id,
-            "agent": params.agent,
+            "agent": agent_norm,
             "stage": params.stage,
+            "profile": params.profile,
+            "tool_profile": params.tool_profile,
+            "mcp_access": params.mcp_access,
+            "allowed_mcp_servers": params.allowed_mcp_servers,
+            "issue_ref": params.issue_ref,
+            "pr_ref": params.pr_ref,
+            "flow_id": params.flow_id,
+            "auto_capability_bundle": params.auto_capability_bundle,
             "v2": v2,
             "timestamp": Utc::now().to_rfc3339(),
         });
@@ -330,9 +393,20 @@ pub(crate) async fn handle_tachi_dispatch(
                     "status": { "state": "TASK_STATE_PENDING_REVIEW" },
                 },
                 "agent": agent_norm,
+                "profile": profile_payload,
+                "selected_profile": resolved_profile.selected_profile,
+                "tool_access": resolved_profile.mcp_access,
+                "dispatch_profile": resolved_profile.mbit_card,
+                "route_explanation": resolved_profile.route_explanation,
+                "fallback_chain": resolved_profile.fallback_chain,
+                "issue_ref": params.issue_ref,
+                "pr_ref": params.pr_ref,
+                "flow_id": params.flow_id,
+                "auto_capability_bundle": resolved_profile.auto_capability_bundle,
                 "v2": true,
                 "plan_review_status": "pending_review",
                 "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
+                "suggested_complete_command": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
                 "plan_file": plan_path.to_string_lossy(),
                 "prompt_file": prompt_md_path.to_string_lossy(),
                 "context_file": context_md_path.to_string_lossy(),
@@ -656,10 +730,21 @@ pub(crate) async fn handle_tachi_dispatch(
             "status": { "state": "TASK_STATE_WORKING" },
         },
         "agent": agent_norm,
+        "profile": profile_payload,
+        "selected_profile": resolved_profile.selected_profile,
+        "tool_access": resolved_profile.mcp_access,
+        "dispatch_profile": resolved_profile.mbit_card,
+        "route_explanation": resolved_profile.route_explanation,
+        "fallback_chain": resolved_profile.fallback_chain,
+        "issue_ref": params.issue_ref,
+        "pr_ref": params.pr_ref,
+        "flow_id": params.flow_id,
+        "auto_capability_bundle": resolved_profile.auto_capability_bundle,
         "v2": v2,
         "plan_review_status": if v2 { "approved" } else { "n/a" },
         "duration_ms_plan": plan_duration_ms,
         "message": "Task dispatched to background. You are unblocked. Use tachi_board to check status.",
+        "suggested_complete_command": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
         "plan_file": plan_path.to_string_lossy(),
         "prompt_file": prompt_md_path.to_string_lossy(),
         "context_file": context_md_path.to_string_lossy(),

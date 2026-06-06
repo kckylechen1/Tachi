@@ -66,6 +66,84 @@ pub struct PrState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeGatePolicyMode {
+    Permissive,
+    Standard,
+    Strict,
+}
+
+impl MergeGatePolicyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeGatePolicyMode::Permissive => "permissive",
+            MergeGatePolicyMode::Standard => "standard",
+            MergeGatePolicyMode::Strict => "strict",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeGatePolicy {
+    pub mode: MergeGatePolicyMode,
+    pub require_checks: bool,
+    pub allow_missing_checks: bool,
+    pub require_review_approval: bool,
+    pub allow_missing_review_decision: bool,
+    pub require_linked_issue_or_flow: bool,
+    pub require_head_consistency: bool,
+}
+
+impl MergeGatePolicy {
+    pub fn permissive() -> Self {
+        Self {
+            mode: MergeGatePolicyMode::Permissive,
+            require_checks: false,
+            allow_missing_checks: true,
+            require_review_approval: false,
+            allow_missing_review_decision: true,
+            require_linked_issue_or_flow: false,
+            require_head_consistency: false,
+        }
+    }
+
+    pub fn standard() -> Self {
+        Self {
+            mode: MergeGatePolicyMode::Standard,
+            require_checks: true,
+            allow_missing_checks: false,
+            require_review_approval: true,
+            allow_missing_review_decision: false,
+            require_linked_issue_or_flow: false,
+            require_head_consistency: false,
+        }
+    }
+
+    pub fn strict() -> Self {
+        Self {
+            mode: MergeGatePolicyMode::Strict,
+            require_checks: true,
+            allow_missing_checks: false,
+            require_review_approval: true,
+            allow_missing_review_decision: false,
+            require_linked_issue_or_flow: true,
+            // PrState does not yet carry independent check/review head SHAs.
+            // Keep strict mergeable when all observable gates are green; callers
+            // that provide a stronger consistency surface can opt in explicitly.
+            require_head_consistency: false,
+        }
+    }
+
+    pub fn from_mode(mode: MergeGatePolicyMode) -> Self {
+        match mode {
+            MergeGatePolicyMode::Permissive => Self::permissive(),
+            MergeGatePolicyMode::Standard => Self::standard(),
+            MergeGatePolicyMode::Strict => Self::strict(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum PrLifecycleState {
     Open,
@@ -209,6 +287,10 @@ impl MergeDecision {
 /// gate the caller is still waiting on, so the polling loop can surface
 /// progress.
 pub fn evaluate_merge_gate(pr: &PrState) -> MergeDecision {
+    evaluate_merge_gate_with_policy(pr, MergeGatePolicy::standard())
+}
+
+pub fn evaluate_merge_gate_with_policy(pr: &PrState, policy: MergeGatePolicy) -> MergeDecision {
     let mut blocked: Vec<String> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
 
@@ -230,12 +312,25 @@ pub fn evaluate_merge_gate(pr: &PrState) -> MergeDecision {
             blocked.push("review:changes_requested".to_string())
         }
         Some(ReviewDecision::ReviewRequired) => pending.push("review:required".to_string()),
-        Some(ReviewDecision::Approved) | None => {}
+        Some(ReviewDecision::Approved) => {}
+        None => {
+            if policy.require_review_approval && !policy.allow_missing_review_decision {
+                pending.push("review:missing_decision".to_string());
+            }
+        }
     }
     match pr.checks {
         ChecksState::Failure => blocked.push("checks:failure".to_string()),
         ChecksState::Pending => pending.push("checks:pending".to_string()),
-        ChecksState::Success | ChecksState::None => {}
+        ChecksState::Success => {}
+        ChecksState::None => {
+            if policy.require_checks && !policy.allow_missing_checks {
+                pending.push("checks:none".to_string());
+            }
+        }
+    }
+    if policy.require_head_consistency {
+        pending.push("head:consistency_unavailable".to_string());
     }
 
     if !blocked.is_empty() {
@@ -485,11 +580,51 @@ mod tests {
     }
 
     #[test]
-    fn gate_ready_when_no_review_required_and_no_checks() {
+    fn gate_permissive_ready_when_no_review_required_and_no_checks() {
         let mut pr = open_pr();
         pr.review_decision = None; // repo has no review policy
         pr.checks = ChecksState::None; // no CI configured
-        assert_eq!(evaluate_merge_gate(&pr), MergeDecision::Ready);
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::permissive()),
+            MergeDecision::Ready
+        );
+    }
+
+    #[test]
+    fn gate_standard_waits_on_missing_checks_and_review_decision() {
+        let mut pr = open_pr();
+        pr.review_decision = None;
+        pr.checks = ChecksState::None;
+        match evaluate_merge_gate(&pr) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "checks:none"));
+                assert!(waiting_on.iter().any(|r| r == "review:missing_decision"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_strict_ready_when_all_observable_gates_are_green() {
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&open_pr(), MergeGatePolicy::strict()),
+            MergeDecision::Ready
+        );
+    }
+
+    #[test]
+    fn gate_waits_when_head_consistency_is_explicitly_required() {
+        let pr = open_pr();
+        let mut policy = MergeGatePolicy::strict();
+        policy.require_head_consistency = true;
+        match evaluate_merge_gate_with_policy(&pr, policy) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on
+                    .iter()
+                    .any(|r| r == "head:consistency_unavailable"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
     }
 
     #[test]

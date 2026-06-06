@@ -36,6 +36,8 @@ pub(crate) enum CompletionStatus {
 pub(crate) struct EvalRow {
     pub agent: String,
     #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
@@ -280,6 +282,10 @@ fn eval_row_from_memory(entry: &memory_core::MemoryEntry) -> Option<EvalRow> {
 
     Some(EvalRow {
         agent,
+        profile: meta
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         model: meta
             .get("model")
             .and_then(|v| v.as_str())
@@ -306,7 +312,10 @@ fn eval_row_from_memory(entry: &memory_core::MemoryEntry) -> Option<EvalRow> {
     })
 }
 
-fn load_live_eval_rows(server: &MemoryServer, limit: usize) -> Result<Vec<EvalRow>, String> {
+pub(crate) fn load_live_eval_rows(
+    server: &MemoryServer,
+    limit: usize,
+) -> Result<Vec<EvalRow>, String> {
     let mut entries = server.with_global_store_read(|store| {
         store
             .list_by_path("/eval", limit, false)
@@ -376,6 +385,7 @@ mod tests {
         let rows = vec![
             EvalRow {
                 agent: "claude".to_string(),
+                profile: Some("claude_plan".to_string()),
                 model: None,
                 mode: None,
                 task_type: TaskType::FixRequest,
@@ -407,6 +417,7 @@ mod tests {
             },
             EvalRow {
                 agent: "claude".to_string(),
+                profile: None,
                 model: None,
                 mode: None,
                 task_type: TaskType::FixRequest,
