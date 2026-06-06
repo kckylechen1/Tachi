@@ -1,5 +1,77 @@
 use super::*;
 
+fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
+    TachiDispatchParams {
+        agent: agent.map(str::to_string),
+        profile: None,
+        task: task.to_string(),
+        cwd: None,
+        skills: Vec::new(),
+        context_query: None,
+        model: None,
+        timeout_secs: 5,
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        max_turns: None,
+        sandbox: None,
+        inject_tachi_mcp: None,
+        inject_hub_mcps: None,
+        command: Vec::new(),
+        project: None,
+        stage: None,
+        issue_ref: None,
+        pr_ref: None,
+        flow_id: None,
+        tool_profile: None,
+        auto_capability_bundle: None,
+        mcp_access: None,
+        allowed_mcp_servers: Vec::new(),
+    }
+}
+
+fn task_params(action: &str) -> TachiTaskParams {
+    TachiTaskParams {
+        action: action.to_string(),
+        format: Some("json".to_string()),
+        task: None,
+        agent_id: None,
+        domain: None,
+        path_prefix: None,
+        top_k: None,
+        agent: None,
+        cwd: None,
+        skills: Vec::new(),
+        context_query: None,
+        model: None,
+        timeout_secs: None,
+        permission_profile: None,
+        allowed_tools: Vec::new(),
+        max_turns: None,
+        sandbox: None,
+        inject_tachi_mcp: None,
+        inject_hub_mcps: None,
+        command: Vec::new(),
+        project: None,
+        stage: None,
+        profile: None,
+        issue_ref: None,
+        pr_ref: None,
+        flow_id: None,
+        risk: None,
+        tool_profile: None,
+        auto_capability_bundle: None,
+        mcp_access: None,
+        allowed_mcp_servers: Vec::new(),
+        state_filter: None,
+        limit: None,
+        worktree: None,
+        branch: None,
+        strategy: None,
+        delete_worktree: true,
+        confirm: false,
+    }
+}
+
 #[tokio::test]
 async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     let server = make_server();
@@ -11,6 +83,8 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             agent: "claude-code".to_string(),
             outcome: "success".to_string(),
             task_type: Some("fix_request".to_string()),
+            profile: Some("claude_plan".to_string()),
+            risk: Some("medium".to_string()),
             duration_ms: Some(5420),
             skills_used: vec!["skill:superpowers".to_string()],
             cost_tokens: Some(1234),
@@ -45,6 +119,12 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
                 cost_usd: None,
             }],
             dispatch_id: None,
+            flow_id: Some("flow-194".to_string()),
+            issue_ref: Some("kckylechen1/tachi#194".to_string()),
+            pr_ref: None,
+            evidence_refs: vec!["crates/memory-server/src/dispatch_profile.rs".to_string()],
+            tests_run: vec!["cargo test -p memory-server dispatch_profile --lib".to_string()],
+            diff_present: None,
             scope: Some("project".to_string()),
             project: None,
         }))
@@ -55,6 +135,13 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert_eq!(bundle["recorded"], serde_json::json!(true));
     assert_eq!(bundle["task_id"], serde_json::json!("smoke-test-001"));
     assert_eq!(bundle["outcome"], serde_json::json!("success"));
+    let next_steps = bundle["next_steps"].as_array().expect("next_steps array");
+    assert!(
+        next_steps.iter().any(|step| step
+            .as_str()
+            .is_some_and(|s| s.contains("no approve_merge step is implied"))),
+        "no-worktree completion should not imply approve_merge: {bundle:#}"
+    );
     let path = bundle["path"].as_str().expect("path present");
     assert!(
         path.starts_with("/eval/"),
@@ -88,6 +175,18 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert_eq!(metadata["agent"], serde_json::json!("claude-code"));
     assert_eq!(metadata["outcome"], serde_json::json!("success"));
     assert_eq!(metadata["task_type"], serde_json::json!("fix_request"));
+    assert_eq!(metadata["profile"], serde_json::json!("claude_plan"));
+    assert_eq!(metadata["risk"], serde_json::json!("medium"));
+    assert_eq!(metadata["flow_id"], serde_json::json!("flow-194"));
+    assert_eq!(
+        metadata["issue_ref"],
+        serde_json::json!("kckylechen1/tachi#194")
+    );
+    assert_eq!(metadata["diff_present"], serde_json::json!(true));
+    assert_eq!(
+        metadata["tests_run"][0],
+        serde_json::json!("cargo test -p memory-server dispatch_profile --lib")
+    );
     assert_eq!(metadata["cost_tokens"], serde_json::json!(1234));
     assert_eq!(metadata["subagent_eval"], serde_json::json!(true));
     assert_eq!(metadata["subagent_count"], serde_json::json!(1));
@@ -202,6 +301,182 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     );
 }
 
+#[tokio::test]
+async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
+    let server = make_server();
+
+    server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("recommend-review-001".to_string()),
+            task: "Review dispatch profile implementation".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("review_request".to_string()),
+            profile: Some("codex_55_review".to_string()),
+            risk: Some("high".to_string()),
+            duration_ms: Some(1200),
+            skills_used: vec!["skill:check".to_string()],
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.95),
+            notes: Some("Found no blockers after verification.".to_string()),
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            dispatch_id: None,
+            flow_id: Some("flow-194".to_string()),
+            issue_ref: Some("kckylechen1/tachi#194".to_string()),
+            pr_ref: None,
+            evidence_refs: vec!["crates/memory-server/src/dispatch_profile.rs".to_string()],
+            tests_run: vec!["cargo test -p memory-server dispatch".to_string()],
+            diff_present: Some(false),
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("seed eval row");
+
+    let mut params = task_params("recommend");
+    params.task = Some("review dispatch/eval profile routing change".to_string());
+    params.risk = Some("high".to_string());
+    params.limit = Some(50);
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("recommend should succeed");
+    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
+
+    assert_eq!(
+        rec["recommended_profile"],
+        serde_json::json!("codex_55_review")
+    );
+    assert_eq!(rec["risk"], serde_json::json!("high"));
+    assert!(rec["fallback_chain"]
+        .as_array()
+        .is_some_and(|chain| chain.iter().any(|item| item == "codex_55_review")));
+    assert!(
+        rec["live_eval"]["matched_samples"].as_u64().unwrap_or(0) >= 1,
+        "expected live eval evidence in recommendation: {rec:#}"
+    );
+    assert!(rec["reason"]
+        .as_array()
+        .is_some_and(|reasons| reasons.iter().any(|reason| reason
+            .as_str()
+            .is_some_and(|s| s.contains("live_useful_rate")))));
+}
+
+#[tokio::test]
+async fn tachi_task_recommend_falls_back_to_builtin_profiles_without_eval_rows() {
+    let server = make_server();
+    let mut params = task_params("recommend");
+    params.task = Some("plan a low-risk documentation update".to_string());
+    params.limit = Some(10);
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("recommend should succeed without eval rows");
+    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
+
+    assert!(rec["recommended_profile"].as_str().is_some());
+    assert_eq!(rec["live_eval"]["row_count"], serde_json::json!(0));
+    assert!(
+        rec["evidence_note"]
+            .as_str()
+            .is_some_and(|note| note.contains("low_sample_fallback")),
+        "expected fallback note: {rec:#}"
+    );
+    assert!(rec["mbit_card"].is_object());
+}
+
+#[tokio::test]
+async fn tachi_task_recommend_does_not_apply_same_backend_wrong_role_subagent_evidence() {
+    let server = make_server();
+
+    server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("recommend-role-guard-001".to_string()),
+            task: "Implement dispatch profile routing".to_string(),
+            agent: "leader".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("review_request".to_string()),
+            profile: None,
+            risk: Some("high".to_string()),
+            duration_ms: Some(1800),
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.9),
+            notes: Some("Executor was useful, but not review evidence.".to_string()),
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: vec![TachiSubagentEvalParams {
+                role: "executor".to_string(),
+                agent: "codex".to_string(),
+                model: None,
+                task: Some("draft implementation".to_string()),
+                task_type: Some("review_request".to_string()),
+                outcome: Some("useful".to_string()),
+                usefulness_score: Some(1.0),
+                failure_mode: None,
+                verification_impact: Some("accepted".to_string()),
+                verification_present: true,
+                evaluator: Some("leader".to_string()),
+                plan_delta: Some("accepted".to_string()),
+                human_override: false,
+                retry_count: 0,
+                notes: None,
+                latency_ms: None,
+                input_tokens: None,
+                output_tokens: None,
+                cost_tokens: None,
+                cost_usd: None,
+            }],
+            dispatch_id: None,
+            flow_id: Some("flow-role-guard".to_string()),
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: vec!["crates/memory-server/src/dispatch_profile.rs".to_string()],
+            tests_run: vec!["cargo test -p memory-server dispatch".to_string()],
+            diff_present: Some(false),
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("seed eval row");
+
+    let mut params = task_params("recommend");
+    params.task = Some("review dispatch/eval profile routing change".to_string());
+    params.risk = Some("high".to_string());
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("recommend should succeed");
+    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
+    let reviewer = rec["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .find(|candidate| candidate["profile"] == serde_json::json!("codex_55_review"))
+        .expect("codex reviewer candidate");
+
+    assert_eq!(
+        reviewer["live_samples"],
+        serde_json::json!(0),
+        "executor subagent evidence must not count as reviewer profile evidence: {rec:#}"
+    );
+    assert!(
+        reviewer["reason"]
+            .as_array()
+            .is_none_or(|reasons| !reasons.iter().any(|reason| reason
+                .as_str()
+                .is_some_and(|s| s.contains("live_subagent_evidence")))),
+        "wrong-role subagent evidence leaked into reviewer reasons: {reviewer:#}"
+    );
+}
+
 #[test]
 fn dispatch_run_cleanup_only_for_completed_success() {
     assert!(crate::dispatch_ops::should_cleanup_run(
@@ -304,24 +579,7 @@ async fn dispatch_prompt_includes_task_route_overlay() {
     let server = make_server();
     let prompt = crate::dispatch_ops::assemble_prompt(
         &server,
-        &TachiDispatchParams {
-            agent: "codex".to_string(),
-            task: "帮我编译二进制并且跑起来验证功能".to_string(),
-            cwd: None,
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            timeout_secs: 5,
-            permission_profile: None,
-            allowed_tools: Vec::new(),
-            max_turns: None,
-            sandbox: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            command: Vec::new(),
-            project: None,
-            stage: None,
-        },
+        &dispatch_params(Some("codex"), "帮我编译二进制并且跑起来验证功能"),
     )
     .await;
 
@@ -357,24 +615,7 @@ async fn dispatch_prompt_injects_sft_examples_as_style_only_context() {
 
     let prompt = crate::dispatch_ops::assemble_prompt(
         &server,
-        &TachiDispatchParams {
-            agent: "codex".to_string(),
-            task: "Fix dispatch routing regression".to_string(),
-            cwd: None,
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            timeout_secs: 5,
-            permission_profile: None,
-            allowed_tools: Vec::new(),
-            max_turns: None,
-            sandbox: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            command: Vec::new(),
-            project: None,
-            stage: None,
-        },
+        &dispatch_params(Some("codex"), "Fix dispatch routing regression"),
     )
     .await;
 
@@ -399,6 +640,40 @@ async fn dispatch_prompt_injects_sft_examples_as_style_only_context() {
         prompt.contains("Do not treat historical SFT samples as current project truth"),
         "{prompt}"
     );
+}
+
+#[tokio::test]
+async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
+    let server = make_server();
+    let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
+    params.profile = Some("claude_plan".to_string());
+    params.stage = Some("plan".to_string());
+    params.tool_profile = Some("delegate".to_string());
+    params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+    params.flow_id = Some("flow-194".to_string());
+    params.auto_capability_bundle = Some(true);
+    params.mcp_access = Some(DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(true),
+        inject_hub_mcps: Some(false),
+        allowed_facades: vec!["tachi_memory".to_string(), "tachi_wiki".to_string()],
+        allowed_mcp_servers: Vec::new(),
+        github_read: Some(true),
+        write_actions: Some(false),
+        issue_refs: vec!["kckylechen1/tachi#194".to_string()],
+        pr_refs: Vec::new(),
+        fallback: Some("report unavailable context instead of guessing".to_string()),
+    });
+
+    let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
+
+    assert!(prompt.contains("## Dispatch profile"), "{prompt}");
+    assert!(prompt.contains("profile: claude_plan"), "{prompt}");
+    assert!(prompt.contains("tachi_tool_profile: delegate"), "{prompt}");
+    assert!(
+        prompt.contains("issue_ref: kckylechen1/tachi#194"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("## Capability Bundle"), "{prompt}");
 }
 
 #[test]
@@ -427,7 +702,8 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
     let err = crate::dispatch_ops::handle_tachi_dispatch(
         &server,
         TachiDispatchParams {
-            agent: "gemini".to_string(),
+            agent: Some("gemini".to_string()),
+            profile: None,
             task: "noop".to_string(),
             cwd: None,
             skills: Vec::new(),
@@ -443,6 +719,13 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             command: Vec::new(),
             project: None,
             stage: None,
+            issue_ref: None,
+            pr_ref: None,
+            flow_id: None,
+            tool_profile: None,
+            auto_capability_bundle: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
         },
     )
     .await
@@ -455,24 +738,9 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
 #[tokio::test]
 async fn custom_dispatch_rejects_mcp_injection() {
     let server = make_server();
-    let params = TachiDispatchParams {
-        agent: "custom".to_string(),
-        task: "should fail before subprocess".to_string(),
-        cwd: None,
-        skills: Vec::new(),
-        context_query: None,
-        model: None,
-        timeout_secs: 5,
-        permission_profile: None,
-        allowed_tools: Vec::new(),
-        max_turns: None,
-        sandbox: None,
-        inject_tachi_mcp: Some(true),
-        inject_hub_mcps: None,
-        command: vec!["true".to_string()],
-        project: None,
-        stage: None,
-    };
+    let mut params = dispatch_params(Some("custom"), "should fail before subprocess");
+    params.inject_tachi_mcp = Some(true);
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
 
     let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
@@ -481,6 +749,40 @@ async fn custom_dispatch_rejects_mcp_injection() {
         err.contains("custom backend"),
         "unexpected custom injection error: {err}"
     );
+}
+
+#[tokio::test]
+async fn dispatch_response_includes_suggested_complete_payload() {
+    let server = make_server();
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let mut params = dispatch_params(Some("custom"), "smoke custom dispatch completion skeleton");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.profile = Some("glm_51_impl".to_string());
+    params.flow_id = Some("flow-complete-skeleton".to_string());
+    params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    let suggested = &response["suggested_complete_command"];
+
+    assert_eq!(suggested["tool"], serde_json::json!("tachi_complete"));
+    assert_eq!(
+        suggested["arguments"]["dispatch_id"], response["dispatch_id"],
+        "completion skeleton should carry dispatch_id"
+    );
+    assert_eq!(
+        suggested["arguments"]["profile"],
+        serde_json::json!("glm_51_impl")
+    );
+    assert_eq!(
+        suggested["arguments"]["flow_id"],
+        serde_json::json!("flow-complete-skeleton")
+    );
+    assert!(suggested["arguments"]["tests_run"].is_array());
+    assert!(suggested["arguments"]["evidence_refs"].is_array());
 }
 
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
@@ -532,26 +834,10 @@ async fn v2_two_stage_smoke() {
     // We can't easily call the private handle_tachi_dispatch from
     // outside the crate, but tests live inside the crate so the
     // `pub(crate)` visibility is accessible via crate path.
-    let params = TachiDispatchParams {
-        agent: "custom".to_string(),
-        task: "smoke v2".to_string(),
-        cwd: None,
-        skills: Vec::new(),
-        context_query: None,
-        model: None,
-        timeout_secs: 5,
-        permission_profile: None,
-        allowed_tools: Vec::new(),
-        max_turns: None,
-        sandbox: None,
-        inject_tachi_mcp: None,
-        inject_hub_mcps: None,
-        // Execute stage uses a no-op command so the test doesn't need
-        // a working claude/codex CLI for Stage 2.
-        command: vec!["true".to_string()],
-        project: None,
-        stage: None,
-    };
+    let mut params = dispatch_params(Some("custom"), "smoke v2");
+    // Execute stage uses a no-op command so the test doesn't need
+    // a working claude/codex CLI for Stage 2.
+    params.command = vec!["true".to_string()];
 
     let resp_json = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await

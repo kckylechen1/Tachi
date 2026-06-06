@@ -34,6 +34,27 @@ fn hub_call_arguments_schema_and_deserialize_preserve_nested_tool_args() {
     );
 }
 
+#[test]
+fn tachi_task_schema_advertises_recommend_and_profiles() {
+    let schema = rmcp::handler::server::tool::schema_for_type::<TachiTaskParams>();
+    let action_description = schema["properties"]["action"]["description"]
+        .as_str()
+        .expect("action description");
+
+    assert!(
+        action_description.contains("recommend"),
+        "tachi_task.action schema must advertise recommend for worker routing: {action_description}"
+    );
+    assert!(
+        action_description.contains("profiles"),
+        "tachi_task.action schema must advertise profile discovery: {action_description}"
+    );
+    assert!(
+        action_description.contains("dispatch"),
+        "tachi_task.action schema must still advertise dispatch: {action_description}"
+    );
+}
+
 #[tokio::test]
 async fn hub_register_defers_mcp_discovery_until_review() {
     let server = make_server();

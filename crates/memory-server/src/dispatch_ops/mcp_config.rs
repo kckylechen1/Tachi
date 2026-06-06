@@ -16,18 +16,25 @@ pub(super) async fn generate_mcp_config(
     dispatch_id: &str,
     inject_tachi: bool,
     inject_hub: bool,
+    tachi_profile: Option<&str>,
+    allowed_mcp_servers: &[String],
 ) -> Result<Option<PathBuf>, String> {
     let mut mcp_servers = serde_json::Map::new();
 
     if inject_tachi {
         // Point at the Tachi binary in stdio mode
-        mcp_servers.insert(
-            "tachi".to_string(),
-            json!({
-                "command": "tachi",
-                "args": ["serve"]
-            }),
-        );
+        let mut env = serde_json::Map::new();
+        if let Some(profile) = tachi_profile.filter(|s| !s.trim().is_empty()) {
+            env.insert("TACHI_PROFILE".to_string(), json!(profile.trim()));
+        }
+        let mut entry = json!({
+            "command": "tachi",
+            "args": ["serve"]
+        });
+        if !env.is_empty() {
+            entry["env"] = json!(env);
+        }
+        mcp_servers.insert("tachi".to_string(), entry);
     }
 
     if inject_hub {
@@ -65,6 +72,13 @@ pub(super) async fn generate_mcp_config(
 
             // Derive server key from capability id: "mcp:context7" → "context7"
             let key = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id).to_string();
+            if !allowed_mcp_servers.is_empty()
+                && !allowed_mcp_servers
+                    .iter()
+                    .any(|allowed| allowed == &key || allowed == &cap.id)
+            {
+                continue;
+            }
 
             let mut entry = json!({ "command": command });
             if !args.is_empty() {

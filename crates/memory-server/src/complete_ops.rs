@@ -66,6 +66,18 @@ pub(crate) async fn handle_tachi_complete(
     if !params.skills_used.is_empty() {
         summary_lines.push(format!("Skills: {}", params.skills_used.join(", ")));
     }
+    if let Some(profile) = params.profile.as_deref().filter(|s| !s.is_empty()) {
+        summary_lines.push(format!("Profile: {}", profile));
+    }
+    if let Some(issue_ref) = params.issue_ref.as_deref().filter(|s| !s.is_empty()) {
+        summary_lines.push(format!("Issue: {}", issue_ref));
+    }
+    if let Some(pr_ref) = params.pr_ref.as_deref().filter(|s| !s.is_empty()) {
+        summary_lines.push(format!("PR: {}", pr_ref));
+    }
+    if !params.tests_run.is_empty() {
+        summary_lines.push(format!("Tests: {}", params.tests_run.join("; ")));
+    }
     if let Some(q) = params.quality_score {
         summary_lines.push(format!("Quality: {:.2}", q));
     }
@@ -83,6 +95,13 @@ pub(crate) async fn handle_tachi_complete(
     for skill in &params.skills_used {
         keywords.push(skill.clone());
     }
+    if let Some(profile) = params.profile.as_deref().filter(|s| !s.is_empty()) {
+        keywords.push(profile.to_string());
+        keywords.push("dispatch_profile".to_string());
+    }
+    if let Some(risk) = params.risk.as_deref().filter(|s| !s.is_empty()) {
+        keywords.push(format!("risk:{risk}"));
+    }
     let entities = params.skills_used.clone();
     if !params.subagents.is_empty() {
         keywords.push("subagent_eval".to_string());
@@ -95,6 +114,16 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(task_type) = &params.task_type {
         if !task_type.is_empty() {
             metadata_map.insert("task_type".into(), serde_json::json!(task_type));
+        }
+    }
+    if let Some(profile) = &params.profile {
+        if !profile.is_empty() {
+            metadata_map.insert("profile".into(), serde_json::json!(profile));
+        }
+    }
+    if let Some(risk) = &params.risk {
+        if !risk.is_empty() {
+            metadata_map.insert("risk".into(), serde_json::json!(risk));
         }
     }
     if let Some(ms) = params.duration_ms {
@@ -120,6 +149,19 @@ pub(crate) async fn handle_tachi_complete(
             metadata_map.insert("diff".into(), serde_json::json!(diff));
         }
     }
+    let diff_present = params.diff_present.unwrap_or_else(|| {
+        params
+            .diff
+            .as_deref()
+            .is_some_and(|diff| !diff.trim().is_empty())
+    });
+    metadata_map.insert("diff_present".into(), serde_json::json!(diff_present));
+    let verification_present =
+        !params.tests_run.is_empty() || !params.evidence_refs.is_empty() || diff_present;
+    metadata_map.insert(
+        "verification_present".into(),
+        serde_json::json!(verification_present),
+    );
     if let Some(wt) = &params.worktree {
         metadata_map.insert("worktree".into(), serde_json::json!(wt));
     }
@@ -144,6 +186,33 @@ pub(crate) async fn handle_tachi_complete(
     }
     if let Some(did) = &params.dispatch_id {
         metadata_map.insert("dispatch_id".into(), serde_json::json!(did));
+    }
+    if let Some(flow_id) = &params.flow_id {
+        if !flow_id.is_empty() {
+            metadata_map.insert("flow_id".into(), serde_json::json!(flow_id));
+        }
+    }
+    if let Some(issue_ref) = &params.issue_ref {
+        if !issue_ref.is_empty() {
+            metadata_map.insert("issue_ref".into(), serde_json::json!(issue_ref));
+        }
+    }
+    if let Some(pr_ref) = &params.pr_ref {
+        if !pr_ref.is_empty() {
+            metadata_map.insert("pr_ref".into(), serde_json::json!(pr_ref));
+        }
+    }
+    if !params.evidence_refs.is_empty() {
+        metadata_map.insert(
+            "evidence_refs".into(),
+            serde_json::json!(params.evidence_refs.clone()),
+        );
+    }
+    if !params.tests_run.is_empty() {
+        metadata_map.insert(
+            "tests_run".into(),
+            serde_json::json!(params.tests_run.clone()),
+        );
     }
 
     let mem_params = SaveMemoryParams {
@@ -437,18 +506,38 @@ pub(crate) async fn handle_tachi_complete(
         pipeline_status["post_complete_hooks"] = json!("skipped (outcome not failure/partial)");
     }
 
+    let mut next_steps =
+        vec!["Use tachi_search with 'eval' keyword to find related outcomes.".to_string()];
+    if params
+        .worktree
+        .as_deref()
+        .is_some_and(|worktree| !worktree.trim().is_empty())
+    {
+        next_steps.push("For worktree-based dispatch, run approve_merge when ready.".to_string());
+    } else {
+        next_steps.push(
+            "No worktree was recorded; no approve_merge step is implied by this completion."
+                .to_string(),
+        );
+    }
+
     let review_bundle = serde_json::json!({
         "recorded": true,
         "task_id": task_id,
         "path": path,
         "outcome": outcome_norm,
+        "profile": params.profile,
+        "risk": params.risk,
+        "flow_id": params.flow_id,
+        "issue_ref": params.issue_ref,
+        "pr_ref": params.pr_ref,
+        "evidence_refs": params.evidence_refs,
+        "tests_run": params.tests_run,
+        "diff_present": diff_present,
         "subagent_count": params.subagents.len(),
         "subagents": params.subagents,
         "eval_entry": save_json,
-        "next_steps": [
-            "Use tachi_search with 'eval' keyword to find related outcomes.",
-            "For worktree-based dispatch, run approve_merge when ready.",
-        ],
+        "next_steps": next_steps,
         "pipeline": pipeline_status,
     });
 

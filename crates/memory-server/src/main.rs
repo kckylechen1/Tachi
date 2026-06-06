@@ -47,6 +47,7 @@ mod copilot_ops;
 mod daemon_lock;
 mod daily_pipeline;
 mod dispatch_ops;
+mod dispatch_profile;
 mod dlq_ops;
 pub(crate) mod docs_ops;
 mod doctor;

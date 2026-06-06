@@ -117,10 +117,10 @@ pub(crate) fn select_agent_for_task(intent: &str, task: &str) -> &'static str {
 
 pub(crate) fn fallback_chain(primary: &str) -> &'static [&'static str] {
     match primary {
-        "claude" => &["claude", "grok", "codex"],
-        "codex" => &["codex", "claude"],
-        "grok" => &["grok", "claude"],
-        "kimi" => &["kimi", "claude"],
+        "claude" => &["grok", "codex"],
+        "codex" => &["claude"],
+        "grok" => &["claude"],
+        "kimi" => &["claude"],
         _ => &["claude", "codex", "grok", "kimi"],
     }
 }
@@ -135,6 +135,10 @@ pub(crate) fn registry_json() -> serde_json::Value {
             "default_timeout_secs": a.default_timeout_secs,
             "mcp_inject": mcp_inject_supported(a),
         })).collect::<Vec<_>>(),
+        "dispatch_profiles": crate::dispatch_profile::dispatch_profiles_json()
+            .get("dispatch_profiles")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([])),
         "fleet_policy": "docs/agent-fleet.md",
     })
 }
@@ -145,7 +149,9 @@ pub(crate) async fn handle_agents(
 ) -> Result<String, String> {
     let action = params.action.trim().to_ascii_lowercase();
     match action.as_str() {
-        "list" => serde_json::to_string(&registry_json()).map_err(|e| format!("serialize: {e}")),
+        "list" | "profiles" => {
+            serde_json::to_string(&registry_json()).map_err(|e| format!("serialize: {e}"))
+        }
         "select" => {
             let intent = params.intent.as_deref().unwrap_or("other");
             let task = params.task.as_deref().unwrap_or("");
@@ -186,6 +192,16 @@ mod tests {
     fn intent_routes_to_fleet_agent() {
         assert_eq!(select_agent_for_intent("review_request"), "kimi");
         assert_eq!(select_agent_for_intent("refactor_request"), "codex");
+    }
+
+    #[test]
+    fn fallback_chain_excludes_primary_agent() {
+        for primary in ["claude", "codex", "grok", "kimi"] {
+            assert!(
+                !fallback_chain(primary).contains(&primary),
+                "fallback chain should not retry primary agent {primary}"
+            );
+        }
     }
 
     #[test]

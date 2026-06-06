@@ -1642,10 +1642,10 @@ impl MemoryServer {
         }
     }
 
-    // ─── Facade: task (plan / dispatch / board / merge) ─────────────────────
+    // ─── Facade: task (plan / recommend / dispatch / board / merge) ─────────
 
     #[tool(
-        description = "Task management facade. action='plan': search memory/wiki for relevant context and produce a todo list before complex multi-step work — call before dispatch; action='dispatch': spawn a delegate agent (Claude Code / Codex) to execute a task slice in a worktree; action='board': view active/completed task statuses; action='merge': land a worktree branch after review. Typical flow: plan → dispatch → board (poll status) → merge."
+        description = "Task management facade for agent work. action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': land a worktree branch after review. Typical worker flow: plan → recommend → dispatch → board → complete/eval → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1669,16 +1669,16 @@ impl MemoryServer {
                 return handle_tachi_task_brief(self, brief_params).await;
             }
             "dispatch" => {
-                let agent = params
-                    .agent
-                    .clone()
-                    .ok_or_else(|| "agent is required when action='dispatch'".to_string())?;
+                if params.agent.is_none() && params.profile.is_none() {
+                    return Err("agent or profile is required when action='dispatch'".to_string());
+                }
                 let task = params
                     .task
                     .clone()
                     .ok_or_else(|| "task is required when action='dispatch'".to_string())?;
                 let dispatch_params = TachiDispatchParams {
-                    agent,
+                    agent: params.agent.clone(),
+                    profile: params.profile.clone(),
                     task,
                     cwd: params.cwd.clone(),
                     skills: params.skills.clone(),
@@ -1694,6 +1694,13 @@ impl MemoryServer {
                     command: params.command.clone(),
                     project: params.project.clone(),
                     stage: params.stage.clone(),
+                    issue_ref: params.issue_ref.clone(),
+                    pr_ref: params.pr_ref.clone(),
+                    flow_id: params.flow_id.clone(),
+                    tool_profile: params.tool_profile.clone(),
+                    auto_capability_bundle: params.auto_capability_bundle,
+                    mcp_access: params.mcp_access.clone(),
+                    allowed_mcp_servers: params.allowed_mcp_servers.clone(),
                 };
                 crate::dispatch_ops::handle_tachi_dispatch(self, dispatch_params).await
             }
@@ -1704,6 +1711,22 @@ impl MemoryServer {
                     project: params.project.clone(),
                 };
                 crate::dispatch_ops::handle_tachi_board(self, board_params).await
+            }
+            "profiles" | "profile" | "card" => serde_json::to_string(
+                &crate::dispatch_profile::dispatch_profiles_json(),
+            )
+            .map_err(|e| format!("serialize dispatch profiles: {e}")),
+            "recommend" => {
+                let task = params
+                    .task
+                    .clone()
+                    .ok_or_else(|| "task is required when action='recommend'".to_string())?;
+                crate::dispatch_profile::handle_dispatch_recommendation(
+                    self,
+                    &task,
+                    params.risk.as_deref(),
+                    params.limit.unwrap_or(500),
+                )
             }
             "merge" => {
                 let worktree = params
@@ -1720,7 +1743,7 @@ impl MemoryServer {
                 crate::dispatch_ops::handle_approve_merge(merge_params).await
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'plan', 'dispatch', 'board', or 'merge'.",
+                "Invalid action '{}'. Use 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', or 'merge'.",
                 params.action
             )),
         }?;

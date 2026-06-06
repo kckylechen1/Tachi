@@ -1,0 +1,762 @@
+//! Dispatch profiles describe who to ask, which context/tools to expose, and
+//! what evidence a delegated agent must return. They are intentionally separate
+//! from `profiles::ToolProfile`, which only gates MCP tool visibility.
+
+use crate::agent_eval::{
+    aggregate_subagent_scores, load_live_eval_rows, CompletionStatus, EvalRow,
+};
+use crate::agent_registry::{fallback_chain, resolve_dispatch_agent};
+use crate::tool_params::{DispatchMcpAccessParams, TachiDispatchParams};
+use crate::MemoryServer;
+use serde::Serialize;
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DispatchProfileDef {
+    pub name: &'static str,
+    pub display_name: &'static str,
+    pub backend: &'static str,
+    pub role: &'static str,
+    pub stage: Option<&'static str>,
+    pub model: Option<&'static str>,
+    pub tool_profile: &'static str,
+    pub inject_tachi_mcp: bool,
+    pub inject_hub_mcps: bool,
+    pub github_read: bool,
+    pub write_actions: bool,
+    pub auto_capability_bundle: bool,
+    pub allowed_facades: &'static [&'static str],
+    pub allowed_mcp_servers: &'static [&'static str],
+    pub common_skills: &'static [&'static str],
+    pub evidence_required: &'static [&'static str],
+    pub strong_against: &'static [&'static str],
+    pub weak_against: &'static [&'static str],
+}
+
+pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
+    DispatchProfileDef {
+        name: "claude_plan",
+        display_name: "Claude Plan",
+        backend: "claude",
+        role: "planner",
+        stage: Some("plan"),
+        model: None,
+        tool_profile: "delegate",
+        inject_tachi_mcp: true,
+        inject_hub_mcps: false,
+        github_read: true,
+        write_actions: false,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
+        allowed_mcp_servers: &[],
+        common_skills: &["skill:think"],
+        evidence_required: &["plan", "risks", "validation_plan"],
+        strong_against: &["planning", "requirements", "feature_breakdown"],
+        weak_against: &["direct_execution", "merge"],
+    },
+    DispatchProfileDef {
+        name: "glm_51_impl",
+        display_name: "GLM 5.1 Implementer",
+        backend: "custom",
+        role: "executor",
+        stage: Some("execute"),
+        model: Some("zhipuai-coding-plan/glm-5.1"),
+        tool_profile: "delegate",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: true,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_memory", "tachi_task"],
+        allowed_mcp_servers: &[],
+        common_skills: &["skill:superpowers-executing-plans"],
+        evidence_required: &["diff", "tests_run", "files_changed"],
+        strong_against: &["bounded_patch", "implementation"],
+        weak_against: &["ambiguous_architecture", "unbounded_refactor"],
+    },
+    DispatchProfileDef {
+        name: "codex_55_review",
+        display_name: "Codex Senior Reviewer",
+        backend: "codex",
+        role: "senior_reviewer",
+        stage: Some("review"),
+        model: None,
+        tool_profile: "standard",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: true,
+        write_actions: false,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
+        allowed_mcp_servers: &[],
+        common_skills: &["skill:check"],
+        evidence_required: &["findings_by_severity", "file_refs", "verification_advice"],
+        strong_against: &[
+            "schema_migration",
+            "dispatch_refactor",
+            "eval_ledger_changes",
+        ],
+        weak_against: &["low_risk_docs", "copyedit"],
+    },
+    DispatchProfileDef {
+        name: "codex_53_fast",
+        display_name: "Codex Fast Checker",
+        backend: "codex",
+        role: "fast_checker",
+        stage: Some("review_light"),
+        model: None,
+        tool_profile: "observe",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: false,
+        auto_capability_bundle: false,
+        allowed_facades: &["tachi_memory"],
+        allowed_mcp_servers: &[],
+        common_skills: &["workflow:targeted-verification"],
+        evidence_required: &["summary", "risk_flags"],
+        strong_against: &["quick_sanity", "low_risk_review"],
+        weak_against: &["schema_migration", "security_review"],
+    },
+    DispatchProfileDef {
+        name: "kimi_arch",
+        display_name: "Kimi Architecture Critic",
+        backend: "kimi",
+        role: "architect",
+        stage: Some("plan_review"),
+        model: None,
+        tool_profile: "observe",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: true,
+        write_actions: false,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_memory", "tachi_wiki"],
+        allowed_mcp_servers: &[],
+        common_skills: &["skill:think"],
+        evidence_required: &["risks", "rejected_options", "file_refs"],
+        strong_against: &["architecture", "schema_boundary", "lifecycle_design"],
+        weak_against: &["shell_execution", "git_write"],
+    },
+    DispatchProfileDef {
+        name: "deepseek_explore",
+        display_name: "DeepSeek Explorer",
+        backend: "custom",
+        role: "explore",
+        stage: Some("explore"),
+        model: Some("deepseek/deepseek-v4-flash"),
+        tool_profile: "observe",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: false,
+        auto_capability_bundle: false,
+        allowed_facades: &["tachi_memory"],
+        allowed_mcp_servers: &[],
+        common_skills: &["workflow:codebase-map"],
+        evidence_required: &["file_map", "caveats", "test_targets"],
+        strong_against: &["repo_mapping", "symbol_search"],
+        weak_against: &["implementation", "final_verification"],
+    },
+];
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ResolvedDispatchProfile {
+    pub selected_profile: Option<String>,
+    pub agent: String,
+    pub role: Option<String>,
+    pub tool_profile: Option<String>,
+    pub auto_capability_bundle: bool,
+    pub mcp_access: DispatchMcpAccessParams,
+    pub evidence_required: Vec<String>,
+    pub fallback_chain: Vec<String>,
+    pub route_explanation: Vec<String>,
+    pub mbit_card: Option<Value>,
+}
+
+pub(crate) fn resolve_dispatch_profile(raw: &str) -> Option<&'static DispatchProfileDef> {
+    let norm = raw.trim().to_ascii_lowercase();
+    DISPATCH_PROFILES
+        .iter()
+        .find(|profile| profile.name == norm)
+}
+
+pub(crate) fn dispatch_profiles_json() -> Value {
+    json!({
+        "dispatch_profiles": DISPATCH_PROFILES.iter().map(profile_json).collect::<Vec<_>>(),
+        "note": "DispatchProfile routes agents/context/evidence; ToolProfile gates visible tools.",
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DispatchRisk {
+    task_type: String,
+    risk: String,
+    reasons: Vec<String>,
+    required_profiles: Vec<String>,
+    blocked_profiles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProfileCandidate {
+    profile: String,
+    agent: String,
+    role: String,
+    score: f64,
+    reasons: Vec<String>,
+    live_samples: u32,
+    useful_rate: Option<f64>,
+    failure_count: u32,
+}
+
+pub(crate) fn handle_dispatch_recommendation(
+    server: &MemoryServer,
+    task: &str,
+    risk_override: Option<&str>,
+    limit: usize,
+) -> Result<String, String> {
+    let risk = classify_dispatch_risk(task, risk_override);
+    let rows = load_live_eval_rows(server, limit.max(1))?;
+    let subagent_scores = aggregate_subagent_scores(&rows);
+
+    let mut candidates = DISPATCH_PROFILES
+        .iter()
+        .map(|profile| score_profile_candidate(profile, &risk, &rows, &subagent_scores))
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.profile.cmp(&b.profile))
+    });
+
+    let best = candidates
+        .first()
+        .ok_or_else(|| "no dispatch profiles configured".to_string())?;
+    let best_profile = resolve_dispatch_profile(&best.profile)
+        .ok_or_else(|| format!("internal missing profile {}", best.profile))?;
+    let fallback = build_profile_fallback_chain(best_profile, &candidates);
+    let live_matched_samples = candidates.iter().map(|c| c.live_samples).sum::<u32>();
+    let evidence_note = if live_matched_samples == 0 {
+        "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
+    } else {
+        "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
+    };
+
+    serde_json::to_string(&json!({
+        "task": task,
+        "task_type": risk.task_type,
+        "risk": risk.risk,
+        "risk_reasons": risk.reasons,
+        "required_profiles": risk.required_profiles,
+        "blocked_profiles": risk.blocked_profiles,
+        "recommended_profile": best.profile,
+        "recommended_agent": best.agent,
+        "role": best.role,
+        "tool_profile": best_profile.tool_profile,
+        "resolved_skills": best_profile.common_skills,
+        "fallback_chain": fallback,
+        "reason": best.reasons,
+        "route_explanation": best.reasons,
+        "evidence_note": evidence_note,
+        "live_eval": {
+            "row_count": rows.len(),
+            "matched_samples": live_matched_samples,
+        },
+        "mbit_card": profile_json(best_profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+        "candidates": candidates,
+    }))
+    .map_err(|e| format!("serialize recommendation: {e}"))
+}
+
+pub(crate) fn resolve_and_apply_dispatch_profile(
+    params: &mut TachiDispatchParams,
+) -> Result<ResolvedDispatchProfile, String> {
+    let mut route_explanation = Vec::new();
+    let requested_agent = params.agent.clone().filter(|s| !s.trim().is_empty());
+    let profile = match params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(raw) => Some(resolve_dispatch_profile(raw).ok_or_else(|| {
+            format!(
+                "Unknown dispatch profile '{}'. Supported: {}",
+                raw.trim(),
+                DISPATCH_PROFILES
+                    .iter()
+                    .map(|p| p.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?),
+        None => None,
+    };
+
+    if let Some(profile) = profile {
+        route_explanation.push(format!(
+            "selected DispatchProfile '{}' ({})",
+            profile.name, profile.role
+        ));
+        if params.agent.is_none() {
+            params.agent = Some(profile.backend.to_string());
+            route_explanation.push(format!("profile selected backend '{}'", profile.backend));
+        } else if requested_agent.as_deref() != Some(profile.backend) {
+            route_explanation.push(format!(
+                "explicit agent '{}' overrides profile backend '{}'",
+                requested_agent.as_deref().unwrap_or(""),
+                profile.backend
+            ));
+        }
+        if params.stage.is_none() {
+            params.stage = profile.stage.map(str::to_string);
+        }
+        if params.model.is_none() {
+            params.model = profile.model.map(str::to_string);
+        }
+        if profile.backend == "custom" && params.command.is_empty() {
+            if let Some(model) = profile.model {
+                params.command = vec![
+                    "opencode".to_string(),
+                    "--pure".to_string(),
+                    "run".to_string(),
+                    "--model".to_string(),
+                    model.to_string(),
+                ];
+                route_explanation.push(format!(
+                    "profile selected opencode custom command for model '{}'",
+                    model
+                ));
+            }
+        }
+        if params.tool_profile.is_none() {
+            params.tool_profile = Some(profile.tool_profile.to_string());
+        }
+        if params.inject_tachi_mcp.is_none() {
+            params.inject_tachi_mcp = Some(profile.inject_tachi_mcp);
+        }
+        if params.inject_hub_mcps.is_none() {
+            params.inject_hub_mcps = Some(profile.inject_hub_mcps);
+        }
+        if params.auto_capability_bundle.is_none() {
+            params.auto_capability_bundle = Some(profile.auto_capability_bundle);
+        }
+        if params.skills.is_empty() {
+            params.skills = profile
+                .common_skills
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        if params.mcp_access.is_none() {
+            params.mcp_access = Some(DispatchMcpAccessParams {
+                inject_tachi_mcp: Some(profile.inject_tachi_mcp),
+                inject_hub_mcps: Some(profile.inject_hub_mcps),
+                allowed_facades: profile
+                    .allowed_facades
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                allowed_mcp_servers: profile
+                    .allowed_mcp_servers
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+                github_read: Some(profile.github_read),
+                write_actions: Some(profile.write_actions),
+                issue_refs: params.issue_ref.iter().cloned().collect(),
+                pr_refs: params.pr_ref.iter().cloned().collect(),
+                fallback: Some(if profile.github_read {
+                    "Use MCP/GitHub read tools when available; if unavailable, report issue_context_unavailable instead of guessing."
+                } else {
+                    "Use leader-provided issue packet; do not perform GitHub writes."
+                }.to_string()),
+            });
+        }
+        if params.allowed_mcp_servers.is_empty() {
+            params.allowed_mcp_servers = profile
+                .allowed_mcp_servers
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+    }
+    if params.allowed_mcp_servers.is_empty() {
+        if let Some(access) = params.mcp_access.as_ref() {
+            params.allowed_mcp_servers = access.allowed_mcp_servers.clone();
+        }
+    }
+
+    let agent = params
+        .agent
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
+    let agent_norm = if agent.eq_ignore_ascii_case("custom") {
+        "custom".to_string()
+    } else if let Some(def) = resolve_dispatch_agent(&agent) {
+        def.name.to_string()
+    } else {
+        agent
+    };
+    let mcp_access = params
+        .mcp_access
+        .clone()
+        .unwrap_or_else(|| DispatchMcpAccessParams {
+            inject_tachi_mcp: params.inject_tachi_mcp,
+            inject_hub_mcps: params.inject_hub_mcps,
+            allowed_facades: Vec::new(),
+            allowed_mcp_servers: params.allowed_mcp_servers.clone(),
+            github_read: Some(params.issue_ref.is_some() || params.pr_ref.is_some()),
+            write_actions: Some(false),
+            issue_refs: params.issue_ref.iter().cloned().collect(),
+            pr_refs: params.pr_ref.iter().cloned().collect(),
+            fallback: Some(
+                "Use leader-provided context if GitHub/MCP issue reads are unavailable."
+                    .to_string(),
+            ),
+        });
+    let evidence_required = profile
+        .map(|p| p.evidence_required.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(Vec::new);
+    let fallback_chain = fallback_chain(&agent_norm)
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    Ok(ResolvedDispatchProfile {
+        selected_profile: profile.map(|p| p.name.to_string()),
+        agent: agent_norm,
+        role: profile.map(|p| p.role.to_string()),
+        tool_profile: params.tool_profile.clone(),
+        auto_capability_bundle: params.auto_capability_bundle.unwrap_or(false),
+        mcp_access,
+        evidence_required,
+        fallback_chain,
+        route_explanation,
+        mbit_card: profile.map(profile_json),
+    })
+}
+
+fn profile_json(profile: &DispatchProfileDef) -> Value {
+    json!({
+        "name": profile.name,
+        "display_name": profile.display_name,
+        "backend": profile.backend,
+        "role": profile.role,
+        "stage": profile.stage,
+        "model": profile.model,
+        "tool_profile": profile.tool_profile,
+        "mcp_access": {
+            "inject_tachi_mcp": profile.inject_tachi_mcp,
+            "inject_hub_mcps": profile.inject_hub_mcps,
+            "allowed_facades": profile.allowed_facades,
+            "allowed_mcp_servers": profile.allowed_mcp_servers,
+            "github_read": profile.github_read,
+            "write_actions": profile.write_actions,
+        },
+        "skill_loadout": {
+            "common_skills": profile.common_skills,
+        },
+        "evidence_contract": {
+            "required": profile.evidence_required,
+        },
+        "mbit_card": {
+            "display_name": profile.display_name,
+            "type": [profile.role],
+            "strong_against": profile.strong_against,
+            "weak_against": profile.weak_against,
+            "auto_capability_bundle": profile.auto_capability_bundle,
+        }
+    })
+}
+
+fn classify_dispatch_risk(task: &str, risk_override: Option<&str>) -> DispatchRisk {
+    let route = crate::copilot_ops::build_task_brief_routing(task, &[]);
+    let task_type = route.intent.to_string();
+    let lower = task.to_ascii_lowercase();
+    let mut reasons = Vec::new();
+    let mut risk = "medium".to_string();
+
+    for (needle, reason) in [
+        ("dispatch", "touches dispatch routing"),
+        ("eval", "touches eval/routing evidence"),
+        ("safe_merge", "touches GitHub merge gate"),
+        ("merge", "touches merge/release gate"),
+        ("schema", "touches schema boundary"),
+        ("migration", "touches migration behavior"),
+        ("vault", "touches vault/secrets boundary"),
+        ("sandbox", "touches sandbox boundary"),
+    ] {
+        if lower.contains(needle) {
+            reasons.push(reason.to_string());
+        }
+    }
+    if matches!(
+        task_type.as_str(),
+        "migration_request" | "refactor_request" | "review_request"
+    ) {
+        reasons.push(format!("task_type={task_type}"));
+    }
+    if !reasons.is_empty()
+        && (lower.contains("dispatch")
+            || lower.contains("eval")
+            || lower.contains("merge")
+            || lower.contains("schema")
+            || lower.contains("vault")
+            || lower.contains("sandbox"))
+    {
+        risk = "high".to_string();
+    } else if matches!(task_type.as_str(), "explain_request" | "research_request") {
+        risk = "low".to_string();
+    }
+    if let Some(override_risk) = risk_override.filter(|s| !s.trim().is_empty()) {
+        risk = override_risk.trim().to_ascii_lowercase();
+        reasons.push(format!("user_override={risk}"));
+    }
+    if reasons.is_empty() {
+        reasons.push("default deterministic route classification".to_string());
+    }
+
+    let required_profiles = match risk.as_str() {
+        "high" | "critical" => vec!["claude_plan".to_string(), "codex_55_review".to_string()],
+        "low" if task_type == "review_request" => vec!["codex_53_fast".to_string()],
+        _ if task_type == "plan_request" => vec!["claude_plan".to_string()],
+        _ if task_type == "review_request" => vec!["codex_55_review".to_string()],
+        _ => Vec::new(),
+    };
+    let blocked_profiles = if matches!(risk.as_str(), "high" | "critical") {
+        vec!["codex_53_fast".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    DispatchRisk {
+        task_type,
+        risk,
+        reasons,
+        required_profiles,
+        blocked_profiles,
+    }
+}
+
+fn score_profile_candidate(
+    profile: &DispatchProfileDef,
+    risk: &DispatchRisk,
+    rows: &[EvalRow],
+    subagent_scores: &[crate::agent_eval::SubagentTaskScore],
+) -> ProfileCandidate {
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+
+    if risk.required_profiles.iter().any(|p| p == profile.name) {
+        score += 45.0;
+        reasons.push("required_by_risk_classifier".to_string());
+    }
+    if risk.blocked_profiles.iter().any(|p| p == profile.name) {
+        score -= 40.0;
+        reasons.push("blocked_or_deprioritized_by_risk_classifier".to_string());
+    }
+
+    match risk.task_type.as_str() {
+        "review_request" if profile.role.contains("review") => {
+            score += 30.0;
+            reasons.push("role_matches_review_request".to_string());
+        }
+        "plan_request" if matches!(profile.role, "planner" | "architect") => {
+            score += 30.0;
+            reasons.push("role_matches_plan_request".to_string());
+        }
+        "fix_request" | "refactor_request" | "migration_request" if profile.role == "executor" => {
+            score += 25.0;
+            reasons.push("role_matches_execution_request".to_string());
+        }
+        "test_request" if profile.role.contains("checker") || profile.role.contains("reviewer") => {
+            score += 20.0;
+            reasons.push("role_matches_verification_request".to_string());
+        }
+        _ => {}
+    }
+
+    for signal in &risk.reasons {
+        if profile
+            .strong_against
+            .iter()
+            .any(|s| signal.contains(s) || s.contains("dispatch") && signal.contains("dispatch"))
+        {
+            score += 15.0;
+            reasons.push(format!("strong_against_signal:{signal}"));
+        }
+    }
+    if matches!(risk.risk.as_str(), "high" | "critical") && profile.role == "fast_checker" {
+        score -= 20.0;
+        reasons.push("fast_checker_deprioritized_for_high_risk".to_string());
+    }
+
+    let mut live_samples = 0u32;
+    let mut useful_sum = 0.0;
+    let mut useful_count = 0u32;
+    let mut failure_count = 0u32;
+    for row in rows {
+        if row.profile.as_deref() == Some(profile.name) {
+            live_samples += 1;
+            if row.completion_status == CompletionStatus::Completed && row.verification_present {
+                score += 12.0;
+                useful_sum += 1.0;
+            } else if row.completion_status == CompletionStatus::Completed {
+                score += 5.0;
+                useful_sum += 0.6;
+            } else {
+                score -= 8.0;
+                failure_count += 1;
+            }
+            useful_count += 1;
+        }
+    }
+    for sub in subagent_scores {
+        let role_match = sub.role == profile.role
+            || (profile.role.contains("review") && sub.role.contains("review"))
+            || (profile.role == "architect" && sub.role == "critic");
+        let agent_match = sub.agent == profile.backend;
+        let task_match = sub.task_type == risk.task_type;
+        if role_match && agent_match && task_match {
+            live_samples += sub.samples;
+            useful_sum += sub.useful_rate * sub.samples as f64;
+            useful_count += sub.samples;
+            failure_count += sub.failure_count;
+            score += sub.useful_rate * 20.0;
+            score -= sub.failure_count as f64 * 5.0;
+            reasons.push(format!(
+                "live_subagent_evidence:{}:{} samples={} useful_rate={:.2}",
+                sub.agent, sub.task_type, sub.samples, sub.useful_rate
+            ));
+        }
+    }
+    let useful_rate = (useful_count > 0).then(|| useful_sum / useful_count as f64);
+    if let Some(rate) = useful_rate {
+        reasons.push(format!("live_useful_rate={rate:.2}"));
+    }
+    if reasons.is_empty() {
+        reasons.push("baseline_mbit_fit".to_string());
+    }
+
+    ProfileCandidate {
+        profile: profile.name.to_string(),
+        agent: profile.backend.to_string(),
+        role: profile.role.to_string(),
+        score: (score * 100.0).round() / 100.0,
+        reasons,
+        live_samples,
+        useful_rate,
+        failure_count,
+    }
+}
+
+fn build_profile_fallback_chain(
+    primary: &DispatchProfileDef,
+    candidates: &[ProfileCandidate],
+) -> Vec<String> {
+    let mut out = vec![primary.name.to_string()];
+    for candidate in candidates.iter().skip(1) {
+        if out.len() >= 4 {
+            break;
+        }
+        if !out.iter().any(|p| p == &candidate.profile) {
+            out.push(candidate.profile.clone());
+        }
+    }
+    for agent in fallback_chain(primary.backend) {
+        if out.len() >= 5 {
+            break;
+        }
+        if let Some(profile) = DISPATCH_PROFILES
+            .iter()
+            .find(|profile| profile.backend == *agent && !out.iter().any(|p| p == profile.name))
+        {
+            out.push(profile.name.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> TachiDispatchParams {
+        TachiDispatchParams {
+            agent: None,
+            profile: Some("claude_plan".to_string()),
+            task: "Plan issue #194".to_string(),
+            cwd: None,
+            skills: Vec::new(),
+            context_query: None,
+            model: None,
+            timeout_secs: 5,
+            permission_profile: None,
+            allowed_tools: Vec::new(),
+            max_turns: None,
+            sandbox: None,
+            inject_tachi_mcp: None,
+            inject_hub_mcps: None,
+            command: Vec::new(),
+            project: None,
+            stage: None,
+            issue_ref: Some("kckylechen1/tachi#194".to_string()),
+            pr_ref: None,
+            flow_id: Some("flow-194".to_string()),
+            tool_profile: None,
+            auto_capability_bundle: None,
+            mcp_access: None,
+            allowed_mcp_servers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dispatch_profile_selects_backend_and_mcp_contract() {
+        let mut params = params();
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        assert_eq!(params.agent.as_deref(), Some("claude"));
+        assert_eq!(params.stage.as_deref(), Some("plan"));
+        assert_eq!(params.tool_profile.as_deref(), Some("delegate"));
+        assert_eq!(params.inject_tachi_mcp, Some(true));
+        assert_eq!(resolved.selected_profile.as_deref(), Some("claude_plan"));
+        assert_eq!(resolved.mcp_access.github_read, Some(true));
+        assert_eq!(
+            resolved.mcp_access.issue_refs,
+            vec!["kckylechen1/tachi#194".to_string()]
+        );
+        assert!(resolved.auto_capability_bundle);
+    }
+
+    #[test]
+    fn explicit_agent_can_override_profile_backend() {
+        let mut params = params();
+        params.agent = Some("codex".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        assert_eq!(resolved.agent, "codex");
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("overrides profile backend")));
+    }
+
+    #[test]
+    fn custom_profile_populates_opencode_command() {
+        let mut params = params();
+        params.profile = Some("deepseek_explore".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+        assert_eq!(resolved.agent, "custom");
+        assert_eq!(
+            params.command,
+            vec![
+                "opencode".to_string(),
+                "--pure".to_string(),
+                "run".to_string(),
+                "--model".to_string(),
+                "deepseek/deepseek-v4-flash".to_string()
+            ]
+        );
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("opencode custom command")));
+    }
+}
