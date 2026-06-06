@@ -249,6 +249,8 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Tachi Shell — coordination/orchestration facade
     "tachi_shell",
+    // Tachi Arena - tracked worker mission ledger
+    "tachi_arena",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -287,6 +289,8 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_status",
     // Tachi Shell — skill-gated flow orchestration (primary user entry)
     "tachi_shell",
+    // Tachi Arena - tracked worker mission document ledger
+    "tachi_arena",
     // Task facade (plan / dispatch / board / merge)
     "tachi_task",
     // Unified memory facade (search / save / extract_facts)
@@ -409,6 +413,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",
+    "tachi_arena",
     "tachi_save",
     "tachi_wiki_write",
     "update_card",
@@ -872,6 +877,7 @@ mod tests {
         let filtered = filter_tool_defs(
             vec![
                 test_tool("tachi_task"),
+                test_tool("tachi_arena"),
                 test_tool("tachi_memory"),
                 test_tool("tachi_briefing"),
                 test_tool("tachi_save"),
@@ -911,6 +917,7 @@ mod tests {
             names,
             vec![
                 "tachi_task".to_string(),
+                "tachi_arena".to_string(),
                 "tachi_memory".to_string(),
                 "tachi_briefing".to_string(),
                 "tachi_save".to_string(),

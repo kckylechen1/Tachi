@@ -902,6 +902,85 @@ pub(crate) struct TachiTaskParams {
     pub confirm: bool,
 }
 
+// ─── Facade: tachi_arena (tracked worker mission ledger) ────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiArenaParams {
+    /// Action: "open", "spawn", "board", "collect", "abort", "reap", or "close"
+    pub action: String,
+
+    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Existing arena id for spawn/board/collect/abort/reap/close.
+    #[serde(default)]
+    pub arena_id: Option<String>,
+
+    /// Existing or requested mission id for spawn/collect/abort.
+    #[serde(default)]
+    pub mission_id: Option<String>,
+
+    /// Human-readable arena title for open.
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Arena objective for open.
+    #[serde(default)]
+    pub objective: Option<String>,
+
+    /// Mission prompt for spawn, or objective fallback for open.
+    #[serde(default)]
+    pub prompt: Option<String>,
+
+    /// Harness adapter hint, e.g. "opencode", "claude-code", "codex", "manual".
+    #[serde(default)]
+    pub harness: Option<String>,
+
+    /// Worker role/lane, e.g. "explore", "critic", "executor", "verifier".
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// Working directory hint for a future harness adapter.
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Required skill ids the worker must invoke/report.
+    #[serde(default)]
+    pub skills: Vec<String>,
+
+    /// Allowed file/module scope for the worker mission.
+    #[serde(default)]
+    pub scope: Vec<String>,
+
+    /// Permission notes or tool names granted to this mission.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+
+    /// Mission timeout hint for a future harness adapter.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub timeout_secs: Option<u64>,
+
+    /// Reason for abort/reap.
+    #[serde(default)]
+    pub reason: Option<String>,
+
+    /// For reap, defaults to true.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+
+    /// Close even when active/uncollected missions remain.
+    #[serde(default)]
+    pub force: bool,
+
+    /// Close requires written results to have been collected. Defaults to true.
+    #[serde(default)]
+    pub require_collected: Option<bool>,
+}
+
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

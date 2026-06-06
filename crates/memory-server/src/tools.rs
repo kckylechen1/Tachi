@@ -10,6 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
 
+use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
     handle_recommend_toolchain,
@@ -1761,6 +1762,26 @@ impl MemoryServer {
         handle_tachi_gh(self, params).await
     }
 
+    // ─── Tachi Arena: tracked worker mission document ledger ────────────────
+
+    #[tool(
+        description = "Tracked worker mission ledger. action='open' creates .tachi/arena/<arena_id>/; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt for a harness; action='board' lists arenas or missions; action='collect' reads worker result.md; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
+    )]
+    pub(crate) async fn tachi_arena(
+        &self,
+        Parameters(params): Parameters<TachiArenaParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        let format = params.format.clone();
+        let raw = handle_tachi_arena(self, params).await?;
+        Ok(format_facade_response(
+            &format!("Tachi arena {}", action),
+            &action,
+            &raw,
+            format.as_deref(),
+        ))
+    }
+
     // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────
 
     #[tool(
@@ -1797,11 +1818,15 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
     };
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
+    append_known_field(&mut lines, &value, "arena_id");
+    append_known_field(&mut lines, &value, "mission_id");
     append_known_field(&mut lines, &value, "flow_id");
     append_known_field(&mut lines, &value, "dispatch_id");
     append_known_field(&mut lines, &value, "stage");
     append_known_field(&mut lines, &value, "state");
     append_known_field(&mut lines, &value, "run_dir");
+    append_known_field(&mut lines, &value, "arena_dir");
+    append_known_field(&mut lines, &value, "mission_dir");
     append_known_field(&mut lines, &value, "instruction_path");
     append_known_field(&mut lines, &value, "prompt_file");
     append_known_field(&mut lines, &value, "trajectory_file");
