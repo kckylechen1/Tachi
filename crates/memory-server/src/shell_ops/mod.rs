@@ -603,10 +603,13 @@ async fn handle_convoy_dispatch_action(
         .as_deref()
         .ok_or_else(|| "'task' is required for action='dispatch'".to_string())?;
     let convoy_superpowers = vec![
-        "superpowers/executing-plans",
-        "superpowers/subagent-driven-development",
-        "superpowers/dispatching-parallel-agents",
-        "superpowers/using-git-worktrees",
+        "skill:superpowers-executing-plans",
+        "skill:superpowers-requesting-code-review",
+    ];
+    let convoy_worker_skills = vec![
+        "skill:superpowers-executing-plans",
+        "skill:superpowers-requesting-code-review",
+        "skill:waza-tachi",
     ];
     let mut parent_instruction = build_instruction_md(
         flow_id,
@@ -617,8 +620,8 @@ async fn handle_convoy_dispatch_action(
         &params.validation,
         &params.allowed_scope,
     );
-    parent_instruction.push_str("## Required Superpowers\n\n");
-    for contract in &convoy_superpowers {
+    parent_instruction.push_str("## Required Worker Skills\n\n");
+    for contract in &convoy_worker_skills {
         parent_instruction.push_str(&format!("- `{}`\n", contract));
     }
     parent_instruction.push('\n');
@@ -681,8 +684,8 @@ async fn handle_convoy_dispatch_action(
             &slice_validation,
             &slice_allowed_scope,
         );
-        instruction.push_str("## Required Superpowers\n\n");
-        for contract in &convoy_superpowers {
+        instruction.push_str("## Required Worker Skills\n\n");
+        for contract in &convoy_worker_skills {
             instruction.push_str(&format!("- `{}`\n", contract));
         }
         instruction.push('\n');
@@ -775,7 +778,8 @@ async fn handle_convoy_dispatch_action(
             "agent": slice_agent,
             "cwd": slice_cwd,
             "instruction_path": slice_instr_path.to_string_lossy(),
-            "required_superpowers": convoy_superpowers,
+            "required_superpowers": convoy_superpowers.clone(),
+            "required_worker_skills": convoy_worker_skills.clone(),
             "dispatch_id": dispatch_id,
             "dispatch_error": dispatch_error,
         }));
@@ -794,7 +798,8 @@ async fn handle_convoy_dispatch_action(
             json!({
                 "mode": "parallel",
                 "slice_count": slice_records.len(),
-                "required_superpowers": convoy_superpowers,
+                "required_superpowers": convoy_superpowers.clone(),
+                "required_worker_skills": convoy_worker_skills.clone(),
                 "slices": slice_records,
                 "updated_at": Utc::now().to_rfc3339(),
             }),

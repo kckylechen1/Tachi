@@ -391,6 +391,73 @@ fn builtin_trading_skills() -> Result<Vec<HubCapability>, String> {
     ])
 }
 
+fn builtin_superpowers_skills() -> Result<Vec<HubCapability>, String> {
+    const SUPERPOWERS_SKILLS: &[(&str, &str, &str, &str)] = &[
+        (
+            "brainstorming",
+            "Superpowers workflow gate for turning rough ideas into approved designs before implementation.",
+            "skill/superpowers/skills/brainstorming/SKILL.md",
+            include_str!("../../../skill/superpowers/skills/brainstorming/SKILL.md"),
+        ),
+        (
+            "writing-plans",
+            "Superpowers workflow gate for writing bite-sized implementation plans before touching code.",
+            "skill/superpowers/skills/writing-plans/SKILL.md",
+            include_str!("../../../skill/superpowers/skills/writing-plans/SKILL.md"),
+        ),
+        (
+            "executing-plans",
+            "Superpowers workflow gate for executing written plans with review checkpoints.",
+            "skill/superpowers/skills/executing-plans/SKILL.md",
+            include_str!("../../../skill/superpowers/skills/executing-plans/SKILL.md"),
+        ),
+        (
+            "requesting-code-review",
+            "Superpowers workflow gate for dispatching focused code review before merge or after major work.",
+            "skill/superpowers/skills/requesting-code-review/SKILL.md",
+            include_str!("../../../skill/superpowers/skills/requesting-code-review/SKILL.md"),
+        ),
+        (
+            "finishing-a-development-branch",
+            "Superpowers workflow gate for verifying and completing a development branch.",
+            "skill/superpowers/skills/finishing-a-development-branch/SKILL.md",
+            include_str!(
+                "../../../skill/superpowers/skills/finishing-a-development-branch/SKILL.md"
+            ),
+        ),
+    ];
+
+    SUPERPOWERS_SKILLS
+        .iter()
+        .map(|(name, description, source_path, content)| {
+            make_skill_capability(
+                &format!("skill:superpowers-{name}"),
+                &format!("superpowers/{name}"),
+                description,
+                json!({
+                    "system": "You are applying a Superpowers workflow gate. Follow the embedded SKILL.md contract, respect hard gates, and keep stage transitions explicit.",
+                    "prompt": "Apply the Superpowers workflow skill `superpowers/{{skill_name}}` to the task below.\n\nTask:\n{{task}}\n\nContext:\n{{context}}\n\nReturn the stage-appropriate result and name the next workflow gate when applicable.",
+                    "content": content,
+                    "policy": { "visibility": "discoverable" },
+                    "tags": ["superpowers", "workflow", "builtin", "skill-set"],
+                    "source_path": source_path,
+                    "skill_path": format!("/skills/superpowers/{name}"),
+                    "retention_policy": "permanent",
+                    "inputSchema": {
+                        "type": "object",
+                        "required": ["task"],
+                        "properties": {
+                            "task": {"type": "string"},
+                            "context": {"type": "string"},
+                            "skill_name": {"type": "string", "default": name}
+                        }
+                    }
+                }),
+            )
+        })
+        .collect()
+}
+
 fn builtin_waza_skills() -> Result<Vec<HubCapability>, String> {
     const WAZA_SKILLS: &[(&str, &str, &str, &str)] = &[
         (
@@ -528,6 +595,7 @@ fn builtin_capabilities() -> Result<Vec<HubCapability>, String> {
     let mut caps = vec![builtin_trajectory_distiller()?];
     caps.extend(builtin_coding_skills()?);
     caps.extend(builtin_trading_skills()?);
+    caps.extend(builtin_superpowers_skills()?);
     caps.extend(builtin_waza_skills()?);
     caps.extend(builtin_mcp_capabilities()?);
     Ok(caps)
