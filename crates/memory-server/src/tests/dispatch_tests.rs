@@ -885,6 +885,60 @@ async fn dispatch_response_includes_suggested_complete_payload() {
     assert!(suggested["arguments"]["evidence_refs"].is_array());
 }
 
+#[tokio::test]
+async fn board_surfaces_dispatch_run_ledger() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let mut params = dispatch_params(Some("custom"), "smoke board run ledger");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "print('ok')".to_string(),
+    ];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    let dispatch_id = response["dispatch_id"]
+        .as_str()
+        .expect("dispatch_id")
+        .to_string();
+
+    let board_raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(20),
+            project: None,
+        },
+    )
+    .await
+    .expect("board should render");
+    let board: serde_json::Value = serde_json::from_str(&board_raw).expect("board JSON");
+    assert!(
+        board["run_count"].as_u64().unwrap_or(0) >= 1,
+        "board must include run-ledger rows even if kanban search misses: {board:#}"
+    );
+    assert!(
+        board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| { task["dispatch_id"].as_str() == Some(dispatch_id.as_str()) }),
+        "board tasks should include dispatch {dispatch_id}: {board:#}"
+    );
+    assert!(
+        board["tasks"].as_array().unwrap().iter().any(|task| {
+            task["dispatch_id"].as_str() == Some(dispatch_id.as_str())
+                && task.get("run_dir").and_then(|v| v.as_str()).is_some()
+        }),
+        "dispatch should carry run_dir from run ledger: {board:#}"
+    );
+}
+
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
 //
 // Spawns the full V2 flow against a fake `claude` binary that emits a
@@ -900,8 +954,6 @@ async fn dispatch_response_includes_suggested_complete_payload() {
 #[ignore]
 async fn v2_two_stage_smoke() {
     use std::io::Write;
-
-    let server = make_server();
 
     // Isolated TACHI_HOME so run files don't pollute real one.
     let temp_home = std::env::temp_dir().join(format!("tachi-v2-{}", uuid::Uuid::new_v4()));
@@ -931,13 +983,15 @@ async fn v2_two_stage_smoke() {
     std::env::set_var("DISPATCH_V2_ENABLED", "true");
     std::env::set_var("DISPATCH_V2_PLAN_REVIEW", "false");
 
+    let server = make_server();
+
     // We can't easily call the private handle_tachi_dispatch from
     // outside the crate, but tests live inside the crate so the
     // `pub(crate)` visibility is accessible via crate path.
     let mut params = dispatch_params(Some("custom"), "smoke v2");
     // Execute stage uses a no-op command so the test doesn't need
     // a working claude/codex CLI for Stage 2.
-    params.command = vec!["true".to_string()];
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
 
     let resp_json = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
@@ -953,8 +1007,15 @@ async fn v2_two_stage_smoke() {
     assert!(plan.contains("## Goal"), "plan.md content: {plan}");
     assert!(plan.contains("## Validation"), "plan.md content: {plan}");
 
-    let trajectory =
-        std::fs::read_to_string(run_dir.join("trajectory.jsonl")).expect("trajectory present");
+    let trajectory_path = run_dir.join("trajectory.jsonl");
+    let mut trajectory = std::fs::read_to_string(&trajectory_path).expect("trajectory present");
+    for _ in 0..30 {
+        if trajectory.contains("\"event\":\"execute_started\"") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        trajectory = std::fs::read_to_string(&trajectory_path).expect("trajectory present");
+    }
     assert!(trajectory.contains("\"event\":\"dispatch_started\""));
     assert!(trajectory.contains("\"event\":\"plan_generated\""));
     assert!(trajectory.contains("\"event\":\"execute_started\""));
@@ -963,11 +1024,16 @@ async fn v2_two_stage_smoke() {
     assert!(progress.contains("\"event\":\"dispatch_started\""));
     assert!(progress.contains("\"event\":\"plan_generated\""));
 
-    // Wait briefly for the spawned stage-2 task to write status.json /
-    // result.md / dispatch_finished trajectory line.
+    // Wait briefly for the spawned stage-2 task to write final status.json.
     for _ in 0..30 {
-        if run_dir.join("status.json").exists() && run_dir.join("result.md").exists() {
-            break;
+        if let Ok(raw) = std::fs::read_to_string(run_dir.join("status.json")) {
+            if let Ok(status) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if status["duration_ms_plan"].as_u64().is_some()
+                    && status["duration_ms_execute"].as_u64().is_some()
+                {
+                    break;
+                }
+            }
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
