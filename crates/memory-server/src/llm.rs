@@ -518,8 +518,18 @@ impl LlmClient {
                     .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                     .json(&body)
                     .send()
-                    .await
-                    .map_err(|e| format!("Voyage batch API request failed: {}", e))?;
+                    .await;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(err) => {
+                        last_err = format!("Voyage batch API request failed: {err}");
+                        if attempt < Self::MAX_ATTEMPTS {
+                            tokio::time::sleep(Self::retry_delay(attempt)).await;
+                            continue;
+                        }
+                        return Err(last_err);
+                    }
+                };
 
                 let status = response.status();
                 let retry_after = response
@@ -619,8 +629,18 @@ impl LlmClient {
                 .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
                 .send()
-                .await
-                .map_err(|e| format!("Voyage rerank API request failed: {}", e))?;
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    last_err = format!("Voyage rerank API request failed: {err}");
+                    if attempt < Self::MAX_ATTEMPTS {
+                        tokio::time::sleep(Self::retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
             let status = response.status();
             let retry_after = response

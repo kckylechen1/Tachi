@@ -62,27 +62,12 @@ pub fn vault_api_key_pools_from_server(
 pub fn vault_api_key_pools_from_keychain(
     global_db_path: &Path,
 ) -> HashMap<String, Vec<ProviderSecret>> {
-    crate::status_ops::status_health::load_keychain_vault_api_key_values(global_db_path)
-        .unwrap_or_default()
-        .into_iter()
-        .fold(HashMap::new(), |mut acc, (name, value)| {
-            if let Some((prefix, _)) = parse_rotation_member_name(&name) {
-                acc.entry(prefix.to_string())
-                    .or_insert_with(Vec::new)
-                    .push(ProviderSecret {
-                        key_id: name,
-                        value,
-                    });
-            } else {
-                acc.entry(name.clone())
-                    .or_insert_with(Vec::new)
-                    .push(ProviderSecret {
-                        key_id: name,
-                        value,
-                    });
-            }
-            acc
-        })
+    let rotation_prefixes = rotation_prefixes_from_global_db(global_db_path);
+    group_api_key_values_by_configured_rotations(
+        crate::status_ops::status_health::load_keychain_vault_api_key_values(global_db_path)
+            .unwrap_or_default(),
+        &rotation_prefixes,
+    )
 }
 
 fn resolve_vault_pools(
@@ -118,6 +103,50 @@ pub(crate) fn parse_rotation_member_name(name: &str) -> Option<(&str, u32)> {
     } else {
         Some((prefix, index))
     }
+}
+
+fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
+    let Some(path) = global_db_path.to_str() else {
+        return HashSet::new();
+    };
+    let Ok(store) = memory_core::MemoryStore::open_read_only(path) else {
+        return HashSet::new();
+    };
+    store
+        .vault_list_rotations()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|rotation| rotation.prefix)
+        .collect()
+}
+
+fn group_api_key_values_by_configured_rotations(
+    values: Vec<(String, String)>,
+    rotation_prefixes: &HashSet<String>,
+) -> HashMap<String, Vec<ProviderSecret>> {
+    values
+        .into_iter()
+        .fold(HashMap::new(), |mut acc, (name, value)| {
+            if let Some((prefix, _)) = parse_rotation_member_name(&name) {
+                if rotation_prefixes.contains(prefix) {
+                    acc.entry(prefix.to_string())
+                        .or_insert_with(Vec::new)
+                        .push(ProviderSecret {
+                            key_id: name,
+                            value,
+                        });
+                    return acc;
+                }
+            }
+
+            acc.entry(name.clone())
+                .or_insert_with(Vec::new)
+                .push(ProviderSecret {
+                    key_id: name,
+                    value,
+                });
+            acc
+        })
 }
 
 /// Apply Vault + config.env aliases into `LlmClient` and strip `vault:` placeholders from env.
@@ -249,5 +278,35 @@ mod tests {
         );
         assert_eq!(parse_vault_alias("  vault:foo  "), Some("foo"));
         assert!(parse_vault_alias("sk-live").is_none());
+    }
+
+    #[test]
+    fn keychain_loader_only_groups_configured_rotation_members() {
+        let mut rotations = HashSet::new();
+        rotations.insert("VOYAGE_API_KEY".to_string());
+
+        let grouped = group_api_key_values_by_configured_rotations(
+            vec![
+                ("VOYAGE_API_KEY_1".to_string(), "voyage-a".to_string()),
+                ("VOYAGE_API_KEY_2".to_string(), "voyage-b".to_string()),
+                ("SOME_API_KEY_2".to_string(), "standalone".to_string()),
+            ],
+            &rotations,
+        );
+
+        let voyage = grouped
+            .get("VOYAGE_API_KEY")
+            .expect("configured rotation members should be grouped");
+        assert_eq!(voyage.len(), 2);
+        assert_eq!(voyage[0].key_id, "VOYAGE_API_KEY_1");
+        assert_eq!(voyage[1].key_id, "VOYAGE_API_KEY_2");
+        assert!(grouped.get("SOME_API_KEY").is_none());
+        assert_eq!(
+            grouped
+                .get("SOME_API_KEY_2")
+                .and_then(|entries| entries.first())
+                .map(|entry| entry.value.as_str()),
+            Some("standalone")
+        );
     }
 }

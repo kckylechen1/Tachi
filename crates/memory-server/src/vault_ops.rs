@@ -458,9 +458,7 @@ pub(super) fn load_unlocked_env_secrets(
         if !is_shell_env_name(&logical_name) {
             continue;
         }
-        if let Ok(value) = read_unlocked_vault_secret(server, &logical_name, None, true) {
-            upsert_env_secret(&mut secrets, logical_name, value);
-        } else if let Some(entry) = entries.first() {
+        if let Some(entry) = entries.first() {
             upsert_env_secret(&mut secrets, logical_name, entry.value.clone());
         }
     }
