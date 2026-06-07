@@ -40,6 +40,34 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::SyncStatus { path } => {
+            let path = super::vault_sync::resolve_vault_sync_path(path)?;
+            let status = super::vault_sync::vault_sync_status(&path)?;
+            super::vault_sync::print_status(&status);
+            Ok(())
+        }
+
+        VaultAction::SyncExport { output } => {
+            let output = super::vault_sync::resolve_vault_sync_path(output)?;
+            let status = super::vault_sync::export_vault_bundle(global_db_path, &output)?;
+            println!("Vault sync export complete.");
+            super::vault_sync::print_status(&status);
+            println!("  contents: encrypted Vault config, entries, and key-rotation metadata");
+            Ok(())
+        }
+
+        VaultAction::SyncImport { input } => {
+            let input = super::vault_sync::resolve_vault_sync_path(input)?;
+            let report = super::vault_sync::import_vault_bundle(global_db_path, &input)?;
+            println!("Vault sync import complete.");
+            println!("  path: {}", report.path);
+            println!("  initialized_vault: {}", report.initialized_vault);
+            println!("  entries_imported: {}", report.entries_imported);
+            println!("  rotations_imported: {}", report.rotations_imported);
+            println!("  note: import only upserts encrypted rows; it does not delete local extras");
+            Ok(())
+        }
+
         VaultAction::Init => {
             let store = open_cli_store_read_only(global_db_path)?;
             if store

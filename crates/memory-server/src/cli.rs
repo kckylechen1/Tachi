@@ -886,4 +886,22 @@ pub(crate) enum VaultAction {
     Lock,
     /// Show vault status (initialized, locked/unlocked, entry count).
     Status,
+    /// Export encrypted Vault rows to an iCloud-compatible sync bundle.
+    SyncExport {
+        /// Output bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+    /// Import encrypted Vault rows from a sync bundle.
+    SyncImport {
+        /// Input bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        #[arg(long, value_name = "PATH")]
+        input: Option<PathBuf>,
+    },
+    /// Show the default Vault sync bundle path and whether it exists.
+    SyncStatus {
+        /// Bundle path to inspect. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        #[arg(long, value_name = "PATH")]
+        path: Option<PathBuf>,
+    },
 }
