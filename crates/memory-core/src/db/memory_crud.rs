@@ -831,6 +831,7 @@ pub fn search_symbolic_candidates(
     );
     terms.sort();
     terms.dedup();
+    terms.sort_by_key(|term| std::cmp::Reverse(term.len()));
     terms.truncate(12);
 
     if terms.is_empty() && path_prefix.is_none() {
@@ -861,13 +862,13 @@ pub fn search_symbolic_candidates(
             params.push(pattern.into());
             let idx = params.len();
             term_clauses.push(format!(
-                "(lower(id) LIKE ?{idx}
-                  OR lower(path) LIKE ?{idx}
-                  OR lower(summary) LIKE ?{idx}
-                  OR lower(text) LIKE ?{idx}
-                  OR lower(keywords) LIKE ?{idx}
-                  OR lower(entities) LIKE ?{idx}
-                  OR lower(topic) LIKE ?{idx})"
+                "(id LIKE ?{idx}
+                  OR path LIKE ?{idx}
+                  OR summary LIKE ?{idx}
+                  OR text LIKE ?{idx}
+                  OR keywords LIKE ?{idx}
+                  OR entities LIKE ?{idx}
+                  OR topic LIKE ?{idx})"
             ));
         }
         sql.push_str(" AND (");

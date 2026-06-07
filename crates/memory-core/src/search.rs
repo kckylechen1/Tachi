@@ -76,7 +76,12 @@ fn scoped_path_can_surface_superseded(path_prefix: Option<&str>) -> bool {
     else {
         return false;
     };
-    if prefix == "/" || prefix.starts_with("/wiki") || prefix.starts_with("/kanban") {
+    if prefix == "/"
+        || prefix == "/wiki"
+        || prefix.starts_with("/wiki/")
+        || prefix == "/kanban"
+        || prefix.starts_with("/kanban/")
+    {
         return false;
     }
     prefix.trim_matches('/').split('/').count() >= 3
@@ -1014,6 +1019,25 @@ mod tests {
         let results = hybrid_search(&conn, "RECALL_PROBE_ALPHA_20260607", &opts).unwrap();
         assert_eq!(results[0].entry.id, "alpha");
         assert!(results[0].score.symbolic > results[1].score.symbolic);
+    }
+
+    #[test]
+    fn superseded_path_gate_matches_reserved_prefixes_exactly() {
+        assert!(!scoped_path_can_surface_superseded(Some("/wiki")));
+        assert!(!scoped_path_can_surface_superseded(Some(
+            "/wiki/agent/tachi"
+        )));
+        assert!(!scoped_path_can_surface_superseded(Some("/kanban")));
+        assert!(!scoped_path_can_surface_superseded(Some(
+            "/kanban/active/task"
+        )));
+
+        assert!(scoped_path_can_surface_superseded(Some(
+            "/wiki_rules/agent/tachi"
+        )));
+        assert!(scoped_path_can_surface_superseded(Some(
+            "/kanbanboard/active/task"
+        )));
     }
 
     #[test]
