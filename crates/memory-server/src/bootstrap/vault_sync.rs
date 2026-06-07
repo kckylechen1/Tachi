@@ -94,7 +94,7 @@ pub(super) fn export_vault_bundle(
     }
     let tmp = output.with_extension("json.tmp");
     let body = serde_json::to_string_pretty(&bundle)?;
-    std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    write_owner_only_file(&tmp, body.as_bytes())?;
     set_owner_only_permissions(&tmp)?;
     std::fs::rename(&tmp, output)
         .map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), output.display()))?;
@@ -214,6 +214,31 @@ fn set_owner_only_permissions(path: &Path) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+fn write_owner_only_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("create {} with 0600: {e}", path.display()))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 pub(super) fn print_status(status: &VaultSyncStatus) {
     println!("Vault sync bundle:");
     println!("  path: {}", status.path.display());
@@ -285,6 +310,16 @@ mod tests {
         let status =
             export_vault_bundle(&source_db, &bundle_path).expect("export vault sync bundle");
         assert!(status.exists);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&bundle_path)
+                .expect("bundle metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
 
         let report =
             import_vault_bundle(&target_db, &bundle_path).expect("import vault sync bundle");
