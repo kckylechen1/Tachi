@@ -887,17 +887,15 @@ async fn dispatch_response_includes_suggested_complete_payload() {
 
 #[tokio::test]
 async fn board_surfaces_dispatch_run_ledger() {
-    let (server, temp_home) = make_server_with_temp_home();
-    let original_tachi_home = std::env::var_os("TACHI_HOME");
-    let original_v2_enabled = std::env::var_os("DISPATCH_V2_ENABLED");
-    let original_v2_review = std::env::var_os("DISPATCH_V2_PLAN_REVIEW");
-    std::env::set_var("TACHI_HOME", temp_home.temp_home.join(".tachi"));
-    std::env::remove_var("DISPATCH_V2_ENABLED");
-    std::env::remove_var("DISPATCH_V2_PLAN_REVIEW");
+    let (server, _temp_home) = make_server_with_temp_home();
 
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let mut params = dispatch_params(Some("custom"), "smoke board run ledger");
-    params.command = vec!["python3".to_string(), "-c".to_string(), "print('ok')".to_string()];
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "print('ok')".to_string(),
+    ];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
 
     let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
@@ -925,9 +923,11 @@ async fn board_surfaces_dispatch_run_ledger() {
         "board must include run-ledger rows even if kanban search misses: {board:#}"
     );
     assert!(
-        board["tasks"].as_array().unwrap().iter().any(|task| {
-            task["dispatch_id"].as_str() == Some(dispatch_id.as_str())
-        }),
+        board["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| { task["dispatch_id"].as_str() == Some(dispatch_id.as_str()) }),
         "board tasks should include dispatch {dispatch_id}: {board:#}"
     );
     assert!(
@@ -937,22 +937,6 @@ async fn board_surfaces_dispatch_run_ledger() {
         }),
         "dispatch should carry run_dir from run ledger: {board:#}"
     );
-
-    if let Some(value) = original_tachi_home {
-        std::env::set_var("TACHI_HOME", value);
-    } else {
-        std::env::remove_var("TACHI_HOME");
-    }
-    if let Some(value) = original_v2_enabled {
-        std::env::set_var("DISPATCH_V2_ENABLED", value);
-    } else {
-        std::env::remove_var("DISPATCH_V2_ENABLED");
-    }
-    if let Some(value) = original_v2_review {
-        std::env::set_var("DISPATCH_V2_PLAN_REVIEW", value);
-    } else {
-        std::env::remove_var("DISPATCH_V2_PLAN_REVIEW");
-    }
 }
 
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
@@ -1024,8 +1008,7 @@ async fn v2_two_stage_smoke() {
     assert!(plan.contains("## Validation"), "plan.md content: {plan}");
 
     let trajectory_path = run_dir.join("trajectory.jsonl");
-    let mut trajectory =
-        std::fs::read_to_string(&trajectory_path).expect("trajectory present");
+    let mut trajectory = std::fs::read_to_string(&trajectory_path).expect("trajectory present");
     for _ in 0..30 {
         if trajectory.contains("\"event\":\"execute_started\"") {
             break;

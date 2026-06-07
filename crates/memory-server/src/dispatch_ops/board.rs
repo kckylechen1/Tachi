@@ -35,11 +35,7 @@ fn status_state(status: &serde_json::Value, result_written: bool) -> &'static st
             _ => "TASK_STATE_WORKING",
         };
     }
-    if status
-        .get("plan_review_status")
-        .and_then(|s| s.as_str())
-        == Some("pending_review")
-    {
+    if status.get("plan_review_status").and_then(|s| s.as_str()) == Some("pending_review") {
         return "TASK_STATE_INPUT_REQUIRED";
     }
     match status.get("exit_code") {
@@ -52,69 +48,79 @@ fn status_state(status: &serde_json::Value, result_written: bool) -> &'static st
 
 fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value> {
     let runs_dir = tachi_home().join("runs");
-    let Ok(entries) = std::fs::read_dir(&runs_dir) else {
+    let Ok(read_dir) = std::fs::read_dir(&runs_dir) else {
         return Vec::new();
     };
 
-    let target_state = map_filter_state(state_filter);
-    let mut runs = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let run_dir = entry.path();
-            if !run_dir.is_dir() {
-                return None;
-            }
-            let status_path = run_dir.join("status.json");
-            let status_raw = std::fs::read_to_string(&status_path).ok()?;
-            let status: serde_json::Value = serde_json::from_str(&status_raw).ok()?;
-            let dispatch_id = status
-                .get("dispatch_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    run_dir
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(str::to_string)
-                })?;
-            let result_written = run_dir.join("result.md").exists();
-            let state = status_state(&status, result_written);
-            if state_filter != "all" && state != target_state {
-                return None;
-            }
-            let updated_at = status
-                .get("updated_at")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    std::fs::metadata(&status_path)
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .map(chrono::DateTime::<Utc>::from)
-                        .map(|dt| dt.to_rfc3339())
-                });
-            let modified = std::fs::metadata(&status_path)
-                .and_then(|m| m.modified())
-                .ok();
-            Some((
-                modified,
-                json!({
-                    "dispatch_id": dispatch_id,
-                    "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
-                    "state": state,
-                    "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
-                    "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
-                    "updated_at": updated_at,
-                    "run_dir": run_dir.to_string_lossy(),
-                    "result_written": result_written,
-                    "source": "run",
-                }),
-            ))
-        })
-        .collect::<Vec<_>>();
+    let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
+    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
 
-    runs.sort_by(|a, b| b.0.cmp(&a.0));
-    runs.into_iter().take(limit).map(|(_, task)| task).collect()
+    let target_state = map_filter_state(state_filter);
+    let mut runs = Vec::new();
+
+    for entry in entries {
+        if runs.len() >= limit {
+            break;
+        }
+        let run_dir = entry.path();
+        if !run_dir.is_dir() {
+            continue;
+        }
+        let status_path = run_dir.join("status.json");
+        let Ok(status_raw) = std::fs::read_to_string(&status_path) else {
+            continue;
+        };
+        let Ok(status) = serde_json::from_str::<serde_json::Value>(&status_raw) else {
+            continue;
+        };
+        let Some(dispatch_id) = status
+            .get("dispatch_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                run_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+        else {
+            continue;
+        };
+        let result_written = run_dir.join("result.md").exists();
+        let state = status_state(&status, result_written);
+        if state_filter != "all" && state != target_state {
+            continue;
+        }
+        let updated_at = status
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                std::fs::metadata(&status_path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(chrono::DateTime::<Utc>::from)
+                    .map(|dt| dt.to_rfc3339())
+            });
+        runs.push(json!({
+            "dispatch_id": dispatch_id,
+            "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
+            "state": state,
+            "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
+            "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
+            "updated_at": updated_at,
+            "run_dir": run_dir.to_string_lossy(),
+            "result_written": result_written,
+            "source": "run",
+        }));
+    }
+
+    runs.sort_by(|a, b| {
+        b.get("updated_at")
+            .and_then(|v| v.as_str())
+            .cmp(&a.get("updated_at").and_then(|v| v.as_str()))
+    });
+    runs
 }
 
 pub(crate) async fn handle_tachi_board(
@@ -189,7 +195,11 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
     }
-    let run_tasks = collect_run_tasks(state_filter, limit);
+    let state_filter_owned = state_filter.to_string();
+    let run_tasks =
+        tokio::task::spawn_blocking(move || collect_run_tasks(&state_filter_owned, limit))
+            .await
+            .unwrap_or_default();
     let run_count = run_tasks.len();
     for task in run_tasks {
         let dispatch_id = task
