@@ -7,7 +7,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const DEFAULT_CHAT_BASE_URL: &str = "https://api.siliconflow.cn/v1/chat/completions";
 const DEFAULT_EXTRACT_MODEL: &str = "Qwen/Qwen3.5-27B";
@@ -18,6 +18,19 @@ struct ChatLaneConfig {
     base_url: String,
     model: String,
     api_key_envs: Vec<&'static str>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ProviderSecret {
+    pub(crate) key_id: String,
+    pub(crate) value: String,
+}
+
+#[derive(Clone)]
+struct SelectedProviderSecret {
+    logical_name: String,
+    key_id: String,
+    value: String,
 }
 
 #[derive(Clone, Copy)]
@@ -46,7 +59,9 @@ pub struct LlmClient {
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
-    provider_secrets: Arc<RwLock<HashMap<String, String>>>,
+    provider_secrets: Arc<RwLock<HashMap<String, Vec<ProviderSecret>>>>,
+    provider_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
+    provider_indices: Arc<RwLock<HashMap<String, usize>>>,
 }
 
 impl LlmClient {
@@ -96,6 +111,7 @@ impl LlmClient {
             "reasoning",
             &[
                 "REASONING_API_KEY",
+                "DEEPSEEK_API_KEY",
                 "ZAI_API_KEY",
                 "BIGMODEL_API_KEY",
                 "DISTILL_API_KEY",
@@ -123,6 +139,7 @@ impl LlmClient {
             &[
                 "DISTILL_API_KEY",
                 "REASONING_API_KEY",
+                "DEEPSEEK_API_KEY",
                 "ZAI_API_KEY",
                 "BIGMODEL_API_KEY",
                 "EXTRACT_API_KEY",
@@ -168,6 +185,8 @@ impl LlmClient {
             reasoning,
             summary,
             provider_secrets: Arc::new(RwLock::new(HashMap::new())),
+            provider_cooldowns: Arc::new(RwLock::new(HashMap::new())),
+            provider_indices: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -224,6 +243,7 @@ impl LlmClient {
         }
     }
 
+    #[cfg(test)]
     pub fn set_provider_secret(&self, name: &str, value: &str) -> bool {
         let name = name.trim();
         let value = value.trim();
@@ -231,28 +251,64 @@ impl LlmClient {
             return false;
         }
 
+        self.set_provider_secret_pool(
+            name,
+            vec![ProviderSecret {
+                key_id: name.to_string(),
+                value: value.to_string(),
+            }],
+        )
+    }
+
+    pub(crate) fn set_provider_secret_pool(
+        &self,
+        name: &str,
+        entries: Vec<ProviderSecret>,
+    ) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let entries: Vec<ProviderSecret> = entries
+            .into_iter()
+            .filter(|entry| !entry.key_id.trim().is_empty() && !entry.value.trim().is_empty())
+            .collect();
+        if entries.is_empty() {
+            return false;
+        }
+
         let mut secrets = self
             .provider_secrets
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        secrets.insert(name.to_string(), value.to_string());
+        secrets.insert(name.to_string(), entries);
+        self.provider_indices
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name);
         true
     }
 
-    pub fn set_provider_secrets<I, K, V>(&self, secrets: I) -> usize
+    pub(crate) fn set_provider_secret_pools<I>(&self, pools: I) -> usize
     where
-        I: IntoIterator<Item = (K, V)>,
-        K: AsRef<str>,
-        V: AsRef<str>,
+        I: IntoIterator<Item = (String, Vec<ProviderSecret>)>,
     {
-        secrets
+        pools
             .into_iter()
-            .filter(|(name, value)| self.set_provider_secret(name.as_ref(), value.as_ref()))
+            .filter(|(name, entries)| self.set_provider_secret_pool(name, entries.clone()))
             .count()
     }
 
     pub fn clear_provider_secrets(&self) {
         self.provider_secrets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.provider_cooldowns
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        self.provider_indices
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
@@ -265,29 +321,125 @@ impl LlmClient {
             .len()
     }
 
-    fn first_secret(&self, keys: &[&str]) -> Option<String> {
+    fn select_secret(&self, keys: &[&str]) -> Option<SelectedProviderSecret> {
+        let now = Instant::now();
+        {
+            let mut cooldowns = self
+                .provider_cooldowns
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cooldowns.retain(|_, until| *until > now);
+        }
+
         let vault_value = {
             let secrets = self
                 .provider_secrets
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let cooldowns = self
+                .provider_cooldowns
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut indices = self
+                .provider_indices
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             keys.iter().find_map(|key| {
                 secrets
                     .get(*key)
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
+                    .and_then(|entries| {
+                        if entries.is_empty() {
+                            return None;
+                        }
+                        let start = *indices.get(*key).unwrap_or(&0);
+                        let mut selected_idx = None;
+                        for offset in 0..entries.len() {
+                            let idx = (start + offset) % entries.len();
+                            if !cooldowns.contains_key(&entries[idx].key_id) {
+                                selected_idx = Some(idx);
+                                break;
+                            }
+                        }
+                        let idx = selected_idx.unwrap_or(start % entries.len());
+                        indices.insert((*key).to_string(), (idx + 1) % entries.len());
+                        entries.get(idx)
+                    })
+                    .map(|entry| SelectedProviderSecret {
+                        logical_name: (*key).to_string(),
+                        key_id: entry.key_id.clone(),
+                        value: entry.value.trim().to_string(),
+                    })
+                    .filter(|entry| !entry.value.is_empty())
             })
         };
 
         vault_value.or_else(|| {
-            Self::first_env(keys).filter(|value| !crate::provider_config::is_vault_alias(value))
+            keys.iter().find_map(|key| {
+                Self::first_env(&[*key])
+                    .filter(|value| !crate::provider_config::is_vault_alias(value))
+                    .map(|value| SelectedProviderSecret {
+                        logical_name: (*key).to_string(),
+                        key_id: (*key).to_string(),
+                        value,
+                    })
+            })
         })
     }
 
+    #[cfg(test)]
+    fn first_secret(&self, keys: &[&str]) -> Option<String> {
+        self.select_secret(keys).map(|selected| selected.value)
+    }
+
+    #[cfg(test)]
     fn required_secret(&self, keys: &[&str]) -> Result<String, String> {
         self.first_secret(keys).ok_or_else(|| {
             "Missing API key. Add one to Tachi Vault or set the appropriate env var.".to_string()
         })
+    }
+
+    fn required_selected_secret(&self, keys: &[&str]) -> Result<SelectedProviderSecret, String> {
+        self.select_secret(keys).ok_or_else(|| {
+            "Missing API key. Add one to Tachi Vault or set the appropriate env var.".to_string()
+        })
+    }
+
+    fn mark_secret_rate_limited(
+        &self,
+        selected: &SelectedProviderSecret,
+        retry_after: Option<u64>,
+    ) {
+        let cooldown = retry_after.unwrap_or(60).clamp(1, 3600);
+        let until = Instant::now() + Duration::from_secs(cooldown);
+        self.provider_cooldowns
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(selected.key_id.clone(), until);
+        tracing::warn!(
+            "[provider] key {} for {} is rate-limited; cooling down for {}s",
+            selected.key_id,
+            selected.logical_name,
+            cooldown
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_key_id_for_tests(&self, keys: &[&str]) -> Option<String> {
+        self.select_secret(keys).map(|selected| selected.key_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_provider_key_rate_limited_for_tests(
+        &self,
+        key_id: &str,
+        retry_after: Option<u64>,
+    ) {
+        let selected = SelectedProviderSecret {
+            logical_name: key_id.to_string(),
+            key_id: key_id.to_string(),
+            value: String::new(),
+        };
+        self.mark_secret_rate_limited(&selected, retry_after);
     }
 
     #[cfg(test)]
@@ -349,35 +501,68 @@ impl LlmClient {
 
         const VOYAGE_MAX_BATCH: usize = 128;
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-        let voyage_api_key = self.required_secret(&["VOYAGE_API_KEY"])?;
-
         for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
             let body = serde_json::json!({
                 "model": "voyage-4",
                 "input": chunk,
                 "input_type": input_type
             });
+            let mut response_json: Option<Value> = None;
+            let mut last_err = String::new();
+            for attempt in 1..=Self::MAX_ATTEMPTS {
+                let selected = self.required_selected_secret(&["VOYAGE_API_KEY"])?;
+                let response = self
+                    .http
+                    .post("https://api.voyageai.com/v1/embeddings")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {}", selected.value))
+                    .json(&body)
+                    .send()
+                    .await;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(err) => {
+                        last_err = format!("Voyage batch API request failed: {err}");
+                        if attempt < Self::MAX_ATTEMPTS {
+                            tokio::time::sleep(Self::retry_delay(attempt)).await;
+                            continue;
+                        }
+                        return Err(last_err);
+                    }
+                };
 
-            let response = self
-                .http
-                .post("https://api.voyageai.com/v1/embeddings")
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", voyage_api_key))
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("Voyage batch API request failed: {}", e))?;
-
-            if !response.status().is_success() {
                 let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok());
                 let text = response.text().await.unwrap_or_default();
-                return Err(format!("Voyage batch API error: {} - {}", status, text));
+                if status.as_u16() == 429 {
+                    self.mark_secret_rate_limited(&selected, retry_after);
+                    last_err = format!("Voyage batch API error: {} - {}", status, text);
+                    if attempt < Self::MAX_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+                if !status.is_success() {
+                    return Err(format!("Voyage batch API error: {} - {}", status, text));
+                }
+                response_json = Some(
+                    serde_json::from_str(&text)
+                        .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
+                );
+                break;
             }
 
-            let json: Value = response
-                .json()
-                .await
-                .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?;
+            let json = response_json.ok_or_else(|| {
+                if last_err.is_empty() {
+                    "Voyage batch API failed without a response".to_string()
+                } else {
+                    last_err
+                }
+            })?;
 
             let data = json["data"]
                 .as_array()
@@ -423,7 +608,6 @@ impl LlmClient {
         if filtered_docs.is_empty() {
             return Ok(vec![]);
         }
-        let voyage_api_key = self.required_secret(&["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])?;
         let effective_top_k = top_k.max(1).min(filtered_docs.len());
 
         let body = serde_json::json!({
@@ -433,26 +617,62 @@ impl LlmClient {
             "top_k": effective_top_k,
         });
 
-        let response = self
-            .http
-            .post("https://api.voyageai.com/v1/rerank")
-            .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", voyage_api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Voyage rerank API request failed: {}", e))?;
+        let mut json: Option<Value> = None;
+        let mut last_err = String::new();
+        for attempt in 1..=Self::MAX_ATTEMPTS {
+            let selected =
+                self.required_selected_secret(&["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])?;
+            let response = self
+                .http
+                .post("https://api.voyageai.com/v1/rerank")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", selected.value))
+                .json(&body)
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    last_err = format!("Voyage rerank API request failed: {err}");
+                    if attempt < Self::MAX_ATTEMPTS {
+                        tokio::time::sleep(Self::retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
-        if !response.status().is_success() {
             let status = response.status();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Voyage rerank API error: {} - {}", status, text));
+            if status.as_u16() == 429 {
+                self.mark_secret_rate_limited(&selected, retry_after);
+                last_err = format!("Voyage rerank API error: {} - {}", status, text);
+                if attempt < Self::MAX_ATTEMPTS {
+                    continue;
+                }
+                return Err(last_err);
+            }
+            if !status.is_success() {
+                return Err(format!("Voyage rerank API error: {} - {}", status, text));
+            }
+            json = Some(
+                serde_json::from_str(&text)
+                    .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?,
+            );
+            break;
         }
-
-        let json: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?;
+        let json = json.ok_or_else(|| {
+            if last_err.is_empty() {
+                "Voyage rerank API failed without a response".to_string()
+            } else {
+                last_err
+            }
+        })?;
         let data = json["data"]
             .as_array()
             .ok_or("Invalid Voyage rerank response: missing data array")?;
@@ -636,7 +856,6 @@ impl LlmClient {
     ) -> Result<String, String> {
         let lane_cfg = self.lane(lane);
         let model = model_override.unwrap_or(&lane_cfg.model);
-        let api_key = self.required_secret(&lane_cfg.api_key_envs)?;
 
         let mut body = serde_json::json!({
             "model": model,
@@ -654,11 +873,12 @@ impl LlmClient {
         let mut last_err = String::new();
 
         for attempt in 1..=Self::MAX_ATTEMPTS {
+            let selected = self.required_selected_secret(&lane_cfg.api_key_envs)?;
             let resp = self
                 .http
                 .post(&lane_cfg.base_url)
                 .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", api_key))
+                .header(AUTHORIZATION, format!("Bearer {}", selected.value))
                 .json(&body)
                 .send()
                 .await;
@@ -694,7 +914,15 @@ impl LlmClient {
                 .unwrap_or_else(|e| format!("<read error: {e}>"));
 
             // Retry on 429 rate-limit or 5xx server errors
-            if status.as_u16() == 429 || status.is_server_error() {
+            if status.as_u16() == 429 {
+                self.mark_secret_rate_limited(&selected, retry_after);
+                last_err = format!("API error {status}: {resp_text}");
+                if attempt < Self::MAX_ATTEMPTS {
+                    continue;
+                }
+                return Err(last_err);
+            }
+            if status.is_server_error() {
                 last_err = format!("API error {status}: {resp_text}");
                 if attempt < Self::MAX_ATTEMPTS {
                     let delay = if let Some(secs) = retry_after {

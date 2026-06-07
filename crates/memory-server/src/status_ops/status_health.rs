@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::{ApiKeyStatus, DbStatus, EXPECTED_EMBEDDING_DIM};
+use super::{ApiKeyRotationStatus, ApiKeyStatus, DbStatus, EXPECTED_EMBEDDING_DIM};
 
 const PROVIDER_PROBE_CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
@@ -45,6 +45,62 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
             "DISTILL_API_KEY",
             "REASONING_API_KEY",
         ],
+    },
+    ApiKeyDef {
+        key: "DEEPSEEK_API_KEY",
+        label: "DeepSeek OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "DEEPSEEK_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
+        key: "ZAI_API_KEY",
+        label: "Zhipu/BigModel OpenAI-compatible LLM",
+        required: false,
+        deprecated: false,
+        canonical_key: "ZAI_API_KEY",
+        aliases: &["BIGMODEL_API_KEY"],
+    },
+    ApiKeyDef {
+        key: "OPENAI_API_KEY",
+        label: "OpenAI-compatible agents",
+        required: false,
+        deprecated: false,
+        canonical_key: "OPENAI_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
+        key: "ANTHROPIC_API_KEY",
+        label: "Anthropic/Claude-compatible agents",
+        required: false,
+        deprecated: false,
+        canonical_key: "ANTHROPIC_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
+        key: "GOOGLE_API_KEY",
+        label: "Google/Gemini-compatible agents",
+        required: false,
+        deprecated: false,
+        canonical_key: "GOOGLE_API_KEY",
+        aliases: &["GEMINI_API_KEY"],
+    },
+    ApiKeyDef {
+        key: "EXA_API_KEY",
+        label: "Exa search",
+        required: false,
+        deprecated: false,
+        canonical_key: "EXA_API_KEY",
+        aliases: &[],
+    },
+    ApiKeyDef {
+        key: "TAVILY_API_KEY",
+        label: "Tavily search",
+        required: false,
+        deprecated: false,
+        canonical_key: "TAVILY_API_KEY",
+        aliases: &[],
     },
     ApiKeyDef {
         key: "MINIMAX_API_KEY",
@@ -143,8 +199,8 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
             }];
         }
     };
-    if let Ok(secrets) = load_keychain_vault_api_key_values(global_db_path) {
-        llm.set_provider_secrets(secrets);
+    if let Err(err) = crate::provider_config::materialize_standalone(&llm, global_db_path) {
+        tracing::warn!("[provider] probe secret materialization failed: {err}");
     }
 
     // Run all three probes concurrently — reduces worst-case latency from
@@ -319,10 +375,10 @@ pub(crate) fn load_keychain_vault_api_key_values(
 
     let mut out = Vec::new();
     for entry in store.vault_list_entries()? {
-        if entry.secret_type != "api_key"
-            || !entry.name.ends_with("_API_KEY")
-            || entry.allowed_agents.is_some()
-        {
+        let is_provider_key = entry.name.ends_with("_API_KEY")
+            || crate::provider_config::parse_rotation_member_name(&entry.name)
+                .is_some_and(|(prefix, _)| prefix.ends_with("_API_KEY"));
+        if entry.secret_type != "api_key" || !is_provider_key || entry.allowed_agents.is_some() {
             continue;
         }
         let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
@@ -349,6 +405,7 @@ fn collect_api_key_status_inner(
     compare_vault_values: bool,
 ) -> Vec<ApiKeyStatus> {
     let mut vault_names = HashSet::new();
+    let mut rotations = HashMap::new();
     if let Some(path) = global_db_path.to_str() {
         if let Ok(store) = memory_core::MemoryStore::open_read_only(path) {
             if let Ok(entries) = store.vault_list_entries() {
@@ -358,6 +415,18 @@ fn collect_api_key_status_inner(
                         .filter(|entry| entry.secret_type == "api_key")
                         .map(|entry| entry.name),
                 );
+            }
+            if let Ok(rows) = store.vault_list_rotations() {
+                for rotation in rows {
+                    rotations.insert(
+                        rotation.prefix,
+                        ApiKeyRotationStatus {
+                            total_keys: rotation.total_keys,
+                            current_index: rotation.current_index,
+                            strategy: rotation.rotation_strategy,
+                        },
+                    );
+                }
             }
         }
     }
@@ -371,13 +440,14 @@ fn collect_api_key_status_inner(
         HashMap::new()
     };
 
-    collect_api_key_status_from_sources(vault_names, vault_values, config_env)
+    collect_api_key_status_from_sources(vault_names, vault_values, config_env, rotations)
 }
 
 fn collect_api_key_status_from_sources(
     vault_names: HashSet<String>,
     vault_values: HashMap<String, String>,
     config_env: HashMap<String, String>,
+    rotations: HashMap<String, ApiKeyRotationStatus>,
 ) -> Vec<ApiKeyStatus> {
     API_KEY_DEFS
         .iter()
@@ -391,7 +461,13 @@ fn collect_api_key_status_from_sources(
                 .as_deref()
                 .map(crate::provider_config::is_vault_alias)
                 .unwrap_or(false);
-            let vault_configured = vault_names.contains(def.key);
+            let rotation_member_configured = vault_names.iter().any(|name| {
+                crate::provider_config::parse_rotation_member_name(name)
+                    .is_some_and(|(prefix, _)| prefix == def.key)
+            });
+            let rotation = rotations.get(def.key);
+            let vault_configured =
+                vault_names.contains(def.key) || rotation.is_some() || rotation_member_configured;
             let config_value = config_env.get(def.key);
             let config_present = config_value.is_some();
             let config_is_vault_alias = config_value
@@ -513,6 +589,11 @@ fn collect_api_key_status_from_sources(
                 cleanup_hint,
                 drift_warning,
                 inferred_invalid_provider: None,
+                rotation: rotation.map(|rotation| ApiKeyRotationStatus {
+                    total_keys: rotation.total_keys,
+                    current_index: rotation.current_index,
+                    strategy: rotation.strategy.clone(),
+                }),
             }
         })
         .collect()
@@ -655,10 +736,16 @@ pub(crate) fn infer_provider_from_auth_error(reason: &str) -> Option<String> {
         Some("VOYAGE".to_string())
     } else if lower.contains("siliconflow") || lower.contains("qwen") {
         Some("SILICONFLOW".to_string())
+    } else if lower.contains("deepseek") {
+        Some("DEEPSEEK".to_string())
     } else if lower.contains("minimax") {
         Some("MINIMAX".to_string())
-    } else if lower.contains("zai") || lower.contains("bigmodel") || lower.contains("glm") {
-        Some("REASONING".to_string())
+    } else if lower.contains("zai")
+        || lower.contains("zhipu")
+        || lower.contains("bigmodel")
+        || lower.contains("glm")
+    {
+        Some("ZAI".to_string())
     } else {
         Some("UNKNOWN".to_string())
     }
@@ -668,7 +755,9 @@ fn provider_to_key(provider: &str) -> Option<&'static str> {
     match provider {
         "VOYAGE" => Some("VOYAGE_API_KEY"),
         "SILICONFLOW" => Some("SILICONFLOW_API_KEY"),
+        "DEEPSEEK" => Some("DEEPSEEK_API_KEY"),
         "MINIMAX" => Some("MINIMAX_API_KEY"),
+        "ZAI" => Some("ZAI_API_KEY"),
         "REASONING" => Some("REASONING_API_KEY"),
         _ => None,
     }
@@ -793,6 +882,7 @@ mod tests {
             HashSet::from(["VOYAGE_API_KEY".to_string()]),
             HashMap::from([("VOYAGE_API_KEY".to_string(), "same-secret".to_string())]),
             HashMap::new(),
+            HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -817,6 +907,7 @@ mod tests {
         let rows = collect_api_key_status_from_sources(
             HashSet::from(["VOYAGE_API_KEY".to_string()]),
             HashMap::from([("VOYAGE_API_KEY".to_string(), "vault-secret".to_string())]),
+            HashMap::new(),
             HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
@@ -843,6 +934,7 @@ mod tests {
             HashSet::from(["VOYAGE_API_KEY".to_string()]),
             HashMap::new(),
             HashMap::new(),
+            HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -864,8 +956,12 @@ mod tests {
         let original = std::env::var_os("REASONING_API_KEY");
         std::env::set_var("REASONING_API_KEY", "legacy-secret");
 
-        let rows =
-            collect_api_key_status_from_sources(HashSet::new(), HashMap::new(), HashMap::new());
+        let rows = collect_api_key_status_from_sources(
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
         assert!(reasoning.deprecated);
@@ -887,8 +983,12 @@ mod tests {
         let original = std::env::var_os("REASONING_API_KEY");
         std::env::remove_var("REASONING_API_KEY");
 
-        let rows =
-            collect_api_key_status_from_sources(HashSet::new(), HashMap::new(), HashMap::new());
+        let rows = collect_api_key_status_from_sources(
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
         let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
         assert!(reasoning.deprecated);
@@ -896,6 +996,42 @@ mod tests {
         assert!(reasoning.cleanup_hint.is_none());
 
         restore_env("REASONING_API_KEY", original);
+    }
+
+    #[test]
+    fn rotation_members_configure_their_logical_provider_key() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("VOYAGE_API_KEY");
+        std::env::remove_var("VOYAGE_API_KEY");
+
+        let rows = collect_api_key_status_from_sources(
+            HashSet::from([
+                "VOYAGE_API_KEY_1".to_string(),
+                "VOYAGE_API_KEY_2".to_string(),
+            ]),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::from([(
+                "VOYAGE_API_KEY".to_string(),
+                ApiKeyRotationStatus {
+                    total_keys: 2,
+                    current_index: 1,
+                    strategy: "round_robin".to_string(),
+                },
+            )]),
+        );
+        let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+        assert_eq!(voyage.status, "configured");
+        assert_eq!(voyage.source, "vault");
+        assert_eq!(
+            voyage.rotation.as_ref().map(|rotation| rotation.total_keys),
+            Some(2)
+        );
+
+        restore_env("VOYAGE_API_KEY", original);
     }
 
     #[test]

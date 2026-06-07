@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
 use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
@@ -347,18 +348,121 @@ fn load_unlocked_vault_secrets(
     Ok(secrets)
 }
 
-pub(super) fn load_unlocked_api_key_secrets(
+pub(super) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
-) -> Result<Vec<(String, String)>, String> {
-    load_unlocked_vault_secrets(server, |entry| {
-        entry.secret_type == "api_key" && entry.name.ends_with("_API_KEY")
-    })
+) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
+    let key = get_vault_key(server)?;
+    let (entries, rotations) = server
+        .with_global_store(|store| {
+            let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
+            let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
+            Ok::<_, String>((entries, rotations))
+        })
+        .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
+
+    let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
+    let mut rotation_members: HashSet<String> = HashSet::new();
+
+    for rotation in rotations {
+        let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
+        if matching.is_empty() {
+            continue;
+        }
+        let selected_idx = match rotation.rotation_strategy.as_str() {
+            "round_robin" => {
+                if rotation.current_index <= 0 {
+                    0
+                } else {
+                    (rotation.current_index as usize - 1) % matching.len()
+                }
+            }
+            "random" => {
+                use rand::Rng;
+                rand::thread_rng().gen_range(0..matching.len())
+            }
+            "least_recently_used" => matching
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (_, entry))| (entry.access_count, entry.accessed_at.clone()))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        matching.rotate_left(selected_idx);
+        let mut pool = Vec::new();
+        for (_, entry) in matching {
+            if entry.secret_type != "api_key"
+                || entry
+                    .allowed_agents
+                    .as_ref()
+                    .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
+            let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+            let value = String::from_utf8(decrypted)
+                .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+            if value.trim().is_empty() {
+                continue;
+            }
+            rotation_members.insert(entry.name.clone());
+            pool.push(crate::llm::ProviderSecret {
+                key_id: entry.name,
+                value,
+            });
+        }
+        if !pool.is_empty() {
+            pools.insert(rotation.prefix, pool);
+        }
+    }
+
+    for entry in entries {
+        if entry.secret_type != "api_key"
+            || !entry.name.ends_with("_API_KEY")
+            || rotation_members.contains(&entry.name)
+            || entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        if !value.trim().is_empty() {
+            pools.entry(entry.name.clone()).or_insert_with(|| {
+                vec![crate::llm::ProviderSecret {
+                    key_id: entry.name,
+                    value,
+                }]
+            });
+        }
+    }
+
+    Ok(pools)
 }
 
 pub(super) fn load_unlocked_env_secrets(
     server: &MemoryServer,
 ) -> Result<Vec<(String, String)>, String> {
-    load_unlocked_vault_secrets(server, |entry| is_shell_env_name(&entry.name))
+    let pools = load_unlocked_api_key_secret_pools(server)?;
+    let rotation_member_names: HashSet<String> = pools
+        .values()
+        .flat_map(|entries| entries.iter().map(|entry| entry.key_id.clone()))
+        .collect();
+    let mut secrets = load_unlocked_vault_secrets(server, |entry| {
+        is_shell_env_name(&entry.name) && !rotation_member_names.contains(&entry.name)
+    })?;
+    for (logical_name, entries) in pools {
+        if !is_shell_env_name(&logical_name) {
+            continue;
+        }
+        if let Some(entry) = entries.first() {
+            upsert_env_secret(&mut secrets, logical_name, entry.value.clone());
+        }
+    }
+    Ok(secrets)
 }
 
 pub(super) fn load_unlocked_env_secrets_for_child_env(
@@ -936,5 +1040,6 @@ pub(crate) async fn handle_vault_setup_rotation(
         "total_keys": params.total_keys,
         "strategy": strategy,
     });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+    let body = serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))?;
+    attach_provider_refresh_warning(server, body)
 }
