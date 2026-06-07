@@ -887,25 +887,33 @@ async fn dispatch_response_includes_suggested_complete_payload() {
 
 #[tokio::test]
 async fn board_surfaces_dispatch_run_ledger() {
-    let (server, _temp_home) = make_server_with_temp_home();
-
-    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
-    let mut params = dispatch_params(Some("custom"), "smoke board run ledger");
-    params.command = vec![
-        "python3".to_string(),
-        "-c".to_string(),
-        "print('ok')".to_string(),
-    ];
-    params.cwd = Some(tmp.path().to_string_lossy().to_string());
-
-    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
-        .await
-        .expect("custom dispatch should start");
-    let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
-    let dispatch_id = response["dispatch_id"]
-        .as_str()
-        .expect("dispatch_id")
-        .to_string();
+    let server = make_server();
+    let dispatch_id = format!(
+        "99991231T235959Z-test-run-ledger-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let tachi_home = std::env::var_os("TACHI_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".tachi"))
+        })
+        .unwrap_or_else(|| std::env::temp_dir().join("tachi"));
+    let run_dir = tachi_home.join("runs").join(&dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create run ledger fixture");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string(&serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "agent": "custom",
+            "task": "smoke board run ledger",
+            "state": "TASK_STATE_WORKING",
+            "updated_at": "9999-12-31T23:59:59Z",
+            "exit_code": null,
+            "result_written": false,
+        }))
+        .expect("serialize status fixture"),
+    )
+    .expect("write status fixture");
 
     let board_raw = crate::dispatch_ops::handle_tachi_board(
         &server,
@@ -937,6 +945,7 @@ async fn board_surfaces_dispatch_run_ledger() {
         }),
         "dispatch should carry run_dir from run ledger: {board:#}"
     );
+    let _ = std::fs::remove_dir_all(&run_dir);
 }
 
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────

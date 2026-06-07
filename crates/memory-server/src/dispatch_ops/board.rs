@@ -46,6 +46,25 @@ fn status_state(status: &serde_json::Value, result_written: bool) -> &'static st
     }
 }
 
+fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
+    let name = name.to_str()?;
+    let bytes = name.as_bytes();
+    if bytes.len() < 16 {
+        return None;
+    }
+    for idx in 0..=bytes.len().saturating_sub(16) {
+        let candidate = &bytes[idx..idx + 16];
+        let valid = candidate[0..8].iter().all(u8::is_ascii_digit)
+            && candidate[8] == b'T'
+            && candidate[9..15].iter().all(u8::is_ascii_digit)
+            && candidate[15] == b'Z';
+        if valid {
+            return Some(name[idx..idx + 16].to_string());
+        }
+    }
+    None
+}
+
 fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value> {
     let runs_dir = tachi_home().join("runs");
     let Ok(read_dir) = std::fs::read_dir(&runs_dir) else {
@@ -53,7 +72,11 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
     };
 
     let mut entries = read_dir.filter_map(Result::ok).collect::<Vec<_>>();
-    entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    entries.sort_by(|a, b| {
+        dispatch_timestamp_key(&b.file_name())
+            .cmp(&dispatch_timestamp_key(&a.file_name()))
+            .then_with(|| b.file_name().cmp(&a.file_name()))
+    });
 
     let target_state = map_filter_state(state_filter);
     let mut runs = Vec::new();
@@ -245,4 +268,23 @@ pub(crate) async fn handle_tachi_board(
         "tasks": tasks,
     }))
     .map_err(|e| format!("serialize board: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn dispatch_timestamp_key_extracts_embedded_timestamp() {
+        assert_eq!(
+            dispatch_timestamp_key(OsStr::new("flow_20260606T151945Z_tachi")),
+            Some("20260606T151945Z".to_string())
+        );
+        assert_eq!(
+            dispatch_timestamp_key(OsStr::new("20260607T045032Z-codex-09802a7f")),
+            Some("20260607T045032Z".to_string())
+        );
+        assert_eq!(dispatch_timestamp_key(OsStr::new("mcp-smoke-test")), None);
+    }
 }
