@@ -274,7 +274,14 @@ pub(crate) async fn handle_tachi_dispatch(
         None,
         None,
         None,
-        None,
+        Some(json!({
+            "agent": agent_norm.clone(),
+            "task": params.task.clone(),
+            "state": "TASK_STATE_WORKING",
+            "updated_at": Utc::now().to_rfc3339(),
+            "run_dir": workspace_dir.to_string_lossy(),
+            "result_written": false,
+        })),
     );
 
     // ─── Stage 1 (V2 only): generate plan via ClaudePool ────────────────
@@ -713,7 +720,17 @@ pub(crate) async fn handle_tachi_dispatch(
                 plan_duration_ms_for_spawn,
                 Some(execute_duration_ms),
                 Some(total_duration_ms),
-                None,
+                Some(json!({
+                    "agent": agent_for_watchdog.clone(),
+                    "state": match final_exit_code {
+                        Some(0) => "TASK_STATE_COMPLETED",
+                        Some(_) => "TASK_STATE_FAILED",
+                        None => "TASK_STATE_FAILED",
+                    },
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "run_dir": workspace_dir_for_spawn.to_string_lossy(),
+                    "result_written": true,
+                })),
             );
         }
 
@@ -743,7 +760,7 @@ pub(crate) async fn handle_tachi_dispatch(
         "v2": v2,
         "plan_review_status": if v2 { "approved" } else { "n/a" },
         "duration_ms_plan": plan_duration_ms,
-        "message": "Task dispatched to background. You are unblocked. Use tachi_board to check status.",
+        "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
         "suggested_complete_command": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
         "plan_file": plan_path.to_string_lossy(),
         "prompt_file": prompt_md_path.to_string_lossy(),
