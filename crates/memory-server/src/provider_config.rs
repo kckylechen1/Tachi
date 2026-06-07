@@ -6,9 +6,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::llm::LlmClient;
+use crate::llm::{LlmClient, ProviderSecret};
 use crate::status_ops::status_health::API_KEY_DEFS;
-use crate::vault_ops::load_unlocked_api_key_secrets;
+use crate::vault_ops::load_unlocked_api_key_secret_pools;
 use crate::MemoryServer;
 
 pub const VAULT_ALIAS_PREFIX: &str = "vault:";
@@ -52,43 +52,84 @@ fn provider_env_keys() -> HashSet<String> {
 }
 
 /// Load API keys from an unlocked in-process Vault session.
-pub fn vault_api_key_map_from_server(
+pub fn vault_api_key_pools_from_server(
     server: &MemoryServer,
-) -> Result<HashMap<String, String>, String> {
-    Ok(load_unlocked_api_key_secrets(server)?.into_iter().collect())
+) -> Result<HashMap<String, Vec<ProviderSecret>>, String> {
+    load_unlocked_api_key_secret_pools(server)
 }
 
 /// Load API keys via macOS Keychain + global DB (daemon/CLI when memory unlock is empty).
-pub fn vault_api_key_map_from_keychain(global_db_path: &Path) -> HashMap<String, String> {
+pub fn vault_api_key_pools_from_keychain(
+    global_db_path: &Path,
+) -> HashMap<String, Vec<ProviderSecret>> {
     crate::status_ops::status_health::load_keychain_vault_api_key_values(global_db_path)
         .unwrap_or_default()
         .into_iter()
-        .collect()
+        .fold(HashMap::new(), |mut acc, (name, value)| {
+            if let Some((prefix, _)) = parse_rotation_member_name(&name) {
+                acc.entry(prefix.to_string())
+                    .or_insert_with(Vec::new)
+                    .push(ProviderSecret {
+                        key_id: name,
+                        value,
+                    });
+            } else {
+                acc.entry(name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(ProviderSecret {
+                        key_id: name,
+                        value,
+                    });
+            }
+            acc
+        })
 }
 
-fn resolve_vault_map(
+fn resolve_vault_pools(
     server: Option<&MemoryServer>,
     global_db_path: &Path,
-) -> HashMap<String, String> {
+) -> HashMap<String, Vec<ProviderSecret>> {
     if let Some(server) = server {
-        if let Ok(map) = vault_api_key_map_from_server(server) {
+        if let Ok(map) = vault_api_key_pools_from_server(server) {
             if !map.is_empty() {
                 return map;
             }
         }
     }
-    vault_api_key_map_from_keychain(global_db_path)
+    vault_api_key_pools_from_keychain(global_db_path)
+}
+
+fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
+    pools
+        .iter()
+        .filter_map(|(name, entries)| {
+            entries
+                .first()
+                .map(|entry| (name.clone(), entry.value.clone()))
+        })
+        .collect()
+}
+
+pub(crate) fn parse_rotation_member_name(name: &str) -> Option<(&str, u32)> {
+    let (prefix, suffix) = name.rsplit_once('_')?;
+    let index = suffix.parse::<u32>().ok()?;
+    if prefix.is_empty() {
+        None
+    } else {
+        Some((prefix, index))
+    }
 }
 
 /// Apply Vault + config.env aliases into `LlmClient` and strip `vault:` placeholders from env.
 pub fn materialize_provider_secrets(
     llm: &LlmClient,
-    vault_map: &HashMap<String, String>,
+    vault_pools: &HashMap<String, Vec<ProviderSecret>>,
 ) -> Result<MaterializeReport, String> {
     llm.clear_provider_secrets();
-    let mut resolved: HashMap<String, String> = vault_map.clone();
+    let vault_map = flatten_pools(vault_pools);
+    let mut resolved_pools: HashMap<String, Vec<ProviderSecret>> = vault_pools.clone();
     let mut report = MaterializeReport {
-        from_vault: vault_map.len(),
+        from_vault: vault_pools.len(),
         ..Default::default()
     };
 
@@ -103,17 +144,24 @@ pub fn materialize_provider_secrets(
         }
 
         if let Some(vault_name) = parse_vault_alias(trimmed) {
-            let secret = resolved
+            let pool = vault_pools
                 .get(vault_name)
                 .cloned()
-                .or_else(|| vault_map.get(vault_name).cloned())
+                .or_else(|| {
+                    vault_map.get(vault_name).cloned().map(|secret| {
+                        vec![ProviderSecret {
+                            key_id: vault_name.to_string(),
+                            value: secret,
+                        }]
+                    })
+                })
                 .ok_or_else(|| {
                     format!(
                         "{key}={trimmed} in config.env but Vault secret '{vault_name}' is missing or Vault is locked. \
                          Run vault_unlock and vault_set, or store the key in Vault as '{vault_name}'."
                     )
                 })?;
-            resolved.insert(key.clone(), secret);
+            resolved_pools.insert(key.clone(), pool);
             std::env::remove_var(&key);
             report.from_alias += 1;
             report.stripped_env_placeholders += 1;
@@ -127,25 +175,31 @@ pub fn materialize_provider_secrets(
             continue;
         }
 
-        resolved.insert(key, trimmed.to_string());
+        resolved_pools.insert(
+            key.clone(),
+            vec![ProviderSecret {
+                key_id: key,
+                value: trimmed.to_string(),
+            }],
+        );
     }
 
-    report.loaded = llm.set_provider_secrets(resolved);
+    report.loaded = llm.set_provider_secret_pools(resolved_pools);
     Ok(report)
 }
 
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
     let global = server.global_db_path_buf();
-    let vault_map = resolve_vault_map(Some(server), &global);
-    materialize_provider_secrets(server.llm.as_ref(), &vault_map)
+    let vault_pools = resolve_vault_pools(Some(server), &global);
+    materialize_provider_secrets(server.llm.as_ref(), &vault_pools)
 }
 
 pub fn materialize_standalone(
     llm: &LlmClient,
     global_db_path: &Path,
 ) -> Result<MaterializeReport, String> {
-    let vault_map = resolve_vault_map(None, global_db_path);
-    materialize_provider_secrets(llm, &vault_map)
+    let vault_pools = resolve_vault_pools(None, global_db_path);
+    materialize_provider_secrets(llm, &vault_pools)
 }
 
 /// Parse `~/.tachi/config.env` (and peers) into key → value (non-empty values only).

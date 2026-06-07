@@ -40,6 +40,13 @@ const DISTILL_STALE_THRESHOLD_SECS: i64 = 36 * 3600;
 pub(crate) const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, serde::Serialize)]
+pub(crate) struct ApiKeyRotationStatus {
+    pub(crate) total_keys: i64,
+    pub(crate) current_index: i64,
+    pub(crate) strategy: String,
+}
+
+#[derive(Debug, serde::Serialize)]
 pub(crate) struct ApiKeyStatus {
     pub(crate) name: String,
     pub(crate) label: String,
@@ -54,6 +61,7 @@ pub(crate) struct ApiKeyStatus {
     pub(crate) cleanup_hint: Option<String>,
     pub(crate) drift_warning: Option<String>,
     pub(crate) inferred_invalid_provider: Option<String>,
+    pub(crate) rotation: Option<ApiKeyRotationStatus>,
 }
 
 #[derive(Debug, serde::Serialize)]
