@@ -62,6 +62,25 @@ pub(crate) async fn handle_tachi_memory(
             }
             crate::facade_search_ops::handle_tachi_search(server, search_params).await
         }
+        "get" => {
+            let id = params
+                .id
+                .clone()
+                .ok_or_else(|| "id is required when action='get'".to_string())?;
+            let body = crate::memory_ops::handle_get_memory(
+                server,
+                GetMemoryParams {
+                    id,
+                    project: params.project.clone(),
+                    include_archived: params.include_archived,
+                },
+            )
+            .await?;
+            if wants_json(params.format.as_deref()) {
+                return json_string(&parse_json_or_empty(body));
+            }
+            Ok(body)
+        }
         "save" => {
             if let Some(body) = crate::cli_client::maybe_forward_write(
                 server.global_db_path.as_path(),

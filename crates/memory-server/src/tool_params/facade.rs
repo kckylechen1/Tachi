@@ -28,6 +28,7 @@ fn tachi_memory_action_schema(
     string_enum_schema(
         &[
             "search",
+            "get",
             "save",
             "extract_facts",
             "briefing",
@@ -329,7 +330,7 @@ fn default_memory_top_k() -> usize {
 pub(crate) struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]

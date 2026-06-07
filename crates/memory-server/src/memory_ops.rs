@@ -46,6 +46,34 @@ pub(crate) async fn handle_get_memory(
         }
     }
 
+    if params.project.is_none() {
+        if let Some(project_name) = crate::memory_search_ops::resolve_workspace_named_project() {
+            if crate::memory_search_ops::named_project_db_exists(&project_name) {
+                let project_entry =
+                    server.with_named_project_store_read(&project_name, |store| {
+                        store
+                            .get_with_options(&params.id, params.include_archived)
+                            .map_err(|e| {
+                                format!(
+                                    "Failed to get memory from named project '{}': {}",
+                                    project_name, e
+                                )
+                            })
+                    })?;
+
+                if let Some(entry) = project_entry {
+                    return serde_json::to_string(&slim_entry_with_enrichment(
+                        server,
+                        &entry,
+                        DbScope::Project,
+                        Some(project_name.as_str()),
+                    ))
+                    .map_err(|e| format!("Failed to serialize: {}", e));
+                }
+            }
+        }
+    }
+
     let global_entry = server.with_global_store_read(|store| {
         store
             .get_with_options(&params.id, params.include_archived)

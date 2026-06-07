@@ -36,13 +36,17 @@ pub(crate) fn should_supersede(
     new_entry: &MemoryEntry,
     old_entry: &MemoryEntry,
     shared_count: usize,
-    symbolic_score: f64,
+    _symbolic_score: f64,
 ) -> bool {
+    let same_path = new_entry.path == old_entry.path;
+    let same_non_empty_topic =
+        !new_entry.topic.trim().is_empty() && new_entry.topic == old_entry.topic;
+
     matches!(new_entry.category.as_str(), "fact" | "preference")
         && matches!(old_entry.category.as_str(), "fact" | "preference")
         && is_newer_than(&new_entry.timestamp, &old_entry.timestamp)
         && shared_count >= 2
-        && (new_entry.topic == old_entry.topic || symbolic_score > 0.3)
+        && (same_path || same_non_empty_topic)
         && path_root(&new_entry.path) == path_root(&old_entry.path)
 }
 
@@ -287,6 +291,37 @@ mod tests {
             "2025-01-01T00:00:00Z",
             "2025-01-02T00:00:00Z"
         ));
+    }
+
+    #[test]
+    fn should_supersede_rejects_cross_path_empty_topic_facts() {
+        let mut new_entry = test_entry("new", "release prep summary mentions cleanup");
+        let mut old_entry = test_entry("old", "clean-cli dry-run implementation fact");
+        new_entry.path = "/scratch/tachi/v1.5-release-prep".to_string();
+        old_entry.path = "/scratch/tachi/clean-cli-integration".to_string();
+        new_entry.timestamp = "2026-06-06T18:53:45Z".to_string();
+        old_entry.timestamp = "2026-06-06T18:47:28Z".to_string();
+        new_entry.entities = vec!["Sigil".to_string(), "memory-server".to_string()];
+        old_entry.entities = new_entry.entities.clone();
+
+        assert!(!should_supersede(&new_entry, &old_entry, 2, 1.0));
+    }
+
+    #[test]
+    fn should_supersede_allows_same_path_or_non_empty_topic() {
+        let mut new_entry = test_entry("new", "new canonical fact");
+        let mut old_entry = test_entry("old", "old canonical fact");
+        new_entry.timestamp = "2026-06-06T18:53:45Z".to_string();
+        old_entry.timestamp = "2026-06-06T18:47:28Z".to_string();
+        new_entry.path = "/scratch/tachi/same".to_string();
+        old_entry.path = "/scratch/tachi/same".to_string();
+        assert!(should_supersede(&new_entry, &old_entry, 2, 0.0));
+
+        new_entry.path = "/scratch/tachi/new".to_string();
+        old_entry.path = "/scratch/tachi/old".to_string();
+        new_entry.topic = "release-fact".to_string();
+        old_entry.topic = "release-fact".to_string();
+        assert!(should_supersede(&new_entry, &old_entry, 2, 0.0));
     }
 
     #[test]

@@ -127,6 +127,14 @@ fn round_score(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
 
+fn text_excerpt(text: &str, max_chars: usize) -> Option<String> {
+    let compact = crate::utils::compact_text_line(text, max_chars);
+    if compact.is_empty() {
+        return None;
+    }
+    Some(compact)
+}
+
 /// Token-efficient search hit: id/path/topic/summary plus scores only.
 /// Full text and metadata remain available via `get_memory`.
 ///
@@ -149,6 +157,9 @@ pub(super) fn slim_search_result(
     }
     if !entry.summary.is_empty() {
         obj.insert("summary".into(), json!(entry.summary));
+    }
+    if let Some(excerpt) = text_excerpt(&entry.text, 480) {
+        obj.insert("excerpt".into(), json!(excerpt));
     }
     if include_metadata {
         // Always include metadata when requested — consumers like the kanban

@@ -35,8 +35,8 @@ pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
     get_access_times, get_all, is_event_processed, list_by_path, mark_event_processed,
     normalize_for_write, record_access, record_enrichment_failure, release_event_claim, search_fts,
-    search_vec, supersede_memory, try_claim_event, update_enrichment_fields, update_with_revision,
-    upsert,
+    search_symbolic_candidates, search_vec, supersede_memory, try_claim_event,
+    update_enrichment_fields, update_with_revision, upsert,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_set_enabled, pack_upsert, projection_delete,
