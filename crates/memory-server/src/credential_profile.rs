@@ -244,6 +244,10 @@ fn is_env_target(target: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+fn materializer_writes_file(kind: &str, target: &str) -> bool {
+    matches!(kind, "file_copy") || (kind == "config_overlay" && !is_env_target(target))
+}
+
 fn render_template_value(template: &serde_json::Value, secret: &str) -> serde_json::Value {
     match template {
         serde_json::Value::String(text) => serde_json::Value::String(
@@ -357,8 +361,7 @@ pub(crate) fn plan_credential_materialization(
             output: materializer_output(&materializer.kind, &target),
             status: status.to_string(),
             redacted: true,
-            would_write: matches!(materializer.kind.as_str(), "file_copy")
-                || (materializer.kind == "config_overlay" && !is_env_target(&target)),
+            would_write: materializer_writes_file(&materializer.kind, &target),
             applied: false,
             chmod: materializer.chmod.clone(),
         });
@@ -585,6 +588,60 @@ pub(crate) fn credential_materialize_report_json(
     json!(report)
 }
 
+fn is_secretish_config_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    let lower = key.to_ascii_lowercase();
+    let parts = lower
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .flat_map(|part| part.split('_'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    matches!(
+        normalized.as_str(),
+        "apikey" | "apitoken" | "token" | "accesstoken" | "refreshtoken" | "secret" | "secretkey"
+    ) || normalized.ends_with("apikey")
+        || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || parts.iter().any(|part| matches!(*part, "token" | "secret"))
+        || (parts.contains(&"api") && parts.contains(&"key"))
+}
+
+fn is_safe_secret_reference(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty()
+        || trimmed.starts_with('$')
+        || trimmed.starts_with("env:")
+        || trimmed.starts_with("vault:")
+        || trimmed.starts_with("{{")
+}
+
+fn config_contains_plaintext_secret(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            if is_secretish_config_key(key) {
+                if let Some(raw) = value.as_str() {
+                    return !is_safe_secret_reference(raw) && raw.trim().len() >= 8;
+                }
+            }
+            config_contains_plaintext_secret(value)
+        }),
+        serde_json::Value::Array(values) => values.iter().any(config_contains_plaintext_secret),
+        _ => false,
+    }
+}
+
+fn target_json_contains_plaintext_secret(target: &Path) -> Result<bool, String> {
+    let raw = fs::read_to_string(target)
+        .map_err(|e| format!("read credential config target '{}': {e}", target.display()))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse credential config target '{}': {e}", target.display()))?;
+    Ok(config_contains_plaintext_secret(&parsed))
+}
+
 pub(crate) fn doctor_credential_profile(
     profile_name: &str,
     profile: &CredentialProfile,
@@ -639,7 +696,7 @@ pub(crate) fn doctor_credential_profile(
             _ => {}
         }
 
-        if step.materializer_type == "file_copy" {
+        if materializer_writes_file(&step.materializer_type, &step.target) {
             let target = PathBuf::from(&step.target);
             if is_high_risk_file_copy_target(&target) {
                 issues.push(CredentialDoctorIssue {
@@ -679,6 +736,28 @@ pub(crate) fn doctor_credential_profile(
                             source: Some(step.resolved_secret.clone()),
                             target: Some(step.target.clone()),
                         });
+                    }
+                }
+                if step.materializer_type == "config_overlay" {
+                    match target_json_contains_plaintext_secret(&target) {
+                        Ok(true) => issues.push(CredentialDoctorIssue {
+                            severity: "high".to_string(),
+                            code: "plaintext_config_secret".to_string(),
+                            message: format!(
+                                "target '{}' appears to contain a plaintext secret; prefer env or vault references in generated configs",
+                                target.display()
+                            ),
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        }),
+                        Ok(false) => {}
+                        Err(err) => issues.push(CredentialDoctorIssue {
+                            severity: "medium".to_string(),
+                            code: "target_config_unreadable".to_string(),
+                            message: err,
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        }),
                     }
                 }
             }
