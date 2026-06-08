@@ -18,11 +18,12 @@ use crate::MemoryServer;
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-const ROUTE_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
+const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
 const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
+const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
 const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
 
 #[derive(Debug, Clone, Copy)]
@@ -482,7 +483,12 @@ pub(crate) fn handle_route_policy_proposals(
         .iter()
         .map(|policy| simulate_route_policy(policy, &performance_matrix, None))
         .collect::<Vec<_>>();
-    let proposals = build_route_policy_proposals(&current, &variants, rows.len(), limit.max(1));
+    let mut proposals = build_route_policy_proposals(&current, &variants, rows.len(), limit.max(1));
+    proposals.extend(build_loadout_evolution_proposals(
+        server,
+        &performance_matrix,
+        limit.max(1),
+    )?);
 
     server.with_global_store(|store| {
         for proposal in proposals {
@@ -492,7 +498,7 @@ pub(crate) fn handle_route_policy_proposals(
                 .to_string();
             let mut next = proposal;
             if let Some((existing, _version)) = store
-                .get_state_kv(ROUTE_POLICY_PROPOSAL_NS, &id)
+                .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, &id)
                 .map_err(|e| format!("load route policy proposal: {e}"))?
             {
                 if let Ok(existing_json) = serde_json::from_str::<Value>(&existing) {
@@ -514,7 +520,7 @@ pub(crate) fn handle_route_policy_proposals(
             let raw = serde_json::to_string(&next)
                 .map_err(|e| format!("serialize route policy proposal: {e}"))?;
             store
-                .set_state(ROUTE_POLICY_PROPOSAL_NS, &id, &raw)
+                .set_state(DISPATCH_POLICY_PROPOSAL_NS, &id, &raw)
                 .map_err(|e| format!("persist route policy proposal: {e}"))?;
         }
         Ok(())
@@ -526,7 +532,7 @@ pub(crate) fn handle_route_policy_proposals(
         .map(|value| value.to_ascii_lowercase());
     let mut records = server.with_global_store_read(|store| {
         store
-            .list_state(ROUTE_POLICY_PROPOSAL_NS)
+            .list_state(DISPATCH_POLICY_PROPOSAL_NS)
             .map_err(|e| format!("list route policy proposals: {e}"))
     })?;
     records.truncate(limit.max(1).min(100));
@@ -548,7 +554,8 @@ pub(crate) fn handle_route_policy_proposals(
 
     serde_json::to_string(&json!({
         "action": "proposals",
-        "kind": "route_policy",
+        "kind": "dispatch_policy",
+        "proposal_kinds": ["route_policy", "loadout_evolution"],
         "read_only": false,
         "requires_human_approval": true,
         "generated_from": {
@@ -561,7 +568,8 @@ pub(crate) fn handle_route_policy_proposals(
         "proposals": out,
         "next_actions": [
             "tachi_task(action='review_proposal', proposal_id=..., review_status='approved')",
-            "tachi_task(action='apply_proposals', proposal_id=..., confirm=true)"
+            "tachi_task(action='apply_proposals', proposal_id=..., confirm=true) for approved route_policy rules",
+            "approved loadout_evolution proposals wait for the profile/card projection slice"
         ],
     }))
     .map_err(|e| format!("serialize route policy proposals: {e}"))
@@ -590,7 +598,7 @@ pub(crate) fn handle_route_policy_review(
     let reviewed_at = Utc::now().to_rfc3339();
     let updated = server.with_global_store(|store| {
         let (raw, _version) = store
-            .get_state_kv(ROUTE_POLICY_PROPOSAL_NS, proposal_id)
+            .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
         let mut value: Value =
@@ -604,7 +612,7 @@ pub(crate) fn handle_route_policy_review(
         let next = serde_json::to_string(&value)
             .map_err(|e| format!("serialize route policy review: {e}"))?;
         store
-            .set_state(ROUTE_POLICY_PROPOSAL_NS, proposal_id, &next)
+            .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
             .map_err(|e| format!("persist route policy review: {e}"))?;
         Ok(value)
     })?;
@@ -635,7 +643,7 @@ pub(crate) fn handle_route_policy_apply(
     let applied_at = Utc::now().to_rfc3339();
     let updated = server.with_global_store(|store| {
         let (raw, _version) = store
-            .get_state_kv(ROUTE_POLICY_PROPOSAL_NS, proposal_id)
+            .get_state_kv(DISPATCH_POLICY_PROPOSAL_NS, proposal_id)
             .map_err(|e| format!("load route policy proposal: {e}"))?
             .ok_or_else(|| format!("route policy proposal not found: {proposal_id}"))?;
         let mut value: Value =
@@ -649,12 +657,21 @@ pub(crate) fn handle_route_policy_apply(
                 "route policy proposal {proposal_id} must be approved before apply; current status={status}"
             ));
         }
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("route_policy");
+        if kind != "route_policy" {
+            return Err(format!(
+                "apply_proposals currently persists only approved route_policy rules; {kind} proposal {proposal_id} remains approved until the MBIT/profile-card projection slice"
+            ));
+        }
         value["status"] = json!("applied");
         value["applied_at"] = json!(applied_at);
         let next = serde_json::to_string(&value)
             .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
         store
-            .set_state(ROUTE_POLICY_PROPOSAL_NS, proposal_id, &next)
+            .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
             .map_err(|e| format!("persist applied route policy proposal: {e}"))?;
         store
             .set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
@@ -1080,8 +1097,6 @@ pub(crate) fn profile_eval_feedback_json(
     profile: &DispatchProfileDef,
     limit: usize,
 ) -> Result<Value, String> {
-    const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
-
     let limit = limit.max(1);
     let rows = load_live_eval_rows(server, limit)?;
     let performance_matrix = aggregate_performance_matrix(&rows);
@@ -1752,6 +1767,204 @@ fn build_route_policy_proposals(
         }
     }
     out
+}
+
+#[derive(Default)]
+struct LoadoutSkillEvidence {
+    hits: u32,
+    verified: u32,
+    success: u32,
+    quality_sum: f64,
+    quality_count: u32,
+    task_types: HashMap<String, u32>,
+    eval_refs: Vec<String>,
+}
+
+fn build_loadout_evolution_proposals(
+    server: &MemoryServer,
+    performance_matrix: &[AgentPerformanceMatrixRow],
+    limit: usize,
+) -> Result<Vec<Value>, String> {
+    let entries = load_live_eval_entries(server, limit)?;
+    let mut out = Vec::new();
+
+    for profile in DISPATCH_PROFILES {
+        let profile_rows = performance_matrix
+            .iter()
+            .filter(|row| row.profile.as_deref() == Some(profile.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let profile_samples = sum_matrix_samples(&profile_rows);
+        if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
+            continue;
+        }
+        let failure_count = sum_matrix_failures(&profile_rows);
+        let human_override_rate =
+            weighted_matrix_rate(&profile_rows, |row| Some(row.human_override_rate)).unwrap_or(0.0);
+        let avg_retry_count =
+            weighted_matrix_rate(&profile_rows, |row| Some(row.avg_retry_count)).unwrap_or(0.0);
+        let success_rate =
+            weighted_matrix_rate(&profile_rows, |row| row.success_rate).unwrap_or(0.0);
+        let useful_rate = weighted_matrix_rate(&profile_rows, |row| row.useful_rate).unwrap_or(0.0);
+        let positive_rate = success_rate.max(useful_rate);
+
+        if failure_count > 0
+            || human_override_rate >= 0.10
+            || avg_retry_count >= 1.0
+            || positive_rate < 0.80
+        {
+            continue;
+        }
+
+        let existing_skills = profile_required_skill_ids(profile)
+            .into_iter()
+            .chain(
+                profile
+                    .forbidden_skills
+                    .iter()
+                    .map(|skill| skill.to_string()),
+            )
+            .collect::<HashSet<_>>();
+        let mut buckets: HashMap<String, LoadoutSkillEvidence> = HashMap::new();
+        for entry in &entries {
+            let Some(meta) = entry.metadata.as_object() else {
+                continue;
+            };
+            if meta.get("profile").and_then(Value::as_str) != Some(profile.name) {
+                continue;
+            }
+            let task_type = meta
+                .get("task_type")
+                .and_then(Value::as_str)
+                .unwrap_or("other")
+                .to_string();
+            let outcome = meta
+                .get("outcome")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let verified = meta
+                .get("verification_present")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let quality = meta.get("quality_score").and_then(Value::as_f64);
+            let skills = meta
+                .get("skills_used")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|skill| !skill.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+
+            for skill in skills {
+                if existing_skills.contains(&skill) {
+                    continue;
+                }
+                let evidence = buckets.entry(skill).or_default();
+                evidence.hits += 1;
+                if verified {
+                    evidence.verified += 1;
+                }
+                if matches!(outcome.as_str(), "success" | "completed") {
+                    evidence.success += 1;
+                }
+                if let Some(quality) = quality {
+                    evidence.quality_sum += quality;
+                    evidence.quality_count += 1;
+                }
+                *evidence.task_types.entry(task_type.clone()).or_insert(0) += 1;
+                if evidence.eval_refs.len() < 5 {
+                    evidence.eval_refs.push(entry.path.clone());
+                }
+            }
+        }
+
+        let min_skill_hits = (profile_samples / 2).max(3);
+        for (skill, evidence) in buckets {
+            if evidence.hits < min_skill_hits {
+                continue;
+            }
+            let verified_rate = evidence.verified as f64 / evidence.hits as f64;
+            let success_rate = evidence.success as f64 / evidence.hits as f64;
+            if verified_rate < 0.50 || success_rate < 0.80 {
+                continue;
+            }
+            let avg_quality = (evidence.quality_count > 0)
+                .then(|| evidence.quality_sum / evidence.quality_count as f64);
+            let id = format!(
+                "loadout_evolution:{}:promote_signature:{}",
+                sanitize_policy_key(profile.name),
+                sanitize_policy_key(&skill)
+            );
+            out.push(json!({
+                "proposal_id": id,
+                "kind": "loadout_evolution",
+                "status": "pending",
+                "requires_human_approval": true,
+                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "profile": profile.name,
+                "operation": "promote_observed_skill_to_signature",
+                "skill_id": skill.clone(),
+                "current_loadout": profile_skill_loadout_json(profile),
+                "proposed_patch": {
+                    "add_signature_skills": [skill.clone()],
+                    "preserve_common_skills": profile.common_skills,
+                    "preserve_forbidden_skills": profile.forbidden_skills,
+                },
+                "evidence": {
+                    "source": "live_memory_eval",
+                    "limit": limit,
+                    "profile_samples": profile_samples,
+                    "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
+                    "min_skill_hits": min_skill_hits,
+                    "skill_hits": evidence.hits,
+                    "verified_rate": round2(verified_rate),
+                    "success_rate": round2(success_rate),
+                    "avg_quality_score": avg_quality.map(round2),
+                    "profile_summary": summarize_matrix_rows(&profile_rows),
+                    "task_types": evidence.task_types,
+                    "eval_refs": evidence.eval_refs,
+                    "loadout_call": "tachi_skill(action='loadout', profile=..., limit=...)",
+                },
+                "rationale": format!(
+                    "{} appeared in {}/{} verified successful {} runs and is not part of the current sparse loadout",
+                    skill, evidence.hits, profile_samples, profile.name
+                ),
+                "projection": {
+                    "status": "pending_profile_card_projection",
+                    "note": "Human approval records the proposal; mutating built-in profile/card definitions is handled by the next MBIT projection slice."
+                }
+            }));
+        }
+    }
+
+    Ok(out)
+}
+
+fn load_live_eval_entries(
+    server: &MemoryServer,
+    limit: usize,
+) -> Result<Vec<memory_core::MemoryEntry>, String> {
+    let limit = limit.max(1);
+    let mut entries = server.with_global_store_read(|store| {
+        store
+            .list_by_path("/eval", limit, false)
+            .map_err(|e| format!("list global eval entries: {e}"))
+    })?;
+    if server.has_project_db() {
+        let mut project_entries = server.with_project_store_read(|store| {
+            store
+                .list_by_path("/eval", limit, false)
+                .map_err(|e| format!("list project eval entries: {e}"))
+        })?;
+        entries.append(&mut project_entries);
+    }
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.truncate(limit);
+    Ok(entries)
 }
 
 fn sanitize_policy_key(value: &str) -> String {

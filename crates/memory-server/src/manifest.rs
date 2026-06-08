@@ -131,6 +131,17 @@ pub fn should_skip_path(p: &Path) -> Option<&'static str> {
     {
         return Some("node_modules test fixture");
     }
+    // Short-lived smoke/UX workspaces often create Tachi project DBs under
+    // /tmp or /private/tmp. They should not become daemon-maintained DBs.
+    let path_lower = path_str.to_ascii_lowercase();
+    let under_tmp = path_lower.starts_with("/tmp/") || path_lower.starts_with("/private/tmp/");
+    if under_tmp
+        && (path_lower.contains("/.tachi/memory.db")
+            || path_lower.contains("/.tachi/project/memory.db")
+            || path_lower.contains("/tachi-recall-smoke"))
+    {
+        return Some("temporary tachi workspace");
+    }
     // generic *.test.db / *.fixture.db
     if file_name.ends_with(".test.db") {
         return Some("*.test.db");
@@ -1279,6 +1290,15 @@ mod tests {
         assert!(should_skip_path(Path::new("/some/path/foo.fixture.db")).is_some());
         // vite zread belt-and-suspenders
         assert!(should_skip_path(Path::new("/x/zread/.cache/feature-daemon-global.db")).is_some());
+        // temporary Tachi workspaces should not become daemon-maintained DBs.
+        assert!(should_skip_path(Path::new(
+            "/private/tmp/quant-hypermemory-ux/.tachi/memory.db"
+        ))
+        .is_some());
+        assert!(should_skip_path(Path::new(
+            "/private/tmp/tachi-recall-smoke.abc123/project/memory.db"
+        ))
+        .is_some());
         // Real-looking Tachi DB must NOT be skipped.
         assert!(should_skip_path(Path::new("/Users/me/.tachi/global/memory.db")).is_none());
         assert!(should_skip_path(Path::new("/repo/.tachi/memory.db")).is_none());
