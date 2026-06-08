@@ -7,6 +7,7 @@ use std::path::Path;
 
 const RUN_STALE_FALLBACK_SECS: i64 = 30 * 60;
 const RUN_STALE_GRACE_SECS: i64 = 60;
+const RUN_STALE_MAX_TIMEOUT_SECS: i64 = 30 * 24 * 60 * 60;
 
 fn tachi_home() -> PathBuf {
     if let Ok(home) = std::env::var("TACHI_HOME") {
@@ -57,6 +58,7 @@ fn status_timeout_secs(status: &Value) -> Option<i64> {
         .get("timeout_secs")
         .and_then(Value::as_i64)
         .filter(|secs| *secs > 0)
+        .map(|secs| secs.min(RUN_STALE_MAX_TIMEOUT_SECS))
 }
 
 fn stale_after_secs(status: &Value) -> i64 {

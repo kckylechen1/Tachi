@@ -1056,6 +1056,61 @@ async fn board_marks_abandoned_working_run_as_failed() {
     let _ = std::fs::remove_dir_all(&run_dir);
 }
 
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn board_caps_corrupt_huge_timeout_before_duration_math() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let dispatch_id = format!(
+        "20260608T000001Z-huge-timeout-run-ledger-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create huge-timeout run fixture");
+    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string(&serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "agent": "codex",
+            "task": "corrupt huge timeout must not panic board",
+            "state": "TASK_STATE_WORKING",
+            "updated_at": stale_updated_at,
+            "exit_code": null,
+            "result_written": false,
+            "timeout_secs": i64::MAX,
+        }))
+        .expect("serialize huge-timeout status fixture"),
+    )
+    .expect("write huge-timeout status fixture");
+
+    let failed_raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("failed".to_string()),
+            limit: Some(20),
+            project: None,
+        },
+    )
+    .await
+    .expect("board should not panic on corrupt huge timeout");
+    let failed: serde_json::Value = serde_json::from_str(&failed_raw).expect("failed board JSON");
+    assert!(
+        failed["tasks"].as_array().unwrap().iter().any(|task| {
+            task["dispatch_id"].as_str() == Some(dispatch_id.as_str())
+                && task["state"].as_str() == Some("TASK_STATE_FAILED")
+                && task["stale"].as_bool() == Some(true)
+        }),
+        "capped huge timeout should still allow stale classification: {failed:#}"
+    );
+
+    let _ = std::fs::remove_dir_all(&run_dir);
+}
+
 // ─── Phase 6: Dispatch V2 two-stage smoke test ──────────────────────────────
 //
 // Spawns the full V2 flow against a fake `claude` binary that emits a
