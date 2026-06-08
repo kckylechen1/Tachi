@@ -1,7 +1,8 @@
-//! Credential profile planning for Vault materialization.
+//! Credential profile planning and application for Vault materialization.
 //!
-//! This first slice intentionally plans and validates materialization only. It
-//! does not decrypt Vault values or write auth files.
+//! Reports remain redacted, while apply can prepare child-process env values and
+//! write guarded credential/config files after the caller supplies decrypted
+//! Vault values.
 
 use memory_core::MemoryStore;
 use serde::{Deserialize, Serialize};
@@ -229,8 +230,55 @@ fn materializer_output(kind: &str, target: &str) -> String {
         "env" => format!("env:{target}"),
         "file_copy" => format!("file:{target}"),
         "config_overlay" => format!("config_overlay:{target}"),
+        "config_content_env" => format!("config_content_env:{target}"),
         _ => format!("{kind}:{target}"),
     }
+}
+
+fn is_env_target(target: &str) -> bool {
+    let mut chars = target.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn render_template_value(template: &serde_json::Value, secret: &str) -> serde_json::Value {
+    match template {
+        serde_json::Value::String(text) => serde_json::Value::String(
+            text.replace("{{secret}}", secret)
+                .replace("{{value}}", secret),
+        ),
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(|value| render_template_value(value, secret))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), render_template_value(value, secret)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn render_config_overlay_value(
+    materializer: &CredentialMaterializer,
+    secret: &str,
+) -> Result<String, String> {
+    let Some(template) = materializer.template.as_ref() else {
+        return Ok(secret.to_string());
+    };
+    let rendered = render_template_value(template, secret);
+    serde_json::to_string(&rendered).map_err(|e| {
+        format!(
+            "serialize config_overlay template for target '{}': {e}",
+            materializer.target
+        )
+    })
 }
 
 pub(crate) fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
@@ -274,7 +322,7 @@ pub(crate) fn plan_credential_materialization(
         let target = display_target(&materializer.target);
         let known_kind = matches!(
             materializer.kind.as_str(),
-            "env" | "file_copy" | "config_overlay"
+            "env" | "file_copy" | "config_overlay" | "config_content_env"
         );
         if !known_kind {
             warnings.push(format!(
@@ -309,7 +357,8 @@ pub(crate) fn plan_credential_materialization(
             output: materializer_output(&materializer.kind, &target),
             status: status.to_string(),
             redacted: true,
-            would_write: matches!(materializer.kind.as_str(), "file_copy" | "config_overlay"),
+            would_write: matches!(materializer.kind.as_str(), "file_copy")
+                || (materializer.kind == "config_overlay" && !is_env_target(&target)),
             applied: false,
             chmod: materializer.chmod.clone(),
         });
@@ -470,10 +519,35 @@ pub(crate) fn apply_credential_materialization(
                 report.steps[idx].applied = true;
             }
             "config_overlay" => {
-                return Err(
-                    "credential materializer type 'config_overlay' is dry-run only in this slice"
-                        .to_string(),
-                );
+                let rendered = render_config_overlay_value(materializer, value)?;
+                if is_env_target(&report.steps[idx].target) {
+                    env.insert(report.steps[idx].target.clone(), rendered);
+                    report.steps[idx].status = "prepared_config_env".to_string();
+                } else {
+                    let target = PathBuf::from(&report.steps[idx].target);
+                    write_file_atomic(
+                        &target,
+                        &rendered,
+                        materializer.chmod.as_deref(),
+                        options.allow_existing,
+                    )?;
+                    report.steps[idx].status = "written".to_string();
+                }
+                report.steps[idx].would_write = false;
+                report.steps[idx].applied = true;
+            }
+            "config_content_env" => {
+                if !is_env_target(&report.steps[idx].target) {
+                    return Err(format!(
+                        "config_content_env target '{}' must be a shell env name",
+                        report.steps[idx].target
+                    ));
+                }
+                let rendered = render_config_overlay_value(materializer, value)?;
+                env.insert(report.steps[idx].target.clone(), rendered);
+                report.steps[idx].status = "prepared_config_env".to_string();
+                report.steps[idx].would_write = false;
+                report.steps[idx].applied = true;
             }
             other => {
                 return Err(format!(
