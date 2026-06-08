@@ -108,6 +108,33 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::Cleanup {
+            run_dir,
+            profile,
+            consumer,
+            dry_run: _,
+            apply,
+            mark_only,
+        } => {
+            let store = if apply {
+                open_cli_store(global_db_path)?
+            } else {
+                open_cli_store_read_only(global_db_path)?
+            };
+            let report = crate::credential_profile::cleanup_managed_credential_materializations(
+                &store,
+                &crate::credential_profile::CredentialCleanupOptions {
+                    run_dir,
+                    profile,
+                    consumer,
+                    dry_run: !apply,
+                    mark_only,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(())
+        }
+
         VaultAction::Doctor {
             profile,
             consumer,

@@ -898,12 +898,12 @@ pub(crate) enum VaultAction {
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
         /// Preview only. This is the default when --apply is not passed.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "apply")]
         dry_run: bool,
         /// Apply supported materializers. Requires vault password input.
         #[arg(long)]
         apply: bool,
-        /// Allow overwriting existing file_copy targets after creating a backup.
+        /// Allow overwriting existing file/config targets after creating a backup.
         #[arg(long)]
         allow_existing: bool,
         /// Read vault password from stdin when --apply needs decrypted values.
@@ -915,6 +915,27 @@ pub(crate) enum VaultAction {
         /// Read vault password from a local file when --apply needs decrypted values.
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+    },
+    /// Cleanup or mark Tachi-managed credential materializations.
+    Cleanup {
+        /// Limit cleanup to materializations under this run directory.
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
+        /// Limit cleanup to one credential profile.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Limit cleanup to one agent or dispatch-profile consumer.
+        #[arg(long)]
+        consumer: Option<String>,
+        /// Preview only. This is the default when --apply is not passed.
+        #[arg(long, conflicts_with = "apply")]
+        dry_run: bool,
+        /// Apply cleanup. Without this flag the command only reports candidates.
+        #[arg(long)]
+        apply: bool,
+        /// Mark matching metadata cleaned without deleting target files.
+        #[arg(long)]
+        mark_only: bool,
     },
     /// Diagnose a credential profile without decrypting or writing secrets.
     Doctor {
