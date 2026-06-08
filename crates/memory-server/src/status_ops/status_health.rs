@@ -974,6 +974,14 @@ pub(crate) fn calculate_health_score(
         .filter(|db| crate::status_ops::vector_dimension_mismatch(db))
         .count();
     score -= ((dim_mismatch_dbs as i32) * 15).min(30);
+    let enrichment_failed_dbs = dbs
+        .iter()
+        .filter(|db| db.enrichment_failed_recent > 0)
+        .count();
+    let enrichment_failed_total: usize = dbs.iter().map(|db| db.enrichment_failed_recent).sum();
+    score -= (((enrichment_failed_dbs as i32) * 5) + (enrichment_failed_total as i32 / 10)).min(20);
+    let vector_orphans: usize = dbs.iter().map(|db| db.vector_orphans).sum();
+    score -= ((vector_orphans as i32) * 3).min(10);
     if distill_marker.map(|m| m.is_stale).unwrap_or(true) {
         score -= 10;
     }

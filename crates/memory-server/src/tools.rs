@@ -1742,7 +1742,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy proposals from replay evidence; action='review_proposal': approve/reject a route-policy proposal; action='apply_proposals': persist an approved route-policy rule, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1875,6 +1875,46 @@ impl MemoryServer {
                     &file_paths,
                 )
             }
+            "route_simulate" => {
+                let mut file_paths = params.doc_paths.clone();
+                file_paths.extend(params.spec_paths.clone());
+                crate::dispatch_profile::handle_route_simulation(
+                    self,
+                    params.limit.unwrap_or(500),
+                    params.task.as_deref(),
+                    params.risk.as_deref(),
+                    &file_paths,
+                )
+            }
+            "proposals" => crate::dispatch_profile::handle_route_policy_proposals(
+                self,
+                params.limit.unwrap_or(500),
+                params.state_filter.as_deref(),
+            ),
+            "review_proposal" => {
+                let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
+                    "proposal_id is required when action='review_proposal'".to_string()
+                })?;
+                let review_status = params.review_status.as_deref().ok_or_else(|| {
+                    "review_status is required when action='review_proposal'".to_string()
+                })?;
+                crate::dispatch_profile::handle_route_policy_review(
+                    self,
+                    proposal_id,
+                    review_status,
+                    params.notes.as_deref(),
+                )
+            }
+            "apply_proposals" => {
+                let proposal_id = params.proposal_id.as_deref().ok_or_else(|| {
+                    "proposal_id is required when action='apply_proposals'".to_string()
+                })?;
+                crate::dispatch_profile::handle_route_policy_apply(
+                    self,
+                    proposal_id,
+                    params.confirm,
+                )
+            }
             "merge" => {
                 if params.pr_ref.is_some() || params.issue_ref.is_some() {
                     return Err(
@@ -1935,7 +1975,7 @@ impl MemoryServer {
                 Ok(result)
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'complete', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'complete', 'board', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;

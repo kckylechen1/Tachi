@@ -191,6 +191,8 @@ async fn render_one(
             let pct = db.vector_coverage * 100.0;
             let marker = if crate::status_ops::vector_dimension_mismatch(db)
                 || (db.memory_total > 0 && db.vector_coverage < 0.9)
+                || db.enrichment_failed_recent > 0
+                || db.vector_orphans > 0
             {
                 "[!]"
             } else if db.vector_missing > 0 {

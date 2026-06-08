@@ -482,6 +482,11 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("plan")));
     assert!(values.contains(&json!("dispatch")));
     assert!(values.contains(&json!("complete")));
+    assert!(values.contains(&json!("recommend")));
+    assert!(values.contains(&json!("route_simulate")));
+    assert!(values.contains(&json!("proposals")));
+    assert!(values.contains(&json!("review_proposal")));
+    assert!(values.contains(&json!("apply_proposals")));
     assert!(values.contains(&json!("intake")));
     assert!(values.contains(&json!("link_pr")));
     assert!(values.contains(&json!("pr_status")));

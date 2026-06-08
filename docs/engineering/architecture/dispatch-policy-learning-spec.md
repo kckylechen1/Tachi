@@ -46,6 +46,8 @@ invent calls that are not exposed yet.
 | feature intake and board | `tachi_task(action="intake"|"briefing")` | implemented |
 | profile/card listing | `tachi_task(action="profiles"|"profile"|"card")` | implemented |
 | route recommendation | `tachi_task(action="recommend")` | implemented |
+| route policy replay | `tachi_task(action="route_simulate")` | implemented |
+| route policy proposals | `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` | implemented |
 | dispatch by profile | `tachi_task(action="dispatch", profile=...)` | implemented |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
@@ -215,6 +217,11 @@ As of 2026-06-09, the baseline includes:
 - built-in dispatch profiles and MBIT-like profile cards;
 - profile recommendation with deterministic risk classification;
 - live eval performance matrix consumption by recommendation;
+- read-only route simulation over recent live eval rows for `current`,
+  `cost_sensitive`, and `quality_first` policy variants;
+- route-policy proposal lifecycle through `tachi_task(action="proposals")`,
+  `review_proposal`, and `apply_proposals`, with human approval required before
+  durable route-policy rules are persisted;
 - sensitive file-context risk escalation;
 - skill loadout fields on profiles;
 - `tachi_skill(action="bundle"|"loadout")` maps worker tasks and dispatch
@@ -237,12 +244,10 @@ The next policy-learning slices should focus on evidence and replay:
   artifact and can be disabled;
 - extend skill loadout results with completion/eval feedback once routing
   policy proposals consume enough samples;
-- write route policy memory or wiki rules with links to supporting `/eval`
-  evidence and human approvals;
-- add route simulation over recent live eval rows for `current`,
-  `cost_sensitive`, and `quality_first` policies;
-- add proposal actions for MBIT/card evolution and require human approval before
-  routing-material changes are applied;
+- teach `recommend` how to consume approved route-policy rules after enough
+  samples and review history exist;
+- project approved MBIT/card evolution proposals into profile/card definitions
+  after the route-policy rule loader is stable;
 - add regression tests for high-risk review routing, low-risk fast-check routing,
   human override weighting, retry weighting, and MBIT card parsing.
 
