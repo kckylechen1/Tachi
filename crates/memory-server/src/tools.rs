@@ -16,8 +16,8 @@ use crate::capability_ops::{
     handle_recommend_toolchain,
 };
 use crate::copilot_ops::{
-    handle_tachi_progress_check, handle_tachi_task_brief, handle_tachi_wiki_search,
-    handle_tachi_wiki_write,
+    handle_tachi_feature_briefing, handle_tachi_progress_check, handle_tachi_task_brief,
+    handle_tachi_wiki_search, handle_tachi_wiki_write,
 };
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
@@ -1704,7 +1704,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge) ─────────
 
     #[tool(
-        description = "Task management facade for agent work. action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: plan → recommend → dispatch → board → complete/eval → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: briefing → plan → recommend → dispatch → board → complete/eval → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1727,6 +1727,7 @@ impl MemoryServer {
                 };
                 return handle_tachi_task_brief(self, brief_params).await;
             }
+            "briefing" => return handle_tachi_feature_briefing(self, &params).await,
             "dispatch" => {
                 if params.agent.is_none() && params.profile.is_none() {
                     return Err("agent or profile is required when action='dispatch'".to_string());
@@ -1809,7 +1810,7 @@ impl MemoryServer {
                 crate::dispatch_ops::handle_approve_merge(merge_params).await
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', or 'merge'.",
                 params.action
             )),
         }?;

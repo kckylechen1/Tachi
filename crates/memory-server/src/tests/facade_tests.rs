@@ -456,6 +456,19 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .contains(&json!("readiness")));
 }
 
+#[test]
+fn tachi_task_action_schema_declares_feature_briefing() {
+    let schema = rmcp::schemars::schema_for!(TachiTaskParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    let values = action["enum"].as_array().expect("action enum");
+    assert!(values.contains(&json!("briefing")));
+    assert!(values.contains(&json!("plan")));
+    assert!(values.contains(&json!("dispatch")));
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_memory_progress_writes_append_only_jsonl() {
