@@ -685,6 +685,7 @@ fn pr_snapshot_from_status(status: &Value) -> Option<PrSnapshot> {
         state: github
             .get("pr_state")
             .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
             .map(str::to_string),
         url: github
             .get("pr_url")
@@ -694,15 +695,18 @@ fn pr_snapshot_from_status(status: &Value) -> Option<PrSnapshot> {
         head_ref: github
             .get("head_ref")
             .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
             .map(str::to_string),
         base_ref: github
             .get("base_ref")
             .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
             .map(str::to_string),
         review_decision: review_state(status),
         mergeable: github
             .get("mergeable")
             .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
             .map(str::to_string),
     })
 }
@@ -740,6 +744,7 @@ fn github_string(status: &Value, key: &str) -> Option<String> {
         .get("github")
         .and_then(|github| github.get(key))
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
 }
 
@@ -749,6 +754,7 @@ fn review_state(status: &Value) -> Option<String> {
         .and_then(|github| github.get("review"))
         .and_then(|review| review.get("state"))
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
 }
 
