@@ -567,7 +567,7 @@ fn attach_provider_refresh_warning(server: &MemoryServer, body: String) -> Resul
     }
 }
 
-pub(super) fn read_unlocked_vault_secret(
+pub(crate) fn read_unlocked_vault_secret(
     server: &MemoryServer,
     name: &str,
     agent_id: Option<&str>,

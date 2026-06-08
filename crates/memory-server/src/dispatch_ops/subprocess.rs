@@ -268,6 +268,7 @@ mod tests {
             command: Vec::new(),
             project: None,
             stage: None,
+            credential_profiles: Vec::new(),
             issue_ref: None,
             pr_ref: None,
             flow_id: None,
