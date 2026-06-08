@@ -34,6 +34,7 @@ use crate::manifest::{DbRole, Manifest};
 const STUCK_THRESHOLD_SECS: i64 = 600;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
+const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
 const DISTILL_STALE_THRESHOLD_SECS: i64 = 36 * 3600;
 
@@ -366,15 +367,18 @@ fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
 }
 
 fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
-    let total: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| {
-        row.get::<_, i64>(0).map(|n| n as usize)
-    })?;
+    let total: usize = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE source != ?1",
+        [FOUNDRY_RECALL_CACHE_SOURCE],
+        |row| row.get::<_, i64>(0).map(|n| n as usize),
+    )?;
     let with_vec: usize = conn
         .query_row(
             "SELECT COUNT(DISTINCT v.id)
              FROM memories_vec v
-             JOIN memories m ON m.id = v.id",
-            [],
+             JOIN memories m ON m.id = v.id
+             WHERE m.source != ?1",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
@@ -1441,6 +1445,68 @@ mod tests {
             status_health::infer_provider_from_auth_error("network timeout"),
             None
         );
+    }
+
+    fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: format!("/scratch/status/{id}"),
+            summary: "summary".to_string(),
+            text: "status vector health test memory".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "status".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: source.to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn vector_health_excludes_recall_cache_rows_from_coverage() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let db = dir.path().join("memory.db");
+        let mut store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
+
+        store
+            .upsert(&vector_health_entry(
+                "normal-with-vector",
+                "manual",
+                Some(vec![0.1; EXPECTED_EMBEDDING_DIM]),
+            ))
+            .expect("insert vector row");
+        store
+            .upsert(&vector_health_entry("normal-missing", "manual", None))
+            .expect("insert missing row");
+        store
+            .upsert(&vector_health_entry(
+                "cache-missing",
+                FOUNDRY_RECALL_CACHE_SOURCE,
+                None,
+            ))
+            .expect("insert cache row");
+
+        let health = vector_health(store.connection()).expect("vector health");
+        assert_eq!(health.total, 2);
+        assert_eq!(health.with_vec, 1);
+        assert_eq!(health.missing, 1);
     }
 
     #[test]

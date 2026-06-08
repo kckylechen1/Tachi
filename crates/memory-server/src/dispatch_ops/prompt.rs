@@ -1,7 +1,14 @@
 use super::*;
 use crate::tool_params::GetMemoryParams;
+use serde_json::{json, Value};
 
 // ─── Prompt assembly (v2) ─────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub(crate) struct PromptAssembly {
+    pub prompt: String,
+    pub capability_bundle: Value,
+}
 
 /// Resolve effective skills list, applying stage-based defaults when the caller
 /// did not explicitly provide skills.
@@ -76,7 +83,10 @@ async fn prompt_row_text(
         .map(str::to_string)
 }
 
-pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
+pub(crate) async fn assemble_prompt_with_trace(
+    server: &MemoryServer,
+    params: &TachiDispatchParams,
+) -> PromptAssembly {
     let mut parts: Vec<String> = Vec::new();
 
     let agent = params.agent.as_deref().unwrap_or("unknown");
@@ -102,8 +112,36 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     // Resolve skills with stage defaults
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
 
-    if params.auto_capability_bundle.unwrap_or(false) {
-        if let Ok(raw) = crate::capability_ops::handle_prepare_capability_bundle(
+    let capability_requested = params.auto_capability_bundle.unwrap_or(false);
+    let capability_source = if params.auto_capability_bundle.is_some() {
+        "params"
+    } else {
+        "unset"
+    };
+    let mut capability_bundle = json!({
+        "status": if capability_requested { "requested" } else { "disabled" },
+        "requested": capability_requested,
+        "disabled": !capability_requested,
+        "injected": false,
+        "host": agent,
+        "query": params.task,
+        "source": capability_source,
+        "primary_skill": Value::Null,
+        "supporting_capabilities": [],
+        "packs": [],
+        "host_tools": [],
+        "activation_steps": [],
+        "rationale": Value::Null,
+        "section": Value::Null,
+        "error": Value::Null,
+        "reason": if capability_requested {
+            "auto_capability_bundle=true"
+        } else {
+            "auto_capability_bundle=false"
+        },
+    });
+    if capability_requested {
+        match crate::capability_ops::handle_prepare_capability_bundle(
             server,
             crate::tool_params::PrepareCapabilityBundleParams {
                 query: params.task.clone(),
@@ -116,15 +154,85 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
         )
         .await
         {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(block) = value
-                    .get("bundle")
-                    .and_then(|bundle| bundle.get("section"))
-                    .and_then(|section| section.get("block"))
-                    .and_then(|block| block.as_str())
-                {
-                    parts.push(block.to_string());
+            Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+                Ok(value) => {
+                    let block = value
+                        .get("bundle")
+                        .and_then(|bundle| bundle.get("section"))
+                        .and_then(|section| section.get("block"))
+                        .and_then(|block| block.as_str());
+                    if let Some(block) = block {
+                        parts.push(block.to_string());
+                    }
+                    capability_bundle = json!({
+                        "status": if block.is_some() { "injected" } else { "prepared" },
+                        "requested": true,
+                        "disabled": false,
+                        "injected": block.is_some(),
+                        "host": value.get("host").cloned().unwrap_or_else(|| json!(agent)),
+                        "query": value.get("query").cloned().unwrap_or_else(|| json!(params.task)),
+                        "source": capability_source,
+                        "primary_skill": value.pointer("/bundle/primary_skill").cloned().unwrap_or(Value::Null),
+                        "supporting_capabilities": value.pointer("/bundle/supporting_capabilities").cloned().unwrap_or_else(|| json!([])),
+                        "packs": value.pointer("/bundle/packs").cloned().unwrap_or_else(|| json!([])),
+                        "host_tools": value.pointer("/bundle/host_tools").cloned().unwrap_or_else(|| json!([])),
+                        "activation_steps": value.pointer("/bundle/activation_steps").cloned().unwrap_or_else(|| json!([])),
+                        "rationale": value.pointer("/bundle/rationale").cloned().unwrap_or(Value::Null),
+                        "section": value.pointer("/bundle/section").cloned().unwrap_or(Value::Null),
+                        "error": Value::Null,
+                        "reason": if block.is_some() {
+                            "capability bundle section injected into prompt"
+                        } else {
+                            "capability bundle prepared without section block"
+                        },
+                    });
                 }
+                Err(error) => {
+                    capability_bundle = json!({
+                        "status": "failed",
+                        "requested": true,
+                        "disabled": false,
+                        "injected": false,
+                        "host": agent,
+                        "query": params.task,
+                        "source": capability_source,
+                        "primary_skill": Value::Null,
+                        "supporting_capabilities": [],
+                        "packs": [],
+                        "host_tools": [],
+                        "activation_steps": [],
+                        "rationale": Value::Null,
+                        "section": Value::Null,
+                        "error": {
+                            "kind": "parse_error",
+                            "message": error.to_string(),
+                        },
+                        "reason": "capability bundle JSON parse failed",
+                    });
+                }
+            },
+            Err(error) => {
+                capability_bundle = json!({
+                    "status": "failed",
+                    "requested": true,
+                    "disabled": false,
+                    "injected": false,
+                    "host": agent,
+                    "query": params.task,
+                    "source": capability_source,
+                    "primary_skill": Value::Null,
+                    "supporting_capabilities": [],
+                    "packs": [],
+                    "host_tools": [],
+                    "activation_steps": [],
+                    "rationale": Value::Null,
+                    "section": Value::Null,
+                    "error": {
+                        "kind": "prepare_error",
+                        "message": error,
+                    },
+                    "reason": "capability bundle preparation failed",
+                });
             }
         }
     }
@@ -335,7 +443,15 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
         );
     }
 
-    prompt
+    PromptAssembly {
+        prompt,
+        capability_bundle,
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatchParams) -> String {
+    assemble_prompt_with_trace(server, params).await.prompt
 }
 
 fn render_skill_invocation_contract(

@@ -37,4 +37,4 @@ pub(crate) use merge::{
     validate_static_merge_safety, worktree_equals_repo_root,
 };
 #[cfg(test)]
-pub(crate) use prompt::assemble_prompt;
+pub(crate) use prompt::{assemble_prompt, assemble_prompt_with_trace};
