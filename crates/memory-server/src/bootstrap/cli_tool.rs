@@ -632,12 +632,42 @@ where
     Fut: std::future::Future<Output = Result<String, String>>,
 {
     if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
-        match crate::cli_client::call_daemon_tool(&info, tool_name, args.clone()).await {
-            Ok(body) => return Ok(body),
-            Err(e) => {
+        if !crate::cli_client::daemon_matches_requested_dbs(
+            &info,
+            global_db,
+            project_db.map(|path| path.as_path()),
+        ) {
+            if let Some(named_project) =
+                project_db.and_then(|path| crate::path_utils::named_project_for_db_path(path))
+            {
+                let mut daemon_args = args.clone();
+                daemon_args
+                    .entry("project".to_string())
+                    .or_insert_with(|| json!(named_project.clone()));
                 eprintln!(
-                    "[cli] daemon dispatch failed ({e}); falling back to in-process execution"
+                    "[cli] daemon DB scope differs; forwarding via named project '{named_project}'"
                 );
+                match crate::cli_client::call_daemon_tool(&info, tool_name, daemon_args).await {
+                    Ok(body) => return Ok(body),
+                    Err(e) => {
+                        eprintln!(
+                            "[cli] daemon named-project dispatch failed ({e}); falling back to in-process execution"
+                        );
+                    }
+                }
+            } else {
+                eprintln!(
+                    "[cli] daemon DB scope differs from requested CLI scope; executing in-process"
+                );
+            }
+        } else {
+            match crate::cli_client::call_daemon_tool(&info, tool_name, args.clone()).await {
+                Ok(body) => return Ok(body),
+                Err(e) => {
+                    eprintln!(
+                        "[cli] daemon dispatch failed ({e}); falling back to in-process execution"
+                    );
+                }
             }
         }
     }

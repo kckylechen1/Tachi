@@ -38,12 +38,8 @@ pub(crate) async fn save_memory_checkpoint(
     server: &MemoryServer,
     mut params: TachiMemoryParams,
 ) -> Result<(String, Option<String>, bool, Option<String>), String> {
-    if let Some(body) = crate::cli_client::maybe_forward_write(
-        server.global_db_path.as_path(),
-        "tachi_memory",
-        &params,
-    )
-    .await
+    if let Some(body) =
+        crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params).await
     {
         return Ok((body, None, true, params.summary.clone()));
     }

@@ -131,7 +131,8 @@ async fn render_one(
             println!(
                 "      version={} port={} global_db={}",
                 version.as_deref().unwrap_or("unknown"),
-                port.map(|p| p.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                port.map(|p| p.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 global_db.as_deref().unwrap_or("unknown")
             );
         }
@@ -465,16 +466,10 @@ pub(crate) async fn run_daemon(
             let pid = read_pid_file(&lock_path);
             let alive = pid.map(process_alive).unwrap_or(false);
             let pid_info = crate::status_ops::read_daemon_pid_info(app_home);
-            let mismatch = pid
-                .filter(|_| alive)
-                .and_then(|lock_pid| {
-                    let global_db = app_home.join("global").join("memory.db");
-                    crate::status_ops::daemon_mismatch_reason(
-                        lock_pid,
-                        pid_info.as_ref(),
-                        &global_db,
-                    )
-                });
+            let mismatch = pid.filter(|_| alive).and_then(|lock_pid| {
+                let global_db = app_home.join("global").join("memory.db");
+                crate::status_ops::daemon_mismatch_reason(lock_pid, pid_info.as_ref(), &global_db)
+            });
             if json_out {
                 println!(
                     "{}",

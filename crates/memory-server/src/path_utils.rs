@@ -132,6 +132,57 @@ pub(crate) fn named_project_from_path(db_path: &Path) -> Option<String> {
     rel.to_str().map(str::to_string)
 }
 
+/// Resolve any DB path that is addressable through Plan C named-project
+/// routing (`~/.tachi/projects/<name>/memory.db`) back to `<name>`.
+///
+/// This accepts both the Plan C path itself and repo-local `.tachi/memory.db`
+/// targets when the Plan C symlink points at the same canonical DB.
+pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
+    if let Some(name) = named_project_from_path(db_path) {
+        return Some(name);
+    }
+
+    let canonical = std::fs::canonicalize(db_path).ok()?;
+
+    if db_path.file_name().and_then(|name| name.to_str()) == Some("memory.db") {
+        if let Some(project_root) = db_path.parent().and_then(|parent| {
+            (parent.file_name().and_then(|name| name.to_str()) == Some(".tachi"))
+                .then(|| parent.parent())
+                .flatten()
+        }) {
+            if let Some(name) = plan_c_dir_name_from_root(project_root) {
+                let named_path = plan_c_global_db_path(&name);
+                if std::fs::canonicalize(&named_path)
+                    .map(|path| path == canonical)
+                    .unwrap_or(false)
+                {
+                    return Some(name);
+                }
+            }
+        }
+    }
+
+    let projects_dir = tachi_home().join("projects");
+    let entries = std::fs::read_dir(projects_dir).ok()?;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let candidate = entry.path().join("memory.db");
+        if std::fs::canonicalize(&candidate)
+            .map(|path| path == canonical)
+            .unwrap_or(false)
+        {
+            return entry.file_name().to_str().map(str::to_string);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +285,29 @@ mod tests {
     fn named_project_from_path_rejects_external_projects_dir() {
         let path = PathBuf::from("/data/tachi/projects/hyperion/memory.db");
         assert!(named_project_from_path(&path).is_none());
+    }
+
+    #[test]
+    fn named_project_for_db_path_accepts_plan_c_symlink_target() {
+        with_env_lock(|| {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let saved = std::env::var_os("TACHI_HOME");
+            let tachi_home = tmp.path().join("home");
+            std::env::set_var("TACHI_HOME", &tachi_home);
+
+            let repo = tmp.path().join("Quant Analyzer");
+            let local_db = repo.join(".tachi/memory.db");
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+            std::fs::write(&local_db, b"").expect("local db placeholder");
+            ensure_plan_c_symlink(&local_db, &repo);
+
+            assert_eq!(
+                named_project_for_db_path(&local_db).as_deref(),
+                Some("Quant_Analyzer")
+            );
+
+            restore_env("TACHI_HOME", saved);
+        });
     }
 
     #[test]

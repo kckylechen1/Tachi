@@ -6,8 +6,11 @@ pub(super) async fn run_backfill_vectors(
     vault_db_path: &PathBuf,
     batch_size: usize,
     dry_run: bool,
+    include_cache: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::llm::LlmClient;
+
+    const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
     let db_str = db_path.to_str().ok_or_else(|| {
         std::io::Error::new(
@@ -17,13 +20,34 @@ pub(super) async fn run_backfill_vectors(
     })?;
 
     let store = MemoryStore::open(db_str)?;
-    let (total, with_vec) = store.vector_stats()?;
+    let skip_recall_cache = !include_cache;
+    let (total, with_vec) = if skip_recall_cache {
+        let total: i64 = store.connection().query_row(
+            "SELECT COUNT(*) FROM memories WHERE source != ?1",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
+            |r| r.get(0),
+        )?;
+        let with_vec: i64 = store.connection().query_row(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories_vec v
+             JOIN memories m ON m.id = v.id
+             WHERE m.source != ?1",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
+            |r| r.get(0),
+        )?;
+        (total, with_vec)
+    } else {
+        store.vector_stats()?
+    };
     let missing = total - with_vec;
 
     println!("DB:      {}", db_path.display());
     println!("Total:   {total}");
     println!("Vectors: {with_vec}");
     println!("Missing: {missing}");
+    if skip_recall_cache {
+        println!("Scope:   durable rows (recall cache excluded; pass --include-cache to include)");
+    }
 
     if missing == 0 {
         println!("\n✅ All entries have vectors!");
@@ -38,8 +62,9 @@ pub(super) async fn run_backfill_vectors(
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
     crate::provider_config::materialize_standalone(&llm, vault_db_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let entries = crate::vector_backfill::list_missing_vector_entries(&store, false, None)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let entries =
+        crate::vector_backfill::list_missing_vector_entries(&store, skip_recall_cache, None)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();

@@ -82,11 +82,8 @@ pub(crate) async fn handle_tachi_memory(
             Ok(body)
         }
         "save" => {
-            if let Some(body) = crate::cli_client::maybe_forward_write(
-                server.global_db_path.as_path(),
-                "tachi_memory",
-                &params,
-            )
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
             .await
             {
                 return Ok(body);
@@ -147,11 +144,8 @@ pub(crate) async fn handle_tachi_memory(
             Ok(format_save_result(&body, params.path.as_deref()))
         }
         "extract_facts" => {
-            if let Some(body) = crate::cli_client::maybe_forward_write(
-                server.global_db_path.as_path(),
-                "tachi_memory",
-                &params,
-            )
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
             .await
             {
                 return Ok(body);

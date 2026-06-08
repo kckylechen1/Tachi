@@ -427,7 +427,7 @@ fn classify_route(
             return Route::Project;
         }
     }
-    if let Some(name) = crate::path_utils::named_project_from_path(db_path) {
+    if let Some(name) = crate::path_utils::named_project_for_db_path(db_path) {
         return Route::NamedProject(name);
     }
     if entry.allow_write
@@ -542,6 +542,40 @@ mod tests {
             Route::NamedProject(n) => assert_eq!(n, "sigil"),
             other => panic!("expected NamedProject(sigil), got {other:?}"),
         }
+        if let Some(v) = saved {
+            std::env::set_var("TACHI_HOME", v);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
+    fn classify_route_recognizes_plan_c_symlink_target() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tmp");
+        let saved = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", tmp.path().join("home"));
+
+        let repo = tmp.path().join("Quant Analyzer");
+        let local_db = repo.join(".tachi/memory.db");
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+        std::fs::write(&local_db, b"").expect("local db placeholder");
+        crate::path_utils::ensure_plan_c_symlink(&local_db, &repo);
+
+        let global = tmp.path().join("global/memory.db");
+        let r = classify_route(
+            &entry(DbRole::Project, "project:Quant_Analyzer"),
+            &local_db,
+            &global,
+            None,
+        );
+        match r {
+            Route::NamedProject(n) => assert_eq!(n, "Quant_Analyzer"),
+            other => panic!("expected NamedProject(Quant_Analyzer), got {other:?}"),
+        }
+
         if let Some(v) = saved {
             std::env::set_var("TACHI_HOME", v);
         } else {

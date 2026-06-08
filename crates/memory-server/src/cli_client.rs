@@ -33,6 +33,7 @@ const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) struct DaemonInfo {
     pub url: String,
     pub global_db: Option<String>,
+    pub project_db: Option<String>,
     pub version: Option<String>,
 }
 
@@ -61,6 +62,10 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
             url,
             global_db: parsed
                 .get("global_db")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            project_db: parsed
+                .get("project_db")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
             version: parsed
@@ -161,6 +166,15 @@ fn daemon_version_matches(info: &DaemonInfo) -> bool {
     }
 }
 
+pub(crate) fn daemon_matches_requested_dbs(
+    info: &DaemonInfo,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> bool {
+    daemon_global_db_matches(info, global_db_path)
+        && daemon_project_db_matches(info, project_db_path)
+}
+
 fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
     let Some(daemon_global) = info.global_db.as_deref() else {
         return true;
@@ -174,6 +188,28 @@ fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
     std::fs::canonicalize(global_db_path)
         .ok()
         .zip(std::fs::canonicalize(daemon_global).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
+}
+
+fn daemon_project_db_matches(info: &DaemonInfo, project_db_path: Option<&Path>) -> bool {
+    match (info.project_db.as_deref(), project_db_path) {
+        (None, None) => true,
+        (Some(daemon_project), Some(requested_project)) if !daemon_project.is_empty() => {
+            paths_match(requested_project, Path::new(daemon_project))
+        }
+        (Some(daemon_project), None) => daemon_project.is_empty(),
+        _ => false,
+    }
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left.as_os_str() == right.as_os_str() {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
         .map(|(left, right)| left == right)
         .unwrap_or(false)
 }
@@ -214,8 +250,24 @@ fn remap_daemon_tool(
 /// Forward a write tool to the running daemon when available.
 /// Returns `Some(body)` on success. Returns `None` when already in daemon
 /// mode, no daemon is listening, or forward failed (caller continues in-process).
+pub(crate) async fn maybe_forward_server_write<T: serde::Serialize>(
+    server: &MemoryServer,
+    tool_name: &str,
+    params: &T,
+) -> Option<String> {
+    let project_db_path = server.project_db_path_buf();
+    maybe_forward_write(
+        server.global_db_path.as_path(),
+        project_db_path.as_deref(),
+        tool_name,
+        params,
+    )
+    .await
+}
+
 pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
     global_db_path: &Path,
+    project_db_path: Option<&Path>,
     tool_name: &str,
     params: &T,
 ) -> Option<String> {
@@ -235,7 +287,7 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
         );
         return None;
     }
-    if !daemon_global_db_matches(&info, global_db_path) {
+    if !daemon_matches_requested_dbs(&info, global_db_path, project_db_path) {
         return None;
     }
     match call_daemon_tool(&info, tool_name, args).await {
@@ -256,4 +308,71 @@ pub(crate) fn build_in_process_server(
 ) -> Result<MemoryServer, Box<dyn std::error::Error>> {
     let server = MemoryServer::new(global_db.clone(), project_db.cloned())?;
     Ok(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn daemon(global: Option<&Path>, project: Option<&Path>) -> DaemonInfo {
+        DaemonInfo {
+            url: "http://127.0.0.1:6919/mcp".to_string(),
+            global_db: global.map(|path| path.display().to_string()),
+            project_db: project.map(|path| path.display().to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }
+    }
+
+    #[test]
+    fn daemon_scope_matches_same_global_and_project() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let project = Path::new("/tmp/tachi/project/memory.db");
+        let info = daemon(Some(global), Some(project));
+
+        assert!(daemon_matches_requested_dbs(&info, global, Some(project)));
+    }
+
+    #[test]
+    fn daemon_scope_rejects_different_project_db() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let daemon_project = Path::new("/tmp/tachi/sigil/memory.db");
+        let requested_project = Path::new("/tmp/tachi/quant/memory.db");
+        let info = daemon(Some(global), Some(daemon_project));
+
+        assert!(!daemon_matches_requested_dbs(
+            &info,
+            global,
+            Some(requested_project)
+        ));
+    }
+
+    #[test]
+    fn daemon_scope_rejects_project_daemon_for_no_project_request() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let project = Path::new("/tmp/tachi/sigil/memory.db");
+        let info = daemon(Some(global), Some(project));
+
+        assert!(!daemon_matches_requested_dbs(&info, global, None));
+    }
+
+    #[test]
+    fn daemon_scope_accepts_global_only_when_both_have_no_project() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let info = daemon(Some(global), None);
+
+        assert!(daemon_matches_requested_dbs(&info, global, None));
+    }
+
+    #[test]
+    fn daemon_scope_rejects_missing_daemon_project_for_project_request() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let requested_project = Path::new("/tmp/tachi/quant/memory.db");
+        let info = daemon(Some(global), None);
+
+        assert!(!daemon_matches_requested_dbs(
+            &info,
+            global,
+            Some(requested_project)
+        ));
+    }
 }

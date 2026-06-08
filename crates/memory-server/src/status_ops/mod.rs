@@ -115,7 +115,10 @@ pub(crate) struct RecentEval {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum DaemonStatus {
-    Running { pid: i32, lock_path: PathBuf },
+    Running {
+        pid: i32,
+        lock_path: PathBuf,
+    },
     Foreign {
         pid: i32,
         lock_path: PathBuf,
@@ -124,7 +127,10 @@ pub(crate) enum DaemonStatus {
         port: Option<u16>,
         global_db: Option<String>,
     },
-    StalePid { pid: i32, lock_path: PathBuf },
+    StalePid {
+        pid: i32,
+        lock_path: PathBuf,
+    },
     None,
 }
 
@@ -396,7 +402,9 @@ pub(crate) fn daemon_mismatch_reason(
     };
     if let Some(pid) = info.pid {
         if pid != lock_pid {
-            return Some(format!("daemon.pid pid={pid} does not match lock pid={lock_pid}"));
+            return Some(format!(
+                "daemon.pid pid={pid} does not match lock pid={lock_pid}"
+            ));
         }
     }
     match info.version.as_deref() {
@@ -736,7 +744,7 @@ fn is_orphan_entry(
             return false;
         }
     }
-    if crate::path_utils::named_project_from_path(db_path).is_some() {
+    if crate::path_utils::named_project_for_db_path(db_path).is_some() {
         return false;
     }
     !(entry.allow_write

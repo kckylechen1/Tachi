@@ -93,12 +93,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
-        if let Some(body) = crate::cli_client::maybe_forward_write(
-            self.global_db_path.as_path(),
-            "save_memory",
-            &params,
-        )
-        .await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await
         {
             return Ok(body);
         }
@@ -112,12 +108,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
-        if let Some(body) = crate::cli_client::maybe_forward_write(
-            self.global_db_path.as_path(),
-            "save_memory",
-            &params,
-        )
-        .await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await
         {
             return Ok(body);
         }
@@ -131,12 +123,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, String> {
-        if let Some(body) = crate::cli_client::maybe_forward_write(
-            self.global_db_path.as_path(),
-            "remember",
-            &params,
-        )
-        .await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "remember", &params).await
         {
             return Ok(body);
         }
@@ -411,12 +399,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<WikiWriteParams>,
     ) -> Result<String, String> {
-        if let Some(body) = crate::cli_client::maybe_forward_write(
-            self.global_db_path.as_path(),
-            "tachi_wiki_write",
-            &params,
-        )
-        .await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "tachi_wiki_write", &params).await
         {
             return Ok(body);
         }
@@ -514,12 +498,8 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<ExtractFactsParams>,
     ) -> Result<String, String> {
-        if let Some(body) = crate::cli_client::maybe_forward_write(
-            self.global_db_path.as_path(),
-            "extract_facts",
-            &params,
-        )
-        .await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "extract_facts", &params).await
         {
             return Ok(body);
         }
@@ -1555,12 +1535,8 @@ impl MemoryServer {
                 handle_wiki_read(self, &path, &project)
             }
             "write" => {
-                if let Some(body) = crate::cli_client::maybe_forward_write(
-                    self.global_db_path.as_path(),
-                    "tachi_wiki",
-                    &params,
-                )
-                .await
+                if let Some(body) =
+                    crate::cli_client::maybe_forward_server_write(self, "tachi_wiki", &params).await
                 {
                     return Ok(body);
                 }
