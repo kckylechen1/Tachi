@@ -446,7 +446,14 @@ impl LlmClient {
         };
 
         vault_value.or_else(|| {
+            let cooldowns = self
+                .provider_cooldowns
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             keys.iter().find_map(|key| {
+                if cooldowns.contains_key(*key) {
+                    return None;
+                }
                 Self::first_env(&[*key])
                     .filter(|value| !crate::provider_config::is_vault_alias(value))
                     .map(|value| SelectedProviderSecret {
@@ -1334,6 +1341,223 @@ mod tests {
         let raw = serde_json::to_string(&statuses).expect("serialize statuses");
         assert!(!raw.contains("secret-one"));
         assert!(!raw.contains("secret-two"));
+    }
+
+    #[test]
+    fn env_fallback_skips_rate_limited_key() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_ENV_COOLDOWN";
+        std::env::set_var(KEY, "env-secret");
+        let client = LlmClient::new().expect("client should initialize");
+
+        assert_eq!(
+            client.provider_secret_for_tests(&[KEY]),
+            Some("env-secret".to_string())
+        );
+        client.mark_provider_key_rate_limited_for_tests(KEY, Some(60));
+
+        assert!(
+            client.provider_secret_for_tests(&[KEY]).is_none(),
+            "env fallback should not reuse a key while it is cooling down"
+        );
+        std::env::remove_var(KEY);
+    }
+
+    #[test]
+    fn all_pool_keys_rate_limited_still_returns_bounded_fallback_key() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_ALL_COOLDOWN";
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "secret-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "secret-two".to_string(),
+                },
+            ],
+        );
+        client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_1"), Some(60));
+        client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_2"), Some(60));
+
+        assert!(
+            client.provider_key_id_for_tests(&[KEY]).is_some(),
+            "pool fallback should return a bounded key instead of panicking when all members are cooling down"
+        );
+    }
+
+    #[test]
+    fn expired_cooldown_reinstates_pool_key() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_EXPIRED_COOLDOWN";
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![ProviderSecret {
+                key_id: format!("{KEY}_1"),
+                value: "secret-one".to_string(),
+            }],
+        );
+        let key_id = format!("{KEY}_1");
+        client.mark_provider_key_rate_limited_for_tests(&key_id, Some(1));
+        std::thread::sleep(Duration::from_millis(1100));
+
+        assert_eq!(
+            client.provider_key_id_for_tests(&[KEY]).as_deref(),
+            Some(key_id.as_str())
+        );
+        assert!(client
+            .provider_pool_statuses()
+            .into_iter()
+            .find(|status| status.logical_name == KEY)
+            .is_some_and(|status| status.rate_limited_keys.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn chat_lane_retries_with_next_pool_key_after_429() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            response::IntoResponse,
+            routing::post,
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        struct EnvRestore {
+            key: &'static str,
+            original: Option<std::ffi::OsString>,
+        }
+
+        impl EnvRestore {
+            fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+                let original = std::env::var_os(key);
+                std::env::set_var(key, value);
+                Self { key, original }
+            }
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                if let Some(value) = self.original.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let seen_auth = Arc::new(Mutex::new(Vec::<String>::new()));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(
+                    |State(seen_auth): State<Arc<Mutex<Vec<String>>>>,
+                     headers: HeaderMap,
+                     Json(_body): Json<Value>| async move {
+                        let auth = headers
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("")
+                            .to_string();
+                        seen_auth
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(auth.clone());
+                        if auth == "Bearer pool-secret-one" {
+                            return (
+                                StatusCode::TOO_MANY_REQUESTS,
+                                [("retry-after", "120")],
+                                "rate limited",
+                            )
+                                .into_response();
+                        }
+                        Json(serde_json::json!({
+                            "choices": [
+                                {
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": "ok from second key"
+                                    },
+                                    "finish_reason": "stop"
+                                }
+                            ],
+                            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                        }))
+                        .into_response()
+                    },
+                ),
+            )
+            .with_state(seen_auth.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider");
+        let port = listener.local_addr().expect("mock provider addr").port();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock provider");
+        });
+
+        let _base_guard = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            "EXTRACT_API_KEY",
+            vec![
+                ProviderSecret {
+                    key_id: "EXTRACT_API_KEY_1".to_string(),
+                    value: "pool-secret-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: "EXTRACT_API_KEY_2".to_string(),
+                    value: "pool-secret-two".to_string(),
+                },
+            ],
+        );
+
+        let out = client
+            .call_extract_llm("system", "user", None, 0.0, 16)
+            .await
+            .expect("second pool key should succeed after first 429");
+        assert_eq!(out, "ok from second key");
+
+        let seen = seen_auth.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(
+            seen,
+            vec![
+                "Bearer pool-secret-one".to_string(),
+                "Bearer pool-secret-two".to_string()
+            ]
+        );
+
+        let status = client
+            .provider_pool_statuses()
+            .into_iter()
+            .find(|status| status.logical_name == "EXTRACT_API_KEY")
+            .expect("provider pool status should include extract key");
+        assert_eq!(status.total_keys, 2);
+        assert_eq!(status.available_keys, 1);
+        assert_eq!(status.rate_limited_keys[0].key_id, "EXTRACT_API_KEY_1");
+        assert!(status.rate_limited_keys[0].remaining_seconds >= 1);
+        assert_eq!(
+            client
+                .provider_key_id_for_tests(&["EXTRACT_API_KEY"])
+                .as_deref(),
+            Some("EXTRACT_API_KEY_2")
+        );
+
+        let raw = serde_json::to_string(&status).expect("serialize status");
+        assert!(!raw.contains("pool-secret-one"));
+        assert!(!raw.contains("pool-secret-two"));
+
+        server_task.abort();
     }
 
     #[test]
