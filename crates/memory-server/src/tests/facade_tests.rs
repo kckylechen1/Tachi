@@ -785,9 +785,12 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         parsed["runtime"]["provider_pools"][0]["logical_name"],
         json!("VOYAGE_API_KEY")
     );
-    assert_eq!(parsed["provider_pools"][0]["available_keys"], json!(1));
     assert_eq!(
-        parsed["provider_pools"][0]["rate_limited_keys"][0]["key_id"],
+        parsed["runtime"]["provider_pools"][0]["available_keys"],
+        json!(1)
+    );
+    assert_eq!(
+        parsed["runtime"]["provider_pools"][0]["rate_limited_keys"][0]["key_id"],
         json!("VOYAGE_API_KEY_1")
     );
     assert!(
