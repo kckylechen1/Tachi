@@ -82,10 +82,11 @@ fn tachi_task_action_schema(
             "link_pr",
             "pr_status",
             "release_note",
+            "ux_matrix",
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -1082,7 +1083,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
@@ -1090,6 +1091,8 @@ pub(crate) struct TachiTaskParams {
     /// action="pr_status" previews GitHub PR safe-merge status and may persist flow status.
     /// action="release_note" synthesizes a release/changelog note from a flow or PR and writes
     /// release_note.md when flow_id is supplied.
+    /// action="ux_matrix" returns a feature workflow UX checklist and writes ux_matrix.json
+    /// when flow_id is supplied.
     /// action="build_references" previews the issue/doc/related reference array.
     /// action="close_loop" writes durable wiki closure through the task lifecycle.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
