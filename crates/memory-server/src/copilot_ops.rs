@@ -837,6 +837,28 @@ fn feature_briefing_query(params: &TachiTaskParams) -> String {
 fn canonical_doc_refs(params: &TachiTaskParams) -> Vec<Value> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
+    if let Ok((flow_docs, flow_specs)) =
+        crate::task_lifecycle::flow_status_doc_refs(params.flow_id.as_deref())
+    {
+        for path in flow_specs {
+            push_doc_ref(
+                &mut out,
+                &mut seen,
+                "flow_spec",
+                &path,
+                params.cwd.as_deref(),
+            );
+        }
+        for path in flow_docs {
+            push_doc_ref(
+                &mut out,
+                &mut seen,
+                "flow_doc",
+                &path,
+                params.cwd.as_deref(),
+            );
+        }
+    }
     for path in params
         .spec_paths
         .iter()
