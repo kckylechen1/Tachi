@@ -886,6 +886,24 @@ pub(crate) enum VaultAction {
     Lock,
     /// Show vault status (initialized, locked/unlocked, entry count).
     Status,
+    /// Dry-run a credential profile materialization plan without exposing secret values.
+    Materialize {
+        /// Credential profile name to materialize.
+        #[arg(long)]
+        profile: String,
+        /// Agent or dispatch-profile consumer id requesting the credential.
+        #[arg(long)]
+        consumer: String,
+        /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+        /// Preview only. This is the default for the first credential-profile slice.
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply materialization. Not implemented in this first dry-run slice.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Export encrypted Vault rows to an iCloud-compatible sync bundle.
     SyncExport {
         /// Output bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.

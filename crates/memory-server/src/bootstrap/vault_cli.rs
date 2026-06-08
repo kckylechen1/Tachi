@@ -40,6 +40,44 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::Materialize {
+            profile,
+            consumer,
+            config,
+            dry_run: _,
+            apply,
+        } => {
+            if apply {
+                return Err(
+                    "credential materialize --apply is not implemented yet; run without --apply for a redacted dry-run plan"
+                        .into(),
+                );
+            }
+
+            let (config_path, profile_def) = if let Some(path) = config {
+                let profile_def =
+                    crate::credential_profile::load_credential_profile_from_path(&path, &profile)?;
+                (path, profile_def)
+            } else {
+                crate::credential_profile::find_credential_profile(
+                    &crate::credential_profile::default_credentials_dir(),
+                    &profile,
+                )?
+            };
+
+            let store = open_cli_store_read_only(global_db_path)?;
+            let report = crate::credential_profile::plan_credential_materialization(
+                &profile,
+                &profile_def,
+                &consumer,
+                &store,
+            )?;
+            let mut body = crate::credential_profile::credential_materialize_report_json(&report);
+            body["config_path"] = serde_json::json!(config_path.to_string_lossy());
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            Ok(())
+        }
+
         VaultAction::SyncStatus { path } => {
             let path = super::vault_sync::resolve_vault_sync_path(path)?;
             let status = super::vault_sync::vault_sync_status(&path)?;
