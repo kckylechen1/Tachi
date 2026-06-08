@@ -25,7 +25,7 @@ brew tap kckylechen1/tachi && brew install tachi
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.2/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)" -- --skip-plugin
 ```
 
 ### Verify Installation
@@ -156,7 +156,7 @@ Tachi uses SQLite with zero external dependencies:
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)"
 ```
 
 This will:

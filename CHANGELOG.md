@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-06-08
+
+Patch release for verification-ledger merge gates and background-check workflow integration.
+
+### Added
+
+- `tachi_verify` records background verification ledgers under `.tachi/runs/<flow_id>/verification.json`.
+- Briefing output now surfaces recent verification gate state so leaders can see what background checks already proved.
+- Standard, coordinate, and focused agent profiles expose `tachi_verify` for worker-driven verification reporting.
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, and `@chaoxlabs/tachi-node` versions are aligned to `1.5.3`.
+- Installer URLs across READMEs and `docs/INSTALL.md` now point at the `v1.5.3` release tag.
+- `tachi_gh(action="safe_merge")` can consume required same-head Tachi verification evidence when a `flow_id` is supplied.
+
+### Fixed
+
+- Missing, mismatched, or skipped required verification items without matching `head_sha` are treated as stale instead of green for merge gates.
+- Recent verification summaries cap metadata-sorted candidate scans before parsing ledger JSON.
+
 ## [1.5.2] - 2026-06-08
 
 Patch release for safe merge gate correctness and agent-facing merge workflow clarity.

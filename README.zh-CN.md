@@ -77,13 +77,13 @@ Tachi 不仅是工具集线器，更是标准 Workflow 的“主板”。通过�
 > 将下方链接复制到你的 AI 对话中，它会自动阅读安装指南并完成全部配置。
 >
 > ```
-> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.2/docs/INSTALL.md
+> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/docs/INSTALL.md
 > ```
 
 ### 方式二：一键脚本安装
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.2/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)"
 ```
 
 安装脚本将自动：
@@ -134,7 +134,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
 1. 一键安装 Tachi + OpenClaw 扩展（推荐）：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.2/scripts/install.sh)"
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)"
 
    该脚本会自动：
    - 通过 Homebrew 安装或升级 `tachi`
