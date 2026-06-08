@@ -695,27 +695,12 @@ pub(crate) fn handle_route_policy_apply(
                     .get("operation")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                if operation != "promote_observed_skill_to_signature" {
+                if !matches!(
+                    operation,
+                    "promote_observed_skill_to_signature" | "add_evidence_backed_passive_trait"
+                ) {
                     return Err(format!(
                         "unsupported loadout_evolution operation for {proposal_id}: {operation}"
-                    ));
-                }
-                let skill_id = value
-                    .get("skill_id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|skill| !skill.is_empty())
-                    .map(str::to_string)
-                    .ok_or_else(|| {
-                        format!("loadout_evolution proposal {proposal_id} missing skill_id")
-                    })?;
-                if profile
-                    .forbidden_skills
-                    .iter()
-                    .any(|skill| *skill == skill_id)
-                {
-                    return Err(format!(
-                        "loadout_evolution proposal {proposal_id} targets forbidden skill {skill_id}"
                     ));
                 }
 
@@ -735,20 +720,88 @@ pub(crate) fn handle_route_policy_apply(
                     })
                 };
 
-                let baseline_skills = profile_required_skill_ids(profile);
-                if baseline_skills.iter().any(|skill| skill == &skill_id) {
-                    return Err(format!(
-                        "loadout_evolution proposal {proposal_id} targets existing baseline skill {skill_id}"
-                    ));
-                }
                 let mut overlay_skills =
                     profile_projected_signature_skills_from_overlay(profile, Some(&overlay));
-                let already_projected = overlay_skills.iter().any(|skill| skill == &skill_id);
+                let mut overlay_traits =
+                    profile_projected_passive_traits_from_overlay(profile, Some(&overlay));
+                let mut added_signature_skills = Vec::new();
+                let mut added_passive_traits = Vec::new();
+                let already_projected = match operation {
+                    "promote_observed_skill_to_signature" => {
+                        let skill_id = value
+                            .get("skill_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|skill| !skill.is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| {
+                                format!("loadout_evolution proposal {proposal_id} missing skill_id")
+                            })?;
+                        if profile
+                            .forbidden_skills
+                            .iter()
+                            .any(|skill| *skill == skill_id)
+                        {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets forbidden skill {skill_id}"
+                            ));
+                        }
+                        let baseline_skills = profile_required_skill_ids(profile);
+                        if baseline_skills.iter().any(|skill| skill == &skill_id) {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets existing baseline skill {skill_id}"
+                            ));
+                        }
+                        let already_projected =
+                            overlay_skills.iter().any(|skill| skill == &skill_id);
 
-                if !overlay_skills.iter().any(|skill| skill == &skill_id) {
-                    overlay_skills.push(skill_id.clone());
-                }
+                        if !already_projected {
+                            overlay_skills.push(skill_id.clone());
+                        }
+                        added_signature_skills.push(skill_id);
+                        already_projected
+                    }
+                    "add_evidence_backed_passive_trait" => {
+                        let trait_id = value
+                            .get("trait_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|trait_id| !trait_id.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                value
+                                    .get("proposed_patch")
+                                    .and_then(|patch| patch.get("add_passive_traits"))
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::trim)
+                                    .find(|trait_id| !trait_id.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "loadout_evolution proposal {proposal_id} missing trait_id"
+                                )
+                            })?;
+                        if profile.passive_traits.iter().any(|item| *item == trait_id) {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets existing baseline passive trait {trait_id}"
+                            ));
+                        }
+                        let already_projected =
+                            overlay_traits.iter().any(|item| item == &trait_id);
+                        if !already_projected {
+                            overlay_traits.push(trait_id.clone());
+                        }
+                        added_passive_traits.push(trait_id);
+                        already_projected
+                    }
+                    _ => unreachable!("unsupported operation checked above"),
+                };
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
+                crate::skill_policy::dedupe_preserve_order(&mut overlay_traits);
 
                 let mut source_proposals = overlay
                     .get("source_proposal_ids")
@@ -764,6 +817,7 @@ pub(crate) fn handle_route_policy_apply(
                 overlay["profile"] = json!(profile.name);
                 overlay["kind"] = json!("profile_card_loadout_overlay");
                 overlay["add_signature_skills"] = json!(overlay_skills);
+                overlay["add_passive_traits"] = json!(overlay_traits);
                 overlay["source_proposal_ids"] = json!(source_proposals);
                 overlay["updated_at"] = json!(applied_at);
                 overlay["last_applied_proposal_id"] = json!(proposal_id);
@@ -780,7 +834,8 @@ pub(crate) fn handle_route_policy_apply(
                     "namespace": PROFILE_CARD_OVERLAY_NS,
                     "key": profile.name,
                     "already_projected": already_projected,
-                    "added_signature_skills": [skill_id],
+                    "added_signature_skills": added_signature_skills,
+                    "added_passive_traits": added_passive_traits,
                     "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
                 });
                 let next = serde_json::to_string(&value)
@@ -1269,7 +1324,9 @@ pub(crate) fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value 
     json!({
         "common_skills": profile.common_skills,
         "signature_skills": profile.signature_skills,
+        "projected_signature_skills": [],
         "passive_traits": profile.passive_traits,
+        "projected_passive_traits": [],
         "forbidden_skills": profile.forbidden_skills,
         "projection": {
             "status": "baseline",
@@ -1284,6 +1341,8 @@ pub(crate) fn profile_skill_loadout_json_for_server(
     let overlay = load_profile_overlay(server, profile.name)?;
     let projected_signature_skills =
         profile_projected_signature_skills_from_overlay(profile, overlay.as_ref());
+    let projected_passive_traits =
+        profile_projected_passive_traits_from_overlay(profile, overlay.as_ref());
     let mut signature_skills = profile
         .signature_skills
         .iter()
@@ -1291,6 +1350,13 @@ pub(crate) fn profile_skill_loadout_json_for_server(
         .collect::<Vec<_>>();
     signature_skills.extend(projected_signature_skills.iter().cloned());
     crate::skill_policy::dedupe_preserve_order(&mut signature_skills);
+    let mut passive_traits = profile
+        .passive_traits
+        .iter()
+        .map(|trait_id| trait_id.to_string())
+        .collect::<Vec<_>>();
+    passive_traits.extend(projected_passive_traits.iter().cloned());
+    crate::skill_policy::dedupe_preserve_order(&mut passive_traits);
     let source_proposal_ids = overlay
         .as_ref()
         .and_then(|overlay| overlay.get("source_proposal_ids"))
@@ -1301,7 +1367,8 @@ pub(crate) fn profile_skill_loadout_json_for_server(
         "common_skills": profile.common_skills,
         "signature_skills": signature_skills,
         "projected_signature_skills": projected_signature_skills,
-        "passive_traits": profile.passive_traits,
+        "passive_traits": passive_traits,
+        "projected_passive_traits": projected_passive_traits,
         "forbidden_skills": profile.forbidden_skills,
         "projection": {
             "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
@@ -1344,6 +1411,29 @@ fn profile_projected_signature_skills_from_overlay(
         .collect::<Vec<_>>();
     crate::skill_policy::dedupe_preserve_order(&mut skills);
     skills
+}
+
+fn profile_projected_passive_traits_from_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let Some(overlay) = overlay else {
+        return Vec::new();
+    };
+    let baseline = profile.passive_traits.iter().collect::<HashSet<_>>();
+    let mut traits = overlay
+        .get("add_passive_traits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|trait_id| !trait_id.is_empty())
+        .filter(|trait_id| !baseline.contains(trait_id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut traits);
+    traits
 }
 
 fn load_profile_overlay(server: &MemoryServer, profile: &str) -> Result<Option<Value>, String> {
@@ -2093,6 +2183,17 @@ fn build_loadout_evolution_proposals(
                     .map(|skill| skill.to_string()),
             )
             .collect::<HashSet<_>>();
+        let existing_passive_traits = {
+            let loadout = profile_skill_loadout_json_for_server(server, profile)?;
+            loadout
+                .get("passive_traits")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<HashSet<_>>()
+        };
         let mut buckets: HashMap<String, LoadoutSkillEvidence> = HashMap::new();
         for entry in &entries {
             let Some(meta) = entry.metadata.as_object() else {
@@ -2151,6 +2252,16 @@ fn build_loadout_evolution_proposals(
         }
 
         let min_skill_hits = (profile_samples / 2).max(3);
+        for proposal in build_passive_trait_evolution_proposals(
+            profile,
+            &profile_rows,
+            profile_samples,
+            &existing_passive_traits,
+            limit,
+            min_skill_hits,
+        ) {
+            out.push(proposal);
+        }
         for (skill, evidence) in buckets {
             if evidence.hits < min_skill_hits {
                 continue;
@@ -2203,13 +2314,116 @@ fn build_loadout_evolution_proposals(
                 ),
                 "projection": {
                     "status": "pending_profile_card_projection",
-                    "note": "Human approval records the proposal; mutating built-in profile/card definitions is handled by the next MBIT projection slice."
+                    "note": "Human approval records the proposal; apply_proposals projects approved changes into the profile/card overlay."
                 }
             }));
         }
     }
 
     Ok(out)
+}
+
+fn build_passive_trait_evolution_proposals(
+    profile: &DispatchProfileDef,
+    profile_rows: &[AgentPerformanceMatrixRow],
+    profile_samples: u32,
+    existing_passive_traits: &HashSet<String>,
+    limit: usize,
+    min_task_hits: u32,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut proposed_traits = HashSet::new();
+    for row in profile_rows {
+        if row.samples < min_task_hits {
+            continue;
+        }
+        if row.failure_count > 0
+            || row.verification_rate < 0.50
+            || row.human_override_rate >= 0.10
+            || row.avg_retry_count >= 1.0
+            || row.success_rate.or(row.useful_rate).unwrap_or(0.0) < 0.80
+        {
+            continue;
+        }
+        let Some((trait_id, trait_label)) = passive_trait_for_task_type(&row.task_type) else {
+            continue;
+        };
+        if existing_passive_traits.contains(trait_id) {
+            continue;
+        }
+        if !proposed_traits.insert(trait_id.to_string()) {
+            continue;
+        }
+        let id = format!(
+            "loadout_evolution:{}:add_passive_trait:{}",
+            sanitize_policy_key(profile.name),
+            sanitize_policy_key(trait_id)
+        );
+        out.push(json!({
+            "proposal_id": id,
+            "kind": "loadout_evolution",
+            "status": "pending",
+            "requires_human_approval": true,
+            "created_or_refreshed_at": Utc::now().to_rfc3339(),
+            "profile": profile.name,
+            "operation": "add_evidence_backed_passive_trait",
+            "trait_id": trait_id,
+            "trait_label": trait_label,
+            "current_loadout": profile_skill_loadout_json(profile),
+            "proposed_patch": {
+                "add_passive_traits": [trait_id],
+                "preserve_signature_skills": profile.signature_skills,
+                "preserve_forbidden_skills": profile.forbidden_skills,
+            },
+            "evidence": {
+                "source": "live_memory_eval",
+                "limit": limit,
+                "profile_samples": profile_samples,
+                "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
+                "min_task_hits": min_task_hits,
+                "task_type": row.task_type,
+                "task_samples": row.samples,
+                "verification_rate": round2(row.verification_rate),
+                "success_rate": row.success_rate.map(round2),
+                "useful_rate": row.useful_rate.map(round2),
+                "avg_retry_count": round2(row.avg_retry_count),
+                "human_override_rate": round2(row.human_override_rate),
+                "profile_summary": summarize_matrix_rows(profile_rows),
+                "loadout_call": "tachi_skill(action='loadout', profile=..., limit=...)",
+            },
+            "rationale": format!(
+                "{} has {} clean verified {} samples; add passive trait {}",
+                profile.name, row.samples, row.task_type, trait_id
+            ),
+            "projection": {
+                "status": "pending_profile_card_projection",
+                "note": "Human approval records the proposal; apply_proposals projects approved passive traits into the profile/card overlay."
+            }
+        }));
+    }
+    out
+}
+
+fn passive_trait_for_task_type(task_type: &str) -> Option<(&'static str, &'static str)> {
+    match task_type {
+        "plan_request" => Some((
+            "evidence_backed_planning",
+            "Repeated verified planning success; keep plan-first behavior prominent.",
+        )),
+        "review_request" => Some((
+            "evidence_backed_review_gate",
+            "Repeated verified review success; keep blocker/evidence review behavior prominent.",
+        )),
+        "fix_request" | "refactor_request" | "migration_request" => Some((
+            "evidence_backed_change_control",
+            "Repeated verified change work; keep bounded-diff and regression-control behavior prominent.",
+        )),
+        "test_request" => Some((
+            "evidence_backed_verification",
+            "Repeated verified test work; keep verification-first behavior prominent.",
+        )),
+        _ => None,
+    }
 }
 
 fn load_live_eval_entries(
