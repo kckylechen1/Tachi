@@ -1305,6 +1305,129 @@ async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
 }
 
 #[test]
+#[allow(clippy::await_holding_lock)]
+fn tachi_task_dispatch_marker_updates_flow_status_idempotently() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let flow_id = "flow_20260608T000007Z_dispatch_marker_test";
+    let dispatch_id = "20260608T000007Z-custom-marker";
+
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "custom",
+            "profile": "deepseek_explore",
+            "task": "read-only review",
+        }),
+    )
+    .expect("mark dispatch");
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "custom",
+            "profile": "deepseek_explore",
+            "task": "read-only review",
+        }),
+    )
+    .expect("mark dispatch idempotently");
+    assert!(
+        crate::task_lifecycle::mark_task_dispatch(flow_id, "../bad", json!({})).is_err(),
+        "dispatch marker ids must stay filename-safe"
+    );
+
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    assert_eq!(status["dispatch_ids"], json!([dispatch_id]));
+    assert_eq!(status["stage"], json!("dispatch"));
+    assert_eq!(status["state"], json!("dispatched"));
+    let card_path = status["artifacts"]["dispatches"][dispatch_id]
+        .as_str()
+        .expect("dispatch card path");
+    assert!(
+        std::path::Path::new(card_path).exists(),
+        "dispatch card should exist: {status:#}"
+    );
+    assert_eq!(
+        status["dispatch_cards"].as_array().map(Vec::len),
+        Some(1),
+        "dispatch card list should not duplicate entries: {status:#}"
+    );
+    let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+    assert!(events.contains("\"event\":\"dispatch_linked\""), "{events}");
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let flow_id = "flow_20260608T000008Z_dispatch_card_test";
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    std::fs::create_dir_all(&run_dir).expect("create flow run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string_pretty(&json!({
+            "flow_id": flow_id,
+            "dispatch_ids": [],
+        }))
+        .expect("serialize status"),
+    )
+    .expect("seed status");
+
+    let mut params = dispatch_params(Some("custom"), "smoke flow dispatch marker");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "print('ok')".to_string(),
+    ];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.profile = Some("glm_51_impl".to_string());
+    params.flow_id = Some(flow_id.to_string());
+    params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    assert!(
+        status["dispatch_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(dispatch_id))),
+        "flow status should include dispatch id {dispatch_id}: {status:#}"
+    );
+    assert!(
+        status["artifacts"]["dispatches"][dispatch_id]
+            .as_str()
+            .is_some_and(|path| path.ends_with(".json")),
+        "flow status should link compact dispatch card: {status:#}"
+    );
+    let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+    assert!(
+        events.contains(dispatch_id) && events.contains("\"event\":\"dispatch_linked\""),
+        "{events}"
+    );
+}
+
+#[test]
 fn tachi_task_pr_status_parses_repo_number_and_pr_ref() {
     let mut params = task_params("pr_status");
     params.repo = Some("kckylechen1/tachi".to_string());
