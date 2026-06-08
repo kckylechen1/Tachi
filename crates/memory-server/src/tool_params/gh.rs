@@ -31,20 +31,23 @@ pub(crate) struct TachiGhParams {
         deserialize_with = "super::coerce::opt_u32_from_string_or_number"
     )]
     pub limit: Option<u32>,
-    /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash")
+    /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash").
+    /// Applies only to the GitHub PR merge path, not local worktree merging.
     #[serde(default)]
     pub merge_strategy: Option<String>,
-    /// When true, safe_merge evaluates the gate but does NOT call `gh pr merge` even if Ready.
-    /// Defaults to true unless confirm=true is supplied.
+    /// When true, safe_merge returns a preview and does NOT call `gh pr merge`
+    /// even if the gate is Ready. Defaults to true unless confirm=true is supplied.
     #[serde(default)]
     pub dry_run: Option<bool>,
     /// Explicit confirmation required to execute `gh pr merge` when the gate is Ready.
+    /// Use confirm=false or dry_run=true for a preflight-only preview.
     #[serde(default)]
     pub confirm: bool,
     /// Optional Tachi flow id; when provided, safe_merge persists status + event to .tachi/runs/<flow_id>/
     #[serde(default)]
     pub flow_id: Option<String>,
     /// Merge gate policy mode: permissive | standard | strict. Defaults to standard.
+    /// Standard waits on missing checks or missing review decisions instead of treating them as green.
     #[serde(default)]
     pub merge_policy: Option<String>,
     /// Optional author/login substring for pr_review_digest. Defaults to "gemini".

@@ -78,7 +78,7 @@ fn tachi_task_action_schema(
             "board",
             "merge",
         ],
-        "Required Tachi task facade action.",
+        "Required Tachi task facade action. action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
         generator,
     )
 }
@@ -1060,6 +1060,8 @@ pub(crate) struct TachiSkillParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
     /// Action: "plan", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
+    /// action="merge" is local dispatched worktree git merge only; use
+    /// tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
     /// from the task, risk, and live eval evidence.
     #[schemars(schema_with = "tachi_task_action_schema")]
@@ -1147,8 +1149,12 @@ pub(crate) struct TachiTaskParams {
     pub state_filter: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
-    // merge fields
+    // merge fields. These apply only to local dispatch worktree merge via
+    // approve_merge; GitHub PR gates/merges go through tachi_gh safe_merge.
     #[serde(default)]
+    #[schemars(
+        description = "Local dispatched worktree path to merge. Do not pass a GitHub PR ref here; use tachi_gh(action='safe_merge') for PR gates/merges."
+    )]
     pub worktree: Option<String>,
     #[serde(default)]
     pub branch: Option<String>,

@@ -24,6 +24,19 @@ It should compose existing infrastructure:
 - `tachi_gh` for GitHub lifecycle actions.
 - `tachi_complete` for distillation after completion.
 
+## Merge tools have separate ownership
+
+Tachi has two merge paths and agents must not mix them:
+
+| Situation | Tool | Scope |
+| --- | --- | --- |
+| A dispatched worker produced a local git worktree branch that the leader reviewed | `tachi_task(action="merge")` or `approve_merge` | Local `git merge` and optional worktree removal only |
+| A GitHub pull request needs CI/review preflight or an audited PR merge | `tachi_gh(action="safe_merge")` | GitHub PR gate; calls `gh pr merge` only when `confirm=true` and `dry_run!=true` |
+
+`tachi_gh(action="safe_merge")` defaults to preview mode. In standard policy it waits on missing checks or missing review decisions, and a supplied `flow_id` writes GitHub merge state plus events into `.tachi/runs/<flow_id>/`.
+
+`tachi_task(action="merge")` rejects GitHub-shaped inputs such as `repo`, `pr_ref`, or `issue_ref`; those belong to `tachi_gh(action="safe_merge")`.
+
 ## Meta skills are workflow gates
 
 Superpowers and Gastown-style workflow SOPs are mandatory shell gates, not optional discoverable skills.

@@ -53,6 +53,14 @@ fn tachi_task_schema_advertises_recommend_and_profiles() {
         action_description.contains("dispatch"),
         "tachi_task.action schema must still advertise dispatch: {action_description}"
     );
+    assert!(
+        action_description.contains("local dispatched worktree git merge only"),
+        "tachi_task.action schema must distinguish local worktree merge from GitHub PR merge: {action_description}"
+    );
+    assert!(
+        action_description.contains("tachi_gh(action='safe_merge')"),
+        "tachi_task.action schema must route GitHub PR merges to safe_merge: {action_description}"
+    );
 }
 
 #[tokio::test]

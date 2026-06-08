@@ -1,7 +1,7 @@
 use crate::gh_safe_merge::{
-    evaluate_merge_gate, evaluate_merge_gate_with_policy, ChecksState, GhClient, GhError,
-    MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
-    PrLifecycleState, PrState, ReviewDecision,
+    evaluate_merge_gate_with_policy, ChecksState, GhClient, GhError, MergeDecision,
+    MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable, PrLifecycleState,
+    PrState, ReviewDecision,
 };
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
@@ -1094,6 +1094,10 @@ fn classify_gh_error(raw: &str) -> GhError {
     }
 }
 
+fn is_no_checks_reported(raw: &str) -> bool {
+    raw.to_ascii_lowercase().contains("no checks reported")
+}
+
 /// Production `GhClient` that wraps the sanitized `gh` subprocess pipeline
 /// already used by the rest of `tachi_gh`. Holds a borrowed `&MemoryServer`
 /// so the vault token is read fresh per call.
@@ -1116,7 +1120,7 @@ impl<'a> GhClient for CliGhClient<'a> {
             .args(["--repo", repo])
             .args([
                 "--json",
-                "number,state,mergeable,reviewDecision,isDraft,headRefOid",
+                "number,state,mergeable,reviewDecision,isDraft,headRefOid,closingIssuesReferences",
             ]);
         let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
         let v: serde_json::Value = serde_json::from_str(&raw)
@@ -1227,6 +1231,9 @@ impl<'a> GhClient for CliGhClient<'a> {
             if output.status.success() {
                 return Ok(Vec::new());
             }
+            if is_no_checks_reported(&sanitized_stderr) {
+                return Ok(Vec::new());
+            }
             return Err(classify_gh_error(&format!(
                 "gh pr checks failed: {}",
                 sanitized_stderr.trim()
@@ -1275,7 +1282,7 @@ impl<'a> GhClient for CliGhClient<'a> {
     }
 }
 
-/// Parse the `gh pr view --json number,state,mergeable,reviewDecision,isDraft,headRefOid`
+/// Parse the `gh pr view --json number,state,mergeable,reviewDecision,isDraft,headRefOid,closingIssuesReferences`
 /// payload into a `PrState`. Pulled out as a free function so unit tests can
 /// exercise the JSON shape without spawning `gh`.
 fn parse_pr_view_json(
@@ -1317,6 +1324,24 @@ fn parse_pr_view_json(
         .and_then(|h| h.as_str())
         .unwrap_or_default()
         .to_string();
+    let linked_issue_refs = v
+        .get("closingIssuesReferences")
+        .and_then(|refs| refs.as_array())
+        .map(|refs| {
+            refs.iter()
+                .filter_map(|issue| {
+                    if let Some(url) = issue.get("url").and_then(|u| u.as_str()) {
+                        Some(url.to_string())
+                    } else {
+                        issue
+                            .get("number")
+                            .and_then(|n| n.as_u64())
+                            .map(|n| format!("#{n}"))
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     Ok(PrState {
         number,
         state,
@@ -1325,6 +1350,7 @@ fn parse_pr_view_json(
         checks: ChecksState::aggregate(&checks),
         is_draft,
         head_sha,
+        linked_issue_refs,
     })
 }
 
@@ -1352,18 +1378,15 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .pr_view(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
-    let mut decision = if policy.mode == MergeGatePolicyMode::Standard {
-        evaluate_merge_gate(&pr)
-    } else {
-        evaluate_merge_gate_with_policy(&pr, policy)
-    };
-    if policy.require_linked_issue_or_flow && flow_id.is_none() {
+    let mut decision = evaluate_merge_gate_with_policy(&pr, policy);
+    let has_linked_issue = !pr.linked_issue_refs.is_empty();
+    if policy.require_linked_issue_or_flow && flow_id.is_none() && !has_linked_issue {
         decision = match decision {
             MergeDecision::Ready => MergeDecision::Pending {
-                waiting_on: vec!["flow:missing".to_string()],
+                waiting_on: vec!["flow_or_issue:missing".to_string()],
             },
             MergeDecision::Pending { mut waiting_on } => {
-                waiting_on.push("flow:missing".to_string());
+                waiting_on.push("flow_or_issue:missing".to_string());
                 MergeDecision::Pending { waiting_on }
             }
             blocked => blocked,
@@ -1371,6 +1394,11 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     }
     let merge_state = decision.merge_state_label();
     let will_merge = matches!(decision, MergeDecision::Ready) && !dry_run;
+    let requested_mode = if dry_run {
+        "preview"
+    } else {
+        "merge_requested"
+    };
 
     let (event_kind, event_payload, merged_sha) = match &decision {
         MergeDecision::Ready => {
@@ -1381,6 +1409,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                         "repo": repo,
                         "pr_number": pr_number,
                         "head_sha": pr.head_sha,
+                        "requested_mode": requested_mode,
+                        "merge_attempted": false,
+                        "merge_executed": false,
                         "dry_run": true,
                     }),
                     None,
@@ -1398,6 +1429,10 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                         "head_sha": pr.head_sha,
                         "merge_sha": merge_res.merge_sha,
                         "strategy": format!("{:?}", merge_res.strategy).to_lowercase(),
+                        "requested_mode": requested_mode,
+                        "merge_attempted": true,
+                        "merge_executed": true,
+                        "dry_run": false,
                     }),
                     Some(merge_res.merge_sha),
                 )
@@ -1409,6 +1444,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                 "repo": repo,
                 "pr_number": pr_number,
                 "head_sha": pr.head_sha,
+                "requested_mode": requested_mode,
+                "merge_attempted": false,
+                "merge_executed": false,
                 "reasons": reasons,
             }),
             None,
@@ -1419,6 +1457,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
                 "repo": repo,
                 "pr_number": pr_number,
                 "head_sha": pr.head_sha,
+                "requested_mode": requested_mode,
+                "merge_attempted": false,
+                "merge_executed": false,
                 "waiting_on": waiting_on,
             }),
             None,
@@ -1441,12 +1482,18 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         "policy": policy.mode.as_str(),
         "dry_run": dry_run,
         "will_merge": will_merge,
+        "requested_mode": requested_mode,
+        "merge_attempted": merged_sha.is_some(),
+        "merge_executed": merged_sha.is_some(),
         "head_consistency": {
             "head_sha": pr.head_sha,
             "checks_head_sha": null,
             "review_decision_head_sha": null,
-            "head_consistent": !policy.require_head_consistency,
+            "head_consistent": false,
+            "state": "unknown",
+            "requirement": policy.require_head_consistency,
             "source": "single_pr_snapshot",
+            "note": "gh_pr_checks does not expose independent head SHA data; match-head-commit still pins the final merge command",
         },
         "checks": {
             "state": match pr.checks {
@@ -1458,7 +1505,8 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "required": policy.require_checks,
             "allow_missing": policy.allow_missing_checks,
             "source": "gh_pr_checks",
-            "head_consistent": !policy.require_head_consistency,
+            "head_consistent": false,
+            "head_consistency_state": "unknown",
         },
         "review": {
             "state": match pr.review_decision {
@@ -1473,6 +1521,8 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         },
         "flow": {
             "flow_id": flow_id,
+            "linked_issue_refs": pr.linked_issue_refs,
+            "has_linked_issue": has_linked_issue,
             "required": policy.require_linked_issue_or_flow,
         },
     });
@@ -1495,6 +1545,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         "merged_sha": merged_sha,
         "dry_run": dry_run,
         "will_merge": will_merge,
+        "requested_mode": requested_mode,
+        "merge_attempted": merged_sha.is_some(),
+        "merge_executed": merged_sha.is_some(),
         "flow_id": flow_id,
         "persisted": persisted,
         "status_patch": status_patch,
@@ -1523,6 +1576,7 @@ mod safe_merge_tests {
             checks: ChecksState::Success,
             is_draft: false,
             head_sha: "deadbeef".to_string(),
+            linked_issue_refs: Vec::new(),
         }
     }
 
@@ -1687,9 +1741,26 @@ mod safe_merge_tests {
         assert_eq!(v["mode"], "standard");
         assert_eq!(v["dry_run"], true);
         assert_eq!(v["will_merge"], false);
+        assert_eq!(v["requested_mode"], "preview");
+        assert_eq!(v["merge_attempted"], false);
+        assert_eq!(v["merge_executed"], false);
         assert!(v["merged_sha"].is_null());
         assert_eq!(v["status_patch"]["checks"]["required"], true);
         assert_eq!(v["status_patch"]["review"]["required"], true);
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["head_sha"],
+            "deadbeef"
+        );
+        assert_eq!(v["status_patch"]["head_consistency"]["state"], "unknown");
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["head_consistent"],
+            false
+        );
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["source"],
+            "single_pr_snapshot"
+        );
+        assert_eq!(v["event"]["payload"]["requested_mode"], "preview");
         assert_eq!(v["event"]["kind"], "github_review_gate_passed");
         assert!(client.merge_calls().is_empty());
     }
@@ -1713,8 +1784,14 @@ mod safe_merge_tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["merge_state"], "merged");
         assert_eq!(v["will_merge"], true);
+        assert_eq!(v["requested_mode"], "merge_requested");
+        assert_eq!(v["merge_attempted"], true);
+        assert_eq!(v["merge_executed"], true);
         assert!(v["merged_sha"].is_string());
         assert_eq!(v["event"]["kind"], "github_pr_merged");
+        assert_eq!(v["event"]["payload"]["requested_mode"], "merge_requested");
+        assert_eq!(v["event"]["payload"]["merge_attempted"], true);
+        assert_eq!(v["event"]["payload"]["merge_executed"], true);
         let calls = client.merge_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "o/r");
@@ -1787,6 +1864,99 @@ mod safe_merge_tests {
         assert!(client.merge_calls().is_empty());
     }
 
+    #[tokio::test]
+    async fn safe_merge_strict_requires_flow_id_before_merge() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let mut policy = MergeGatePolicy::strict();
+        policy.require_head_consistency = false;
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            None,
+            policy,
+        )
+        .await
+        .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(v["will_merge"], false);
+        assert_eq!(v["merge_attempted"], false);
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "flow_or_issue:missing"));
+        assert!(client.merge_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn safe_merge_strict_accepts_linked_issue_without_flow_id() {
+        let mut pr = ready_pr();
+        pr.linked_issue_refs = vec!["https://github.com/o/r/issues/99".to_string()];
+        let client = MockGhClient::new()
+            .with_pr("o/r", pr)
+            .with_checks("o/r", 42, vec![]);
+        let mut policy = MergeGatePolicy::strict();
+        policy.require_head_consistency = false;
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            true,
+            None,
+            policy,
+        )
+        .await
+        .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "ready");
+        assert_eq!(v["status_patch"]["flow"]["has_linked_issue"], true);
+        assert_eq!(
+            v["status_patch"]["flow"]["linked_issue_refs"][0],
+            "https://github.com/o/r/issues/99"
+        );
+    }
+
+    #[tokio::test]
+    async fn safe_merge_head_consistency_required_blocks_merge() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+        let mut policy = MergeGatePolicy::standard();
+        policy.require_head_consistency = true;
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            None,
+            policy,
+        )
+        .await
+        .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(v["will_merge"], false);
+        assert_eq!(v["status_patch"]["head_consistency"]["state"], "unknown");
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["head_consistent"],
+            false
+        );
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "head:consistency_unavailable"));
+        assert!(client.merge_calls().is_empty());
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
@@ -1814,6 +1984,7 @@ mod safe_merge_tests {
         .expect("ok");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["persisted"], true);
+        assert_eq!(v["requested_mode"], "preview");
         let run_dir = tmp.path().join(flow);
         let status: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
@@ -1821,9 +1992,117 @@ mod safe_merge_tests {
         assert_eq!(status["github"]["merge_state"], "ready");
         assert_eq!(status["github"]["policy"], "standard");
         assert_eq!(status["github"]["will_merge"], false);
+        assert_eq!(status["github"]["requested_mode"], "preview");
+        assert_eq!(status["github"]["merge_attempted"], false);
+        assert_eq!(status["github"]["merge_executed"], false);
+        assert_eq!(
+            status["github"]["head_consistency"]["source"],
+            "single_pr_snapshot"
+        );
         assert_eq!(status["github"]["pr_number"], 42);
         let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
         assert!(events.contains("\"github_review_gate_passed\""));
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+        let pending_client = MockGhClient::new()
+            .with_pr("o/r", pending_pr())
+            .with_checks("o/r", 42, vec![]);
+        handle_github_safe_merge(
+            &pending_client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            true,
+            Some("flow_pending-safe-merge"),
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("pending ok");
+        let pending_dir = tmp.path().join("flow_pending-safe-merge");
+        let pending_status: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(pending_dir.join("status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pending_status["github"]["merge_state"], "pending");
+        assert!(std::fs::read_to_string(pending_dir.join("events.jsonl"))
+            .unwrap()
+            .contains("\"github_checks_polled\""));
+
+        let blocked_client = MockGhClient::new()
+            .with_pr("o/r", blocked_draft_pr())
+            .with_checks("o/r", 42, vec![]);
+        handle_github_safe_merge(
+            &blocked_client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some("flow_blocked-safe-merge"),
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("blocked ok");
+        let blocked_dir = tmp.path().join("flow_blocked-safe-merge");
+        let blocked_status: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(blocked_dir.join("status.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(blocked_status["github"]["merge_state"], "blocked");
+        assert_eq!(
+            blocked_status["github"]["requested_mode"],
+            "merge_requested"
+        );
+        assert_eq!(blocked_status["github"]["merge_attempted"], false);
+        assert_eq!(blocked_status["github"]["merge_executed"], false);
+        assert!(std::fs::read_to_string(blocked_dir.join("events.jsonl"))
+            .unwrap()
+            .contains("\"github_merge_blocked\""));
+        assert!(blocked_client.merge_calls().is_empty());
+
+        let merged_client =
+            MockGhClient::new()
+                .with_pr("o/r", ready_pr())
+                .with_checks("o/r", 42, vec![]);
+        handle_github_safe_merge(
+            &merged_client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some("flow_merged-safe-merge"),
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("merged ok");
+        let merged_dir = tmp.path().join("flow_merged-safe-merge");
+        let merged_status: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(merged_dir.join("status.json")).unwrap())
+                .unwrap();
+        assert_eq!(merged_status["github"]["merge_state"], "merged");
+        assert_eq!(merged_status["github"]["will_merge"], true);
+        assert_eq!(merged_status["github"]["requested_mode"], "merge_requested");
+        assert_eq!(merged_status["github"]["merge_attempted"], true);
+        assert_eq!(merged_status["github"]["merge_executed"], true);
+        assert!(std::fs::read_to_string(merged_dir.join("events.jsonl"))
+            .unwrap()
+            .contains("\"github_pr_merged\""));
+        assert_eq!(merged_client.merge_calls().len(), 1);
+
         if let Some(v) = original {
             std::env::set_var("TACHI_RUN_ROOT", v);
         } else {
@@ -1877,6 +2156,9 @@ mod safe_merge_tests {
             "reviewDecision": "APPROVED",
             "isDraft": false,
             "headRefOid": "abc123",
+            "closingIssuesReferences": [
+                {"number": 99, "url": "https://github.com/o/r/issues/99"}
+            ],
         });
         let pr = parse_pr_view_json(&v, vec![]).unwrap();
         assert_eq!(pr.number, 7);
@@ -1886,6 +2168,10 @@ mod safe_merge_tests {
         assert_eq!(pr.checks, ChecksState::None);
         assert!(!pr.is_draft);
         assert_eq!(pr.head_sha, "abc123");
+        assert_eq!(
+            pr.linked_issue_refs,
+            vec!["https://github.com/o/r/issues/99".to_string()]
+        );
     }
 
     #[test]
@@ -1954,6 +2240,15 @@ mod safe_merge_tests {
         assert!(!effective_safe_merge_dry_run(true, None));
         assert!(!effective_safe_merge_dry_run(true, Some(false)));
         assert!(effective_safe_merge_dry_run(true, Some(true)));
+    }
+
+    #[test]
+    fn safe_merge_classifies_no_checks_reported_as_empty_checks_surface() {
+        assert!(is_no_checks_reported(
+            "no checks reported on the 'feature' branch"
+        ));
+        assert!(is_no_checks_reported("No checks reported"));
+        assert!(!is_no_checks_reported("API rate limit exceeded"));
     }
 
     #[test]
