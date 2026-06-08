@@ -45,6 +45,22 @@ fn task_params(action: &str) -> TachiTaskParams {
         include_global: false,
         compact: None,
         agent: None,
+        outcome: None,
+        task_id: None,
+        task_type: None,
+        duration_ms: None,
+        skills_used: Vec::new(),
+        cost_tokens: None,
+        cost_usd: None,
+        quality_score: None,
+        notes: None,
+        trajectory: None,
+        diff: None,
+        subagents: Vec::new(),
+        evidence_refs: Vec::new(),
+        tests_run: Vec::new(),
+        diff_present: None,
+        scope: None,
         cwd: None,
         skills: Vec::new(),
         context_query: None,
@@ -66,6 +82,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         issue_ref: None,
         pr_ref: None,
         flow_id: None,
+        dispatch_id: None,
         risk: None,
         tool_profile: None,
         auto_capability_bundle: None,
@@ -1509,7 +1526,11 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
         .expect("dispatch card path");
     let card: Value = serde_json::from_str(&std::fs::read_to_string(card_path).expect("card"))
         .expect("card JSON");
-    assert_eq!(card["suggested_complete"]["tool"], json!("tachi_complete"));
+    assert_eq!(card["suggested_complete"]["tool"], json!("tachi_task"));
+    assert_eq!(
+        card["suggested_complete"]["arguments"]["action"],
+        json!("complete")
+    );
     assert_eq!(
         card["suggested_complete"]["arguments"]["dispatch_id"],
         json!(dispatch_id)
@@ -1548,35 +1569,28 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     )
     .expect("mark dispatch");
 
+    let mut complete_params = task_params("complete");
+    complete_params.task = Some("Implement dispatch completion linkage".to_string());
+    complete_params.agent = Some("glm".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-link-002".to_string());
+    complete_params.task_type = Some("fix_request".to_string());
+    complete_params.profile = Some("glm_51_impl".to_string());
+    complete_params.risk = Some("medium".to_string());
+    complete_params.duration_ms = Some(1200);
+    complete_params.skills_used = vec!["skill:superpowers-executing-plans".to_string()];
+    complete_params.cost_tokens = Some(123);
+    complete_params.quality_score = Some(0.88);
+    complete_params.notes = Some("Linked eval back to dispatch card.".to_string());
+    complete_params.diff = Some("diff --git a/x b/x\n+y\n".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.flow_id = Some(flow_id.to_string());
+    complete_params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+    complete_params.evidence_refs = vec!["crates/memory-server/src/complete_ops.rs".to_string()];
+    complete_params.tests_run = vec!["cargo test -p memory-server dispatch_tests".to_string()];
+    complete_params.scope = Some("project".to_string());
     let raw = server
-        .tachi_complete(Parameters(TachiCompleteParams {
-            task_id: Some("eval-link-002".to_string()),
-            task: "Implement dispatch completion linkage".to_string(),
-            agent: "glm".to_string(),
-            outcome: "success".to_string(),
-            task_type: Some("fix_request".to_string()),
-            profile: Some("glm_51_impl".to_string()),
-            risk: Some("medium".to_string()),
-            duration_ms: Some(1200),
-            skills_used: vec!["skill:superpowers-executing-plans".to_string()],
-            cost_tokens: Some(123),
-            cost_usd: None,
-            quality_score: Some(0.88),
-            notes: Some("Linked eval back to dispatch card.".to_string()),
-            trajectory: None,
-            diff: Some("diff --git a/x b/x\n+y\n".to_string()),
-            worktree: None,
-            subagents: Vec::new(),
-            dispatch_id: Some(dispatch_id.to_string()),
-            flow_id: Some(flow_id.to_string()),
-            issue_ref: Some("kckylechen1/tachi#194".to_string()),
-            pr_ref: None,
-            evidence_refs: vec!["crates/memory-server/src/complete_ops.rs".to_string()],
-            tests_run: vec!["cargo test -p memory-server dispatch_tests".to_string()],
-            diff_present: None,
-            scope: Some("project".to_string()),
-            project: None,
-        }))
+        .tachi_task(Parameters(complete_params))
         .await
         .expect("complete should succeed");
     let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
@@ -2384,7 +2398,11 @@ async fn dispatch_response_includes_suggested_complete_payload() {
     let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
     let suggested = &response["suggested_complete_command"];
 
-    assert_eq!(suggested["tool"], serde_json::json!("tachi_complete"));
+    assert_eq!(suggested["tool"], serde_json::json!("tachi_task"));
+    assert_eq!(
+        suggested["arguments"]["action"],
+        serde_json::json!("complete")
+    );
     assert_eq!(
         suggested["arguments"]["dispatch_id"], response["dispatch_id"],
         "completion skeleton should carry dispatch_id"

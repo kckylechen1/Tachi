@@ -307,7 +307,10 @@ pub(crate) async fn assemble_prompt(server: &MemoryServer, params: &TachiDispatc
     // 4. Operating instructions
     parts.push("## Operating instructions".to_string());
     parts.push("- Use Tachi MCP tools if available for additional context.".to_string());
-    parts.push("- Call `tachi_complete` when done, including dispatch_id if provided.".to_string());
+    parts.push(
+        "- Call `tachi_task(action=\"complete\")` when done, including dispatch_id if provided."
+            .to_string(),
+    );
     parts.push(String::new());
 
     // 5. Extra instruction from stage (e.g. auto → "plan first")
