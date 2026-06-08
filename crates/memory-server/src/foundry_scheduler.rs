@@ -10,7 +10,7 @@
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
 //! worker does **not** know how to route to (agents/, hub/, vault/, anything
 //! outside global + project + named-projects), jobs are counted as orphans
-//! and logged at `eprintln` level.
+//! and logged with structured `tracing` warnings.
 //!
 //! ### What this does NOT own
 //! - Job execution: the existing `run_foundry_maintenance_worker` in
@@ -341,7 +341,7 @@ async fn run_one_poll(
         Ok(v) => v,
         Err(e) => {
             metrics.errors_total.fetch_add(1, Ordering::Relaxed);
-            eprintln!("[foundry-scheduler:{label}] poll error: {e}");
+            tracing::warn!(target: "tachi::foundry_scheduler", label = %label, error = %e, "foundry scheduler poll error");
             return;
         }
     };
@@ -393,7 +393,7 @@ async fn run_one_poll(
                 metrics
                     .jobs_reinjected_total
                     .fetch_add(sent, Ordering::Relaxed);
-                eprintln!("[foundry-scheduler:{label}] re-injected {sent} pending job(s)");
+                tracing::info!(target: "tachi::foundry_scheduler", label = %label, jobs = sent, "re-injected pending foundry job(s)");
             }
         }
         Route::Orphan(reason) => {
@@ -402,8 +402,12 @@ async fn run_one_poll(
             // deferred to follow-up work that adds DbScope::Path.
             let n = pending.len() as u64;
             metrics.jobs_orphan_total.fetch_add(n, Ordering::Relaxed);
-            eprintln!(
-                "[foundry-scheduler:{label}] {n} pending job(s) in non-routable DB ({reason}); see `tachi status`"
+            tracing::warn!(
+                target: "tachi::foundry_scheduler",
+                label = %label,
+                jobs = n,
+                reason = reason,
+                "pending foundry job(s) in non-routable DB; see tachi status"
             );
         }
     }

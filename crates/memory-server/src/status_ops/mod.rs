@@ -154,6 +154,7 @@ pub(crate) struct DbStatus {
     pub(crate) vector_coverage: f64,
     pub(crate) vector_dimension: Option<usize>,
     pub(crate) enrichment_failed_recent: usize,
+    pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,
     pub(crate) pending: usize,
     pub(crate) running: usize,
     pub(crate) completed: usize,
@@ -163,6 +164,13 @@ pub(crate) struct DbStatus {
     pub(crate) latest_job: Option<LatestFoundryJob>,
     pub(crate) latest_failed_job: Option<LatestFailedJob>,
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct EnrichmentFailureSummary {
+    pub(crate) stage: String,
+    pub(crate) last_error: String,
+    pub(crate) count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -262,6 +270,7 @@ fn collect_snapshot_inner(
                 vector_coverage: 0.0,
                 vector_dimension: None,
                 enrichment_failed_recent: 0,
+                enrichment_failures: Vec::new(),
                 pending: 0,
                 running: 0,
                 completed: 0,
@@ -286,6 +295,7 @@ fn collect_snapshot_inner(
                 vector_coverage: vector.coverage,
                 vector_dimension: vector.dimension,
                 enrichment_failed_recent: vector.enrichment_failed_recent,
+                enrichment_failures: vector.enrichment_failures,
                 pending: hist.queued + hist.planned,
                 running: hist.running,
                 completed: hist.completed,
@@ -307,6 +317,7 @@ fn collect_snapshot_inner(
                 vector_coverage: 0.0,
                 vector_dimension: None,
                 enrichment_failed_recent: 0,
+                enrichment_failures: Vec::new(),
                 pending: 0,
                 running: 0,
                 completed: 0,
@@ -450,6 +461,7 @@ struct VectorHealth {
     coverage: f64,
     dimension: Option<usize>,
     enrichment_failed_recent: usize,
+    enrichment_failures: Vec<EnrichmentFailureSummary>,
 }
 
 type ProbeDbResult = (
@@ -508,6 +520,7 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
+    let enrichment_failures = enrichment_failure_summary(conn).unwrap_or_default();
     let missing = total.saturating_sub(with_vec);
     let coverage = if total == 0 {
         1.0
@@ -523,7 +536,36 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
         coverage,
         dimension,
         enrichment_failed_recent,
+        enrichment_failures,
     })
+}
+
+fn enrichment_failure_summary(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<EnrichmentFailureSummary>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             COALESCE(json_extract(metadata, '$.enrichment.failed_stage'), 'unknown') AS stage,
+             COALESCE(json_extract(metadata, '$.enrichment.last_error'), '') AS last_error,
+             COUNT(*) AS n
+         FROM memories
+         WHERE json_extract(metadata, '$.enrichment.status') = 'failed'
+         GROUP BY stage, last_error
+         ORDER BY n DESC
+         LIMIT 5",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(EnrichmentFailureSummary {
+            stage: row.get(0)?,
+            last_error: row.get(1)?,
+            count: row.get::<_, i64>(2)? as usize,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
@@ -548,6 +590,7 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
                 "dimension": health.dimension,
                 "expected_dimension": EXPECTED_EMBEDDING_DIM,
                 "enrichment_failed_recent": health.enrichment_failed_recent,
+                "enrichment_failures": health.enrichment_failures,
             }),
             Err(err) => json!({
                 "path": db_path.display().to_string(),
@@ -1155,7 +1198,7 @@ async fn handle_tachi_status_detail(
                 "path": d.path,
                 "dimension": d.vector_dimension,
                 "expected_dimension": EXPECTED_EMBEDDING_DIM,
-                "remediation": "Rebuild/backfill memories_vec with voyage-4 1024-d embeddings.",
+                "remediation": "Vector rows exist but use an unexpected dimension; rebuild vectors with the current embedding model instead of treating this as missing-vector backfill.",
             })
         })
         .collect();
@@ -1181,7 +1224,8 @@ async fn handle_tachi_status_detail(
                 "label": d.label,
                 "path": d.path,
                 "enrichment_failed": d.enrichment_failed_recent,
-                "remediation": "Inspect failed enrichment metadata and provider probe status; rerun provider probes before bulk backfill.",
+                "failures": d.enrichment_failures,
+                "remediation": "Inspect failed enrichment metadata and provider probes; vector backfill will not retry summary/metadata enrichment failures.",
             })
         })
         .collect();
@@ -1781,6 +1825,7 @@ mod tests {
             vector_coverage: coverage,
             vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
             enrichment_failed_recent: 0,
+            enrichment_failures: Vec::new(),
             pending: 0,
             running: 0,
             completed: 0,
