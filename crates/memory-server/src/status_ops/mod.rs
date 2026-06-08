@@ -39,11 +39,25 @@ const DISTILL_STALE_THRESHOLD_SECS: i64 = 36 * 3600;
 
 pub(crate) const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ApiKeyRotationMemberStatus {
+    pub(crate) name: String,
+    pub(crate) status: String,
+    pub(crate) message: Option<String>,
+    pub(crate) last_probe_at: Option<String>,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct ApiKeyRotationStatus {
     pub(crate) total_keys: i64,
+    pub(crate) configured_keys: i64,
+    pub(crate) healthy_keys: Option<i64>,
+    pub(crate) rate_limited_keys: i64,
+    pub(crate) auth_failed_keys: i64,
     pub(crate) current_index: i64,
     pub(crate) strategy: String,
+    pub(crate) next_retry_at: Option<String>,
+    pub(crate) members: Vec<ApiKeyRotationMemberStatus>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -274,10 +288,21 @@ fn collect_snapshot_inner(
     let last_daily_report = find_last_daily_report(app_home);
     let distill_marker = read_distill_marker(app_home);
     let provider_probe_cache = status_health::read_provider_probe_cache(app_home);
+    let fresh_provider_probe_cache = provider_probe_cache
+        .as_ref()
+        .filter(|cache| !cache.is_stale());
     let mut api_keys = if compare_provider_values {
-        status_health::collect_api_key_status_with_value_compare(global_db_path)
+        status_health::collect_api_key_status_with_probe_cache(
+            global_db_path,
+            fresh_provider_probe_cache,
+            true,
+        )
     } else {
-        status_health::collect_api_key_status(global_db_path)
+        status_health::collect_api_key_status_with_probe_cache(
+            global_db_path,
+            fresh_provider_probe_cache,
+            false,
+        )
     };
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
     let cached_probe_results = provider_probe_cache
@@ -290,6 +315,7 @@ fn collect_snapshot_inner(
         distill_marker.as_ref(),
         &api_keys,
         cached_probe_results,
+        fresh_provider_probe_cache.map(|cache| cache.rotation_groups.as_slice()),
     );
 
     StatusSnapshot {
@@ -1248,6 +1274,28 @@ fn build_status_warnings(
                     "provider probe {} is {} ({message})",
                     probe.name, probe.status
                 ));
+            }
+            for group in &cache.rotation_groups {
+                if group.auth_failed_keys > 0 {
+                    let failed = group
+                        .keys
+                        .iter()
+                        .filter(|key| key.status == "auth_failed")
+                        .map(|key| key.name.as_str())
+                        .collect::<Vec<_>>();
+                    warnings.push(format!(
+                        "provider rotation group {} has {} auth-failed key(s): {}",
+                        group.logical_name,
+                        group.auth_failed_keys,
+                        failed.join(", ")
+                    ));
+                }
+                if group.rate_limited_keys >= group.configured_keys && group.configured_keys > 0 {
+                    warnings.push(format!(
+                        "provider rotation group {} has all {} configured key(s) rate-limited",
+                        group.logical_name, group.configured_keys
+                    ));
+                }
             }
         }
     }

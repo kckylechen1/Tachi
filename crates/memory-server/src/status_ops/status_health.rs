@@ -3,7 +3,10 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::{ApiKeyRotationStatus, ApiKeyStatus, DbStatus, EXPECTED_EMBEDDING_DIM};
+use super::{
+    ApiKeyRotationMemberStatus, ApiKeyRotationStatus, ApiKeyStatus, DbStatus,
+    EXPECTED_EMBEDDING_DIM,
+};
 
 const PROVIDER_PROBE_CACHE_TTL_SECS: i64 = 24 * 60 * 60;
 
@@ -128,10 +131,32 @@ pub(crate) struct ProviderProbeResult {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProviderRotationGroupProbe {
+    pub(crate) logical_name: String,
+    pub(crate) total_keys: i64,
+    pub(crate) configured_keys: i64,
+    pub(crate) healthy_keys: i64,
+    pub(crate) rate_limited_keys: i64,
+    pub(crate) auth_failed_keys: i64,
+    pub(crate) current_index: i64,
+    pub(crate) strategy: String,
+    pub(crate) next_retry_at: Option<String>,
+    pub(crate) keys: Vec<ApiKeyRotationMemberStatus>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct ProviderProbeReport {
+    pub(crate) probes: Vec<ProviderProbeResult>,
+    pub(crate) rotation_groups: Vec<ProviderRotationGroupProbe>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ProviderProbeCache {
     pub(crate) last_probe_at: String,
     pub(crate) ttl_seconds: i64,
     pub(crate) probes: Vec<ProviderProbeResult>,
+    #[serde(default)]
+    pub(crate) rotation_groups: Vec<ProviderRotationGroupProbe>,
 }
 
 impl ProviderProbeCache {
@@ -141,6 +166,71 @@ impl ProviderProbeCache {
         };
         let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
         age.num_seconds() > self.ttl_seconds
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RotationSourceStatus {
+    total_keys: i64,
+    current_index: i64,
+    strategy: String,
+    members: Vec<String>,
+}
+
+fn rotation_member_names(vault_names: &HashSet<String>, prefix: &str) -> Vec<String> {
+    let mut members = vault_names
+        .iter()
+        .filter_map(|name| {
+            crate::provider_config::parse_rotation_member_name(name)
+                .filter(|(member_prefix, _)| *member_prefix == prefix)
+                .map(|(_, idx)| (idx, name.clone()))
+        })
+        .collect::<Vec<_>>();
+    members.sort_by(|(left_idx, left_name), (right_idx, right_name)| {
+        left_idx
+            .cmp(right_idx)
+            .then_with(|| left_name.cmp(right_name))
+    });
+    members.into_iter().map(|(_, name)| name).collect()
+}
+
+fn build_rotation_status(
+    source: &RotationSourceStatus,
+    probe: Option<&ProviderRotationGroupProbe>,
+) -> ApiKeyRotationStatus {
+    let probed_members = probe.map(|probe| {
+        probe
+            .keys
+            .iter()
+            .map(|member| (member.name.as_str(), member))
+            .collect::<HashMap<_, _>>()
+    });
+    let members = source
+        .members
+        .iter()
+        .map(|name| {
+            probed_members
+                .as_ref()
+                .and_then(|members| members.get(name.as_str()))
+                .map(|member| (*member).clone())
+                .unwrap_or_else(|| ApiKeyRotationMemberStatus {
+                    name: name.clone(),
+                    status: "configured".to_string(),
+                    message: None,
+                    last_probe_at: None,
+                })
+        })
+        .collect::<Vec<_>>();
+    ApiKeyRotationStatus {
+        total_keys: source.total_keys,
+        configured_keys: members.len() as i64,
+        healthy_keys: probe.map(|probe| probe.healthy_keys),
+        rate_limited_keys: probe.map(|probe| probe.rate_limited_keys).unwrap_or(0),
+        auth_failed_keys: probe.map(|probe| probe.auth_failed_keys).unwrap_or(0),
+        current_index: source.current_index,
+        strategy: source.strategy.clone(),
+        next_retry_at: probe.and_then(|probe| probe.next_retry_at.clone()),
+        members,
     }
 }
 
@@ -188,15 +278,18 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
     })
 }
 
-pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {
+pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> ProviderProbeReport {
     let llm = match crate::llm::LlmClient::new() {
         Ok(client) => client,
         Err(err) => {
-            return vec![ProviderProbeResult {
-                name: "llm_client".to_string(),
-                status: "failed".to_string(),
-                message: Some(err),
-            }];
+            return ProviderProbeReport {
+                probes: vec![ProviderProbeResult {
+                    name: "llm_client".to_string(),
+                    status: "failed".to_string(),
+                    message: Some(err),
+                }],
+                rotation_groups: run_rotation_group_probes(global_db_path).await,
+            };
         }
     };
     if let Err(err) = crate::provider_config::materialize_standalone(&llm, global_db_path) {
@@ -284,15 +377,210 @@ pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderPr
             message: Some("timed out after 20s".to_string()),
         },
     });
+    ProviderProbeReport {
+        probes: out,
+        rotation_groups: run_rotation_group_probes(global_db_path).await,
+    }
+}
+
+pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {
+    run_provider_probe_report(global_db_path).await.probes
+}
+
+async fn run_rotation_group_probes(global_db_path: &Path) -> Vec<ProviderRotationGroupProbe> {
+    let rotation_sources = collect_rotation_sources(global_db_path);
+    if rotation_sources.is_empty() {
+        return Vec::new();
+    }
+    let values = load_keychain_vault_api_key_values(global_db_path)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let probed_at = chrono::Utc::now().to_rfc3339();
+
+    let mut groups = Vec::new();
+    for (logical_name, source) in rotation_sources {
+        let mut keys = Vec::new();
+        for key_id in &source.members {
+            let (status, message) = match values.get(key_id) {
+                Some(value) => probe_rotation_member(&logical_name, key_id, value.clone()).await,
+                None => (
+                    "unavailable".to_string(),
+                    Some(
+                        "Vault key material unavailable; unlock Vault/Keychain for live probe"
+                            .to_string(),
+                    ),
+                ),
+            };
+            keys.push(ApiKeyRotationMemberStatus {
+                name: key_id.clone(),
+                status,
+                message,
+                last_probe_at: Some(probed_at.clone()),
+            });
+        }
+        let healthy_keys = keys.iter().filter(|key| key.status == "ok").count() as i64;
+        let rate_limited_keys = keys
+            .iter()
+            .filter(|key| key.status == "rate_limited")
+            .count() as i64;
+        let auth_failed_keys = keys
+            .iter()
+            .filter(|key| key.status == "auth_failed")
+            .count() as i64;
+        groups.push(ProviderRotationGroupProbe {
+            logical_name,
+            total_keys: source.total_keys,
+            configured_keys: source.members.len() as i64,
+            healthy_keys,
+            rate_limited_keys,
+            auth_failed_keys,
+            current_index: source.current_index,
+            strategy: source.strategy,
+            next_retry_at: None,
+            keys,
+        });
+    }
+    groups.sort_by(|a, b| a.logical_name.cmp(&b.logical_name));
+    groups
+}
+
+fn collect_rotation_sources(global_db_path: &Path) -> Vec<(String, RotationSourceStatus)> {
+    let Some(path) = global_db_path.to_str() else {
+        return Vec::new();
+    };
+    let Ok(store) = memory_core::MemoryStore::open_read_only(path) else {
+        return Vec::new();
+    };
+    let Ok(entries) = store.vault_list_entries() else {
+        return Vec::new();
+    };
+    let vault_names = entries
+        .into_iter()
+        .filter(|entry| entry.secret_type == "api_key")
+        .map(|entry| entry.name)
+        .collect::<HashSet<_>>();
+    let Ok(rotations) = store.vault_list_rotations() else {
+        return Vec::new();
+    };
+    let mut out = rotations
+        .into_iter()
+        .map(|rotation| {
+            let members = rotation_member_names(&vault_names, &rotation.prefix);
+            (
+                rotation.prefix,
+                RotationSourceStatus {
+                    total_keys: rotation.total_keys,
+                    current_index: rotation.current_index,
+                    strategy: rotation.rotation_strategy,
+                    members,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+async fn probe_rotation_member(
+    logical_name: &str,
+    key_id: &str,
+    value: String,
+) -> (String, Option<String>) {
+    let client = match crate::llm::LlmClient::new() {
+        Ok(client) => client,
+        Err(err) => return ("failed".to_string(), Some(err)),
+    };
+    client.clear_provider_secrets();
+    client.set_provider_secret_pool(
+        logical_name,
+        vec![crate::llm::ProviderSecret {
+            key_id: key_id.to_string(),
+            value,
+        }],
+    );
+
+    let result = match logical_name {
+        "VOYAGE_API_KEY" => {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.embed_voyage("tachi provider rotation probe", "document"),
+            )
+            .await;
+            match result {
+                Ok(Ok(vec)) => Ok(format!("{} dims", vec.len())),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err("timed out after 15s".to_string()),
+            }
+        }
+        "VOYAGE_RERANK_API_KEY" => {
+            let docs = vec![
+                "Tachi stores operational memory".to_string(),
+                "Unrelated weather note".to_string(),
+            ];
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                client.rerank_voyage("tachi provider rotation probe", &docs, 1),
+            )
+            .await;
+            match result {
+                Ok(Ok(rows)) => Ok(format!("{} result(s)", rows.len())),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err("timed out after 15s".to_string()),
+            }
+        }
+        "SILICONFLOW_API_KEY" | "EXTRACT_API_KEY" => {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                client.call_extract_llm(
+                    "Return exactly OK.",
+                    "Provider rotation probe. Reply OK only.",
+                    None,
+                    0.0,
+                    8,
+                ),
+            )
+            .await;
+            match result {
+                Ok(Ok(text)) => Ok(text.chars().take(80).collect()),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err("timed out after 20s".to_string()),
+            }
+        }
+        _ => {
+            return (
+                "unsupported".to_string(),
+                Some("No live probe lane is registered for this logical key".to_string()),
+            );
+        }
+    };
+
+    match result {
+        Ok(message) => ("ok".to_string(), Some(message)),
+        Err(err) => classify_provider_probe_error(err),
+    }
+}
+
+fn classify_provider_probe_error(err: String) -> (String, Option<String>) {
+    let lower = err.to_ascii_lowercase();
+    let status = if lower.contains("429") || lower.contains("rate limit") {
+        "rate_limited"
+    } else if is_auth_error(&err) {
+        "auth_failed"
+    } else if lower.contains("timed out") {
+        "timeout"
+    } else {
+        "failed"
+    };
+    (status.to_string(), Some(err))
 }
 
 pub(crate) async fn refresh_provider_probe_cache(
     app_home: &Path,
     global_db_path: &Path,
 ) -> Result<ProviderProbeCache, String> {
-    let probes = run_provider_probes(global_db_path).await;
-    write_provider_probe_cache(app_home, probes)
+    let report = run_provider_probe_report(global_db_path).await;
+    write_provider_probe_cache_report(app_home, report)
 }
 
 pub(crate) fn read_provider_probe_cache(app_home: &Path) -> Option<ProviderProbeCache> {
@@ -300,14 +588,15 @@ pub(crate) fn read_provider_probe_cache(app_home: &Path) -> Option<ProviderProbe
     serde_json::from_str(&raw).ok()
 }
 
-pub(crate) fn write_provider_probe_cache(
+pub(crate) fn write_provider_probe_cache_report(
     app_home: &Path,
-    probes: Vec<ProviderProbeResult>,
+    report: ProviderProbeReport,
 ) -> Result<ProviderProbeCache, String> {
     let cache = ProviderProbeCache {
         last_probe_at: chrono::Utc::now().to_rfc3339(),
         ttl_seconds: PROVIDER_PROBE_CACHE_TTL_SECS,
-        probes,
+        probes: report.probes,
+        rotation_groups: report.rotation_groups,
     };
     let path = provider_probe_cache_path(app_home);
     if let Some(parent) = path.parent() {
@@ -391,21 +680,30 @@ pub(crate) fn load_keychain_vault_api_key_values(
 }
 
 pub(crate) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, false)
+    collect_api_key_status_inner(global_db_path, false, None)
 }
 
 pub(crate) fn collect_api_key_status_with_value_compare(
     global_db_path: &Path,
 ) -> Vec<ApiKeyStatus> {
-    collect_api_key_status_inner(global_db_path, true)
+    collect_api_key_status_inner(global_db_path, true, None)
+}
+
+pub(crate) fn collect_api_key_status_with_probe_cache(
+    global_db_path: &Path,
+    probe_cache: Option<&ProviderProbeCache>,
+    compare_vault_values: bool,
+) -> Vec<ApiKeyStatus> {
+    collect_api_key_status_inner(global_db_path, compare_vault_values, probe_cache)
 }
 
 fn collect_api_key_status_inner(
     global_db_path: &Path,
     compare_vault_values: bool,
+    probe_cache: Option<&ProviderProbeCache>,
 ) -> Vec<ApiKeyStatus> {
     let mut vault_names = HashSet::new();
-    let mut rotations = HashMap::new();
+    let mut rotation_rows = Vec::new();
     if let Some(path) = global_db_path.to_str() {
         if let Ok(store) = memory_core::MemoryStore::open_read_only(path) {
             if let Ok(entries) = store.vault_list_entries() {
@@ -417,19 +715,25 @@ fn collect_api_key_status_inner(
                 );
             }
             if let Ok(rows) = store.vault_list_rotations() {
-                for rotation in rows {
-                    rotations.insert(
-                        rotation.prefix,
-                        ApiKeyRotationStatus {
-                            total_keys: rotation.total_keys,
-                            current_index: rotation.current_index,
-                            strategy: rotation.rotation_strategy,
-                        },
-                    );
-                }
+                rotation_rows = rows;
             }
         }
     }
+    let rotations = rotation_rows
+        .into_iter()
+        .map(|rotation| {
+            let members = rotation_member_names(&vault_names, &rotation.prefix);
+            (
+                rotation.prefix,
+                RotationSourceStatus {
+                    total_keys: rotation.total_keys,
+                    current_index: rotation.current_index,
+                    strategy: rotation.rotation_strategy,
+                    members,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let config_env = crate::provider_config::collect_config_env_values();
     let vault_values: HashMap<String, String> = if compare_vault_values {
         load_keychain_vault_api_key_values(global_db_path)
@@ -440,14 +744,31 @@ fn collect_api_key_status_inner(
         HashMap::new()
     };
 
-    collect_api_key_status_from_sources(vault_names, vault_values, config_env, rotations)
+    let rotation_probes = probe_cache
+        .map(|cache| {
+            cache
+                .rotation_groups
+                .iter()
+                .map(|group| (group.logical_name.clone(), group))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    collect_api_key_status_from_sources(
+        vault_names,
+        vault_values,
+        config_env,
+        rotations,
+        &rotation_probes,
+    )
 }
 
 fn collect_api_key_status_from_sources(
     vault_names: HashSet<String>,
     vault_values: HashMap<String, String>,
     config_env: HashMap<String, String>,
-    rotations: HashMap<String, ApiKeyRotationStatus>,
+    rotations: HashMap<String, RotationSourceStatus>,
+    rotation_probes: &HashMap<String, &ProviderRotationGroupProbe>,
 ) -> Vec<ApiKeyStatus> {
     API_KEY_DEFS
         .iter()
@@ -589,10 +910,8 @@ fn collect_api_key_status_from_sources(
                 cleanup_hint,
                 drift_warning,
                 inferred_invalid_provider: None,
-                rotation: rotation.map(|rotation| ApiKeyRotationStatus {
-                    total_keys: rotation.total_keys,
-                    current_index: rotation.current_index,
-                    strategy: rotation.strategy.clone(),
+                rotation: rotation.map(|rotation| {
+                    build_rotation_status(rotation, rotation_probes.get(def.key).copied())
                 }),
             }
         })
@@ -635,6 +954,7 @@ pub(crate) fn calculate_health_score(
     distill_marker: Option<&crate::status_ops::DistillMarkerStatus>,
     api_keys: &[ApiKeyStatus],
     probe_results: Option<&[ProviderProbeResult]>,
+    rotation_group_results: Option<&[ProviderRotationGroupProbe]>,
 ) -> u8 {
     let mut score = 100i32;
     if !matches!(daemon, crate::status_ops::DaemonStatus::Running { .. }) {
@@ -672,6 +992,12 @@ pub(crate) fn calculate_health_score(
     if let Some(probes) = probe_results {
         let failed_probes = probes.iter().filter(|p| p.status != "ok").count();
         score -= ((failed_probes as i32) * 8).min(24);
+    }
+    if let Some(groups) = rotation_group_results {
+        let rate_limited_keys: i64 = groups.iter().map(|group| group.rate_limited_keys).sum();
+        let auth_failed_keys: i64 = groups.iter().map(|group| group.auth_failed_keys).sum();
+        score -= ((rate_limited_keys as i32) * 4).min(16);
+        score -= ((auth_failed_keys as i32) * 8).min(24);
     }
     score.clamp(0, 100) as u8
 }
@@ -883,6 +1209,7 @@ mod tests {
             HashMap::from([("VOYAGE_API_KEY".to_string(), "same-secret".to_string())]),
             HashMap::new(),
             HashMap::new(),
+            &HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -909,6 +1236,7 @@ mod tests {
             HashMap::from([("VOYAGE_API_KEY".to_string(), "vault-secret".to_string())]),
             HashMap::new(),
             HashMap::new(),
+            &HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -935,6 +1263,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            &HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -961,6 +1290,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            &HashMap::new(),
         );
         let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
@@ -988,6 +1318,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashMap::new(),
+            &HashMap::new(),
         );
         let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
@@ -1015,12 +1346,17 @@ mod tests {
             HashMap::new(),
             HashMap::from([(
                 "VOYAGE_API_KEY".to_string(),
-                ApiKeyRotationStatus {
+                RotationSourceStatus {
                     total_keys: 2,
                     current_index: 1,
                     strategy: "round_robin".to_string(),
+                    members: vec![
+                        "VOYAGE_API_KEY_1".to_string(),
+                        "VOYAGE_API_KEY_2".to_string(),
+                    ],
                 },
             )]),
+            &HashMap::new(),
         );
         let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -1030,6 +1366,81 @@ mod tests {
             voyage.rotation.as_ref().map(|rotation| rotation.total_keys),
             Some(2)
         );
+        assert_eq!(
+            voyage
+                .rotation
+                .as_ref()
+                .map(|rotation| rotation.configured_keys),
+            Some(2)
+        );
+        assert_eq!(
+            voyage
+                .rotation
+                .as_ref()
+                .map(|rotation| {
+                    rotation
+                        .members
+                        .iter()
+                        .map(|member| member.name.as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+            vec!["VOYAGE_API_KEY_1", "VOYAGE_API_KEY_2"]
+        );
+
+        let rotation_sources = HashMap::from([(
+            "VOYAGE_API_KEY".to_string(),
+            RotationSourceStatus {
+                total_keys: 2,
+                current_index: 1,
+                strategy: "round_robin".to_string(),
+                members: vec![
+                    "VOYAGE_API_KEY_1".to_string(),
+                    "VOYAGE_API_KEY_2".to_string(),
+                ],
+            },
+        )]);
+        let probed = ProviderRotationGroupProbe {
+            logical_name: "VOYAGE_API_KEY".to_string(),
+            total_keys: 2,
+            configured_keys: 2,
+            healthy_keys: 1,
+            rate_limited_keys: 1,
+            auth_failed_keys: 0,
+            current_index: 1,
+            strategy: "round_robin".to_string(),
+            next_retry_at: None,
+            keys: vec![
+                ApiKeyRotationMemberStatus {
+                    name: "VOYAGE_API_KEY_1".to_string(),
+                    status: "ok".to_string(),
+                    message: Some("1024 dims".to_string()),
+                    last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                },
+                ApiKeyRotationMemberStatus {
+                    name: "VOYAGE_API_KEY_2".to_string(),
+                    status: "rate_limited".to_string(),
+                    message: Some("429".to_string()),
+                    last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                },
+            ],
+        };
+        let rotation_probes = HashMap::from([("VOYAGE_API_KEY".to_string(), &probed)]);
+        let probed_rows = collect_api_key_status_from_sources(
+            HashSet::from([
+                "VOYAGE_API_KEY_1".to_string(),
+                "VOYAGE_API_KEY_2".to_string(),
+            ]),
+            HashMap::new(),
+            HashMap::new(),
+            rotation_sources,
+            &rotation_probes,
+        );
+        let probed_voyage = api_key_row(&probed_rows, "VOYAGE_API_KEY");
+        let rotation = probed_voyage.rotation.as_ref().expect("rotation");
+        assert_eq!(rotation.healthy_keys, Some(1));
+        assert_eq!(rotation.rate_limited_keys, 1);
+        assert_eq!(rotation.members[1].status, "rate_limited");
 
         restore_env("VOYAGE_API_KEY", original);
     }
@@ -1037,13 +1448,40 @@ mod tests {
     #[test]
     fn provider_probe_cache_round_trips() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let cache = write_provider_probe_cache(
+        let cache = write_provider_probe_cache_report(
             dir.path(),
-            vec![ProviderProbeResult {
-                name: "voyage_embed".to_string(),
-                status: "ok".to_string(),
-                message: Some("1024 dims".to_string()),
-            }],
+            ProviderProbeReport {
+                probes: vec![ProviderProbeResult {
+                    name: "voyage_embed".to_string(),
+                    status: "ok".to_string(),
+                    message: Some("1024 dims".to_string()),
+                }],
+                rotation_groups: vec![ProviderRotationGroupProbe {
+                    logical_name: "VOYAGE_API_KEY".to_string(),
+                    total_keys: 2,
+                    configured_keys: 2,
+                    healthy_keys: 1,
+                    rate_limited_keys: 1,
+                    auth_failed_keys: 0,
+                    current_index: 1,
+                    strategy: "round_robin".to_string(),
+                    next_retry_at: None,
+                    keys: vec![
+                        ApiKeyRotationMemberStatus {
+                            name: "VOYAGE_API_KEY_1".to_string(),
+                            status: "ok".to_string(),
+                            message: Some("1024 dims".to_string()),
+                            last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                        },
+                        ApiKeyRotationMemberStatus {
+                            name: "VOYAGE_API_KEY_2".to_string(),
+                            status: "rate_limited".to_string(),
+                            message: Some("429".to_string()),
+                            last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                        },
+                    ],
+                }],
+            },
         )
         .expect("write cache");
 
@@ -1053,5 +1491,10 @@ mod tests {
         assert!(!loaded.is_stale());
         assert_eq!(loaded.probes.len(), 1);
         assert_eq!(loaded.probes[0].status, "ok");
+        assert_eq!(loaded.rotation_groups.len(), 1);
+        assert_eq!(loaded.rotation_groups[0].logical_name, "VOYAGE_API_KEY");
+        assert_eq!(loaded.rotation_groups[0].healthy_keys, 1);
+        assert_eq!(loaded.rotation_groups[0].rate_limited_keys, 1);
+        assert_eq!(loaded.rotation_groups[0].keys[1].status, "rate_limited");
     }
 }
