@@ -67,15 +67,19 @@ async fn render_one(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let provider_probes = if probe_keys {
-        let probes = super::status_health::run_provider_probes(global_db_path).await;
-        if let Err(err) = super::status_health::write_provider_probe_cache(app_home, probes.clone())
+    let provider_probe_report = if probe_keys {
+        let report = super::status_health::run_provider_probe_report(global_db_path).await;
+        if let Err(err) =
+            super::status_health::write_provider_probe_cache_report(app_home, report.clone())
         {
             eprintln!("[!] provider probe cache write failed: {err}");
         }
-        probes
+        report
     } else {
-        Vec::new()
+        super::status_health::ProviderProbeReport {
+            probes: Vec::new(),
+            rotation_groups: Vec::new(),
+        }
     };
     let snapshot = if probe_keys {
         crate::status_ops::collect_snapshot_with_provider_value_compare(
@@ -92,7 +96,11 @@ async fn render_one(
         if let Some(obj) = v.as_object_mut() {
             obj.insert(
                 "provider_probes".to_string(),
-                serde_json::to_value(&provider_probes)?,
+                serde_json::to_value(&provider_probe_report.probes)?,
+            );
+            obj.insert(
+                "provider_rotation_groups".to_string(),
+                serde_json::to_value(&provider_probe_report.rotation_groups)?,
             );
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
@@ -314,10 +322,37 @@ async fn render_one(
         if let Some(hint) = &key.cleanup_hint {
             println!("       [i] {hint}");
         }
+        if let Some(rotation) = &key.rotation {
+            println!(
+                "       [i] rotation: total={} configured={} current={} strategy={} healthy={} rate_limited={} auth_failed={}",
+                rotation.total_keys,
+                rotation.configured_keys,
+                rotation.current_index,
+                rotation.strategy,
+                rotation
+                    .healthy_keys
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                rotation.rate_limited_keys,
+                rotation.auth_failed_keys,
+            );
+            for member in &rotation.members {
+                println!(
+                    "           - {}: {}{}",
+                    member.name,
+                    member.status,
+                    member
+                        .message
+                        .as_ref()
+                        .map(|msg| format!(" ({})", crate::status_ops::truncate(msg, 72)))
+                        .unwrap_or_default()
+                );
+            }
+        }
     }
     if probe_keys {
         println!("  live probes:");
-        for probe in &provider_probes {
+        for probe in &provider_probe_report.probes {
             println!(
                 "    {}: {}{}",
                 probe.name,
@@ -329,6 +364,7 @@ async fn render_one(
                     .unwrap_or_default()
             );
         }
+        render_rotation_group_probes(&provider_probe_report.rotation_groups);
     } else if let Some(cache) = &snapshot.provider_probe_cache {
         let marker = if cache.is_stale() { "[!]" } else { "[OK]" };
         println!(
@@ -348,6 +384,7 @@ async fn render_one(
                     .unwrap_or_default()
             );
         }
+        render_rotation_group_probes(&cache.rotation_groups);
     } else {
         println!("  live probes skipped (pass --probe-keys to test providers)");
     }
@@ -366,6 +403,37 @@ async fn render_one(
     );
 
     Ok(())
+}
+
+fn render_rotation_group_probes(groups: &[super::status_health::ProviderRotationGroupProbe]) {
+    if groups.is_empty() {
+        return;
+    }
+    println!("  rotation groups:");
+    for group in groups {
+        println!(
+            "    {}: total={} configured={} healthy={} rate_limited={} auth_failed={} current={} strategy={}",
+            group.logical_name,
+            group.total_keys,
+            group.configured_keys,
+            group.healthy_keys,
+            group.rate_limited_keys,
+            group.auth_failed_keys,
+            group.current_index,
+            group.strategy,
+        );
+        for key in &group.keys {
+            println!(
+                "      - {}: {}{}",
+                key.name,
+                key.status,
+                key.message
+                    .as_ref()
+                    .map(|msg| format!(" ({})", crate::status_ops::truncate(msg, 72)))
+                    .unwrap_or_default()
+            );
+        }
+    }
 }
 
 pub(crate) async fn run_daemon(
