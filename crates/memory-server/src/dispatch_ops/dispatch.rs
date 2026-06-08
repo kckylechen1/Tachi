@@ -643,6 +643,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 "plan_file": plan_path.to_string_lossy(),
                 "evidence_required": resolved_profile.evidence_required.clone(),
                 "route_explanation": resolved_profile.route_explanation.clone(),
+                "suggested_complete": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
             }),
         ) {
             append_trajectory_event(

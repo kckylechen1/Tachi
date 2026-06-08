@@ -1364,6 +1364,90 @@ fn tachi_task_dispatch_marker_updates_flow_status_idempotently() {
     assert!(events.contains("\"event\":\"dispatch_linked\""), "{events}");
 }
 
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn tachi_task_dispatch_completion_marker_updates_card_and_status_idempotently() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let flow_id = "flow_20260609T000001Z_dispatch_completion_marker_test";
+    let dispatch_id = "20260609T000001Z-custom-complete";
+
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "custom",
+            "profile": "glm_51_impl",
+            "task": "implementation",
+        }),
+    )
+    .expect("mark dispatch");
+    crate::task_lifecycle::mark_task_dispatch_completion(
+        flow_id,
+        dispatch_id,
+        json!({
+            "task_id": "eval-link-001",
+            "outcome": "success",
+            "eval_memory_id": "memory-eval-001",
+            "eval_path": "/eval/2026-06-09/eval-link-001",
+            "verification_present": true,
+            "tests_run": ["cargo test -p memory-server dispatch_tests"],
+        }),
+    )
+    .expect("mark completion");
+    crate::task_lifecycle::mark_task_dispatch_completion(
+        flow_id,
+        dispatch_id,
+        json!({
+            "task_id": "eval-link-001",
+            "outcome": "success",
+            "eval_memory_id": "memory-eval-001",
+            "eval_path": "/eval/2026-06-09/eval-link-001",
+            "verification_present": true,
+        }),
+    )
+    .expect("mark completion idempotently");
+
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    assert_eq!(status["completed_dispatch_ids"], json!([dispatch_id]));
+    assert_eq!(status["stage"], json!("eval"));
+    assert_eq!(status["state"], json!("dispatch_completed"));
+    assert_eq!(
+        status["dispatch_eval"][dispatch_id]["eval_memory_id"],
+        json!("memory-eval-001")
+    );
+    assert_eq!(
+        status["artifacts"]["dispatch_completions"][dispatch_id]["outcome"],
+        json!("success")
+    );
+    let card_path = status["artifacts"]["dispatches"][dispatch_id]
+        .as_str()
+        .expect("dispatch card path");
+    let card: Value = serde_json::from_str(&std::fs::read_to_string(card_path).expect("card"))
+        .expect("card JSON");
+    assert_eq!(
+        card["completion"]["eval_path"],
+        json!("/eval/2026-06-09/eval-link-001")
+    );
+    assert_eq!(
+        card["completion_history"].as_array().map(Vec::len),
+        Some(1),
+        "same eval should not duplicate completion history: {card:#}"
+    );
+    let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
+    assert!(
+        events.contains("\"event\":\"dispatch_completed\""),
+        "{events}"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
@@ -1420,10 +1504,124 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
             .is_some_and(|path| path.ends_with(".json")),
         "flow status should link compact dispatch card: {status:#}"
     );
+    let card_path = status["artifacts"]["dispatches"][dispatch_id]
+        .as_str()
+        .expect("dispatch card path");
+    let card: Value = serde_json::from_str(&std::fs::read_to_string(card_path).expect("card"))
+        .expect("card JSON");
+    assert_eq!(card["suggested_complete"]["tool"], json!("tachi_complete"));
+    assert_eq!(
+        card["suggested_complete"]["arguments"]["dispatch_id"],
+        json!(dispatch_id)
+    );
+    assert_eq!(
+        card["suggested_complete"]["arguments"]["flow_id"],
+        json!(flow_id)
+    );
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
     assert!(
         events.contains(dispatch_id) && events.contains("\"event\":\"dispatch_linked\""),
         "{events}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let flow_id = "flow_20260609T000002Z_complete_link_test";
+    let dispatch_id = "20260609T000002Z-custom-complete-link";
+
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "custom",
+            "profile": "glm_51_impl",
+            "task": "implementation",
+        }),
+    )
+    .expect("mark dispatch");
+
+    let raw = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("eval-link-002".to_string()),
+            task: "Implement dispatch completion linkage".to_string(),
+            agent: "glm".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: Some("glm_51_impl".to_string()),
+            risk: Some("medium".to_string()),
+            duration_ms: Some(1200),
+            skills_used: vec!["skill:superpowers-executing-plans".to_string()],
+            cost_tokens: Some(123),
+            cost_usd: None,
+            quality_score: Some(0.88),
+            notes: Some("Linked eval back to dispatch card.".to_string()),
+            trajectory: None,
+            diff: Some("diff --git a/x b/x\n+y\n".to_string()),
+            worktree: None,
+            subagents: Vec::new(),
+            dispatch_id: Some(dispatch_id.to_string()),
+            flow_id: Some(flow_id.to_string()),
+            issue_ref: Some("kckylechen1/tachi#194".to_string()),
+            pr_ref: None,
+            evidence_refs: vec!["crates/memory-server/src/complete_ops.rs".to_string()],
+            tests_run: vec!["cargo test -p memory-server dispatch_tests".to_string()],
+            diff_present: None,
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("complete should succeed");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+    assert_eq!(
+        bundle["pipeline"]["dispatch_completion_link"]["recorded"],
+        json!(true),
+        "{bundle:#}"
+    );
+
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    assert_eq!(status["completed_dispatch_ids"], json!([dispatch_id]));
+    assert_eq!(status["stage"], json!("eval"));
+    assert_eq!(status["state"], json!("dispatch_completed"));
+    let card_path = status["artifacts"]["dispatches"][dispatch_id]
+        .as_str()
+        .expect("dispatch card path");
+    let card: Value = serde_json::from_str(&std::fs::read_to_string(card_path).expect("card"))
+        .expect("card JSON");
+    assert_eq!(card["completion"]["task_id"], json!("eval-link-002"));
+    assert_eq!(card["completion"]["outcome"], json!("success"));
+    assert_eq!(
+        card["completion"]["verification_present"],
+        json!(true),
+        "{card:#}"
+    );
+
+    let mut ux_params = task_params("ux_matrix");
+    ux_params.flow_id = Some(flow_id.to_string());
+    ux_params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+    let ux_raw = server
+        .tachi_task(Parameters(ux_params))
+        .await
+        .expect("ux_matrix should succeed");
+    let ux: Value = serde_json::from_str(&ux_raw).expect("ux JSON");
+    assert!(
+        ux["matrix"].as_array().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step["id"] == json!("complete_eval") && step["status"] == json!("passed")
+            })
+        }),
+        "{ux:#}"
     );
 }
 

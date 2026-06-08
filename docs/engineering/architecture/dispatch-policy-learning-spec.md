@@ -198,10 +198,11 @@ Every substantial policy-learning slice should be able to pass this workflow:
 5. `tachi_task(action="dispatch", profile=..., flow_id=..., issue_ref=...)`
 6. `tachi_task(action="board", flow_id=...)`
 7. leader verification and `tachi_verify`
-8. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
-9. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
-10. `tachi_task(action="release_note", flow_id=...)`
-11. `tachi_task(action="close_loop", flow_id=...)`
+8. `tachi_complete(flow_id=..., dispatch_id=...)`
+9. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
+10. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
+11. `tachi_task(action="release_note", flow_id=...)`
+12. `tachi_task(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -223,14 +224,15 @@ As of 2026-06-09, the baseline includes:
   `ux_matrix`, `build_references`, and `close_loop`;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;
+- dispatch card artifacts include the suggested `tachi_complete` payload, and
+  `tachi_complete(flow_id=..., dispatch_id=...)` links the `/eval` result back
+  into the dispatch card, flow status, and UX matrix;
 - close-loop marker persistence for UX matrix completion.
 
 ## Remaining Work
 
 The next policy-learning slices should focus on evidence and replay:
 
-- extend dispatch cards with completion/eval linkage once the worker has called
-  `tachi_complete`;
 - ensure capability bundle auto-injection is visible in the dispatch prompt
   artifact and can be disabled;
 - extend skill loadout results with completion/eval feedback once routing
