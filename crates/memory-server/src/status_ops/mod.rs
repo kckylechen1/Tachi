@@ -1172,6 +1172,19 @@ async fn handle_tachi_status_detail(
             })
         })
         .collect();
+    let enrichment_failure_dbs: Vec<serde_json::Value> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.enrichment_failed_recent > 0)
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "path": d.path,
+                "enrichment_failed": d.enrichment_failed_recent,
+                "remediation": "Inspect failed enrichment metadata and provider probe status; rerun provider probes before bulk backfill.",
+            })
+        })
+        .collect();
     let auth_failures: Vec<serde_json::Value> = snapshot
         .dbs
         .iter()
@@ -1238,6 +1251,7 @@ async fn handle_tachi_status_detail(
                 "low_vector_coverage": low_coverage,
                 "vector_dimension_mismatches": vector_dimension_mismatches,
                 "vector_orphans": vector_orphan_dbs,
+                "enrichment_failures": enrichment_failure_dbs,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },
@@ -1282,6 +1296,8 @@ async fn handle_tachi_status_detail(
             },
             "distill": distill,
             "vector_coverage_issues": low_coverage.len(),
+            "vector_orphans": vector_orphan_dbs.len(),
+            "enrichment_failures": enrichment_failure_dbs.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {
                 "drift": api_key_drift,
@@ -1337,6 +1353,24 @@ fn build_status_warnings(
         .map(|d| d.label.as_str())
         .collect();
     let vector_dimension_mismatch_count = vector_dimension_mismatch_dbs.len();
+    let vector_orphan_dbs: Vec<&str> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.vector_orphans > 0)
+        .map(|d| d.label.as_str())
+        .collect();
+    let vector_orphan_count: usize = snapshot.dbs.iter().map(|d| d.vector_orphans).sum();
+    let enrichment_failed_dbs: Vec<&str> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.enrichment_failed_recent > 0)
+        .map(|d| d.label.as_str())
+        .collect();
+    let enrichment_failed_count: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.enrichment_failed_recent)
+        .sum();
     let auth_failure_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
@@ -1367,6 +1401,18 @@ fn build_status_warnings(
         warnings.push(format!(
             "{vector_dimension_mismatch_count} db(s) have vector dimension metadata that differs from expected {EXPECTED_EMBEDDING_DIM}: {}",
             vector_dimension_mismatch_dbs.join(", ")
+        ));
+    }
+    if vector_orphan_count > 0 {
+        warnings.push(format!(
+            "{vector_orphan_count} orphan vector row(s) found in {}",
+            vector_orphan_dbs.join(", ")
+        ));
+    }
+    if enrichment_failed_count > 0 {
+        warnings.push(format!(
+            "{enrichment_failed_count} memory enrichment failure(s) remain in {}",
+            enrichment_failed_dbs.join(", ")
         ));
     }
     if total_failed > 0 {
@@ -1833,6 +1879,64 @@ mod tests {
         assert!(
             stuck.contains("sigil"),
             "stuck-jobs warning should name the affected dbs, got: {stuck}"
+        );
+    }
+
+    #[test]
+    fn build_status_warnings_lists_enrichment_failures_and_vector_orphans() {
+        let mut hyperion = db_status("hyperion", 0, 0, 1.0);
+        hyperion.enrichment_failed_recent = 42;
+        let mut sigil = db_status("sigil", 0, 0, 1.0);
+        sigil.vector_orphans = 2;
+        let snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0), hyperion, sigil]);
+
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        let enrichment = warnings
+            .iter()
+            .find(|w| w.contains("memory enrichment failure"))
+            .expect("enrichment-failure warning present");
+        assert!(
+            enrichment.contains("hyperion") && enrichment.contains("42"),
+            "enrichment warning should name affected db and count, got: {enrichment}"
+        );
+        let orphans = warnings
+            .iter()
+            .find(|w| w.contains("orphan vector row"))
+            .expect("vector-orphan warning present");
+        assert!(
+            orphans.contains("sigil") && orphans.contains("2"),
+            "vector orphan warning should name affected db and count, got: {orphans}"
+        );
+    }
+
+    #[test]
+    fn health_score_drops_for_background_enrichment_failures_and_orphans() {
+        let mut hyperion = db_status("hyperion", 0, 0, 1.0);
+        hyperion.enrichment_failed_recent = 42;
+        let mut sigil = db_status("sigil", 0, 0, 1.0);
+        sigil.vector_orphans = 1;
+        let dbs = vec![hyperion, sigil];
+        let score = status_health::calculate_health_score(
+            &DaemonStatus::Running {
+                pid: 1,
+                lock_path: PathBuf::from("/tmp/tachi.lock"),
+            },
+            &dbs,
+            Some(&DistillMarkerStatus {
+                path: "/tmp/marker".to_string(),
+                last_run_at: "2026-06-09T00:00:00Z".to_string(),
+                age_seconds: 0,
+                age: "0s ago".to_string(),
+                is_stale: false,
+            }),
+            &[],
+            Some(&[]),
+            Some(&[]),
+        );
+
+        assert!(
+            score < 100,
+            "background failures/orphans must prevent perfect health score"
         );
     }
 }
