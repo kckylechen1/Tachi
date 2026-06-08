@@ -252,6 +252,8 @@ const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_shell",
     // Tachi Arena - tracked worker mission ledger
     "tachi_arena",
+    // Tachi Verify - background verification evidence ledger
+    "tachi_verify",
 ];
 
 const OPERATE_TOOL_PATTERNS: &[&str] = &[
@@ -294,6 +296,8 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Tachi Arena - focused tracked worker/advisor mission ledger for leaders.
     "tachi_arena",
+    // Background verification evidence ledger for runners and safe_merge.
+    "tachi_verify",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
@@ -414,6 +418,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_memory",
     "tachi_orchestrator",
     "tachi_arena",
+    "tachi_verify",
     "tachi_save",
     "tachi_wiki_write",
     "update_card",

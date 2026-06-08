@@ -18,6 +18,7 @@ pub(crate) fn format_briefing(
     wiki: &Value,
     cross_project: &Value,
     health_summary: &Value,
+    verification: &Value,
     kanban: &Value,
     checkpoints: &Value,
     compact: bool,
@@ -27,6 +28,7 @@ pub(crate) fn format_briefing(
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
     let cross_cap = if compact { 3 } else { 5 };
+    let verification_cap = if compact { 3 } else { 6 };
 
     let mut out = vec!["## Tachi briefing".to_string(), format!("Query: {query}")];
     if let Some(project) = project_label.filter(|p| !p.is_empty()) {
@@ -101,6 +103,31 @@ pub(crate) fn format_briefing(
         }
     }
 
+    if let Some(rows) = verification.as_array() {
+        if !rows.is_empty() {
+            out.push("\n### Verification gates".to_string());
+            for row in rows.iter().take(verification_cap) {
+                let flow_id = row.get("flow_id").and_then(Value::as_str).unwrap_or("?");
+                let overall = row
+                    .get("overall")
+                    .and_then(Value::as_str)
+                    .unwrap_or("pending");
+                let total = row.get("total").and_then(Value::as_u64).unwrap_or(0);
+                let failed = row.get("failed").and_then(Value::as_u64).unwrap_or(0);
+                let pending = row.get("pending").and_then(Value::as_u64).unwrap_or(0);
+                let pr_ref = row.get("pr_ref").and_then(Value::as_str).unwrap_or("");
+                out.push(format!(
+                    "- [{overall}] `{flow_id}`{} checks={total} failed={failed} pending={pending}",
+                    if pr_ref.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" `{}`", md_escape(&compact_text_line(pr_ref, 80)))
+                    }
+                ));
+            }
+        }
+    }
+
     if let Some(tasks) = kanban.get("tasks").and_then(Value::as_array) {
         if !tasks.is_empty() {
             out.push("\n### Kanban".to_string());
@@ -135,7 +162,7 @@ pub(crate) fn format_briefing(
     out.push("\n### Suggested next step".to_string());
     out.push(format!(
         "- {}",
-        briefing_next_step(query, wiki, health_summary, kanban)
+        briefing_next_step(query, wiki, health_summary, verification, kanban)
     ));
     out.push(
         "\n> Save only new decisions/outcomes as they happen → `tachi_memory(action='save', text=…, keywords=[…], project='…')`. Windsurf/Cursor have no auto-capture."
@@ -180,7 +207,23 @@ pub(crate) fn format_alerts(warnings: &[String], wiki_counts: &Value) -> String 
     out.join("\n")
 }
 
-fn briefing_next_step(query: &str, wiki: &Value, health_summary: &Value, kanban: &Value) -> String {
+fn briefing_next_step(
+    query: &str,
+    wiki: &Value,
+    health_summary: &Value,
+    verification: &Value,
+    kanban: &Value,
+) -> String {
+    if verification.as_array().is_some_and(|rows| {
+        rows.iter().any(|row| {
+            row.get("overall")
+                .and_then(Value::as_str)
+                .is_some_and(|s| matches!(s, "failed" | "pending"))
+        })
+    }) {
+        return "`tachi_verify(action='board')` to inspect background verification gates before merge."
+            .to_string();
+    }
     let has_warnings = health_summary
         .get("warnings")
         .and_then(Value::as_array)
@@ -424,6 +467,7 @@ mod tests {
             &wiki,
             &cross,
             &health,
+            &serde_json::json!([]),
             &kanban,
             &checkpoints,
             false,
@@ -480,6 +524,7 @@ mod tests {
             &serde_json::json!(wiki),
             &cross,
             &health,
+            &serde_json::json!([]),
             &kanban,
             &serde_json::json!(checkpoints),
             true,
@@ -491,6 +536,7 @@ mod tests {
             &serde_json::json!(wiki),
             &cross,
             &health,
+            &serde_json::json!([]),
             &kanban,
             &serde_json::json!(checkpoints),
             false,
@@ -545,5 +591,42 @@ mod tests {
             compact.len(),
             full.len()
         );
+    }
+
+    #[test]
+    fn format_briefing_compact_caps_verification_gates() {
+        let verification: Vec<serde_json::Value> = (0..10)
+            .map(|i| {
+                serde_json::json!({
+                    "flow_id": format!("flow_{i}"),
+                    "overall": if i == 0 { "failed" } else { "passed" },
+                    "total": 3,
+                    "failed": if i == 0 { 1 } else { 0 },
+                    "pending": 0,
+                })
+            })
+            .collect();
+        let empty = serde_json::json!([]);
+        let health = serde_json::json!({"health_score": 95, "warnings": [], "wiki": {}});
+        let kanban = serde_json::json!({"tasks": []});
+        let compact = format_briefing(
+            "q",
+            Some("sigil"),
+            &empty,
+            &empty,
+            &empty,
+            &health,
+            &serde_json::json!(verification),
+            &kanban,
+            &empty,
+            true,
+        );
+        let gate_rows = compact
+            .lines()
+            .filter(|line| line.starts_with("- [") && line.contains("`flow_"))
+            .count();
+        assert_eq!(gate_rows, 3);
+        assert!(compact.contains("### Verification gates"));
+        assert!(compact.contains("tachi_verify(action='board')"));
     }
 }
