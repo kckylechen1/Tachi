@@ -1701,10 +1701,10 @@ impl MemoryServer {
         }
     }
 
-    // ─── Facade: task (plan / recommend / dispatch / board / merge) ─────────
+    // ─── Facade: task (plan / recommend / dispatch / board / merge / closure)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: briefing → plan → recommend → dispatch → board → complete/eval → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: briefing → plan → recommend → dispatch → board → complete/eval → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1812,8 +1812,30 @@ impl MemoryServer {
                 };
                 crate::dispatch_ops::handle_approve_merge(merge_params).await
             }
+            "build_references" | "close_loop" => {
+                let workflow_params = TachiWorkflowParams {
+                    action: action.clone(),
+                    issue_ref: params.issue_ref.clone(),
+                    doc_paths: params.doc_paths.clone(),
+                    related_issues: params.related_issues.clone(),
+                    wiki_title: params.wiki_title.clone(),
+                    wiki_text: params.wiki_text.clone(),
+                    wiki_path: params.wiki_path.clone(),
+                    wiki_topic: params.wiki_topic.clone(),
+                    wiki_summary: params.wiki_summary.clone(),
+                    wiki_category: params.wiki_category.clone(),
+                    wiki_keywords: params.wiki_keywords.clone(),
+                    wiki_entities: params.wiki_entities.clone(),
+                    wiki_importance: params.wiki_importance,
+                    wiki_scope: params.wiki_scope.clone(),
+                    wiki_domain: params.wiki_domain.clone(),
+                    project: params.project.clone(),
+                    force: params.force,
+                };
+                crate::workflow_closure::handle_workflow(self, workflow_params).await
+            }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;

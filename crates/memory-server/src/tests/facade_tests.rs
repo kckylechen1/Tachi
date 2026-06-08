@@ -467,6 +467,8 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("briefing")));
     assert!(values.contains(&json!("plan")));
     assert!(values.contains(&json!("dispatch")));
+    assert!(values.contains(&json!("build_references")));
+    assert!(values.contains(&json!("close_loop")));
 }
 
 #[allow(clippy::await_holding_lock)]
