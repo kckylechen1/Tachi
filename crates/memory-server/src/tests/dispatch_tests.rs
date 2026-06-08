@@ -1237,6 +1237,73 @@ async fn tachi_task_close_loop_writes_wiki_with_references() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let temp_runs = tempfile::tempdir().expect("temp run root");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
+    let server = make_server();
+    let flow_id = "flow_20260608T000006Z_close_loop_marker_test";
+    let issue = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 239,
+        title: "Persist close_loop marker".to_string(),
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/239".to_string(),
+        doc_paths: vec!["docs/engineering/architecture/credential-adapters-cleanup.md".to_string()],
+        spec_paths: Vec::new(),
+    };
+    crate::task_lifecycle::write_intake_flow_artifacts(
+        flow_id,
+        "Persist close_loop marker",
+        &issue,
+    )
+    .expect("write intake artifacts");
+
+    let mut close_params = task_params("close_loop");
+    close_params.flow_id = Some(flow_id.to_string());
+    close_params.issue_ref = Some("kckylechen1/tachi#239".to_string());
+    close_params.wiki_title = Some("Close loop marker smoke".to_string());
+    close_params.wiki_text = Some("Close loop should mark the flow complete.".to_string());
+    close_params.wiki_topic = Some("close-loop-marker".to_string());
+    close_params.force = true;
+    let raw = server
+        .tachi_task(Parameters(close_params))
+        .await
+        .expect("close_loop should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("close_loop response JSON");
+    assert_eq!(parsed["ok"], json!(true));
+
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    assert!(run_dir.join("close_loop.json").exists());
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status json");
+    assert_eq!(status["state"], json!("closed_loop"));
+    assert!(status["artifacts"]["close_loop"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("close_loop.json")));
+
+    let mut ux_params = task_params("ux_matrix");
+    ux_params.flow_id = Some(flow_id.to_string());
+    let raw = server
+        .tachi_task(Parameters(ux_params))
+        .await
+        .expect("ux_matrix should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("ux_matrix response JSON");
+    assert_eq!(parsed["overall"], json!("complete"));
+    let matrix = parsed["matrix"].as_array().expect("matrix array");
+    assert!(matrix
+        .iter()
+        .any(|step| { step["id"] == json!("close_loop") && step["status"] == json!("passed") }));
+}
+
 #[test]
 fn tachi_task_pr_status_parses_repo_number_and_pr_ref() {
     let mut params = task_params("pr_status");
