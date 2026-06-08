@@ -51,6 +51,36 @@ fn credential_profile_json_parse_supports_core_materializers() {
 }
 
 #[test]
+fn credential_profile_discovery_skips_unrelated_malformed_json() {
+    let dir = tempfile::tempdir().expect("temp credential dir");
+    std::fs::write(dir.path().join("broken.json"), "{not valid json")
+        .expect("write malformed profile");
+    std::fs::write(
+        dir.path().join("valid.json"),
+        r#"{
+          "credential_profiles": {
+            "codex_shared": {
+              "entries": {"api_key": "OPENAI_API_KEY"},
+              "materializers": [
+                {"type": "env", "source": "api_key", "target": "OPENAI_API_KEY"}
+              ]
+            }
+          }
+        }"#,
+    )
+    .expect("write valid profile");
+
+    let (path, profile) =
+        crate::credential_profile::find_credential_profile(dir.path(), "codex_shared")
+            .expect("valid profile should be found despite malformed sibling");
+    assert_eq!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("valid.json")
+    );
+    assert_eq!(profile.materializers[0].kind, "env");
+}
+
+#[test]
 fn credential_materialize_dry_run_reports_redacted_outputs() {
     let db_path = std::env::temp_dir().join(format!(
         "credential-materialize-test-{}.sqlite",

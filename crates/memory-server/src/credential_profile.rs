@@ -112,6 +112,7 @@ pub(crate) fn find_credential_profile(
             credentials_dir.display()
         )
     })?;
+    let mut skipped_invalid_configs = Vec::new();
     for entry in entries {
         let path = entry
             .map_err(|e| format!("read credential profile directory entry: {e}"))?
@@ -119,18 +120,35 @@ pub(crate) fn find_credential_profile(
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| format!("read credential profile config '{}': {e}", path.display()))?;
-        let doc: CredentialProfileDocument = serde_json::from_str(&raw)
-            .map_err(|e| format!("parse credential profile config '{}': {e}", path.display()))?;
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                skipped_invalid_configs.push(format!("{} ({err})", path.display()));
+                continue;
+            }
+        };
+        let doc: CredentialProfileDocument = match serde_json::from_str(&raw) {
+            Ok(doc) => doc,
+            Err(err) => {
+                skipped_invalid_configs.push(format!("{} ({err})", path.display()));
+                continue;
+            }
+        };
         if let Some(profile) = doc.credential_profiles.get(profile_name).cloned() {
             return Ok((path, profile));
         }
     }
-    Err(format!(
+    let mut err = format!(
         "Credential profile '{profile_name}' not found under {}",
         credentials_dir.display()
-    ))
+    );
+    if !skipped_invalid_configs.is_empty() {
+        err.push_str(&format!(
+            "; skipped invalid configs: {}",
+            skipped_invalid_configs.join(", ")
+        ));
+    }
+    Err(err)
 }
 
 fn consumer_allowed(allowed: &AllowedConsumers, consumer: &str) -> bool {
@@ -141,7 +159,7 @@ fn consumer_allowed(allowed: &AllowedConsumers, consumer: &str) -> bool {
         || allowed.profiles.iter().any(|profile| profile == consumer)
 }
 
-fn entry_allows_consumer(entry_allowed_agents: Option<&Vec<String>>, consumer: &str) -> bool {
+fn entry_allows_consumer(entry_allowed_agents: Option<&[String]>, consumer: &str) -> bool {
     entry_allowed_agents
         .map(|agents| agents.iter().any(|agent| agent == consumer))
         .unwrap_or(true)
@@ -219,7 +237,7 @@ pub(crate) fn plan_credential_materialization(
                 }
                 "missing_secret"
             }
-            Some(entry) if !entry_allows_consumer(entry.allowed_agents.as_ref(), consumer) => {
+            Some(entry) if !entry_allows_consumer(entry.allowed_agents.as_deref(), consumer) => {
                 if !denied_secrets.contains(&resolved_secret) {
                     denied_secrets.push(resolved_secret.clone());
                 }
