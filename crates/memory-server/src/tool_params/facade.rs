@@ -1313,7 +1313,7 @@ pub(crate) struct TachiTaskParams {
     pub limit: Option<usize>,
     #[serde(default)]
     #[schemars(
-        description = "Proposal id for action='review_proposal' or action='apply_proposals'. Route-policy proposals can be applied; loadout-evolution proposals can be reviewed and await projection."
+        description = "Proposal id for action='review_proposal' or action='apply_proposals'. Route-policy proposals persist rules; loadout-evolution proposals project reviewed profile/card overlays."
     )]
     pub proposal_id: Option<String>,
     #[serde(default)]

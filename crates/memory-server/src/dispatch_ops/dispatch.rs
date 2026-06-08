@@ -22,7 +22,7 @@ use crate::credential_profile::{
     plan_credential_materialization_with_run_dir, profile_secret_names, CredentialApplyOptions,
     CredentialMaterializeReport,
 };
-use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
+use crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server;
 use crate::vault_ops::read_unlocked_vault_secret;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -301,7 +301,7 @@ pub(crate) async fn handle_tachi_dispatch(
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
     let now = Utc::now();
-    let resolved_profile = resolve_and_apply_dispatch_profile(&mut params)?;
+    let resolved_profile = resolve_and_apply_dispatch_profile_for_server(server, &mut params)?;
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 

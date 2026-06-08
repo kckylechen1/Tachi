@@ -871,13 +871,115 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     assert_eq!(reviewed["proposal"]["kind"], json!("loadout_evolution"));
 
     let mut apply = task_params("apply_proposals");
-    apply.proposal_id = Some(proposal_id);
+    apply.proposal_id = Some(proposal_id.clone());
     apply.confirm = true;
-    let err = server
+    let applied_raw = server
         .tachi_task(Parameters(apply))
         .await
-        .expect_err("loadout projection should be a separate slice");
-    assert!(err.contains("profile-card projection slice"), "{err}");
+        .expect("approved loadout evolution should project");
+    let applied: serde_json::Value = serde_json::from_str(&applied_raw).expect("apply JSON");
+    assert_eq!(applied["applied"], json!(true));
+    assert_eq!(applied["profile_card_mutated"], json!(true));
+    assert_eq!(
+        applied["projection_namespace"],
+        json!("dispatch_profile_card_overlays")
+    );
+    assert_eq!(applied["proposal"]["status"], json!("applied"));
+    assert_eq!(
+        applied["proposal"]["projection"]["status"],
+        json!("applied_profile_card_overlay")
+    );
+
+    let mut second_apply = task_params("apply_proposals");
+    second_apply.proposal_id = Some(proposal_id.clone());
+    second_apply.confirm = true;
+    let err = server
+        .tachi_task(Parameters(second_apply))
+        .await
+        .expect_err("applied proposal should require a fresh approved proposal");
+    assert!(err.contains("must be approved before apply"), "{err}");
+
+    let loadout_raw = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "loadout".to_string(),
+            query: Some("plan a dispatch loadout evolution slice".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: Some(50),
+            skill_id: None,
+            args: None,
+            profile: Some("claude_plan".to_string()),
+            host: Some("codex".to_string()),
+            skill_limit: Some(3),
+            capability_limit: Some(2),
+            pack_limit: Some(1),
+            include_section: Some(false),
+        }))
+        .await
+        .expect("loadout should include projected skill");
+    let loadout: serde_json::Value = serde_json::from_str(&loadout_raw).expect("loadout JSON");
+    assert!(loadout["resolved_skills"]
+        .as_array()
+        .expect("resolved skills")
+        .contains(&json!("skill:planning-ux-review")));
+    assert!(loadout["skill_loadout"]["projected_signature_skills"]
+        .as_array()
+        .expect("projected signature skills")
+        .contains(&json!("skill:planning-ux-review")));
+    assert_eq!(
+        loadout["skill_loadout"]["projection"]["status"],
+        json!("applied_overlay")
+    );
+
+    let profiles_raw = server
+        .tachi_task(Parameters(task_params("profiles")))
+        .await
+        .expect("profiles should include projected loadout");
+    let profiles: serde_json::Value = serde_json::from_str(&profiles_raw).expect("profiles JSON");
+    let claude_profile = profiles["dispatch_profiles"]
+        .as_array()
+        .expect("profiles")
+        .iter()
+        .find(|profile| profile["name"] == json!("claude_plan"))
+        .expect("claude_plan profile");
+    assert!(claude_profile["skill_loadout"]["signature_skills"]
+        .as_array()
+        .expect("signature skills")
+        .contains(&json!("skill:planning-ux-review")));
+
+    let mut recommend_params = task_params("recommend");
+    recommend_params.task = Some("Plan a dispatch loadout evolution slice".to_string());
+    recommend_params.limit = Some(50);
+    let recommend_raw = server
+        .tachi_task(Parameters(recommend_params))
+        .await
+        .expect("recommend should include projected loadout");
+    let recommend: serde_json::Value =
+        serde_json::from_str(&recommend_raw).expect("recommend JSON");
+    assert!(recommend["resolved_skills"]
+        .as_array()
+        .expect("recommend resolved skills")
+        .contains(&json!("skill:planning-ux-review")));
+
+    let agents_raw = server
+        .tachi_agents(Parameters(TachiAgentsParams {
+            action: "profiles".to_string(),
+            intent: None,
+            task: None,
+        }))
+        .await
+        .expect("legacy agents registry should include projected loadout");
+    let agents: serde_json::Value = serde_json::from_str(&agents_raw).expect("agents JSON");
+    let agent_claude_profile = agents["dispatch_profiles"]
+        .as_array()
+        .expect("agent profiles")
+        .iter()
+        .find(|profile| profile["name"] == json!("claude_plan"))
+        .expect("claude_plan in agent registry");
+    assert!(agent_claude_profile["skill_loadout"]["signature_skills"]
+        .as_array()
+        .expect("agent signature skills")
+        .contains(&json!("skill:planning-ux-review")));
 }
 
 #[tokio::test]
@@ -2870,6 +2972,24 @@ async fn dispatch_prompt_injects_sft_examples_as_style_only_context() {
 #[tokio::test]
 async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     let server = make_server();
+    server
+        .with_global_store(|store| {
+            store
+                .set_state(
+                    "dispatch_profile_card_overlays",
+                    "claude_plan",
+                    &json!({
+                        "kind": "profile_card_loadout_overlay",
+                        "profile": "claude_plan",
+                        "add_signature_skills": ["skill:planning-ux-review"],
+                        "source_proposal_ids": ["proposal-fixture"],
+                    })
+                    .to_string(),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed profile/card overlay");
     let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
     params.profile = Some("claude_plan".to_string());
     params.stage = Some("plan".to_string());
@@ -2905,6 +3025,15 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     );
     assert!(
         prompt.contains("skill:coding-architecture-decision"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("skill:planning-ux-review"), "{prompt}");
+    assert!(
+        prompt.contains("projected_signature_skills: skill:planning-ux-review"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("projection_status: applied_overlay"),
         "{prompt}"
     );
     assert!(

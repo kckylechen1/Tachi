@@ -300,7 +300,7 @@ mod tests {
         assert_eq!(voyage.len(), 2);
         assert_eq!(voyage[0].key_id, "VOYAGE_API_KEY_1");
         assert_eq!(voyage[1].key_id, "VOYAGE_API_KEY_2");
-        assert!(grouped.get("SOME_API_KEY").is_none());
+        assert!(!grouped.contains_key("SOME_API_KEY"));
         assert_eq!(
             grouped
                 .get("SOME_API_KEY_2")
