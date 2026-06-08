@@ -1139,3 +1139,328 @@ fn credential_doctor_detects_compound_secretish_config_keys() {
         report.issues
     );
 }
+
+#[test]
+fn credential_config_patch_merges_json_with_backup_permissions_and_redaction() {
+    let db_path = std::env::temp_dir().join(format!(
+        "credential-config-patch-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("OPENAI_API_KEY", None))
+        .expect("insert api key metadata");
+
+    let out_dir = tempfile::tempdir().expect("temp output dir");
+    let config_path = out_dir.path().join("opencode.json");
+    let existing = r#"{"provider":{"openai":{"baseURL":"https://api.example.test"}},"keep":true}"#;
+    std::fs::write(&config_path, existing).expect("write existing config");
+    #[cfg(unix)]
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644))
+        .expect("set initial broad permissions");
+
+    let profile = crate::credential_profile::CredentialProfile {
+        provider: Some("opencode".to_string()),
+        description: None,
+        entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
+            .into_iter()
+            .collect(),
+        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        materializers: vec![crate::credential_profile::CredentialMaterializer {
+            kind: "config_patch".to_string(),
+            source: "api_key".to_string(),
+            target: config_path.to_string_lossy().to_string(),
+            chmod: Some("0600".to_string()),
+            template: Some(serde_json::json!({
+                "provider": {
+                    "openai": {
+                        "apiKey": "{{secret}}"
+                    }
+                }
+            })),
+        }],
+    };
+    let secret_values = [("OPENAI_API_KEY".to_string(), "sk-patch-secret".to_string())]
+        .into_iter()
+        .collect();
+
+    let result = crate::credential_profile::apply_credential_materialization(
+        "opencode_shared",
+        &profile,
+        "opencode",
+        &store,
+        &secret_values,
+        &crate::credential_profile::CredentialApplyOptions {
+            allow_existing: true,
+            run_dir: None,
+        },
+    )
+    .expect("apply config_patch materialization");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).expect("read config"))
+            .expect("patched config JSON");
+    assert_eq!(
+        parsed["provider"]["openai"]["baseURL"],
+        serde_json::json!("https://api.example.test")
+    );
+    assert_eq!(
+        parsed["provider"]["openai"]["apiKey"],
+        serde_json::json!("sk-patch-secret")
+    );
+    assert_eq!(parsed["keep"], serde_json::json!(true));
+    #[cfg(unix)]
+    assert_eq!(
+        std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    let backups = std::fs::read_dir(out_dir.path())
+        .expect("list output dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("opencode.json.tachi-bak-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    assert_eq!(
+        std::fs::read_to_string(&backups[0]).expect("read backup"),
+        existing
+    );
+    let temp_leftovers = std::fs::read_dir(out_dir.path())
+        .expect("list output dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(".tachi-tmp-"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        temp_leftovers.is_empty(),
+        "atomic write should not leave temp files: {temp_leftovers:?}"
+    );
+
+    assert_eq!(result.report.steps[0].status, "written");
+    assert!(result.report.steps[0].applied);
+    let raw = serde_json::to_string(&result.report).expect("serialize report");
+    assert!(!raw.contains("sk-patch-secret"));
+    assert!(raw.contains("config_patch"));
+}
+
+#[test]
+fn credential_config_patch_refuses_unsafe_targets() {
+    let db_path = std::env::temp_dir().join(format!(
+        "credential-config-patch-risk-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CLAUDE_API_KEY", None))
+        .expect("insert api key metadata");
+
+    let out_dir = tempfile::tempdir().expect("temp output dir");
+    let unsafe_target = out_dir.path().join(".claude/settings.json");
+    let profile = crate::credential_profile::CredentialProfile {
+        provider: Some("claude".to_string()),
+        description: None,
+        entries: [("api_key".to_string(), "CLAUDE_API_KEY".to_string())]
+            .into_iter()
+            .collect(),
+        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        materializers: vec![crate::credential_profile::CredentialMaterializer {
+            kind: "config_patch".to_string(),
+            source: "api_key".to_string(),
+            target: unsafe_target.to_string_lossy().to_string(),
+            chmod: Some("0600".to_string()),
+            template: Some(serde_json::json!({"apiKey": "{{secret}}" })),
+        }],
+    };
+    let secret_values = [("CLAUDE_API_KEY".to_string(), "sk-claude-secret".to_string())]
+        .into_iter()
+        .collect();
+
+    let err = crate::credential_profile::apply_credential_materialization(
+        "claude_shared",
+        &profile,
+        "claude_code",
+        &store,
+        &secret_values,
+        &crate::credential_profile::CredentialApplyOptions {
+            allow_existing: true,
+            run_dir: None,
+        },
+    )
+    .expect_err("unsafe config_patch target should be refused");
+    assert!(
+        err.contains("refusing high-risk credential target"),
+        "{err}"
+    );
+    assert!(!err.contains("sk-claude-secret"));
+    assert!(!unsafe_target.exists());
+}
+
+#[test]
+fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
+    let db_path = std::env::temp_dir().join(format!(
+        "credential-manual-cleanup-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("CODEX_AUTH_JSON", None))
+        .expect("insert auth json metadata");
+
+    let out_dir = tempfile::tempdir().expect("temp output dir");
+    let auth_path = out_dir.path().join("auth.json");
+    let profile = codex_auth_file_profile(&auth_path);
+    apply_codex_auth_file_materialization(&store, &profile);
+    assert!(auth_path.exists());
+
+    let dry_run = crate::credential_profile::cleanup_managed_credential_materializations(
+        &store,
+        &crate::credential_profile::CredentialCleanupOptions {
+            run_dir: None,
+            profile: Some("codex_shared".to_string()),
+            consumer: Some("codex_cli".to_string()),
+            dry_run: true,
+            mark_only: false,
+        },
+    )
+    .expect("dry-run manual cleanup");
+    assert_eq!(
+        dry_run.would_remove,
+        vec![auth_path.to_string_lossy().to_string()]
+    );
+    assert!(auth_path.exists(), "dry-run must not remove target");
+
+    let applied = crate::credential_profile::cleanup_managed_credential_materializations(
+        &store,
+        &crate::credential_profile::CredentialCleanupOptions {
+            run_dir: None,
+            profile: Some("codex_shared".to_string()),
+            consumer: Some("codex_cli".to_string()),
+            dry_run: false,
+            mark_only: false,
+        },
+    )
+    .expect("apply manual cleanup");
+    assert_eq!(
+        applied.removed,
+        vec![auth_path.to_string_lossy().to_string()]
+    );
+    assert!(!auth_path.exists());
+    let raw = serde_json::to_string(&applied).expect("serialize cleanup report");
+    assert!(!raw.contains("secret-token"));
+    assert!(!raw.contains("CODEX_AUTH_JSON\":"));
+
+    let rows = store
+        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .expect("list managed credential metadata");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&rows[0].value_json).expect("metadata JSON");
+    assert_eq!(metadata["cleanup_status"], serde_json::json!("cleaned"));
+}
+
+#[test]
+fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
+    let db_path = std::env::temp_dir().join(format!(
+        "credential-manual-mark-only-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+    store
+        .vault_upsert_entry(&test_vault_entry("OPENAI_API_KEY", None))
+        .expect("insert api key metadata");
+
+    let out_dir = tempfile::tempdir().expect("temp output dir");
+    let config_path = out_dir.path().join("opencode.json");
+    std::fs::write(&config_path, r#"{"provider":{"openai":{}}}"#).expect("write existing config");
+    let profile = crate::credential_profile::CredentialProfile {
+        provider: Some("opencode".to_string()),
+        description: None,
+        entries: [("api_key".to_string(), "OPENAI_API_KEY".to_string())]
+            .into_iter()
+            .collect(),
+        allowed_consumers: crate::credential_profile::AllowedConsumers::default(),
+        materializers: vec![crate::credential_profile::CredentialMaterializer {
+            kind: "config_patch".to_string(),
+            source: "api_key".to_string(),
+            target: config_path.to_string_lossy().to_string(),
+            chmod: Some("0600".to_string()),
+            template: Some(serde_json::json!({
+                "provider": {"openai": {"apiKey": "{{secret}}"}}
+            })),
+        }],
+    };
+    let secret_values = [("OPENAI_API_KEY".to_string(), "sk-mark-secret".to_string())]
+        .into_iter()
+        .collect();
+    crate::credential_profile::apply_credential_materialization(
+        "opencode_shared",
+        &profile,
+        "opencode",
+        &store,
+        &secret_values,
+        &crate::credential_profile::CredentialApplyOptions {
+            allow_existing: true,
+            run_dir: None,
+        },
+    )
+    .expect("apply config_patch");
+
+    let skipped = crate::credential_profile::cleanup_managed_credential_materializations(
+        &store,
+        &crate::credential_profile::CredentialCleanupOptions {
+            run_dir: None,
+            profile: Some("opencode_shared".to_string()),
+            consumer: Some("opencode".to_string()),
+            dry_run: false,
+            mark_only: false,
+        },
+    )
+    .expect("cleanup without mark-only");
+    assert!(skipped.removed.is_empty());
+    assert!(skipped
+        .skipped
+        .iter()
+        .any(|entry| entry.contains("config_patch requires --mark-only")));
+    assert!(config_path.exists());
+
+    let marked = crate::credential_profile::cleanup_managed_credential_materializations(
+        &store,
+        &crate::credential_profile::CredentialCleanupOptions {
+            run_dir: None,
+            profile: Some("opencode_shared".to_string()),
+            consumer: Some("opencode".to_string()),
+            dry_run: false,
+            mark_only: true,
+        },
+    )
+    .expect("mark config_patch cleaned");
+    assert_eq!(
+        marked.marked,
+        vec![config_path.to_string_lossy().to_string()]
+    );
+    assert!(
+        config_path.exists(),
+        "mark-only must not remove config file"
+    );
+    let raw = serde_json::to_string(&marked).expect("serialize mark-only report");
+    assert!(!raw.contains("sk-mark-secret"));
+
+    let rows = store
+        .list_state(crate::credential_profile::CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .expect("list managed credential metadata");
+    let metadata: serde_json::Value =
+        serde_json::from_str(&rows[0].value_json).expect("metadata JSON");
+    assert_eq!(metadata["cleanup_status"], serde_json::json!("cleaned"));
+}

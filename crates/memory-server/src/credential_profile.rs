@@ -132,11 +132,25 @@ pub(crate) struct CredentialCleanupReport {
     pub run_dir: String,
     pub credentials_dir: String,
     pub dry_run: bool,
+    pub profile: Option<String>,
+    pub consumer: Option<String>,
+    pub mark_only: bool,
+    pub would_mark: Vec<String>,
+    pub marked: Vec<String>,
     pub would_remove: Vec<String>,
     pub removed: Vec<String>,
     pub missing: Vec<String>,
     pub skipped: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CredentialCleanupOptions {
+    pub run_dir: Option<PathBuf>,
+    pub profile: Option<String>,
+    pub consumer: Option<String>,
+    pub dry_run: bool,
+    pub mark_only: bool,
 }
 
 pub(crate) fn default_credentials_dir() -> PathBuf {
@@ -247,6 +261,7 @@ fn materializer_output(kind: &str, target: &str) -> String {
         "env" => format!("env:{target}"),
         "file_copy" => format!("file:{target}"),
         "config_overlay" => format!("config_overlay:{target}"),
+        "config_patch" => format!("config_patch:{target}"),
         "config_content_env" => format!("config_content_env:{target}"),
         _ => format!("{kind}:{target}"),
     }
@@ -262,7 +277,8 @@ fn is_env_target(target: &str) -> bool {
 }
 
 fn materializer_writes_file(kind: &str, target: &str) -> bool {
-    matches!(kind, "file_copy") || (kind == "config_overlay" && !is_env_target(target))
+    matches!(kind, "file_copy" | "config_patch")
+        || (kind == "config_overlay" && !is_env_target(target))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -417,6 +433,64 @@ fn render_config_overlay_value(
     })
 }
 
+fn render_template_json(materializer: &CredentialMaterializer, secret: &str) -> serde_json::Value {
+    materializer
+        .template
+        .as_ref()
+        .map(|template| render_template_value(template, secret))
+        .unwrap_or_else(|| serde_json::Value::String(secret.to_string()))
+}
+
+fn merge_json_patch(base: &mut serde_json::Value, patch: serde_json::Value) {
+    match (base, patch) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                if value.is_null() {
+                    base.remove(&key);
+                } else if let Some(existing) = base.get_mut(&key) {
+                    merge_json_patch(existing, value);
+                } else {
+                    base.insert(key, value);
+                }
+            }
+        }
+        (base, patch) => {
+            *base = patch;
+        }
+    }
+}
+
+fn render_config_patch_value(
+    materializer: &CredentialMaterializer,
+    secret: &str,
+    target: &Path,
+) -> Result<String, String> {
+    let patch = render_template_json(materializer, secret);
+    if !patch.is_object() {
+        return Err(format!(
+            "config_patch template for target '{}' must render to a JSON object",
+            materializer.target
+        ));
+    }
+    let mut base = if target.exists() {
+        let raw = fs::read_to_string(target)
+            .map_err(|e| format!("read config_patch target '{}': {e}", target.display()))?;
+        serde_json::from_str(&raw)
+            .map_err(|e| format!("parse config_patch target '{}': {e}", target.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    if !base.is_object() {
+        return Err(format!(
+            "config_patch target '{}' must contain a JSON object",
+            target.display()
+        ));
+    }
+    merge_json_patch(&mut base, patch);
+    serde_json::to_string_pretty(&base)
+        .map_err(|e| format!("serialize config_patch target '{}': {e}", target.display()))
+}
+
 fn expand_target(target: &str, run_dir: Option<&Path>) -> String {
     let mut expanded = display_target(target);
     if let Some(run_dir) = run_dir {
@@ -483,7 +557,7 @@ pub(crate) fn plan_credential_materialization_with_run_dir(
         let target = expand_target(&materializer.target, run_dir);
         let known_kind = matches!(
             materializer.kind.as_str(),
-            "env" | "file_copy" | "config_overlay" | "config_content_env"
+            "env" | "file_copy" | "config_overlay" | "config_patch" | "config_content_env"
         );
         if !known_kind {
             warnings.push(format!(
@@ -542,15 +616,15 @@ fn mode_from_chmod(chmod: Option<&str>) -> Result<u32, String> {
     u32::from_str_radix(raw, 8).map_err(|e| format!("invalid chmod '{raw}': {e}"))
 }
 
-fn is_high_risk_file_copy_target(path: &Path) -> bool {
+fn is_high_risk_credential_target(path: &Path) -> bool {
     let raw = path.to_string_lossy();
     raw.ends_with("/.claude.json")
         || raw.contains("/.claude/")
         || raw.contains("/.claude-code-router/")
 }
 
-fn ensure_safe_file_copy_target(path: &Path) -> Result<(), String> {
-    if is_high_risk_file_copy_target(path) {
+fn ensure_safe_credential_target(path: &Path) -> Result<(), String> {
+    if is_high_risk_credential_target(path) {
         return Err(format!(
             "refusing high-risk credential target '{}'; use a narrower generated credential path",
             path.display()
@@ -565,7 +639,7 @@ fn write_file_atomic(
     chmod: Option<&str>,
     allow_existing: bool,
 ) -> Result<(), String> {
-    ensure_safe_file_copy_target(target)?;
+    ensure_safe_credential_target(target)?;
     if target.exists() && !allow_existing {
         return Err(format!(
             "target '{}' already exists; rerun with allow_existing after reviewing backup policy",
@@ -716,6 +790,27 @@ pub(crate) fn apply_credential_materialization(
                 report.steps[idx].would_write = false;
                 report.steps[idx].applied = true;
             }
+            "config_patch" => {
+                let target = PathBuf::from(&report.steps[idx].target);
+                ensure_safe_credential_target(&target)?;
+                let rendered = render_config_patch_value(materializer, value, &target)?;
+                write_file_atomic(
+                    &target,
+                    &rendered,
+                    materializer.chmod.as_deref(),
+                    options.allow_existing,
+                )?;
+                record_managed_materialization(
+                    store,
+                    profile_name,
+                    consumer,
+                    &report.steps[idx],
+                    &rendered,
+                )?;
+                report.steps[idx].status = "written".to_string();
+                report.steps[idx].would_write = false;
+                report.steps[idx].applied = true;
+            }
             "config_content_env" => {
                 if !is_env_target(&report.steps[idx].target) {
                     return Err(format!(
@@ -764,11 +859,93 @@ pub(crate) fn cleanup_ephemeral_credential_materializations(
     run_dir: &Path,
     dry_run: bool,
 ) -> Result<CredentialCleanupReport, String> {
+    cleanup_managed_credential_materializations(
+        store,
+        &CredentialCleanupOptions {
+            run_dir: Some(run_dir.to_path_buf()),
+            profile: None,
+            consumer: None,
+            dry_run,
+            mark_only: false,
+        },
+    )
+}
+
+fn metadata_matches_cleanup_scope(
+    metadata: &ManagedCredentialMaterialization,
+    options: &CredentialCleanupOptions,
+) -> bool {
+    if let Some(profile) = &options.profile {
+        if metadata.profile != *profile {
+            return false;
+        }
+    }
+    if let Some(consumer) = &options.consumer {
+        if metadata.consumer != *consumer {
+            return false;
+        }
+    }
+    if let Some(run_dir) = &options.run_dir {
+        let target = PathBuf::from(&metadata.target);
+        if !target.starts_with(run_dir) {
+            return false;
+        }
+    }
+    true
+}
+
+fn mark_metadata_cleaned(
+    store: &MemoryStore,
+    row_key: &str,
+    metadata: &mut ManagedCredentialMaterialization,
+    cleanup_run_dir: Option<&Path>,
+) -> Result<(), String> {
+    metadata.cleanup_status = Some("cleaned".to_string());
+    metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
+    metadata.cleanup_run_dir = cleanup_run_dir.map(|run_dir| run_dir.to_string_lossy().to_string());
+    let value = serde_json::to_string(metadata)
+        .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
+    store
+        .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, row_key, &value)
+        .map_err(|e| format!("mark credential target cleaned: {e}"))?;
+    Ok(())
+}
+
+fn managed_target_current_hash(
+    metadata: &ManagedCredentialMaterialization,
+    target: &Path,
+) -> Result<String, String> {
+    let current = fs::read_to_string(target)
+        .map_err(|e| format!("read managed credential target '{}': {e}", target.display()))?;
+    Ok(managed_materialization_content_hash(
+        &metadata.profile,
+        &metadata.consumer,
+        &metadata.target,
+        &current,
+    ))
+}
+
+pub(crate) fn cleanup_managed_credential_materializations(
+    store: &MemoryStore,
+    options: &CredentialCleanupOptions,
+) -> Result<CredentialCleanupReport, String> {
+    if options.run_dir.is_none() && options.profile.is_none() && options.consumer.is_none() {
+        return Err(
+            "credential cleanup requires at least one scope: --run-dir, --profile, or --consumer"
+                .to_string(),
+        );
+    }
+    let run_dir = options.run_dir.clone().unwrap_or_default();
     let credentials_dir = run_dir.join("credentials");
     let mut report = CredentialCleanupReport {
         run_dir: run_dir.to_string_lossy().to_string(),
         credentials_dir: credentials_dir.to_string_lossy().to_string(),
-        dry_run,
+        dry_run: options.dry_run,
+        profile: options.profile.clone(),
+        consumer: options.consumer.clone(),
+        mark_only: options.mark_only,
+        would_mark: Vec::new(),
+        marked: Vec::new(),
         would_remove: Vec::new(),
         removed: Vec::new(),
         missing: Vec::new(),
@@ -793,24 +970,35 @@ pub(crate) fn cleanup_ephemeral_credential_materializations(
             report.skipped.push(metadata.target);
             continue;
         }
-        let target = PathBuf::from(&metadata.target);
-        if !target.starts_with(run_dir) {
+        if !metadata_matches_cleanup_scope(&metadata, options) {
             report.skipped.push(metadata.target);
             continue;
         }
+        let target = PathBuf::from(&metadata.target);
         if !target.exists() {
-            metadata.cleanup_status = Some("cleaned".to_string());
-            metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
-            metadata.cleanup_run_dir = Some(run_dir.to_string_lossy().to_string());
-            let value = serde_json::to_string(&metadata)
-                .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
-            store
-                .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, &row.key, &value)
-                .map_err(|e| format!("mark missing credential target cleaned: {e}"))?;
+            if !options.dry_run {
+                mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
+            }
             report.missing.push(target.to_string_lossy().to_string());
             continue;
         }
-        if dry_run {
+        if options.mark_only {
+            if options.dry_run {
+                report.would_mark.push(target.to_string_lossy().to_string());
+                continue;
+            }
+            mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
+            report.marked.push(target.to_string_lossy().to_string());
+            continue;
+        }
+        if metadata.materializer_type == "config_patch" && options.run_dir.is_none() {
+            report.skipped.push(format!(
+                "{} (config_patch requires --mark-only unless scoped to --run-dir)",
+                metadata.target
+            ));
+            continue;
+        }
+        if options.dry_run {
             report
                 .would_remove
                 .push(target.to_string_lossy().to_string());
@@ -823,16 +1011,25 @@ pub(crate) fn cleanup_ephemeral_credential_materializations(
             ));
             continue;
         }
+        if options.run_dir.is_none() {
+            match managed_target_current_hash(&metadata, &target) {
+                Ok(current_hash) if current_hash == metadata.content_hash => {}
+                Ok(_) => {
+                    report.skipped.push(format!(
+                        "{} (hash mismatch; use --mark-only after review)",
+                        metadata.target
+                    ));
+                    continue;
+                }
+                Err(err) => {
+                    report.errors.push(err);
+                    continue;
+                }
+            }
+        }
         match fs::remove_file(&target) {
             Ok(()) => {
-                metadata.cleanup_status = Some("cleaned".to_string());
-                metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
-                metadata.cleanup_run_dir = Some(run_dir.to_string_lossy().to_string());
-                let value = serde_json::to_string(&metadata)
-                    .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
-                store
-                    .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, &row.key, &value)
-                    .map_err(|e| format!("mark credential target cleaned: {e}"))?;
+                mark_metadata_cleaned(store, &row.key, &mut metadata, options.run_dir.as_deref())?;
                 report.removed.push(target.to_string_lossy().to_string());
             }
             Err(err) => report.errors.push(format!(
@@ -973,7 +1170,7 @@ pub(crate) fn doctor_credential_profile(
                     None
                 }
             };
-            if is_high_risk_file_copy_target(&target) {
+            if is_high_risk_credential_target(&target) {
                 issues.push(CredentialDoctorIssue {
                     severity: "high".to_string(),
                     code: "high_risk_target".to_string(),
@@ -1074,7 +1271,11 @@ pub(crate) fn doctor_credential_profile(
                         });
                     }
                 }
-                if step.materializer_type == "config_overlay" && managed_target_readable {
+                if matches!(
+                    step.materializer_type.as_str(),
+                    "config_overlay" | "config_patch"
+                ) && managed_target_readable
+                {
                     match target_json_contains_plaintext_secret(&target) {
                         Ok(true) => issues.push(CredentialDoctorIssue {
                             severity: "high".to_string(),
