@@ -7,6 +7,10 @@ use memory_core::MemoryStore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -75,8 +79,20 @@ pub(crate) struct CredentialMaterializeStepReport {
     pub status: String,
     pub redacted: bool,
     pub would_write: bool,
+    pub applied: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chmod: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CredentialApplyOptions {
+    pub allow_existing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CredentialApplyResult {
+    pub report: CredentialMaterializeReport,
+    pub env: HashMap<String, String>,
 }
 
 pub(crate) fn default_credentials_dir() -> PathBuf {
@@ -191,6 +207,17 @@ fn materializer_output(kind: &str, target: &str) -> String {
     }
 }
 
+pub(crate) fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
+    let mut names = profile
+        .materializers
+        .iter()
+        .map(|materializer| resolve_source(profile, &materializer.source))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
 pub(crate) fn plan_credential_materialization(
     profile_name: &str,
     profile: &CredentialProfile,
@@ -256,7 +283,8 @@ pub(crate) fn plan_credential_materialization(
             output: materializer_output(&materializer.kind, &target),
             status: status.to_string(),
             redacted: true,
-            would_write: false,
+            would_write: matches!(materializer.kind.as_str(), "file_copy" | "config_overlay"),
+            applied: false,
             chmod: materializer.chmod.clone(),
         });
     }
@@ -272,6 +300,180 @@ pub(crate) fn plan_credential_materialization(
         denied_secrets,
         warnings,
     })
+}
+
+fn mode_from_chmod(chmod: Option<&str>) -> Result<u32, String> {
+    let raw = chmod.unwrap_or("0600");
+    u32::from_str_radix(raw, 8).map_err(|e| format!("invalid chmod '{raw}': {e}"))
+}
+
+fn ensure_safe_file_copy_target(path: &Path) -> Result<(), String> {
+    let raw = path.to_string_lossy();
+    if raw.ends_with("/.claude.json")
+        || raw.contains("/.claude/")
+        || raw.contains("/.claude-code-router/")
+    {
+        return Err(format!(
+            "refusing high-risk credential target '{}'; use a narrower generated credential path",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn write_file_atomic(
+    target: &Path,
+    value: &str,
+    chmod: Option<&str>,
+    allow_existing: bool,
+) -> Result<(), String> {
+    ensure_safe_file_copy_target(target)?;
+    if target.exists() && !allow_existing {
+        return Err(format!(
+            "target '{}' already exists; rerun with allow_existing after reviewing backup policy",
+            target.display()
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create '{}': {e}", parent.display()))?;
+    }
+
+    if target.exists() {
+        let backup = target.with_extension(format!(
+            "{}.tachi-bak-{}",
+            target
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("bak"),
+            chrono::Utc::now().timestamp()
+        ));
+        fs::copy(target, &backup).map_err(|e| {
+            format!(
+                "backup existing target '{}' to '{}': {e}",
+                target.display(),
+                backup.display()
+            )
+        })?;
+    }
+
+    let temp = target.with_extension(format!(
+        "{}.tachi-tmp-{}",
+        target
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("tmp"),
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|e| format!("create temp credential file '{}': {e}", temp.display()))?;
+        file.write_all(value.as_bytes())
+            .map_err(|e| format!("write temp credential file '{}': {e}", temp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync temp credential file '{}': {e}", temp.display()))?;
+    }
+
+    #[cfg(unix)]
+    {
+        let mode = mode_from_chmod(chmod)?;
+        fs::set_permissions(&temp, fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("chmod temp credential file '{}': {e}", temp.display()))?;
+    }
+
+    fs::rename(&temp, target).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        format!(
+            "move temp credential file '{}' to '{}': {e}",
+            temp.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
+pub(crate) fn apply_credential_materialization(
+    profile_name: &str,
+    profile: &CredentialProfile,
+    consumer: &str,
+    store: &MemoryStore,
+    secret_values: &HashMap<String, String>,
+    options: &CredentialApplyOptions,
+) -> Result<CredentialApplyResult, String> {
+    let mut report = plan_credential_materialization(profile_name, profile, consumer, store)?;
+    report.dry_run = false;
+    if !report.allowed
+        || !report.missing_secrets.is_empty()
+        || !report.denied_secrets.is_empty()
+        || report.steps.iter().any(|step| step.status != "ready")
+    {
+        return Err(format!(
+            "credential profile '{}' is not ready to apply; inspect dry-run report first",
+            profile_name
+        ));
+    }
+
+    let mut env = HashMap::new();
+    for (idx, materializer) in profile.materializers.iter().enumerate() {
+        let resolved_secret = resolve_source(profile, &materializer.source);
+        let value = secret_values
+            .get(&resolved_secret)
+            .ok_or_else(|| format!("missing decrypted value for secret '{resolved_secret}'"))?;
+        match materializer.kind.as_str() {
+            "env" => {
+                env.insert(materializer.target.clone(), value.clone());
+                report.steps[idx].status = "prepared_env".to_string();
+                report.steps[idx].would_write = false;
+                report.steps[idx].applied = true;
+            }
+            "file_copy" => {
+                let target = PathBuf::from(&report.steps[idx].target);
+                write_file_atomic(
+                    &target,
+                    value,
+                    materializer.chmod.as_deref(),
+                    options.allow_existing,
+                )?;
+                report.steps[idx].status = "written".to_string();
+                report.steps[idx].would_write = false;
+                report.steps[idx].applied = true;
+            }
+            "config_overlay" => {
+                return Err(
+                    "credential materializer type 'config_overlay' is dry-run only in this slice"
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "unsupported credential materializer type '{other}'"
+                ))
+            }
+        }
+    }
+
+    let audit_detail = format!(
+        "consumer={consumer}; outputs={}",
+        report
+            .steps
+            .iter()
+            .map(|step| format!("{}:{}", step.output, step.status))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    if let Err(err) = store.vault_insert_audit(
+        &chrono::Utc::now().to_rfc3339(),
+        "credential_materialize",
+        Some(profile_name),
+        true,
+        Some(&audit_detail),
+    ) {
+        eprintln!("WARNING: failed to record credential materialize audit: {err}");
+    }
+
+    Ok(CredentialApplyResult { report, env })
 }
 
 pub(crate) fn credential_materialize_report_json(
