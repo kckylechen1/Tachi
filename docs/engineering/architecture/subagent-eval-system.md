@@ -95,6 +95,18 @@ ledger or generated-column indexes instead of storing duplicate live state.
 7. Run `tachi_agent_eval(action="aggregate_live")` periodically to update
    routing hypotheses.
 
+`aggregate_live` now returns three evidence layers:
+
+| Field | Purpose |
+|---|---|
+| `scores` | leader-level success and verification rates by agent/task type |
+| `subagent_scores` | helper usefulness, plan-change, and failure counts by role/agent/model/task type |
+| `performance_matrix` | leader and subagent latency, token, cost, quality, verification, retry, and override metrics |
+
+Use `tachi_agent_eval(action="telemetry")` or `action="perf"` as readable aliases
+when the goal is specifically to inspect the live performance matrix. These
+aliases use the same `/eval` memory source; they do not create a second ledger.
+
 Do not count a helper as useful just because it produced text. Count it as
 useful when it changed the plan, found a real risk, saved time, improved
 verification, or produced a bounded patch the leader accepted.

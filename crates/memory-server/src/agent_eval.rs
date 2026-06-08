@@ -54,6 +54,10 @@ pub(crate) struct EvalRow {
     #[serde(default)]
     pub cost_usd: Option<f64>,
     #[serde(default)]
+    pub cost_tokens: Option<u64>,
+    #[serde(default)]
+    pub quality_score: Option<f64>,
+    #[serde(default)]
     pub latency_ms: Option<u64>,
     #[serde(default)]
     pub subagents: Vec<SubagentEvalRow>,
@@ -91,6 +95,10 @@ pub(crate) struct SubagentEvalRow {
     pub input_tokens: Option<u64>,
     #[serde(default)]
     pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cost_tokens: Option<u64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -115,6 +123,38 @@ pub(crate) struct SubagentTaskScore {
     pub failure_count: u32,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct AgentPerformanceMatrixRow {
+    pub scope: String,
+    pub profile: Option<String>,
+    pub role: Option<String>,
+    pub agent: String,
+    pub model: Option<String>,
+    pub task_type: String,
+    pub samples: u32,
+    pub success_rate: Option<f64>,
+    pub useful_rate: Option<f64>,
+    pub verification_rate: f64,
+    pub failure_count: u32,
+    pub human_override_rate: f64,
+    pub avg_retry_count: f64,
+    pub avg_latency_ms: Option<f64>,
+    pub p50_latency_ms: Option<u64>,
+    pub p95_latency_ms: Option<u64>,
+    pub avg_input_tokens: Option<f64>,
+    pub avg_output_tokens: Option<f64>,
+    pub avg_cost_tokens: Option<f64>,
+    pub avg_cost_usd: Option<f64>,
+    pub total_cost_usd: Option<f64>,
+    pub avg_quality_score: Option<f64>,
+}
+
+fn task_type_name(task_type: &TaskType) -> String {
+    serde_json::to_string(task_type)
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_else(|_| format!("{:?}", task_type))
+}
+
 pub(crate) fn load_eval_jsonl(path: &Path) -> Result<Vec<EvalRow>, String> {
     let file = File::open(path).map_err(|e| format!("open eval file {}: {e}", path.display()))?;
     let reader = BufReader::new(file);
@@ -136,9 +176,7 @@ pub(crate) fn aggregate_scores(rows: &[EvalRow]) -> Vec<AgentTaskScore> {
     use std::collections::HashMap;
     let mut buckets: HashMap<(String, String), (u32, u32, u32)> = HashMap::new();
     for row in rows {
-        let task = serde_json::to_string(&row.task_type)
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|_| format!("{:?}", row.task_type));
+        let task = task_type_name(&row.task_type);
         let key = (row.agent.clone(), task.clone());
         let entry = buckets.entry(key).or_insert((0, 0, 0));
         entry.0 += 1;
@@ -179,9 +217,7 @@ pub(crate) fn aggregate_subagent_scores(rows: &[EvalRow]) -> Vec<SubagentTaskSco
 
     let mut buckets: HashMap<(String, String, Option<String>, String), Bucket> = HashMap::new();
     for row in rows {
-        let task_type = serde_json::to_string(&row.task_type)
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|_| format!("{:?}", row.task_type));
+        let task_type = task_type_name(&row.task_type);
         for subagent in &row.subagents {
             let subagent_task_type = subagent
                 .task_type
@@ -253,6 +289,255 @@ pub(crate) fn aggregate_subagent_scores(rows: &[EvalRow]) -> Vec<SubagentTaskSco
     out
 }
 
+pub(crate) fn aggregate_performance_matrix(rows: &[EvalRow]) -> Vec<AgentPerformanceMatrixRow> {
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Bucket {
+        samples: u32,
+        success: u32,
+        useful: u32,
+        verified: u32,
+        failures: u32,
+        human_overrides: u32,
+        retry_sum: u64,
+        latency_sum: u128,
+        latency_count: u32,
+        input_tokens_sum: u128,
+        input_tokens_count: u32,
+        output_tokens_sum: u128,
+        output_tokens_count: u32,
+        cost_tokens_sum: u128,
+        cost_tokens_count: u32,
+        cost_usd_sum: f64,
+        cost_usd_count: u32,
+        quality_score_sum: f64,
+        quality_score_count: u32,
+        latencies: Vec<u64>,
+    }
+
+    type Key = (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+    );
+
+    fn add_u64(sum: &mut u128, count: &mut u32, value: Option<u64>) {
+        if let Some(value) = value {
+            *sum += value as u128;
+            *count += 1;
+        }
+    }
+
+    fn add_f64(sum: &mut f64, count: &mut u32, value: Option<f64>) {
+        if let Some(value) = value {
+            *sum += value;
+            *count += 1;
+        }
+    }
+
+    fn avg_u128(sum: u128, count: u32) -> Option<f64> {
+        (count > 0).then(|| round2(sum as f64 / count as f64))
+    }
+
+    fn avg_f64(sum: f64, count: u32) -> Option<f64> {
+        (count > 0).then(|| round4(sum / count as f64))
+    }
+
+    fn total_f64(sum: f64, count: u32) -> Option<f64> {
+        (count > 0).then(|| round4(sum))
+    }
+
+    fn percentile(values: &[u64], percentile: f64) -> Option<u64> {
+        if values.is_empty() {
+            return None;
+        }
+        let idx = ((values.len() - 1) as f64 * percentile).ceil() as usize;
+        values.get(idx).copied()
+    }
+
+    fn round2(value: f64) -> f64 {
+        (value * 100.0).round() / 100.0
+    }
+
+    fn round4(value: f64) -> f64 {
+        (value * 10_000.0).round() / 10_000.0
+    }
+
+    fn outcome_is_useful(outcome: Option<&str>) -> bool {
+        matches!(
+            outcome.unwrap_or("").to_ascii_lowercase().as_str(),
+            "useful" | "success" | "completed"
+        )
+    }
+
+    fn outcome_is_failure(outcome: Option<&str>) -> bool {
+        matches!(
+            outcome.unwrap_or("").to_ascii_lowercase().as_str(),
+            "failed" | "failure"
+        )
+    }
+
+    let mut buckets: HashMap<Key, Bucket> = HashMap::new();
+    for row in rows {
+        let task_type = task_type_name(&row.task_type);
+        let leader_key = (
+            "leader".to_string(),
+            row.profile.clone(),
+            None,
+            row.agent.clone(),
+            row.model.clone(),
+            task_type.clone(),
+        );
+        let entry = buckets.entry(leader_key).or_default();
+        entry.samples += 1;
+        if row.completion_status == CompletionStatus::Completed {
+            entry.success += 1;
+        }
+        if row.verification_present {
+            entry.verified += 1;
+        }
+        if row.completion_status != CompletionStatus::Completed
+            || row
+                .failure_mode
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            entry.failures += 1;
+        }
+        add_u64(
+            &mut entry.latency_sum,
+            &mut entry.latency_count,
+            row.latency_ms,
+        );
+        if let Some(latency) = row.latency_ms {
+            entry.latencies.push(latency);
+        }
+        add_u64(
+            &mut entry.cost_tokens_sum,
+            &mut entry.cost_tokens_count,
+            row.cost_tokens,
+        );
+        add_f64(
+            &mut entry.cost_usd_sum,
+            &mut entry.cost_usd_count,
+            row.cost_usd,
+        );
+        add_f64(
+            &mut entry.quality_score_sum,
+            &mut entry.quality_score_count,
+            row.quality_score,
+        );
+
+        for subagent in &row.subagents {
+            let subagent_task_type = subagent
+                .task_type
+                .clone()
+                .unwrap_or_else(|| task_type.clone());
+            let sub_key = (
+                "subagent".to_string(),
+                row.profile.clone(),
+                Some(subagent.role.clone()),
+                subagent.agent.clone(),
+                subagent.model.clone(),
+                subagent_task_type,
+            );
+            let entry = buckets.entry(sub_key).or_default();
+            entry.samples += 1;
+            if outcome_is_useful(subagent.outcome.as_deref()) {
+                entry.useful += 1;
+            }
+            if outcome_is_failure(subagent.outcome.as_deref())
+                || subagent
+                    .failure_mode
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty())
+            {
+                entry.failures += 1;
+            }
+            if subagent.verification_present {
+                entry.verified += 1;
+            }
+            if subagent.human_override {
+                entry.human_overrides += 1;
+            }
+            entry.retry_sum += subagent.retry_count as u64;
+            add_u64(
+                &mut entry.latency_sum,
+                &mut entry.latency_count,
+                subagent.latency_ms,
+            );
+            if let Some(latency) = subagent.latency_ms {
+                entry.latencies.push(latency);
+            }
+            add_u64(
+                &mut entry.input_tokens_sum,
+                &mut entry.input_tokens_count,
+                subagent.input_tokens,
+            );
+            add_u64(
+                &mut entry.output_tokens_sum,
+                &mut entry.output_tokens_count,
+                subagent.output_tokens,
+            );
+            add_u64(
+                &mut entry.cost_tokens_sum,
+                &mut entry.cost_tokens_count,
+                subagent.cost_tokens,
+            );
+            add_f64(
+                &mut entry.cost_usd_sum,
+                &mut entry.cost_usd_count,
+                subagent.cost_usd,
+            );
+        }
+    }
+
+    let mut out = Vec::new();
+    for ((scope, profile, role, agent, model, task_type), bucket) in buckets {
+        let samples_f = bucket.samples as f64;
+        let mut latencies = bucket.latencies;
+        latencies.sort_unstable();
+        out.push(AgentPerformanceMatrixRow {
+            success_rate: (scope == "leader").then(|| round4(bucket.success as f64 / samples_f)),
+            useful_rate: (scope == "subagent").then(|| round4(bucket.useful as f64 / samples_f)),
+            verification_rate: round4(bucket.verified as f64 / samples_f),
+            failure_count: bucket.failures,
+            human_override_rate: round4(bucket.human_overrides as f64 / samples_f),
+            avg_retry_count: round4(bucket.retry_sum as f64 / samples_f),
+            avg_latency_ms: avg_u128(bucket.latency_sum, bucket.latency_count),
+            p50_latency_ms: percentile(&latencies, 0.50),
+            p95_latency_ms: percentile(&latencies, 0.95),
+            avg_input_tokens: avg_u128(bucket.input_tokens_sum, bucket.input_tokens_count),
+            avg_output_tokens: avg_u128(bucket.output_tokens_sum, bucket.output_tokens_count),
+            avg_cost_tokens: avg_u128(bucket.cost_tokens_sum, bucket.cost_tokens_count),
+            avg_cost_usd: avg_f64(bucket.cost_usd_sum, bucket.cost_usd_count),
+            total_cost_usd: total_f64(bucket.cost_usd_sum, bucket.cost_usd_count),
+            avg_quality_score: avg_f64(bucket.quality_score_sum, bucket.quality_score_count),
+            scope,
+            profile,
+            role,
+            agent,
+            model,
+            task_type,
+            samples: bucket.samples,
+        });
+    }
+    out.sort_by(|a, b| {
+        a.scope
+            .cmp(&b.scope)
+            .then(a.profile.cmp(&b.profile))
+            .then(a.role.cmp(&b.role))
+            .then(a.agent.cmp(&b.agent))
+            .then(a.model.cmp(&b.model))
+            .then(a.task_type.cmp(&b.task_type))
+    });
+    out
+}
+
 fn task_type_from_str(value: Option<&str>) -> TaskType {
     value
         .and_then(|s| serde_json::from_value(serde_json::json!(s)).ok())
@@ -307,6 +592,8 @@ fn eval_row_from_memory(entry: &memory_core::MemoryEntry) -> Option<EvalRow> {
             .map(|s| s.to_string()),
         completion_status: completion_status_from_outcome(outcome),
         cost_usd: meta.get("cost_usd").and_then(|v| v.as_f64()),
+        cost_tokens: meta.get("cost_tokens").and_then(|v| v.as_u64()),
+        quality_score: meta.get("quality_score").and_then(|v| v.as_f64()),
         latency_ms: meta.get("duration_ms").and_then(|v| v.as_u64()),
         subagents,
     })
@@ -349,11 +636,13 @@ pub(crate) async fn handle_agent_eval(
             let rows = load_eval_jsonl(Path::new(path))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
+            let performance_matrix = aggregate_performance_matrix(&rows);
             serde_json::to_string(&serde_json::json!({
                 "row_count": rows.len(),
                 "source": "fixture",
                 "scores": scores,
                 "subagent_scores": subagent_scores,
+                "performance_matrix": performance_matrix,
             }))
             .map_err(|e| format!("serialize aggregate: {e}"))
         }
@@ -361,16 +650,32 @@ pub(crate) async fn handle_agent_eval(
             let rows = load_live_eval_rows(_server, params.limit.unwrap_or(500).max(1))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
+            let performance_matrix = aggregate_performance_matrix(&rows);
             serde_json::to_string(&serde_json::json!({
                 "row_count": rows.len(),
                 "source": "live_memory",
                 "scores": scores,
                 "subagent_scores": subagent_scores,
+                "performance_matrix": performance_matrix,
             }))
             .map_err(|e| format!("serialize aggregate_live: {e}"))
         }
+        "telemetry" | "perf" => {
+            let rows = load_live_eval_rows(_server, params.limit.unwrap_or(500).max(1))?;
+            let scores = aggregate_scores(&rows);
+            let subagent_scores = aggregate_subagent_scores(&rows);
+            let performance_matrix = aggregate_performance_matrix(&rows);
+            serde_json::to_string(&serde_json::json!({
+                "row_count": rows.len(),
+                "source": "live_memory",
+                "scores": scores,
+                "subagent_scores": subagent_scores,
+                "performance_matrix": performance_matrix,
+            }))
+            .map_err(|e| format!("serialize telemetry: {e}"))
+        }
         _ => Err(format!(
-            "Invalid eval action '{}'. Use aggregate or aggregate_live.",
+            "Invalid eval action '{}'. Use aggregate, aggregate_live, telemetry, or perf.",
             params.action
         )),
     }
@@ -395,6 +700,8 @@ mod tests {
                 failure_mode: None,
                 completion_status: CompletionStatus::Completed,
                 cost_usd: None,
+                cost_tokens: Some(1200),
+                quality_score: Some(0.9),
                 latency_ms: Some(1000),
                 subagents: vec![SubagentEvalRow {
                     role: "architect".to_string(),
@@ -413,11 +720,13 @@ mod tests {
                     latency_ms: Some(1200),
                     input_tokens: Some(1000),
                     output_tokens: Some(200),
+                    cost_tokens: Some(1200),
+                    cost_usd: Some(0.01),
                 }],
             },
             EvalRow {
                 agent: "claude".to_string(),
-                profile: None,
+                profile: Some("claude_plan".to_string()),
                 model: None,
                 mode: None,
                 task_type: TaskType::FixRequest,
@@ -427,6 +736,8 @@ mod tests {
                 failure_mode: Some("retry_loop".to_string()),
                 completion_status: CompletionStatus::Stalled,
                 cost_usd: None,
+                cost_tokens: None,
+                quality_score: Some(0.3),
                 latency_ms: Some(5000),
                 subagents: vec![SubagentEvalRow {
                     role: "explore".to_string(),
@@ -445,6 +756,8 @@ mod tests {
                     latency_ms: Some(800),
                     input_tokens: Some(500),
                     output_tokens: Some(100),
+                    cost_tokens: Some(600),
+                    cost_usd: Some(0.002),
                 }],
             },
         ];
@@ -465,5 +778,31 @@ mod tests {
         assert_eq!(kimi.samples, 1);
         assert!((kimi.useful_rate - 1.0).abs() < f64::EPSILON);
         assert_eq!(kimi.changed_plan_count, 1);
+
+        let performance = aggregate_performance_matrix(&rows);
+        let claude = performance
+            .iter()
+            .find(|row| row.scope == "leader" && row.agent == "claude")
+            .expect("leader performance row");
+        assert_eq!(claude.samples, 2);
+        assert_eq!(claude.success_rate, Some(0.5));
+        assert_eq!(claude.verification_rate, 0.5);
+        assert_eq!(claude.avg_latency_ms, Some(3000.0));
+        assert_eq!(claude.p50_latency_ms, Some(5000));
+        assert_eq!(claude.p95_latency_ms, Some(5000));
+        assert_eq!(claude.avg_cost_tokens, Some(1200.0));
+        assert_eq!(claude.avg_quality_score, Some(0.6));
+
+        let deepseek = performance
+            .iter()
+            .find(|row| row.scope == "subagent" && row.agent == "deepseek")
+            .expect("subagent performance row");
+        assert_eq!(deepseek.role.as_deref(), Some("explore"));
+        assert_eq!(deepseek.useful_rate, Some(0.0));
+        assert_eq!(deepseek.failure_count, 1);
+        assert_eq!(deepseek.avg_retry_count, 1.0);
+        assert_eq!(deepseek.avg_input_tokens, Some(500.0));
+        assert_eq!(deepseek.avg_cost_usd, Some(0.002));
+        assert_eq!(deepseek.total_cost_usd, Some(0.002));
     }
 }

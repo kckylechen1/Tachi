@@ -339,6 +339,41 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         aggregate["subagent_scores"][0]["task_type"],
         serde_json::json!("plan_request")
     );
+    assert!(
+        aggregate["performance_matrix"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["scope"] == "leader"
+                && row["agent"] == "claude-code"
+                && row["profile"] == "claude_plan"
+                && row["avg_latency_ms"] == 5420.0
+                && row["avg_cost_tokens"] == 1234.0
+                && row["avg_cost_usd"] == 0.0812
+                && row["avg_quality_score"] == 0.9)),
+        "aggregate_live should include leader performance telemetry: {aggregate:#}"
+    );
+    assert!(
+        aggregate["performance_matrix"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["scope"] == "subagent"
+                && row["agent"] == "kimi"
+                && row["role"] == "architect"
+                && row["useful_rate"] == 1.0
+                && row["avg_input_tokens"] == 1200.0
+                && row["avg_cost_tokens"] == 321.0)),
+        "aggregate_live should include subagent performance telemetry: {aggregate:#}"
+    );
+
+    let telemetry = server
+        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
+            action: "telemetry".to_string(),
+            fixture_path: None,
+            limit: Some(50),
+        }))
+        .await
+        .expect("telemetry alias should succeed");
+    let telemetry: serde_json::Value = serde_json::from_str(&telemetry).expect("telemetry JSON");
+    assert_eq!(telemetry["source"], serde_json::json!("live_memory"));
+    assert!(telemetry["performance_matrix"].is_array());
 }
 
 #[tokio::test]

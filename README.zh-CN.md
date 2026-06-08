@@ -68,6 +68,19 @@ Tachi 已经不只是一个记忆库。它正在变成一套本地优先的 Agen
 
 活的 SQLite 数据库应该留在本地。云端同步不应该直接同步 WAL/SHM 和运行锁，而应该同步加密 bundle、append-only event log、Vault 密文、workflow 摘要、wiki / skill 产物，以及 performance aggregate。这样既保留本地写入速度和安全性，也能让同一个用户和他的 Agent 群体在多台机器上共享长期工程状态。
 
+### 日常 Agent 工作流
+
+面向 coding agent 的默认循环应该紧凑、可验证：
+
+1. 先用 `tachi_memory(action="briefing")` 或 `tachi_task(action="briefing")` 读取当前 feature board、关联 docs/specs、相关 wiki、项目记忆碎片和 live eval lesson。
+2. 再用 `tachi_task(action="recommend")` 选择 dispatch profile、skill loadout、fallback chain 和本次必须提交的证据。
+3. 只派发边界清楚的小弟任务。leader 仍然负责最终集成、验证、PR 和对用户的判断。
+4. 跑真实 verifier：测试、类型检查、`gitleaks`、safe-merge gate、UI/UX smoke，或领域专用探针。
+5. 用 `tachi_complete` 记录结果，并尽量带上 `subagents`、`tests_run`、`evidence_refs`、latency、token 和 cost 字段。
+6. 定期跑 `tachi_agent_eval(action="aggregate_live")`。它输出的 scorecard 和 performance matrix 会反哺未来的路由选择，而不是继续依赖主观印象。
+
+目标不是把每个任务都强行变成群殴，而是让每次 agent workflow 都有足够证据，使 Tachi 能学会哪个 harness、profile、skill 和验证门真的有效。
+
 ---
 
 ## 🎯 造物理念 (Why Tachi)
