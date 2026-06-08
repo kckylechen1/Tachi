@@ -731,6 +731,36 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     assert!(briefing["wiki_hits"].as_array().is_some_and(|hits| hits
         .iter()
         .any(|hit| { hit["path"] == json!("/wiki/agent/tachi/feature-briefing") })));
+    assert!(briefing["route_recommendation"]["recommended_profile"]
+        .as_str()
+        .is_some_and(|profile| !profile.is_empty()));
+    assert!(briefing["relevant_profiles"]
+        .as_array()
+        .is_some_and(|profiles| {
+            profiles.iter().any(|profile| {
+                profile["profile"] == briefing["route_recommendation"]["recommended_profile"]
+            })
+        }));
+    assert_eq!(
+        briefing["suggested_dispatch"]["tool"],
+        json!("tachi_task"),
+        "feature briefing should tell leaders which facade to call next: {briefing:#}"
+    );
+    assert_eq!(
+        briefing["suggested_dispatch"]["arguments"]["action"],
+        json!("dispatch")
+    );
+    assert_eq!(
+        briefing["suggested_dispatch"]["arguments"]["issue_ref"],
+        json!("kckylechen1/tachi#194")
+    );
+    assert_eq!(
+        briefing["suggested_dispatch"]["arguments"]["flow_id"],
+        json!(flow_id)
+    );
+    assert!(briefing["suggested_dispatch"]["arguments"]["profile"]
+        .as_str()
+        .is_some_and(|profile| !profile.is_empty()));
     assert!(
         briefing["memory_fragments"]
             .as_array()
@@ -773,6 +803,8 @@ async fn tachi_task_briefing_defaults_to_markdown_layered_sections() {
         "## Run Artifacts",
         "## Board State",
         "## Guide / SOP",
+        "## Recommended Dispatch",
+        "## Relevant Skills / Profiles",
         "## Wiki Decisions / Lessons",
         "## Memory Fragments / Checkpoints",
         "## Eval Evidence",
@@ -780,6 +812,7 @@ async fn tachi_task_briefing_defaults_to_markdown_layered_sections() {
     ] {
         assert!(body.contains(section), "missing {section}: {body}");
     }
+    assert!(body.contains("Dispatch args:"), "{body}");
 }
 
 #[tokio::test]
