@@ -116,8 +116,24 @@ pub(crate) struct RecentEval {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum DaemonStatus {
     Running { pid: i32, lock_path: PathBuf },
+    Foreign {
+        pid: i32,
+        lock_path: PathBuf,
+        reason: String,
+        version: Option<String>,
+        port: Option<u16>,
+        global_db: Option<String>,
+    },
     StalePid { pid: i32, lock_path: PathBuf },
     None,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub(crate) struct DaemonPidInfo {
+    pub(crate) pid: Option<i32>,
+    pub(crate) port: Option<u16>,
+    pub(crate) version: Option<String>,
+    pub(crate) global_db: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -193,8 +209,22 @@ fn collect_snapshot_inner(
     compare_provider_values: bool,
 ) -> StatusSnapshot {
     let lock_path = app_home.join("daemon.lock");
+    let pid_info = read_daemon_pid_info(app_home);
     let daemon = match read_pid_file(&lock_path) {
-        Some(pid) if process_alive(pid) => DaemonStatus::Running { pid, lock_path },
+        Some(pid) if process_alive(pid) => {
+            if let Some(reason) = daemon_mismatch_reason(pid, pid_info.as_ref(), global_db_path) {
+                DaemonStatus::Foreign {
+                    pid,
+                    lock_path,
+                    reason,
+                    version: pid_info.as_ref().and_then(|info| info.version.clone()),
+                    port: pid_info.as_ref().and_then(|info| info.port),
+                    global_db: pid_info.as_ref().and_then(|info| info.global_db.clone()),
+                }
+            } else {
+                DaemonStatus::Running { pid, lock_path }
+            }
+        }
         Some(pid) => DaemonStatus::StalePid { pid, lock_path },
         None => DaemonStatus::None,
     };
@@ -331,6 +361,76 @@ fn collect_snapshot_inner(
         provider_probe_cache,
         health_score,
     }
+}
+
+pub(crate) fn read_daemon_pid_info(app_home: &Path) -> Option<DaemonPidInfo> {
+    let raw = std::fs::read_to_string(app_home.join("daemon.pid")).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(DaemonPidInfo {
+        pid: parsed
+            .get("pid")
+            .and_then(|value| value.as_i64())
+            .and_then(|value| i32::try_from(value).ok()),
+        port: parsed
+            .get("port")
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u16::try_from(value).ok()),
+        version: parsed
+            .get("version")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        global_db: parsed
+            .get("global_db")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    })
+}
+
+pub(crate) fn daemon_mismatch_reason(
+    lock_pid: i32,
+    pid_info: Option<&DaemonPidInfo>,
+    global_db_path: &Path,
+) -> Option<String> {
+    let Some(info) = pid_info else {
+        return Some("daemon.pid missing or unreadable".to_string());
+    };
+    if let Some(pid) = info.pid {
+        if pid != lock_pid {
+            return Some(format!("daemon.pid pid={pid} does not match lock pid={lock_pid}"));
+        }
+    }
+    match info.version.as_deref() {
+        Some(version) => {
+            if version != env!("CARGO_PKG_VERSION") {
+                return Some(format!(
+                    "daemon version {version} does not match binary {}",
+                    env!("CARGO_PKG_VERSION")
+                ));
+            }
+        }
+        None => return Some("daemon.pid missing version".to_string()),
+    }
+    if let Some(daemon_global) = info.global_db.as_deref() {
+        if !daemon_global.is_empty() && !path_matches_string(global_db_path, daemon_global) {
+            return Some(format!(
+                "daemon global_db {} does not match {}",
+                daemon_global,
+                global_db_path.display()
+            ));
+        }
+    }
+    None
+}
+
+fn path_matches_string(left: &Path, right: &str) -> bool {
+    if left.as_os_str() == right {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Default)]
@@ -676,6 +776,7 @@ pub(crate) fn runtime_observability_json(
         .map(|path| path.display().to_string());
     let daemon_pid = match daemon {
         Some(DaemonStatus::Running { pid, .. }) => Some(*pid),
+        Some(DaemonStatus::Foreign { pid, .. }) => Some(*pid),
         Some(DaemonStatus::StalePid { pid, .. }) => Some(*pid),
         Some(DaemonStatus::None) => None,
         None => read_pid_file(app_home.join("daemon.lock")),
@@ -991,6 +1092,22 @@ async fn handle_tachi_status_detail(
             "running": true,
             "pid": pid,
         }),
+        DaemonStatus::Foreign {
+            pid,
+            reason,
+            version,
+            port,
+            global_db,
+            ..
+        } => json!({
+            "running": false,
+            "foreign": true,
+            "pid": pid,
+            "reason": reason,
+            "version": version,
+            "port": port,
+            "global_db": global_db,
+        }),
         DaemonStatus::StalePid { pid, .. } => json!({
             "running": false,
             "stale": true,
@@ -1179,6 +1296,9 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
         let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
         let daemon_state = match &snapshot.daemon {
             DaemonStatus::Running { .. } => json!({ "running": true }),
+            DaemonStatus::Foreign { reason, .. } => {
+                json!({ "running": false, "foreign": true, "reason": reason })
+            }
             DaemonStatus::StalePid { .. } => json!({ "running": false, "stale": true }),
             DaemonStatus::None => json!({ "running": false }),
         };
@@ -1411,6 +1531,48 @@ mod tests {
         } else {
             std::env::remove_var("TACHI_HOME");
         }
+    }
+
+    #[test]
+    fn daemon_mismatch_detects_foreign_version() {
+        let global = PathBuf::from("/tmp/status/global/memory.db");
+        let info = DaemonPidInfo {
+            pid: Some(42),
+            port: Some(6888),
+            version: Some("1.3.0".to_string()),
+            global_db: Some(global.display().to_string()),
+        };
+        let reason = daemon_mismatch_reason(42, Some(&info), &global)
+            .expect("foreign version should be reported");
+        assert!(reason.contains("1.3.0"));
+        assert!(reason.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn daemon_mismatch_detects_pid_file_lock_pid_disagreement() {
+        let global = PathBuf::from("/tmp/status/global/memory.db");
+        let info = DaemonPidInfo {
+            pid: Some(7),
+            port: Some(6919),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            global_db: Some(global.display().to_string()),
+        };
+        let reason = daemon_mismatch_reason(42, Some(&info), &global)
+            .expect("pid disagreement should be reported");
+        assert!(reason.contains("pid=7"));
+        assert!(reason.contains("lock pid=42"));
+    }
+
+    #[test]
+    fn daemon_mismatch_accepts_matching_daemon_pid_file() {
+        let global = PathBuf::from("/tmp/status/global/memory.db");
+        let info = DaemonPidInfo {
+            pid: Some(42),
+            port: Some(6919),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            global_db: Some(global.display().to_string()),
+        };
+        assert!(daemon_mismatch_reason(42, Some(&info), &global).is_none());
     }
 
     #[test]

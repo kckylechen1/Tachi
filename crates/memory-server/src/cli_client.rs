@@ -102,8 +102,11 @@ pub(crate) async fn call_daemon_tool(
         })?
         .map_err(|e| format!("daemon call '{daemon_tool}' failed: {e}"))?;
 
-    // Best-effort cancel of the client session; ignore errors.
-    let _ = client.cancel().await;
+    // Dropping the client is enough to close the short-lived CLI HTTP session.
+    // Calling `cancel()` here has caused daemon-side lifecycle confusion with
+    // rmcp streamable HTTP: a successful forwarded write could be followed by
+    // the daemon exiting and leaving a stale pid file.
+    drop(client);
 
     if result.is_error.unwrap_or(false) {
         let err_text =
