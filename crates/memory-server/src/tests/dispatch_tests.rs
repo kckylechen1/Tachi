@@ -387,6 +387,15 @@ async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
         .is_some_and(|reasons| reasons.iter().any(|reason| reason
             .as_str()
             .is_some_and(|s| s.contains("live_useful_rate")))));
+    assert!(rec["resolved_skills"]
+        .as_array()
+        .is_some_and(|skills| skills
+            .iter()
+            .any(|skill| skill == "skill:superpowers-requesting-code-review")));
+    assert_eq!(
+        rec["resolved_skill_loadout"]["passive_traits"][0],
+        serde_json::json!("strict_on_missing_tests")
+    );
 }
 
 #[tokio::test]
@@ -794,6 +803,19 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     assert!(prompt.contains("tachi_tool_profile: delegate"), "{prompt}");
     assert!(
         prompt.contains("issue_ref: kckylechen1/tachi#194"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("- skill_loadout:"), "{prompt}");
+    assert!(
+        prompt.contains("skill:superpowers-subagent-driven-development"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("skill:coding-architecture-decision"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("passive_traits: plan_before_execute"),
         "{prompt}"
     );
     assert!(prompt.contains("## Capability Bundle"), "{prompt}");
