@@ -116,6 +116,25 @@ async fn render_one(
         crate::status_ops::DaemonStatus::Running { pid, lock_path } => {
             println!("  [OK] running pid={pid} lock={}", lock_path.display());
         }
+        crate::status_ops::DaemonStatus::Foreign {
+            pid,
+            lock_path,
+            reason,
+            version,
+            port,
+            global_db,
+        } => {
+            println!(
+                "  [!] foreign daemon pid={pid} lock={} reason={reason}",
+                lock_path.display()
+            );
+            println!(
+                "      version={} port={} global_db={}",
+                version.as_deref().unwrap_or("unknown"),
+                port.map(|p| p.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                global_db.as_deref().unwrap_or("unknown")
+            );
+        }
         crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
             println!(
                 "  [!] stale pid file pid={pid} (process not alive); lock at {}",
@@ -445,6 +464,17 @@ pub(crate) async fn run_daemon(
         DaemonAction::Status { json: json_out } => {
             let pid = read_pid_file(&lock_path);
             let alive = pid.map(process_alive).unwrap_or(false);
+            let pid_info = crate::status_ops::read_daemon_pid_info(app_home);
+            let mismatch = pid
+                .filter(|_| alive)
+                .and_then(|lock_pid| {
+                    let global_db = app_home.join("global").join("memory.db");
+                    crate::status_ops::daemon_mismatch_reason(
+                        lock_pid,
+                        pid_info.as_ref(),
+                        &global_db,
+                    )
+                });
             if json_out {
                 println!(
                     "{}",
@@ -452,18 +482,36 @@ pub(crate) async fn run_daemon(
                         "lock_path": lock_path.display().to_string(),
                         "pid": pid,
                         "alive": alive,
+                        "mismatch": mismatch,
+                        "pid_file": pid_info,
                     }))?
                 );
             } else {
-                match (pid, alive) {
-                    (Some(p), true) => {
+                match (pid, alive, mismatch) {
+                    (Some(p), true, Some(reason)) => {
+                        println!(
+                            "[!] foreign daemon pid={p} lock={} reason={reason}",
+                            lock_path.display()
+                        );
+                        if let Some(info) = pid_info {
+                            println!(
+                                "    version={} port={} global_db={}",
+                                info.version.as_deref().unwrap_or("unknown"),
+                                info.port
+                                    .map(|p| p.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string()),
+                                info.global_db.as_deref().unwrap_or("unknown")
+                            );
+                        }
+                    }
+                    (Some(p), true, None) => {
                         println!("[OK] daemon running pid={p} lock={}", lock_path.display())
                     }
-                    (Some(p), false) => println!(
+                    (Some(p), false, _) => println!(
                         "[!] stale pid file pid={p} at {} (process not alive)",
                         lock_path.display()
                     ),
-                    (None, _) => println!("[OK] no daemon running"),
+                    (None, _, _) => println!("[OK] no daemon running"),
                 }
             }
             Ok(())
