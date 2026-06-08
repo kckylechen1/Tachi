@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/banner.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
   <h1>✧ 藏经阁 (Tachi)</h1>
-  <p><strong>专为自主智能体（AI Agents）打造的本地优先、高性能混合上下文数据库</strong></p>
+  <p><strong>专为自主智能体（AI Agents）打造的本地优先记忆与工作流控制平面</strong></p>
 
   <p>
     <a href="README.en.md">English</a> | <a href="README.zh-CN.md"><b>简体中文</b></a> | <a href="README.md">文言文</a>
@@ -21,6 +21,7 @@
 ## 📖 目录
 
 - [概览](#-概览)
+- [Agent 工程控制平面](#-agent-工程控制平面)
 - [造物理念 (Why Tachi)](#-造物理念-why-tachi)
 - [快速开始: Coding Agents (MCP)](#-快速开始-coding-agents-mcp)
 - [快速开始: OpenClaw 框架](#-快速开始-openclaw-框架)
@@ -43,6 +44,29 @@
 当前的 AI 记忆模型大多依赖于向量数据库存储扁平化的文本片段。这种设计极易导致 Agent 的上下文视窗膨胀，并在长时间运行中丢失关键的因果和时间联系。
 
 **藏经阁** 引入了由 Rust 高度优化的**层级化、类文件系统管理范式**与**图谱级因果关联**。无论是作为 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器独立运行，还是内嵌于 OpenClaw 等原生框架中，它均能提供亚毫秒级的多模态混合语义检索，且**无需任何外部独立数据库依赖**。
+
+---
+
+## 🧭 Agent 工程控制平面
+
+Tachi 已经不只是一个记忆库。它正在变成一套本地优先的 Agent 工程控制平面：Agent 在这里保存经验、发现工具和 Skill、派发 worker、记录验证证据，并把反复出现的 UX / workflow 失败沉淀成下一轮更好的流程。
+
+这套系统里，长期状态应该分层：
+
+- **语义记忆**：记录“我们知道什么”，例如决策、根因、偏好、架构笔记、领域 lesson。
+- **工作流账本**：记录“我们怎么干活”，例如 flow、worker mission、tracked docs、handoff、PR / release 状态，以及 `tachi_verify` 的验证结果。
+- **运行状态**：记录“现在正在发生什么”，例如 daemon、profile、pending worker、verification gate、Vault 状态和健康警告。
+- **性能证据**：作为下一层调度记忆，记录哪个 harness、哪个 Skill、哪种小弟模式真的省时间、抓到真 bug，或制造了不必要噪音。
+
+所以 Tachi 不绑定单一 harness。Claude Code dynamic workflows、Codex subagents、OpenCode、Kimi、GLM、Gemini，以及 HyperMem 这类领域系统，都可以是执行 lane。Tachi 负责把跨工具的硬状态、调度证据、验证门、Vault 策略和记忆边界统一起来。
+
+### 语言约定
+
+面向人的记忆可以用中文写，因为很多判断、取舍和坑用中文更高密度。但代码、CLI、schema、公开文档、commit、PR 和测试名应该用英文。好的中文记忆仍然要保留英文检索锚点，例如 `safe_merge`、`head_sha`、`verify_ops.rs`、PR 编号、测试名、tags 和 entities。
+
+### 同步方向
+
+活的 SQLite 数据库应该留在本地。云端同步不应该直接同步 WAL/SHM 和运行锁，而应该同步加密 bundle、append-only event log、Vault 密文、workflow 摘要、wiki / skill 产物，以及 performance aggregate。这样既保留本地写入速度和安全性，也能让同一个用户和他的 Agent 群体在多台机器上共享长期工程状态。
 
 ---
 

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/banner.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
   <h1>✧ 藏经阁（Tachi）记事</h1>
-  <p><strong>专为自主灵核（AI Agents）所筑之本地首储、凌波疾行之混合识海阵法</strong></p>
+  <p><strong>专为自主灵核（AI Agents）所筑之本地首储、工务调度与混合识海总枢</strong></p>
 
   <p>
     <a href="README.en.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.md"><b>文言文</b></a>
@@ -21,6 +21,7 @@
 ## 📖 卷首目录
 
 - [一、 概览](#一-概览)
+- [一又半、 今时定位：灵核工务总枢](#一又半-今时定位灵核工务总枢)
 - [二、 立派初心](#二-立派初心)
 - [三、 开宗明义：辅佐灵核 (MCP)](#三-开宗明义-辅佐灵核-mcp)
 - [四、 别派旁支：外挂外丹 (OpenClaw)](#四-别派旁支-外挂外丹-openclaw)
@@ -43,6 +44,23 @@
 今世之造物，多以片语金石（向量数据库）碎藏执念。然此法极易致其神识胀乱（上下文膨胀），久之则前因后果尽皆遗忘。
 
 **藏经阁** 弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
+
+---
+
+## 🧭 一又半、 今时定位：灵核工务总枢
+
+藏经阁今已不止藏识。其所司者，乃灵核工务之总枢：记其所得，录其所行，验其所证，察其所耗，并令诸路小弟与外部法器各归其位。
+
+- **语义记忆**：记“吾等知何事”，如决策、根因、偏好、架构、领域教训。
+- **工务账本**：记“吾等如何行事”，如 flow、worker mission、tracked docs、handoff、PR / release 状态与 `tachi_verify` 验证凭据。
+- **运行硬态**：记“此刻何事未竟”，如 daemon、profile、pending worker、verification gate、Vault 与健康告警。
+- **功效凭据**：记“何法最有效”，以观某 harness、某 Skill、某小弟阵型究竟省时、抓虫，抑或徒增噪音。
+
+故藏经阁不拘一派。Claude Code dynamic workflows、Codex subagents、OpenCode、Kimi、GLM、Gemini，乃至 HyperMem 等领域分身，皆可为执行之 lane；藏经阁执掌其长效状态、调度证据、验收门禁、Vault 方略与记忆疆界。
+
+**书写之约**：面向人心之记忆，可从中文，取其高密；面向代码、CLI、schema、公开文档、commit、PR 与测试者，仍以 English 为正。中文记忆亦须留英文锚点，如 `safe_merge`、`head_sha`、`verify_ops.rs`、PR 号、测试名、tags 与 entities，方可他日准确召回。
+
+**同步之约**：活 SQLite 库不可入云同步。宜同步加密 bundle、append-only event log、Vault 密文、workflow 摘要、wiki / skill 产物与功效聚合；本地守其疾速与锁序，云端传其密文与证据。
 
 ### 飞升之境（v1.0.0 正式版）
 

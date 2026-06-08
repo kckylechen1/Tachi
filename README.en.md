@@ -1,7 +1,7 @@
 <div align="center">
   <img src="assets/banner_en.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
   <h1>✧ Tachi</h1>
-  <p><strong>A Fast, Local-First Context & Memory Database for Autonomous AI Agents</strong></p>
+  <p><strong>A Local-First Memory and Workflow Control Plane for Autonomous AI Agents</strong></p>
 
   <p>
     <a href="README.en.md"><b>English</b></a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.md">文言文</a>
@@ -21,6 +21,7 @@
 ## 📖 Table of Contents
 
 - [Overview](#-overview)
+- [Agent Engineering Control Plane](#-agent-engineering-control-plane)
 - [Why Tachi?](#-why-tachi)
 - [How Tachi Compares](#-how-tachi-compares)
 - [Quick Start: Coding Agents (MCP)](#-quick-start-coding-agents-mcp)
@@ -44,6 +45,29 @@
 Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Tachi addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
 
 Whether integrated as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server or used as a native extension in frameworks like OpenClaw, Tachi delivers sub-millisecond, multi-modal semantic retrieval with **zero external database dependencies**.
+
+---
+
+## 🧭 Agent Engineering Control Plane
+
+Tachi is no longer just a memory store. It is becoming the local-first control plane for agent engineering: the place where agents remember what they learned, discover tools and skills, dispatch worker lanes, record verification evidence, and turn repeated workflow failures into better future workflows.
+
+The useful split is:
+
+- **Semantic memory** records what the user, project, or agent learned: decisions, root causes, preferences, architecture notes, and domain lessons.
+- **Workflow ledgers** record how work was done: flows, worker missions, tracked documents, handoffs, PR/release state, and `tachi_verify` results.
+- **Operational state** records what is happening now: active daemons, profiles, pending workers, verification gates, vault status, and health warnings.
+- **Performance evidence** is the next routing layer: which harness, skill, or worker pattern actually saved time, caught real bugs, or created avoidable noise.
+
+This is why Tachi is deliberately **cross-harness**. Claude Code dynamic workflows, Codex subagents, OpenCode, Kimi, GLM, Gemini, and domain-specific systems can all be execution lanes. Tachi's job is to keep the durable state, routing evidence, verification gates, vault policy, and memory boundaries consistent across them.
+
+### Language Convention
+
+Human-facing memory can be written in Chinese when that is the highest-density way to preserve judgment. Code, CLI surfaces, schemas, public docs, commit messages, PRs, and tests should stay in English. A good memory entry can be Chinese, but it must keep English retrieval anchors such as `safe_merge`, `head_sha`, `verify_ops.rs`, PR numbers, test names, tags, and entity names.
+
+### Sync Direction
+
+Live SQLite databases should stay local. Cloud sync should move encrypted bundles, event logs, vault ciphertext, workflow summaries, wiki/skill artifacts, and performance aggregates. That keeps the runtime fast and avoids WAL/lock corruption, while still allowing the same user and agent fleet to share durable engineering state across machines.
 
 ---
 
