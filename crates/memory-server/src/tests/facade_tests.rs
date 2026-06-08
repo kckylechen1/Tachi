@@ -457,6 +457,20 @@ fn tachi_memory_action_schema_declares_enum_values() {
 }
 
 #[test]
+fn tachi_skill_action_schema_declares_bundle_and_loadout() {
+    let schema = rmcp::schemars::schema_for!(TachiSkillParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    let values = action["enum"].as_array().expect("action enum");
+    assert!(values.contains(&json!("discover")));
+    assert!(values.contains(&json!("run")));
+    assert!(values.contains(&json!("bundle")));
+    assert!(values.contains(&json!("loadout")));
+}
+
+#[test]
 fn tachi_task_action_schema_declares_feature_briefing() {
     let schema = rmcp::schemars::schema_for!(TachiTaskParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
