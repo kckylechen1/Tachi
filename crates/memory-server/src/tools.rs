@@ -1703,7 +1703,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge) ─────────
 
     #[tool(
-        description = "Task management facade for agent work. action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': land a worktree branch after review. Typical worker flow: plan → recommend → dispatch → board → complete/eval → merge."
+        description = "Task management facade for agent work. action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: plan → recommend → dispatch → board → complete/eval → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1787,6 +1787,12 @@ impl MemoryServer {
                 )
             }
             "merge" => {
+                if params.pr_ref.is_some() || params.issue_ref.is_some() {
+                    return Err(
+                        "tachi_task(action='merge') only merges local dispatched worktrees. Use tachi_gh(action='safe_merge', repo=..., number=...) for GitHub PR gates or PR merges."
+                            .to_string(),
+                    );
+                }
                 let worktree = params
                     .worktree
                     .clone()
@@ -1816,7 +1822,7 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates that require leader verdict before promotion. safe_merge defaults to dry-run unless confirm=true. Requires GH_TOKEN in Vault or environment."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates that require leader verdict before promotion. safe_merge is for GitHub PR merges, returns requested_mode=preview unless confirm=true and dry_run!=true, and reports merge_attempted/merge_executed separately. Standard policy waits on missing checks/reviews. Use approve_merge/tachi_task for local dispatched worktree merges. Requires GH_TOKEN in Vault or environment."
     )]
     pub(crate) async fn tachi_gh(
         &self,

@@ -49,8 +49,9 @@ pub struct PrState {
     /// `gh` `mergeable` field. `Mergeable::Unknown` means GitHub hasn't
     /// finished computing the merge-conflict check yet — treated as Pending.
     pub mergeable: Mergeable,
-    /// `gh` `reviewDecision` field. `None` when the repo has no review
-    /// requirements configured, in which case review is treated as approved.
+    /// `gh` `reviewDecision` field. `None` is policy-dependent: permissive
+    /// mode treats it as no review policy, while standard/strict wait instead
+    /// of silently treating missing review data as approval.
     pub review_decision: Option<ReviewDecision>,
     /// Aggregated check status, derived from `gh pr checks` (or any equivalent
     /// CI surface). Computed by `ChecksState::aggregate`.
@@ -63,6 +64,11 @@ pub struct PrState {
     /// `github_merge_blocked` / `github_pr_merged` events so an audit can pin
     /// down exactly which commit was (or wasn't) merged.
     pub head_sha: String,
+    /// GitHub closing issue references associated with the PR, e.g. values
+    /// from `closingIssuesReferences`. Strict policy accepts either one of
+    /// these links or an explicit Tachi `flow_id`.
+    #[serde(default)]
+    pub linked_issue_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,10 +133,7 @@ impl MergeGatePolicy {
             require_review_approval: true,
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: true,
-            // PrState does not yet carry independent check/review head SHAs.
-            // Keep strict mergeable when all observable gates are green; callers
-            // that provide a stronger consistency surface can opt in explicitly.
-            require_head_consistency: false,
+            require_head_consistency: true,
         }
     }
 
@@ -179,10 +182,9 @@ pub enum ReviewDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChecksState {
-    /// No required checks have been configured (or no check runs reported).
-    /// Treated as a soft pass so brand-new repos / branches without CI can
-    /// still use safe-merge — the `is_mergeable` + `review_decision` gates
-    /// remain in force.
+    /// No check runs were reported. This is policy-dependent: permissive mode
+    /// allows it for repos without CI, while standard/strict wait because the
+    /// API cannot distinguish "no CI" from "checks missing/not started".
     None,
     /// At least one check is still pending and none have failed.
     Pending,
@@ -286,6 +288,7 @@ impl MergeDecision {
 /// `github_merge_blocked` event). A `Pending` decision likewise lists every
 /// gate the caller is still waiting on, so the polling loop can surface
 /// progress.
+#[cfg(test)]
 pub fn evaluate_merge_gate(pr: &PrState) -> MergeDecision {
     evaluate_merge_gate_with_policy(pr, MergeGatePolicy::standard())
 }
@@ -569,6 +572,7 @@ mod tests {
             checks: ChecksState::Success,
             is_draft: false,
             head_sha: "abc123".to_string(),
+            linked_issue_refs: Vec::new(),
         }
     }
 
@@ -605,19 +609,57 @@ mod tests {
     }
 
     #[test]
-    fn gate_strict_ready_when_all_observable_gates_are_green() {
+    fn gate_policy_modes_for_checks_none() {
+        let mut pr = open_pr();
+        pr.checks = ChecksState::None;
+
         assert_eq!(
-            evaluate_merge_gate_with_policy(&open_pr(), MergeGatePolicy::strict()),
+            evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::permissive()),
             MergeDecision::Ready
         );
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "checks:none"));
+                assert!(!waiting_on.iter().any(|r| r == "review:missing_decision"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "checks:none"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
     }
 
     #[test]
-    fn gate_waits_when_head_consistency_is_explicitly_required() {
+    fn gate_policy_modes_for_missing_review_decision() {
+        let mut pr = open_pr();
+        pr.review_decision = None;
+
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::permissive()),
+            MergeDecision::Ready
+        );
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "review:missing_decision"));
+                assert!(!waiting_on.iter().any(|r| r == "checks:none"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "review:missing_decision"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_strict_waits_when_head_consistency_is_unavailable() {
         let pr = open_pr();
-        let mut policy = MergeGatePolicy::strict();
-        policy.require_head_consistency = true;
-        match evaluate_merge_gate_with_policy(&pr, policy) {
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
             MergeDecision::Pending { waiting_on } => {
                 assert!(waiting_on
                     .iter()
