@@ -775,6 +775,9 @@ pub(crate) async fn handle_tachi_feature_briefing(
 
     let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
     let routing = build_task_brief_routing(&query, &skills);
+    let route_recommendation = feature_dispatch_recommendation(server, params, &query);
+    let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
+    let relevant_profiles = relevant_feature_profiles(&route_recommendation);
     let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
     let response = json!({
         "status": "ok",
@@ -798,6 +801,9 @@ pub(crate) async fn handle_tachi_feature_briefing(
             "tool_plan": routing.tool_plan,
             "recommended_skills": skills,
         },
+        "route_recommendation": route_recommendation,
+        "relevant_profiles": relevant_profiles,
+        "suggested_dispatch": suggested_dispatch,
         "wiki_hits": compact_rows(wiki_rows, top_k),
         "memory_fragments": compact_rows(memory_rows, top_k),
         "eval_evidence": compact_rows(eval_rows, top_k.min(5)),
@@ -906,6 +912,124 @@ fn resolve_workspace_path(raw_path: &str, cwd: Option<&str>) -> Option<PathBuf> 
         }
     }
     Some(cwd.join(raw_path))
+}
+
+fn feature_dispatch_recommendation(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    query: &str,
+) -> Value {
+    match crate::dispatch_profile::handle_dispatch_recommendation(
+        server,
+        query,
+        params.risk.as_deref(),
+        params.limit.unwrap_or(500),
+    ) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .unwrap_or_else(|err| json!({"available": false, "error": err.to_string()})),
+        Err(err) => json!({"available": false, "error": err}),
+    }
+}
+
+fn suggested_feature_dispatch(
+    params: &TachiTaskParams,
+    query: &str,
+    recommendation: &Value,
+) -> Value {
+    let profile = params.profile.as_deref().map(str::to_string).or_else(|| {
+        recommendation
+            .get("recommended_profile")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("action".to_string(), json!("dispatch"));
+    arguments.insert(
+        "task".to_string(),
+        json!(params.task.as_deref().unwrap_or(query)),
+    );
+    if let Some(profile) = profile {
+        arguments.insert("profile".to_string(), json!(profile));
+    }
+    if let Some(cwd) = params
+        .cwd
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("cwd".to_string(), json!(cwd));
+    }
+    if let Some(project) = params
+        .project
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("project".to_string(), json!(project));
+    }
+    if let Some(issue_ref) = params
+        .issue_ref
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("issue_ref".to_string(), json!(issue_ref));
+    }
+    if let Some(pr_ref) = params
+        .pr_ref
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("pr_ref".to_string(), json!(pr_ref));
+    }
+    if let Some(flow_id) = params
+        .flow_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("flow_id".to_string(), json!(flow_id));
+    }
+    if let Some(risk) = params
+        .risk
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        arguments.insert("risk".to_string(), json!(risk));
+    }
+    if let Some(true) = params.auto_capability_bundle {
+        arguments.insert("auto_capability_bundle".to_string(), json!(true));
+    }
+    json!({
+        "tool": "tachi_task",
+        "arguments": arguments,
+        "evidence_required": recommendation
+            .get("evidence_required")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "fallback_chain": recommendation
+            .get("fallback_chain")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    })
+}
+
+fn relevant_feature_profiles(recommendation: &Value) -> Vec<Value> {
+    recommendation
+        .get("candidates")
+        .and_then(Value::as_array)
+        .map(|candidates| {
+            candidates
+                .iter()
+                .take(4)
+                .map(|candidate| {
+                    json!({
+                        "profile": candidate.get("profile").cloned().unwrap_or(Value::Null),
+                        "agent": candidate.get("agent").cloned().unwrap_or(Value::Null),
+                        "role": candidate.get("role").cloned().unwrap_or(Value::Null),
+                        "score": candidate.get("score").cloned().unwrap_or(Value::Null),
+                        "reason": candidate.get("reasons").cloned().unwrap_or_else(|| json!([])),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
@@ -1133,6 +1257,12 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
             .and_then(Value::as_array),
         "No SOP selected.",
     ));
+    out.push(markdown_dispatch_recommendation(value));
+    out.push(markdown_section(
+        "Relevant Skills / Profiles",
+        value.get("relevant_profiles").and_then(Value::as_array),
+        "No dispatch profiles ranked.",
+    ));
     out.push(markdown_section(
         "Wiki Decisions / Lessons",
         value.get("wiki_hits").and_then(Value::as_array),
@@ -1156,6 +1286,48 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
             .unwrap_or("Continue from the canonical docs/specs.")
     ));
     out.join("\n")
+}
+
+fn markdown_dispatch_recommendation(value: &Value) -> String {
+    let mut out = vec!["\n## Recommended Dispatch".to_string()];
+    let recommendation = value.get("route_recommendation").unwrap_or(&Value::Null);
+    let suggested = value.get("suggested_dispatch").unwrap_or(&Value::Null);
+    let Some(profile) = recommendation
+        .get("recommended_profile")
+        .and_then(Value::as_str)
+    else {
+        out.push("- No dispatch profile recommendation available.".to_string());
+        return out.join("\n");
+    };
+    let agent = recommendation
+        .get("recommended_agent")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let risk = recommendation
+        .get("risk")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    out.push(format!(
+        "- Profile: `{profile}` via `{agent}` (risk={risk})"
+    ));
+    if let Some(reason) = recommendation.get("reason").and_then(Value::as_array) {
+        let reason = reason
+            .iter()
+            .take(3)
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if !reason.is_empty() {
+            out.push(format!("- Why: {}", reason.join("; ")));
+        }
+    }
+    if let Some(arguments) = suggested.get("arguments") {
+        out.push(format!("- Dispatch args: `{}`", compact_json(arguments)));
+    }
+    out.join("\n")
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn markdown_section(title: &str, rows: Option<&Vec<Value>>, empty: &str) -> String {

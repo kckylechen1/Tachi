@@ -296,6 +296,7 @@ pub(crate) fn handle_dispatch_recommendation(
         "recommended_agent": best.agent,
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
+        "evidence_required": best_profile.evidence_required,
         "resolved_skills": profile_required_skill_ids(best_profile),
         "resolved_skill_loadout": profile_skill_loadout_json(best_profile),
         "fallback_chain": fallback,
