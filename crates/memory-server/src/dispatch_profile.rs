@@ -262,8 +262,9 @@ pub(crate) fn handle_dispatch_recommendation(
     task: &str,
     risk_override: Option<&str>,
     limit: usize,
+    file_paths: &[String],
 ) -> Result<String, String> {
-    let risk = classify_dispatch_risk(task, risk_override);
+    let risk = classify_dispatch_risk(task, risk_override, file_paths);
     let rows = load_live_eval_rows(server, limit.max(1))?;
     let subagent_scores = aggregate_subagent_scores(&rows);
     let performance_matrix = aggregate_performance_matrix(&rows);
@@ -555,40 +556,61 @@ pub(crate) fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value 
     })
 }
 
-fn classify_dispatch_risk(task: &str, risk_override: Option<&str>) -> DispatchRisk {
+fn classify_dispatch_risk(
+    task: &str,
+    risk_override: Option<&str>,
+    file_paths: &[String],
+) -> DispatchRisk {
     let route = crate::copilot_ops::build_task_brief_routing(task, &[]);
     let task_type = route.intent.to_string();
     let lower = task.to_ascii_lowercase();
+    let lower_paths = file_paths
+        .iter()
+        .map(|path| path.to_ascii_lowercase())
+        .collect::<Vec<_>>();
     let mut reasons = Vec::new();
     let mut risk = "medium".to_string();
 
-    for (needle, reason) in [
-        ("dispatch", "touches dispatch routing"),
-        ("eval", "touches eval/routing evidence"),
-        ("safe_merge", "touches GitHub merge gate"),
-        ("merge", "touches merge/release gate"),
-        ("schema", "touches schema boundary"),
-        ("migration", "touches migration behavior"),
-        ("vault", "touches vault/secrets boundary"),
-        ("sandbox", "touches sandbox boundary"),
-    ] {
-        if lower.contains(needle) {
+    let mut push_reason = |reason: &str| {
+        if !reasons.iter().any(|existing| existing == reason) {
             reasons.push(reason.to_string());
+        }
+    };
+
+    for (needle, reason) in dispatch_risk_needles() {
+        if lower.contains(needle) {
+            push_reason(reason);
+        }
+    }
+    for lower_path in &lower_paths {
+        for (needle, reason) in dispatch_risk_needles() {
+            if lower_path.contains(needle) {
+                push_reason(reason);
+            }
         }
     }
     if matches!(
         task_type.as_str(),
         "migration_request" | "refactor_request" | "review_request"
     ) {
-        reasons.push(format!("task_type={task_type}"));
+        push_reason(&format!("task_type={task_type}"));
+    }
+    let missing_verification = indicates_missing_verification(&lower);
+    if missing_verification {
+        push_reason("missing_verification_signal");
+    }
+    if indicates_prior_failure(&lower) {
+        push_reason("prior_failure_or_regression_hint");
     }
     if !reasons.is_empty()
-        && (lower.contains("dispatch")
-            || lower.contains("eval")
-            || lower.contains("merge")
-            || lower.contains("schema")
-            || lower.contains("vault")
-            || lower.contains("sandbox"))
+        && (contains_high_risk_surface(&lower)
+            || lower_paths
+                .iter()
+                .any(|path| contains_high_risk_surface(path))
+            || missing_verification
+            || reasons
+                .iter()
+                .any(|reason| reason == "prior_failure_or_regression_hint"))
     {
         risk = "high".to_string();
     } else if matches!(task_type.as_str(), "explain_request" | "research_request") {
@@ -622,6 +644,96 @@ fn classify_dispatch_risk(task: &str, risk_override: Option<&str>) -> DispatchRi
         required_profiles,
         blocked_profiles,
     }
+}
+
+fn dispatch_risk_needles() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("dispatch_profile.rs", "touched_area:dispatch_refactor"),
+        ("dispatch_ops", "touched_area:dispatch_refactor"),
+        ("dispatch", "touches dispatch routing"),
+        ("agent_eval.rs", "touched_area:eval_ledger_changes"),
+        ("complete_ops.rs", "touched_area:eval_ledger_changes"),
+        ("tachi_complete", "touched_area:eval_ledger_changes"),
+        ("aggregate_live", "touched_area:eval_ledger_changes"),
+        ("performance_matrix", "touched_area:eval_ledger_changes"),
+        ("eval", "touches eval/routing evidence"),
+        ("safe_merge", "touches GitHub merge gate"),
+        ("gh_safe_merge.rs", "touches GitHub merge gate"),
+        ("merge", "touches merge/release gate"),
+        ("schema", "touches schema boundary"),
+        ("migration", "touches migration behavior"),
+        ("vault_ops.rs", "touches vault/secrets boundary"),
+        ("credential_profile", "touches vault/secrets boundary"),
+        ("vault", "touches vault/secrets boundary"),
+        ("secret", "touches vault/secrets boundary"),
+        ("api key", "touches vault/secrets boundary"),
+        ("sandbox", "touches sandbox boundary"),
+        ("profiles.rs", "touches tool surface/profile visibility"),
+        ("tool profile", "touches tool surface/profile visibility"),
+        ("mcp", "touches MCP/tool boundary"),
+    ]
+}
+
+fn contains_high_risk_surface(lower: &str) -> bool {
+    [
+        "dispatch",
+        "eval",
+        "merge",
+        "schema",
+        "migration",
+        "vault",
+        "secret",
+        "api key",
+        "sandbox",
+        "mcp",
+        "profiles.rs",
+        "tool profile",
+        "dispatch profile",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn indicates_missing_verification(lower: &str) -> bool {
+    [
+        "without tests",
+        "without verification",
+        "no tests",
+        "not tested",
+        "untested",
+        "skip tests",
+        "skipped tests",
+        "tests not run",
+        "did not run tests",
+        "没跑测试",
+        "没有测试",
+        "没验证",
+        "未验证",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn indicates_prior_failure(lower: &str) -> bool {
+    [
+        "regression",
+        "failed before",
+        "retry loop",
+        "flaky",
+        "human override",
+        "still failing",
+        "keeps failing",
+        "still broken",
+        "failed again",
+        "blocked by failure",
+        "stuck in",
+        "又坏",
+        "回归",
+        "失败过",
+        "卡住",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 fn score_profile_candidate(
@@ -971,5 +1083,105 @@ mod tests {
             .route_explanation
             .iter()
             .any(|line| line.contains("opencode custom command")));
+    }
+
+    #[test]
+    fn risk_classifier_uses_touched_area_and_missing_verification_signals() {
+        let risk = classify_dispatch_risk(
+            "review changes in crates/memory-server/src/agent_eval.rs and dispatch_profile.rs; tests not run",
+            None,
+            &[],
+        );
+
+        assert_eq!(risk.risk, "high");
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "touched_area:eval_ledger_changes"));
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "touched_area:dispatch_refactor"));
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "missing_verification_signal"));
+        assert!(risk
+            .required_profiles
+            .iter()
+            .any(|profile| profile == "codex_55_review"));
+        assert!(risk
+            .blocked_profiles
+            .iter()
+            .any(|profile| profile == "codex_53_fast"));
+    }
+
+    #[test]
+    fn risk_classifier_preserves_low_risk_research_route() {
+        let risk = classify_dispatch_risk("research low-risk documentation wording", None, &[]);
+
+        assert_eq!(risk.risk, "low");
+        assert!(risk.blocked_profiles.is_empty());
+    }
+
+    #[test]
+    fn risk_classifier_marks_regression_hints_high() {
+        let risk = classify_dispatch_risk(
+            "fix a regression where the worker got stuck in a retry loop",
+            None,
+            &[],
+        );
+
+        assert_eq!(risk.risk, "high");
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "prior_failure_or_regression_hint"));
+    }
+
+    #[test]
+    fn risk_classifier_does_not_treat_plain_override_or_profile_as_failure() {
+        let override_risk = classify_dispatch_risk(
+            "document the config override behavior for normal settings",
+            None,
+            &[],
+        );
+        assert_ne!(override_risk.risk, "high");
+        assert!(!override_risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "prior_failure_or_regression_hint"));
+
+        let profile_risk = classify_dispatch_risk("review user profile page wording", None, &[]);
+        assert_ne!(profile_risk.risk, "high");
+    }
+
+    #[test]
+    fn risk_classifier_escalates_on_sensitive_file_paths() {
+        let paths = vec![
+            "docs/notes.md".to_string(),
+            "crates/memory-server/src/vault_crypto.rs".to_string(),
+        ];
+        let risk = classify_dispatch_risk("plan a small docs update", None, &paths);
+
+        assert_eq!(risk.risk, "high");
+        assert!(risk
+            .reasons
+            .iter()
+            .any(|reason| reason == "touches vault/secrets boundary"));
+    }
+
+    #[test]
+    fn risk_classifier_dedupes_text_and_path_signals() {
+        let paths = vec!["crates/memory-server/src/dispatch_profile.rs".to_string()];
+        let risk = classify_dispatch_risk("review dispatch profile changes", None, &paths);
+        let count = risk
+            .reasons
+            .iter()
+            .filter(|reason| *reason == "touches dispatch routing")
+            .count();
+
+        assert_eq!(risk.risk, "high");
+        assert_eq!(count, 1);
     }
 }
