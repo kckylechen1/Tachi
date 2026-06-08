@@ -1,6 +1,12 @@
 use super::*;
+use chrono::{DateTime, Duration as ChronoDuration};
+use serde_json::Value;
+use std::path::Path;
 
 // ─── Task Board (Kanban) handler ──────────────────────────────────────────────
+
+const RUN_STALE_FALLBACK_SECS: i64 = 30 * 60;
+const RUN_STALE_GRACE_SECS: i64 = 60;
 
 fn tachi_home() -> PathBuf {
     if let Ok(home) = std::env::var("TACHI_HOME") {
@@ -46,6 +52,59 @@ fn status_state(status: &serde_json::Value, result_written: bool) -> &'static st
     }
 }
 
+fn status_timeout_secs(status: &Value) -> Option<i64> {
+    status
+        .get("timeout_secs")
+        .and_then(Value::as_i64)
+        .filter(|secs| *secs > 0)
+}
+
+fn stale_after_secs(status: &Value) -> i64 {
+    status_timeout_secs(status)
+        .map(|secs| secs.saturating_add(RUN_STALE_GRACE_SECS))
+        .unwrap_or(RUN_STALE_FALLBACK_SECS)
+}
+
+fn parse_status_updated_at(status: &Value, status_path: &Path) -> Option<DateTime<Utc>> {
+    status
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| {
+            std::fs::metadata(status_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(DateTime::<Utc>::from)
+        })
+}
+
+fn is_unresolved_exit(status: &Value) -> bool {
+    match status.get("exit_code") {
+        Some(Value::Number(_)) => false,
+        Some(Value::Null) | None => true,
+        _ => true,
+    }
+}
+
+fn is_abandoned_working_run(
+    status: &Value,
+    result_written: bool,
+    updated_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if status_state(status, result_written) != "TASK_STATE_WORKING" {
+        return false;
+    }
+    if result_written || !is_unresolved_exit(status) {
+        return false;
+    }
+    let Some(updated_at) = updated_at else {
+        return false;
+    };
+    now.signed_duration_since(updated_at) > ChronoDuration::seconds(stale_after_secs(status))
+}
+
 fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
     let name = name.to_str()?;
     let bytes = name.as_bytes();
@@ -80,6 +139,7 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
 
     let target_state = map_filter_state(state_filter);
     let mut runs = Vec::new();
+    let now = Utc::now();
 
     for entry in entries {
         if runs.len() >= limit {
@@ -110,7 +170,13 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
             continue;
         };
         let result_written = run_dir.join("result.md").exists();
-        let state = status_state(&status, result_written);
+        let updated_at_dt = parse_status_updated_at(&status, &status_path);
+        let abandoned = is_abandoned_working_run(&status, result_written, updated_at_dt, now);
+        let state = if abandoned {
+            "TASK_STATE_FAILED"
+        } else {
+            status_state(&status, result_written)
+        };
         if state_filter != "all" && state != target_state {
             continue;
         }
@@ -125,6 +191,14 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
                     .map(chrono::DateTime::<Utc>::from)
                     .map(|dt| dt.to_rfc3339())
             });
+        let stale_reason = if abandoned {
+            Some(format!(
+                "run ledger stayed WORKING for more than {}s without result.md or exit_code",
+                stale_after_secs(&status)
+            ))
+        } else {
+            None
+        };
         runs.push(json!({
             "dispatch_id": dispatch_id,
             "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
@@ -135,6 +209,9 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
             "run_dir": run_dir.to_string_lossy(),
             "result_written": result_written,
             "source": "run",
+            "stale": abandoned,
+            "stale_reason": stale_reason,
+            "state_source": if abandoned { "run_stale_timeout" } else { "run" },
         }));
     }
 
@@ -179,24 +256,10 @@ pub(crate) async fn handle_tachi_board(
     )
     .await?;
 
-    // Filter by state if requested
     let state_filter = params.state_filter.as_deref().unwrap_or("all");
-    let filtered: Vec<&serde_json::Value> = if state_filter == "all" {
-        rows.iter().collect()
-    } else {
-        let target_state = map_filter_state(state_filter);
-        rows.iter()
-            .filter(|row| {
-                row.get("metadata")
-                    .and_then(|m| m.get("a2a_state"))
-                    .and_then(|s| s.as_str())
-                    == Some(target_state)
-            })
-            .collect()
-    };
 
     // Build compact board view
-    let mut tasks: Vec<serde_json::Value> = filtered
+    let mut tasks: Vec<serde_json::Value> = rows
         .iter()
         .map(|row| {
             let meta = row.get("metadata").cloned().unwrap_or(json!({}));
@@ -218,11 +281,10 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
     }
-    let state_filter_owned = state_filter.to_string();
-    let run_tasks =
-        tokio::task::spawn_blocking(move || collect_run_tasks(&state_filter_owned, limit))
-            .await
-            .unwrap_or_default();
+    let run_scan_limit = limit.saturating_mul(5).max(50);
+    let run_tasks = tokio::task::spawn_blocking(move || collect_run_tasks("all", run_scan_limit))
+        .await
+        .unwrap_or_default();
     let run_count = run_tasks.len();
     for task in run_tasks {
         let dispatch_id = task
@@ -235,13 +297,34 @@ pub(crate) async fn handle_tachi_board(
                     candidate.get("dispatch_id").and_then(|v| v.as_str()) == Some(id)
                 }) {
                     if let Some(obj) = existing.as_object_mut() {
-                        for key in ["run_dir", "result_written", "exit_code"] {
+                        for key in [
+                            "run_dir",
+                            "result_written",
+                            "exit_code",
+                            "stale",
+                            "stale_reason",
+                            "state_source",
+                        ] {
                             if obj.get(key).is_none() {
                                 obj.insert(
                                     key.to_string(),
                                     task.get(key).cloned().unwrap_or(serde_json::Value::Null),
                                 );
                             }
+                        }
+                        if task.get("stale").and_then(|v| v.as_bool()) == Some(true) {
+                            obj.insert(
+                                "state".to_string(),
+                                task.get("state")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
+                            obj.insert(
+                                "updated_at".to_string(),
+                                task.get("updated_at")
+                                    .cloned()
+                                    .unwrap_or(serde_json::Value::Null),
+                            );
                         }
                         obj.insert("source".to_string(), json!("kanban+run"));
                     }
@@ -251,6 +334,10 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
         tasks.push(task);
+    }
+    if state_filter != "all" {
+        let target_state = map_filter_state(state_filter);
+        tasks.retain(|task| task.get("state").and_then(|v| v.as_str()) == Some(target_state));
     }
     tasks.sort_by(|a, b| {
         b.get("updated_at")

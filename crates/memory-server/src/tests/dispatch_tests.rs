@@ -72,6 +72,29 @@ fn task_params(action: &str) -> TachiTaskParams {
     }
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+        let original = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.as_ref() {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 #[tokio::test]
 async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     let server = make_server();
@@ -852,8 +875,14 @@ async fn custom_dispatch_rejects_mcp_injection() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn dispatch_response_includes_suggested_complete_payload() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let mut params = dispatch_params(Some("custom"), "smoke custom dispatch completion skeleton");
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
@@ -886,19 +915,19 @@ async fn dispatch_response_includes_suggested_complete_payload() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn board_surfaces_dispatch_run_ledger() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let dispatch_id = format!(
         "99991231T235959Z-test-run-ledger-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let tachi_home = std::env::var_os("TACHI_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".tachi"))
-        })
-        .unwrap_or_else(|| std::env::temp_dir().join("tachi"));
-    let run_dir = tachi_home.join("runs").join(&dispatch_id);
+    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create run ledger fixture");
     std::fs::write(
         run_dir.join("status.json"),
@@ -945,6 +974,85 @@ async fn board_surfaces_dispatch_run_ledger() {
         }),
         "dispatch should carry run_dir from run ledger: {board:#}"
     );
+    let _ = std::fs::remove_dir_all(&run_dir);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn board_marks_abandoned_working_run_as_failed() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let dispatch_id = format!(
+        "20260608T000000Z-stale-run-ledger-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create stale run fixture");
+    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string(&serde_json::json!({
+            "dispatch_id": dispatch_id,
+            "agent": "codex",
+            "task": "stale run should not clog working board",
+            "state": "TASK_STATE_WORKING",
+            "updated_at": stale_updated_at,
+            "exit_code": null,
+            "result_written": false,
+            "timeout_secs": 5,
+        }))
+        .expect("serialize stale status fixture"),
+    )
+    .expect("write stale status fixture");
+
+    let failed_raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("failed".to_string()),
+            limit: Some(20),
+            project: None,
+        },
+    )
+    .await
+    .expect("failed board should render");
+    let failed: serde_json::Value = serde_json::from_str(&failed_raw).expect("failed board JSON");
+    assert!(
+        failed["tasks"].as_array().unwrap().iter().any(|task| {
+            task["dispatch_id"].as_str() == Some(dispatch_id.as_str())
+                && task["state"].as_str() == Some("TASK_STATE_FAILED")
+                && task["stale"].as_bool() == Some(true)
+                && task["stale_reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("WORKING"))
+        }),
+        "failed board should include stale derived run: {failed:#}"
+    );
+
+    let working_raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("working".to_string()),
+            limit: Some(20),
+            project: None,
+        },
+    )
+    .await
+    .expect("working board should render");
+    let working: serde_json::Value =
+        serde_json::from_str(&working_raw).expect("working board JSON");
+    assert!(
+        !working["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(dispatch_id.as_str())),
+        "stale run should not remain on working board: {working:#}"
+    );
+
     let _ = std::fs::remove_dir_all(&run_dir);
 }
 
