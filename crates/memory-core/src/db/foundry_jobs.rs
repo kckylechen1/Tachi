@@ -14,7 +14,10 @@ pub struct PersistedFoundryJob {
     pub memory_ids: Vec<String>,
 }
 
-/// Insert a new Foundry job (or replace if ID already exists).
+/// Insert a new Foundry job.
+///
+/// Existing rows are intentionally left alone. Re-inserting the same job id must
+/// not resurrect a terminal job back to `queued`.
 pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Result<(), MemoryError> {
     let now = chrono::Utc::now().to_rfc3339();
     let kind_str = serde_json::to_string(&job.spec.kind)
@@ -31,7 +34,7 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
         .to_string();
 
     conn.execute(
-        "INSERT OR REPLACE INTO foundry_jobs
+        "INSERT OR IGNORE INTO foundry_jobs
          (id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
           target_agent_id, requested_by, evidence_count, goal_count, metadata,
           created_at, updated_at)
@@ -59,6 +62,49 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
         ],
     )?;
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoundryJobLease {
+    Queued,
+    StaleRunning,
+}
+
+/// Atomically lease a queued or stale-running job for execution.
+///
+/// Returns `None` when another worker has already leased this job, or when the
+/// row is already terminal. `running_before` is the same cutoff used by the
+/// scheduler for crash recovery.
+pub fn claim_foundry_job_for_run(
+    conn: &Connection,
+    id: &str,
+    running_before: &str,
+) -> Result<Option<FoundryJobLease>, MemoryError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE foundry_jobs
+         SET status = 'running', updated_at = ?1
+         WHERE id = ?2
+           AND status = 'queued'",
+        params![now, id],
+    )?;
+    if changed > 0 {
+        return Ok(Some(FoundryJobLease::Queued));
+    }
+
+    let changed = conn.execute(
+        "UPDATE foundry_jobs
+         SET status = 'running', updated_at = ?1
+         WHERE id = ?2
+           AND status = 'running'
+           AND updated_at < ?3",
+        params![now, id, running_before],
+    )?;
+    if changed > 0 {
+        return Ok(Some(FoundryJobLease::StaleRunning));
+    }
+
+    Ok(None)
 }
 
 /// Branch #5: update job status AND record a structured reason for the
@@ -418,5 +464,93 @@ mod tests {
             .map(|job| job.spec.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["queued", "old-running"]);
+    }
+
+    #[test]
+    fn claim_foundry_job_for_run_leases_only_queued_or_stale_running_jobs() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "queued", "queued");
+        insert_minimal_job(&conn, "fresh-running", "running");
+        insert_minimal_job(&conn, "old-running", "running");
+        insert_minimal_job(&conn, "completed", "completed");
+
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+        conn.execute(
+            "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
+            params![old],
+        )
+        .unwrap();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "queued", &cutoff).unwrap(),
+            Some(FoundryJobLease::Queued)
+        );
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "old-running", &cutoff).unwrap(),
+            Some(FoundryJobLease::StaleRunning)
+        );
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "fresh-running", &cutoff).unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "completed", &cutoff).unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_foundry_job_for_run(&conn, "missing", &cutoff).unwrap(),
+            None
+        );
+
+        let statuses = ["queued", "old-running", "fresh-running", "completed"]
+            .into_iter()
+            .map(|id| {
+                conn.query_row(
+                    "SELECT status FROM foundry_jobs WHERE id = ?1",
+                    params![id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(statuses, vec!["running", "running", "running", "completed"]);
+    }
+
+    #[test]
+    fn insert_foundry_job_does_not_resurrect_existing_terminal_job() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "j1", "completed");
+
+        let job = PersistedFoundryJob {
+            spec: FoundryJobSpec {
+                id: "j1".to_string(),
+                kind: FoundryJobKind::RecallRerankCache,
+                lane: FoundryModelLane::Rerank,
+                status: FoundryJobStatus::Queued,
+                target_agent_id: Some("agent".to_string()),
+                requested_by: Some("test".to_string()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                evidence_count: 1,
+                goal_count: 1,
+                metadata: serde_json::json!({"new": true}),
+            },
+            target_db: "project".to_string(),
+            named_project: None,
+            path_prefix: "/x".to_string(),
+            memory_ids: vec!["m1".to_string()],
+        };
+
+        insert_foundry_job(&conn, &job).unwrap();
+
+        let (status, kind): (String, String) = conn
+            .query_row(
+                "SELECT status, kind FROM foundry_jobs WHERE id = 'j1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+        assert_eq!(kind, "thesis_compaction");
     }
 }

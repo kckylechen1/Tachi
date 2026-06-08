@@ -50,6 +50,10 @@ pub(crate) struct FoundryMaintenanceItem {
     pub db_path: Option<std::path::PathBuf>,
     pub path_prefix: String,
     pub memory_ids: Vec<String>,
+    /// True only for the primary enqueue path that incremented
+    /// `foundry_stats.queued`. Safety-net replay/scheduler items are sourced
+    /// from DB state and must not decrement that in-memory queue counter.
+    pub counted_queue_slot: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

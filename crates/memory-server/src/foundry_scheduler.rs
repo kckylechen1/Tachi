@@ -385,6 +385,7 @@ async fn run_one_poll(
                     },
                     path_prefix: job.path_prefix,
                     memory_ids: job.memory_ids,
+                    counted_queue_slot: false,
                 };
                 // try_send is non-blocking; if the channel is full we
                 // simply skip this tick — next poll will retry. The

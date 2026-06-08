@@ -473,7 +473,8 @@ pub(crate) fn count_memories_missing_vectors(conn: &Connection) -> rusqlite::Res
     conn.query_row(
         "SELECT COUNT(*)
          FROM memories m
-         WHERE m.id NOT IN (SELECT id FROM memories_vec)",
+         WHERE m.id NOT IN (SELECT id FROM memories_vec)
+           AND m.source != 'foundry_recall_rerank_cache'",
         [],
         |r| r.get(0),
     )
@@ -504,5 +505,27 @@ mod tests {
 
         let missing = count_memories_missing_vectors(store.connection()).expect("missing count");
         assert_eq!(missing, 1);
+    }
+
+    #[test]
+    fn doctor_vector_count_ignores_recall_cache_rows() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let db = dir.path().join("memory.db");
+        let store = memory_core::MemoryStore::open(db.to_str().expect("db path"))
+            .expect("open memory store");
+        let now = Utc::now().to_rfc3339();
+
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, '/recall-cache/test', 'cache', 'ephemeral recall cache diagnostic row', 0.3, ?2, 'other', 'recall', '[]', '[]', 'foundry_recall_rerank_cache', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                rusqlite::params!["recall-cache-without-vector", now],
+            )
+            .expect("insert recall cache without vector");
+
+        let missing = count_memories_missing_vectors(store.connection()).expect("missing count");
+        assert_eq!(missing, 0);
     }
 }
