@@ -118,12 +118,25 @@ pub(crate) struct CredentialDoctorSummary {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CredentialApplyOptions {
     pub allow_existing: bool,
+    pub run_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct CredentialApplyResult {
     pub report: CredentialMaterializeReport,
     pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CredentialCleanupReport {
+    pub run_dir: String,
+    pub credentials_dir: String,
+    pub dry_run: bool,
+    pub would_remove: Vec<String>,
+    pub removed: Vec<String>,
+    pub missing: Vec<String>,
+    pub skipped: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 pub(crate) fn default_credentials_dir() -> PathBuf {
@@ -264,6 +277,12 @@ struct ManagedCredentialMaterialization {
     content_hash: String,
     chmod: Option<String>,
     managed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cleanup_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cleaned_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cleanup_run_dir: Option<String>,
 }
 
 fn managed_materialization_key(
@@ -325,6 +344,9 @@ fn record_managed_materialization(
         ),
         chmod: step.chmod.clone(),
         managed_at: chrono::Utc::now().to_rfc3339(),
+        cleanup_status: None,
+        cleaned_at: None,
+        cleanup_run_dir: None,
     };
     let value = serde_json::to_string(&metadata)
         .map_err(|e| format!("serialize credential materialization metadata: {e}"))?;
@@ -395,6 +417,21 @@ fn render_config_overlay_value(
     })
 }
 
+fn expand_target(target: &str, run_dir: Option<&Path>) -> String {
+    let mut expanded = display_target(target);
+    if let Some(run_dir) = run_dir {
+        let run_dir = run_dir.to_string_lossy();
+        let credentials_dir = Path::new(run_dir.as_ref())
+            .join("credentials")
+            .to_string_lossy()
+            .to_string();
+        expanded = expanded
+            .replace("{credentials_dir}", &credentials_dir)
+            .replace("{run_dir}", run_dir.as_ref());
+    }
+    expanded
+}
+
 pub(crate) fn profile_secret_names(profile: &CredentialProfile) -> Vec<String> {
     let mut names = profile
         .materializers
@@ -411,6 +448,16 @@ pub(crate) fn plan_credential_materialization(
     profile: &CredentialProfile,
     consumer: &str,
     store: &MemoryStore,
+) -> Result<CredentialMaterializeReport, String> {
+    plan_credential_materialization_with_run_dir(profile_name, profile, consumer, store, None)
+}
+
+pub(crate) fn plan_credential_materialization_with_run_dir(
+    profile_name: &str,
+    profile: &CredentialProfile,
+    consumer: &str,
+    store: &MemoryStore,
+    run_dir: Option<&Path>,
 ) -> Result<CredentialMaterializeReport, String> {
     let entries = store
         .vault_list_entries()
@@ -433,7 +480,7 @@ pub(crate) fn plan_credential_materialization(
 
     for materializer in &profile.materializers {
         let resolved_secret = resolve_source(profile, &materializer.source);
-        let target = display_target(&materializer.target);
+        let target = expand_target(&materializer.target, run_dir);
         let known_kind = matches!(
             materializer.kind.as_str(),
             "env" | "file_copy" | "config_overlay" | "config_content_env"
@@ -593,7 +640,13 @@ pub(crate) fn apply_credential_materialization(
     secret_values: &HashMap<String, String>,
     options: &CredentialApplyOptions,
 ) -> Result<CredentialApplyResult, String> {
-    let mut report = plan_credential_materialization(profile_name, profile, consumer, store)?;
+    let mut report = plan_credential_materialization_with_run_dir(
+        profile_name,
+        profile,
+        consumer,
+        store,
+        options.run_dir.as_deref(),
+    )?;
     report.dry_run = false;
     if !report.allowed
         || !report.missing_secrets.is_empty()
@@ -704,6 +757,91 @@ pub(crate) fn apply_credential_materialization(
     }
 
     Ok(CredentialApplyResult { report, env })
+}
+
+pub(crate) fn cleanup_ephemeral_credential_materializations(
+    store: &MemoryStore,
+    run_dir: &Path,
+    dry_run: bool,
+) -> Result<CredentialCleanupReport, String> {
+    let credentials_dir = run_dir.join("credentials");
+    let mut report = CredentialCleanupReport {
+        run_dir: run_dir.to_string_lossy().to_string(),
+        credentials_dir: credentials_dir.to_string_lossy().to_string(),
+        dry_run,
+        would_remove: Vec::new(),
+        removed: Vec::new(),
+        missing: Vec::new(),
+        skipped: Vec::new(),
+        errors: Vec::new(),
+    };
+    let rows = store
+        .list_state(CREDENTIAL_MATERIALIZATION_NAMESPACE)
+        .map_err(|e| format!("list credential materialization metadata: {e}"))?;
+    for row in rows {
+        let mut metadata: ManagedCredentialMaterialization =
+            match serde_json::from_str(&row.value_json) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    report
+                        .errors
+                        .push(format!("parse metadata '{}': {err}", row.key));
+                    continue;
+                }
+            };
+        if metadata.cleanup_status.as_deref() == Some("cleaned") {
+            report.skipped.push(metadata.target);
+            continue;
+        }
+        let target = PathBuf::from(&metadata.target);
+        if !target.starts_with(run_dir) {
+            report.skipped.push(metadata.target);
+            continue;
+        }
+        if !target.exists() {
+            metadata.cleanup_status = Some("cleaned".to_string());
+            metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
+            metadata.cleanup_run_dir = Some(run_dir.to_string_lossy().to_string());
+            let value = serde_json::to_string(&metadata)
+                .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
+            store
+                .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, &row.key, &value)
+                .map_err(|e| format!("mark missing credential target cleaned: {e}"))?;
+            report.missing.push(target.to_string_lossy().to_string());
+            continue;
+        }
+        if dry_run {
+            report
+                .would_remove
+                .push(target.to_string_lossy().to_string());
+            continue;
+        }
+        if target.is_dir() {
+            report.errors.push(format!(
+                "refusing to remove credential target directory '{}'",
+                target.display()
+            ));
+            continue;
+        }
+        match fs::remove_file(&target) {
+            Ok(()) => {
+                metadata.cleanup_status = Some("cleaned".to_string());
+                metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
+                metadata.cleanup_run_dir = Some(run_dir.to_string_lossy().to_string());
+                let value = serde_json::to_string(&metadata)
+                    .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
+                store
+                    .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, &row.key, &value)
+                    .map_err(|e| format!("mark credential target cleaned: {e}"))?;
+                report.removed.push(target.to_string_lossy().to_string());
+            }
+            Err(err) => report.errors.push(format!(
+                "remove credential target '{}': {err}",
+                target.display()
+            )),
+        }
+    }
+    Ok(report)
 }
 
 pub(crate) fn credential_materialize_report_json(
@@ -849,7 +987,10 @@ pub(crate) fn doctor_credential_profile(
             }
             let target_metadata = fs::metadata(&target).ok();
             if target_metadata.is_none() {
-                if managed.is_some() {
+                if managed
+                    .as_ref()
+                    .is_some_and(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                {
                     issues.push(CredentialDoctorIssue {
                         severity: "high".to_string(),
                         code: "managed_target_missing".to_string(),
@@ -865,7 +1006,10 @@ pub(crate) fn doctor_credential_profile(
             }
             if let Some(meta) = target_metadata {
                 let mut managed_target_readable = true;
-                if let Some(managed) = managed.as_ref() {
+                if let Some(managed) = managed
+                    .as_ref()
+                    .filter(|managed| managed.cleanup_status.as_deref() != Some("cleaned"))
+                {
                     match fs::read_to_string(&target) {
                         Ok(current) => {
                             let current_hash = managed_materialization_content_hash(

@@ -17,9 +17,10 @@ use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
 };
 use crate::credential_profile::{
-    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
-    find_credential_profile, plan_credential_materialization, profile_secret_names,
-    CredentialApplyOptions, CredentialMaterializeReport,
+    apply_credential_materialization, cleanup_ephemeral_credential_materializations,
+    credential_materialize_report_json, default_credentials_dir, find_credential_profile,
+    plan_credential_materialization_with_run_dir, profile_secret_names, CredentialApplyOptions,
+    CredentialMaterializeReport,
 };
 use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
 use crate::vault_ops::read_unlocked_vault_secret;
@@ -161,6 +162,7 @@ fn materialize_dispatch_credentials(
     params: &TachiDispatchParams,
     agent_norm: &str,
     selected_profile: Option<&str>,
+    run_dir: &Path,
 ) -> Result<DispatchCredentialMaterialization, String> {
     if params.credential_profiles.is_empty() {
         return Ok(DispatchCredentialMaterialization {
@@ -184,7 +186,13 @@ fn materialize_dispatch_credentials(
         let (_, profile) = find_dispatch_credential_profile(&profile_name, cwd)?;
         let consumer = dispatch_credential_consumer(agent_norm, selected_profile, &profile);
         let plan = server.with_global_store(|store| {
-            plan_credential_materialization(&profile_name, &profile, &consumer, store)
+            plan_credential_materialization_with_run_dir(
+                &profile_name,
+                &profile,
+                &consumer,
+                store,
+                Some(run_dir),
+            )
         })?;
         if !credential_report_ready(&plan) {
             let plan_json = serde_json::to_string(&credential_materialize_report_json(&plan))
@@ -217,6 +225,7 @@ fn materialize_dispatch_credentials(
                 &secret_values,
                 &CredentialApplyOptions {
                     allow_existing: false,
+                    run_dir: Some(run_dir.to_path_buf()),
                 },
             )
         })?;
@@ -653,6 +662,7 @@ pub(crate) async fn handle_tachi_dispatch(
         &params,
         &agent_norm,
         resolved_profile.selected_profile.as_deref(),
+        &workspace_dir,
     ) {
         Ok(materialized) => materialized,
         Err(err) => {
@@ -986,6 +996,26 @@ pub(crate) async fn handle_tachi_dispatch(
         }
 
         if should_cleanup {
+            let credential_cleanup = server_clone.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(
+                    store,
+                    &workspace_dir_for_spawn,
+                    false,
+                )
+            });
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "credentials_cleanup",
+                    "dispatch_id": d_id,
+                    "agent": agent_for_watchdog,
+                    "report": credential_cleanup
+                        .as_ref()
+                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
+                        .unwrap_or_else(|err| json!({"errors": [err]})),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
             let _ = std::fs::remove_dir_all(workspace_dir);
         }
     });
