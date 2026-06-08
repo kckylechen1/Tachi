@@ -257,6 +257,7 @@ async fn render_one(
                 "completed" | "success" if d.reviewed => "[OK]",
                 "completed" | "success" => "[!] ",
                 "in_progress" => "[..]",
+                "stale_working" => "[!] ",
                 _ => "[X] ",
             };
             let review_tag = if !d.reviewed && matches!(d.outcome.as_str(), "completed" | "success")
