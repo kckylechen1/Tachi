@@ -1782,11 +1782,14 @@ impl MemoryServer {
                     .task
                     .clone()
                     .ok_or_else(|| "task is required when action='recommend'".to_string())?;
+                let mut file_paths = params.doc_paths.clone();
+                file_paths.extend(params.spec_paths.clone());
                 crate::dispatch_profile::handle_dispatch_recommendation(
                     self,
                     &task,
                     params.risk.as_deref(),
                     params.limit.unwrap_or(500),
+                    &file_paths,
                 )
             }
             "merge" => {

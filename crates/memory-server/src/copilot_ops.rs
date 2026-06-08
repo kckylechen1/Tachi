@@ -919,11 +919,14 @@ fn feature_dispatch_recommendation(
     params: &TachiTaskParams,
     query: &str,
 ) -> Value {
+    let mut file_paths = params.doc_paths.clone();
+    file_paths.extend(params.spec_paths.clone());
     match crate::dispatch_profile::handle_dispatch_recommendation(
         server,
         query,
         params.risk.as_deref(),
         params.limit.unwrap_or(500),
+        &file_paths,
     ) {
         Ok(raw) => serde_json::from_str(&raw)
             .unwrap_or_else(|err| json!({"available": false, "error": err.to_string()})),
