@@ -644,9 +644,13 @@ impl MemoryServer {
                     count
                 };
 
+                let running_cutoff = (chrono::Utc::now()
+                    - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
+                .to_rfc3339();
+
                 // Replay from global DB
                 if let Ok(jobs) = replay_server.with_global_store(|store| {
-                    memory_core::load_pending_foundry_jobs(store.connection())
+                    memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
                         .map_err(|e| format!("load pending foundry jobs (global): {e}"))
                 }) {
                     replayed += replay_from(jobs);
@@ -654,7 +658,7 @@ impl MemoryServer {
 
                 // Replay from project DB
                 if let Ok(jobs) = replay_server.with_project_store(|store| {
-                    memory_core::load_pending_foundry_jobs(store.connection())
+                    memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
                         .map_err(|e| format!("load pending foundry jobs (project): {e}"))
                 }) {
                     replayed += replay_from(jobs);

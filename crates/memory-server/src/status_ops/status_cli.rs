@@ -167,7 +167,7 @@ async fn render_one(
     }
     for db in &visible_dbs {
         let stuck_marker = if db.stuck_in_progress > 0 {
-            format!(" [!] {} stuck in_progress", db.stuck_in_progress)
+            format!(" [!] {} stuck running", db.stuck_in_progress)
         } else {
             String::new()
         };
@@ -416,7 +416,7 @@ async fn render_one(
     let total_orphan = snapshot.dbs.iter().filter(|d| d.orphan).count();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
     println!(
-        "Summary: health_score={score}/100, {n} dbs, {pending} total pending, {orphan} orphan (informational), {stuck} stuck in_progress",
+        "Summary: health_score={score}/100, {n} dbs, {pending} total pending, {orphan} orphan (informational), {stuck} stuck running",
         score = snapshot.health_score,
         n = snapshot.dbs.len(),
         pending = total_pending,

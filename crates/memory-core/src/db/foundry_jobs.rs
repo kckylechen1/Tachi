@@ -155,19 +155,21 @@ pub struct JobStatusHistogram {
     pub gc_eligible: usize,
 }
 
-/// Load all jobs with status 'queued' or 'running' (for startup replay).
+/// Load queued jobs plus stale running jobs for startup/safety-net replay.
 pub fn load_pending_foundry_jobs(
     conn: &Connection,
+    running_before: &str,
 ) -> Result<Vec<PersistedFoundryJob>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
                 target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at
          FROM foundry_jobs
-         WHERE status IN ('queued', 'running')
+         WHERE status = 'queued'
+            OR (status = 'running' AND updated_at < ?1)
          ORDER BY created_at ASC",
     )?;
 
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(params![running_before], |row| {
         let kind_str: String = row.get(1)?;
         let lane_str: String = row.get(2)?;
         let status_str: String = row.get(3)?;
@@ -392,5 +394,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM foundry_jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn pending_loader_replays_only_queued_and_stale_running_jobs() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "queued", "queued");
+        insert_minimal_job(&conn, "fresh-running", "running");
+        insert_minimal_job(&conn, "old-running", "running");
+        insert_minimal_job(&conn, "completed", "completed");
+
+        let old = (chrono::Utc::now() - chrono::Duration::minutes(20)).to_rfc3339();
+        conn.execute(
+            "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
+            params![old],
+        )
+        .unwrap();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+
+        let jobs = load_pending_foundry_jobs(&conn, &cutoff).unwrap();
+        let ids = jobs
+            .iter()
+            .map(|job| job.spec.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["queued", "old-running"]);
     }
 }
