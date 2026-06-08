@@ -78,10 +78,11 @@ fn tachi_task_action_schema(
             "card",
             "board",
             "merge",
+            "pr_status",
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='pr_status' previews GitHub PR safe-merge status without merging; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -1074,13 +1075,14 @@ pub(crate) struct TachiSkillParams {
     pub args: Option<serde_json::Value>,
 }
 
-// ─── Facade: task (plan / recommend / dispatch / board / merge / close_loop) ─
+// ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle) ──
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "pr_status", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
-    /// tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.
+    /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
+    /// action="pr_status" previews GitHub PR safe-merge status and may persist flow status.
     /// action="build_references" previews the issue/doc/related reference array.
     /// action="close_loop" writes durable wiki closure through the task lifecycle.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
@@ -1172,6 +1174,19 @@ pub(crate) struct TachiTaskParams {
     )]
     pub credential_profiles: Vec<String>,
     #[serde(default)]
+    #[schemars(
+        description = "GitHub repository in owner/repo format for action='pr_status'. Optional when pr_ref is owner/repo#123 or a GitHub PR URL."
+    )]
+    pub repo: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    #[schemars(
+        description = "GitHub issue/PR number for action='pr_status' when repo is supplied."
+    )]
+    pub number: Option<u64>,
+    #[serde(default)]
     pub issue_ref: Option<String>,
     #[serde(default)]
     pub pr_ref: Option<String>,
@@ -1208,7 +1223,15 @@ pub(crate) struct TachiTaskParams {
     #[serde(default)]
     pub branch: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Local dispatch worktree merge strategy for action='merge'. Ignored by action='pr_status', which always runs GitHub safe_merge in preview mode."
+    )]
     pub strategy: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "GitHub PR gate policy for action='pr_status': permissive | standard | strict. Defaults to standard."
+    )]
+    pub merge_policy: Option<String>,
     #[serde(default = "default_true")]
     pub delete_worktree: bool,
     #[serde(default)]
