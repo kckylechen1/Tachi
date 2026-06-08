@@ -69,6 +69,19 @@ Human-facing memory can be written in Chinese when that is the highest-density w
 
 Live SQLite databases should stay local. Cloud sync should move encrypted bundles, event logs, vault ciphertext, workflow summaries, wiki/skill artifacts, and performance aggregates. That keeps the runtime fast and avoids WAL/lock corruption, while still allowing the same user and agent fleet to share durable engineering state across machines.
 
+### Daily Agent Workflow
+
+For coding-agent work, the intended loop is compact and evidence-driven:
+
+1. Start with `tachi_memory(action="briefing")` or `tachi_task(action="briefing")` to load the current feature board, linked docs/specs, relevant wiki notes, project memory fragments, and live eval lessons.
+2. Use `tachi_task(action="recommend")` to choose a dispatch profile, skill loadout, fallback chain, and required evidence for the task.
+3. Dispatch only bounded worker slices. The leader keeps final ownership of integration, verification, PRs, and user-facing decisions.
+4. Run the real verifier for the change: tests, type checks, `gitleaks`, safe-merge gates, UI/UX smoke tests, or domain-specific probes.
+5. Record the outcome with `tachi_complete`, including `subagents`, `tests_run`, `evidence_refs`, latency, token, and cost fields when available.
+6. Periodically run `tachi_agent_eval(action="aggregate_live")`. Its scorecards and performance matrix feed future routing decisions instead of relying on subjective memory.
+
+The product goal is not to force every task through a swarm. The goal is to make each agent workflow measurable enough that Tachi can learn which harness, profile, skill, and verification gate actually works.
+
 ---
 
 ## 🎯 Why Tachi?

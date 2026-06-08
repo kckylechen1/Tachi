@@ -120,6 +120,12 @@ them unless the caller explicitly scopes to `/eval`. Use
 `tachi_agent_eval(action="aggregate_live")` to aggregate production eval memory;
 use `action="aggregate"` only for fixture JSONL replay.
 
+For routing and UX workflow audits, inspect `performance_matrix` in the
+`aggregate_live` response. It separates leader rows from subagent rows and
+summarizes latency, token use, cost, quality, verification, retry count, human
+override rate, and failures by profile/role/agent/model/task type. `telemetry`
+and `perf` are aliases for the same live-memory aggregate.
+
 Leader workflow:
 
 1. Start with `tachi_memory(action="briefing")`.
