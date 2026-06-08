@@ -87,7 +87,10 @@ pub(super) async fn run_vault_command(
                     &consumer,
                     &store,
                     &secret_values,
-                    &crate::credential_profile::CredentialApplyOptions { allow_existing },
+                    &crate::credential_profile::CredentialApplyOptions {
+                        allow_existing,
+                        run_dir: None,
+                    },
                 )?;
                 let mut value =
                     crate::credential_profile::credential_materialize_report_json(&result.report);
