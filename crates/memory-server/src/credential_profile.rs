@@ -14,6 +14,10 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::utils::stable_hash;
+
+pub(crate) const CREDENTIAL_MATERIALIZATION_NAMESPACE: &str = "credential_materialization";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CredentialProfileDocument {
@@ -246,6 +250,112 @@ fn is_env_target(target: &str) -> bool {
 
 fn materializer_writes_file(kind: &str, target: &str) -> bool {
     matches!(kind, "file_copy") || (kind == "config_overlay" && !is_env_target(target))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ManagedCredentialMaterialization {
+    version: u32,
+    profile: String,
+    consumer: String,
+    materializer_type: String,
+    source: String,
+    resolved_secret: String,
+    target: String,
+    content_hash: String,
+    chmod: Option<String>,
+    managed_at: String,
+}
+
+fn managed_materialization_key(
+    profile_name: &str,
+    consumer: &str,
+    materializer_type: &str,
+    resolved_secret: &str,
+    target: &str,
+) -> String {
+    format!(
+        "managed:{}",
+        stable_hash(&format!(
+            "{profile_name}\u{1f}{consumer}\u{1f}{materializer_type}\u{1f}{resolved_secret}\u{1f}{target}"
+        ))
+    )
+}
+
+fn managed_materialization_content_hash(
+    profile_name: &str,
+    consumer: &str,
+    target: &str,
+    content: &str,
+) -> String {
+    format!(
+        "stable-fnv1a:{}",
+        stable_hash(&format!(
+            "{profile_name}\u{1f}{consumer}\u{1f}{target}\u{1f}{content}"
+        ))
+    )
+}
+
+fn record_managed_materialization(
+    store: &MemoryStore,
+    profile_name: &str,
+    consumer: &str,
+    step: &CredentialMaterializeStepReport,
+    content: &str,
+) -> Result<(), String> {
+    let key = managed_materialization_key(
+        profile_name,
+        consumer,
+        &step.materializer_type,
+        &step.resolved_secret,
+        &step.target,
+    );
+    let metadata = ManagedCredentialMaterialization {
+        version: 1,
+        profile: profile_name.to_string(),
+        consumer: consumer.to_string(),
+        materializer_type: step.materializer_type.clone(),
+        source: step.source.clone(),
+        resolved_secret: step.resolved_secret.clone(),
+        target: step.target.clone(),
+        content_hash: managed_materialization_content_hash(
+            profile_name,
+            consumer,
+            &step.target,
+            content,
+        ),
+        chmod: step.chmod.clone(),
+        managed_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let value = serde_json::to_string(&metadata)
+        .map_err(|e| format!("serialize credential materialization metadata: {e}"))?;
+    store
+        .set_state(CREDENTIAL_MATERIALIZATION_NAMESPACE, &key, &value)
+        .map_err(|e| format!("record credential materialization metadata: {e}"))?;
+    Ok(())
+}
+
+fn read_managed_materialization(
+    store: &MemoryStore,
+    profile_name: &str,
+    consumer: &str,
+    step: &CredentialMaterializeStepReport,
+) -> Result<Option<ManagedCredentialMaterialization>, String> {
+    let key = managed_materialization_key(
+        profile_name,
+        consumer,
+        &step.materializer_type,
+        &step.resolved_secret,
+        &step.target,
+    );
+    let Some((value_json, _version)) = store
+        .get_state_kv(CREDENTIAL_MATERIALIZATION_NAMESPACE, &key)
+        .map_err(|e| format!("read credential materialization metadata: {e}"))?
+    else {
+        return Ok(None);
+    };
+    let metadata = serde_json::from_str(&value_json)
+        .map_err(|e| format!("parse credential materialization metadata: {e}"))?;
+    Ok(Some(metadata))
 }
 
 fn render_template_value(template: &serde_json::Value, secret: &str) -> serde_json::Value {
@@ -517,6 +627,13 @@ pub(crate) fn apply_credential_materialization(
                     materializer.chmod.as_deref(),
                     options.allow_existing,
                 )?;
+                record_managed_materialization(
+                    store,
+                    profile_name,
+                    consumer,
+                    &report.steps[idx],
+                    value,
+                )?;
                 report.steps[idx].status = "written".to_string();
                 report.steps[idx].would_write = false;
                 report.steps[idx].applied = true;
@@ -533,6 +650,13 @@ pub(crate) fn apply_credential_materialization(
                         &rendered,
                         materializer.chmod.as_deref(),
                         options.allow_existing,
+                    )?;
+                    record_managed_materialization(
+                        store,
+                        profile_name,
+                        consumer,
+                        &report.steps[idx],
+                        &rendered,
                     )?;
                     report.steps[idx].status = "written".to_string();
                 }
@@ -698,6 +822,19 @@ pub(crate) fn doctor_credential_profile(
 
         if materializer_writes_file(&step.materializer_type, &step.target) {
             let target = PathBuf::from(&step.target);
+            let managed = match read_managed_materialization(store, profile_name, consumer, step) {
+                Ok(managed) => managed,
+                Err(err) => {
+                    issues.push(CredentialDoctorIssue {
+                        severity: "medium".to_string(),
+                        code: "managed_metadata_unreadable".to_string(),
+                        message: err,
+                        source: Some(step.resolved_secret.clone()),
+                        target: Some(step.target.clone()),
+                    });
+                    None
+                }
+            };
             if is_high_risk_file_copy_target(&target) {
                 issues.push(CredentialDoctorIssue {
                     severity: "high".to_string(),
@@ -710,17 +847,72 @@ pub(crate) fn doctor_credential_profile(
                     target: Some(step.target.clone()),
                 });
             }
-            if let Ok(meta) = fs::metadata(&target) {
-                issues.push(CredentialDoctorIssue {
-                    severity: "medium".to_string(),
-                    code: "existing_target".to_string(),
-                    message: format!(
-                        "target '{}' already exists; apply will require allow_existing and create a backup",
-                        target.display()
-                    ),
-                    source: Some(step.resolved_secret.clone()),
-                    target: Some(step.target.clone()),
-                });
+            let target_metadata = fs::metadata(&target).ok();
+            if target_metadata.is_none() {
+                if managed.is_some() {
+                    issues.push(CredentialDoctorIssue {
+                        severity: "high".to_string(),
+                        code: "managed_target_missing".to_string(),
+                        message: format!(
+                            "target '{}' was previously materialized by Tachi but no longer exists",
+                            target.display()
+                        ),
+                        source: Some(step.resolved_secret.clone()),
+                        target: Some(step.target.clone()),
+                    });
+                }
+                continue;
+            }
+            if let Some(meta) = target_metadata {
+                let mut managed_target_readable = true;
+                if let Some(managed) = managed.as_ref() {
+                    match fs::read_to_string(&target) {
+                        Ok(current) => {
+                            let current_hash = managed_materialization_content_hash(
+                                profile_name,
+                                consumer,
+                                &step.target,
+                                &current,
+                            );
+                            if current_hash != managed.content_hash {
+                                issues.push(CredentialDoctorIssue {
+                                    severity: "high".to_string(),
+                                    code: "managed_target_hash_mismatch".to_string(),
+                                    message: format!(
+                                        "target '{}' differs from the last Tachi-managed materialization",
+                                        target.display()
+                                    ),
+                                    source: Some(step.resolved_secret.clone()),
+                                    target: Some(step.target.clone()),
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            managed_target_readable = false;
+                            issues.push(CredentialDoctorIssue {
+                                severity: "medium".to_string(),
+                                code: "managed_target_unreadable".to_string(),
+                                message: format!(
+                                    "read managed credential target '{}': {err}",
+                                    target.display()
+                                ),
+                                source: Some(step.resolved_secret.clone()),
+                                target: Some(step.target.clone()),
+                            });
+                        }
+                    }
+                } else {
+                    issues.push(CredentialDoctorIssue {
+                        severity: "medium".to_string(),
+                        code: "existing_target".to_string(),
+                        message: format!(
+                            "target '{}' already exists; apply will require allow_existing and create a backup",
+                            target.display()
+                        ),
+                        source: Some(step.resolved_secret.clone()),
+                        target: Some(step.target.clone()),
+                    });
+                }
                 #[cfg(unix)]
                 {
                     let mode = meta.permissions().mode() & 0o777;
@@ -738,7 +930,7 @@ pub(crate) fn doctor_credential_profile(
                         });
                     }
                 }
-                if step.materializer_type == "config_overlay" {
+                if step.materializer_type == "config_overlay" && managed_target_readable {
                     match target_json_contains_plaintext_secret(&target) {
                         Ok(true) => issues.push(CredentialDoctorIssue {
                             severity: "high".to_string(),
