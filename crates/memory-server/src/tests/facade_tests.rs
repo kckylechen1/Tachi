@@ -756,6 +756,22 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");
+    server.llm.set_provider_secret_pool(
+        "VOYAGE_API_KEY",
+        vec![
+            crate::llm::ProviderSecret {
+                key_id: "VOYAGE_API_KEY_1".to_string(),
+                value: "voyage-secret-one".to_string(),
+            },
+            crate::llm::ProviderSecret {
+                key_id: "VOYAGE_API_KEY_2".to_string(),
+                value: "voyage-secret-two".to_string(),
+            },
+        ],
+    );
+    server
+        .llm
+        .mark_provider_key_rate_limited_for_tests("VOYAGE_API_KEY_1", Some(60));
 
     let body = crate::status_ops::handle_tachi_status_full(&server)
         .await
@@ -765,6 +781,19 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
     assert!(parsed["runtime"]["provider_secret_count"]
         .as_u64()
         .is_some());
+    assert_eq!(
+        parsed["runtime"]["provider_pools"][0]["logical_name"],
+        json!("VOYAGE_API_KEY")
+    );
+    assert_eq!(parsed["provider_pools"][0]["available_keys"], json!(1));
+    assert_eq!(
+        parsed["provider_pools"][0]["rate_limited_keys"][0]["key_id"],
+        json!("VOYAGE_API_KEY_1")
+    );
+    assert!(
+        !body.contains("voyage-secret-one") && !body.contains("voyage-secret-two"),
+        "status must not expose provider secret values: {body}"
+    );
     assert_eq!(parsed["runtime"]["vault"]["unlocked"], json!(false));
     assert_eq!(parsed["databases"]["failed_jobs"], json!(1));
     assert_eq!(parsed["distill"]["is_stale"], json!(false));
