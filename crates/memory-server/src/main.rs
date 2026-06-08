@@ -631,6 +631,7 @@ impl MemoryServer {
                             db_path: None,
                             path_prefix: job.path_prefix,
                             memory_ids: job.memory_ids,
+                            counted_queue_slot: false,
                         };
                         if replay_server
                             .foundry_lock()
