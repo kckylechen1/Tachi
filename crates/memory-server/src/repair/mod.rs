@@ -22,6 +22,7 @@
 //! - **R8** Deterministic junk cleanup (exact duplicate old versions,
 //!   foundry rerank cache records, empty JSON turn records).
 //! - **R9** Domain normalization/backfill for missing and legacy path-like values.
+//! - **R10** Enrichment failure marker reset (explicit opt-in only).
 //!
 //! Exit codes: 0 clean (or successful dry-run with no findings), 1 if
 //! repairs were found and not applied, 2 if any rule errored.
@@ -35,6 +36,7 @@ use crate::manifest::{DbEntry, Manifest};
 
 pub mod domain;
 pub mod edges;
+pub mod enrichment;
 pub mod fts;
 pub mod integrity;
 pub mod inventory;
@@ -241,6 +243,7 @@ pub async fn run_repair(
                 "R7" => Box::new(edges::OrphanRefs),
                 "R8" => Box::new(junk::JunkCleanup),
                 "R9" => Box::new(domain::DomainRepair),
+                "R10" => Box::new(enrichment::EnrichmentFailureReset),
                 // R6 deliberately not part of bulk sweep — too aggressive.
                 _ => continue,
             };
