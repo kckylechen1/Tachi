@@ -32,6 +32,7 @@ use crate::daemon_lock::{process_alive, read_pid_file};
 use crate::manifest::{DbRole, Manifest};
 
 pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
+const DISPATCH_STALE_THRESHOLD_SECS: i64 = 6 * 60 * 60;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
@@ -957,19 +958,11 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-        let outcome = meta
-            .get("a2a_state")
-            .and_then(|v| v.as_str())
-            .map(|s| match s {
-                "TASK_STATE_IN_PROGRESS" => "in_progress",
-                "TASK_STATE_COMPLETED" => "completed",
-                "TASK_STATE_FAILED" => "failed",
-                "TASK_STATE_CANCELED" => "aborted",
-                "TASK_STATE_INPUT_REQUIRED" => "partial",
-                other => other,
-            })
-            .unwrap_or("unknown")
-            .to_string();
+        let outcome = normalize_dispatch_outcome(
+            meta.get("a2a_state").and_then(|v| v.as_str()),
+            &created_at,
+            now,
+        );
         let reviewed = meta
             .get("reviewed")
             .and_then(|v| v.as_bool())
@@ -1012,6 +1005,35 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
         });
     }
     out
+}
+
+fn normalize_dispatch_outcome(
+    a2a_state: Option<&str>,
+    created_at: &str,
+    now: DateTime<Utc>,
+) -> String {
+    let outcome = a2a_state
+        .map(|s| match s {
+            "TASK_STATE_WORKING" | "TASK_STATE_IN_PROGRESS" => "in_progress",
+            "TASK_STATE_COMPLETED" => "completed",
+            "TASK_STATE_FAILED" => "failed",
+            "TASK_STATE_CANCELED" => "aborted",
+            "TASK_STATE_INPUT_REQUIRED" => "partial",
+            other => other,
+        })
+        .unwrap_or("unknown")
+        .to_string();
+
+    if outcome == "in_progress"
+        && created_at
+            .parse::<DateTime<Utc>>()
+            .ok()
+            .is_some_and(|dt| now - dt > chrono::Duration::seconds(DISPATCH_STALE_THRESHOLD_SECS))
+    {
+        return "stale_working".to_string();
+    }
+
+    outcome
 }
 
 fn collect_recent_evals(global_db_path: &Path, project_db_path: Option<&Path>) -> Vec<RecentEval> {
@@ -1855,6 +1877,28 @@ mod tests {
 
     fn daemon_running() -> serde_json::Value {
         serde_json::json!({ "running": true })
+    }
+
+    #[test]
+    fn normalize_dispatch_outcome_marks_old_working_rows_stale() {
+        let now = DateTime::parse_from_rfc3339("2026-06-09T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let fresh = (now - chrono::Duration::minutes(30)).to_rfc3339();
+        let stale = (now - chrono::Duration::hours(7)).to_rfc3339();
+
+        assert_eq!(
+            normalize_dispatch_outcome(Some("TASK_STATE_WORKING"), &fresh, now),
+            "in_progress"
+        );
+        assert_eq!(
+            normalize_dispatch_outcome(Some("TASK_STATE_WORKING"), &stale, now),
+            "stale_working"
+        );
+        assert_eq!(
+            normalize_dispatch_outcome(Some("TASK_STATE_COMPLETED"), &stale, now),
+            "completed"
+        );
     }
 
     #[test]
