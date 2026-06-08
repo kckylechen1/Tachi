@@ -544,7 +544,7 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
     })
 }
 
-fn profile_json(profile: &DispatchProfileDef) -> Value {
+pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "name": profile.name,
         "display_name": profile.display_name,

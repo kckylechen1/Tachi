@@ -1,7 +1,7 @@
 # Dispatch Policy Learning
 
 Status: active canonical spec
-Updated: 2026-06-08
+Updated: 2026-06-09
 Related: GitHub issue #194, `docs/engineering/architecture/subagent-eval-system.md`,
 `docs/engineering/architecture/sft-memory-eval-playbook.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
@@ -50,7 +50,7 @@ invent calls that are not exposed yet.
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` / `tachi_complete` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
-| skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | planned |
+| skill bundle/loadout | `tachi_skill(action="bundle"|"loadout")` | implemented |
 | lifecycle UX audit | `tachi_task(action="ux_matrix")` | implemented |
 | PR gate preview | `tachi_task(action="pr_status")` | implemented |
 | release and closure | `tachi_task(action="release_note"|"close_loop")` | implemented |
@@ -208,7 +208,7 @@ can guide an agent from issue to durable closure without relying on chat memory.
 
 ## Implemented Baseline
 
-As of 2026-06-08, the baseline includes:
+As of 2026-06-09, the baseline includes:
 
 - feature-scoped `tachi_task(action="briefing")`;
 - built-in dispatch profiles and MBIT-like profile cards;
@@ -216,6 +216,8 @@ As of 2026-06-08, the baseline includes:
 - live eval performance matrix consumption by recommendation;
 - sensitive file-context risk escalation;
 - skill loadout fields on profiles;
+- `tachi_skill(action="bundle"|"loadout")` maps worker tasks and dispatch
+  profiles to sparse skill loadouts plus capability bundles;
 - credentialed `opencode_builder` profile;
 - feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
   `ux_matrix`, `build_references`, and `close_loop`;
@@ -231,8 +233,8 @@ The next policy-learning slices should focus on evidence and replay:
   `tachi_complete`;
 - ensure capability bundle auto-injection is visible in the dispatch prompt
   artifact and can be disabled;
-- implement `tachi_skill(action="bundle"|"loadout")` or map that capability to
-  an existing skill action before telling workers to call it;
+- extend skill loadout results with completion/eval feedback once routing
+  policy proposals consume enough samples;
 - write route policy memory or wiki rules with links to supporting `/eval`
   evidence and human approvals;
 - add route simulation over recent live eval rows for `current`,

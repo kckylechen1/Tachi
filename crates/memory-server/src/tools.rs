@@ -705,7 +705,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Prepare a host-aware capability bundle for a task query. Returns the primary skill, supporting capabilities, relevant packs, suggested host-native tools, and a ready-to-inject bundle section."
+        description = "Prepare a host-aware capability bundle for a task query. Returns the primary skill, supporting capabilities, relevant packs, suggested host-native tools, and a ready-to-inject bundle section. Standard agents may also use tachi_skill(action='bundle')."
     )]
     pub(crate) async fn prepare_capability_bundle(
         &self,
@@ -1602,10 +1602,10 @@ impl MemoryServer {
         }
     }
 
-    // ─── Facade: skill (discover / run) ──────────────────────────────────────
+    // ─── Facade: skill (discover / run / bundle / loadout) ──────────────────
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem — a pre-built workflow may already exist (try: 'brainstorm', 'code-review', 'debug', 'ship', 'design'). action='run': execute a named skill by ID. Always discover before writing custom multi-step logic."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='bundle': prepare a host-aware capability bundle for a task query; action='loadout': resolve a DispatchProfile's sparse skill loadout plus capability bundle; action='run': execute a named skill by ID. Always discover/bundle before writing custom multi-step logic."
     )]
     pub(crate) async fn tachi_skill(
         &self,
@@ -1694,8 +1694,70 @@ impl MemoryServer {
                 };
                 handle_run_skill(self, run_params).await
             }
+            "bundle" => {
+                let query = required_skill_query(&params, "bundle")?;
+                let bundle_params = skill_bundle_params(&params, query, params.host.clone());
+                handle_prepare_capability_bundle(self, bundle_params).await
+            }
+            "loadout" => {
+                let profile_name = params
+                    .profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|profile| !profile.is_empty())
+                    .ok_or_else(|| "profile is required when action='loadout'".to_string())?;
+                let profile = crate::dispatch_profile::resolve_dispatch_profile(profile_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Unknown dispatch profile '{}'. Supported: {}",
+                            profile_name,
+                            crate::dispatch_profile::DISPATCH_PROFILES
+                                .iter()
+                                .map(|profile| profile.name)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    })?;
+                let query = params.query.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} {} {}",
+                        profile.role,
+                        profile.common_skills.join(" "),
+                        profile.signature_skills.join(" ")
+                    )
+                });
+                let host = params
+                    .host
+                    .clone()
+                    .or_else(|| Some(profile.backend.to_string()));
+                let bundle_raw = handle_prepare_capability_bundle(
+                    self,
+                    skill_bundle_params(&params, query.clone(), host.clone()),
+                )
+                .await?;
+                let bundle_value: Value = serde_json::from_str(&bundle_raw)
+                    .map_err(|e| format!("parse capability bundle: {e}"))?;
+                serde_json::to_string(&json!({
+                    "action": "loadout",
+                    "profile": profile.name,
+                    "display_name": profile.display_name,
+                    "role": profile.role,
+                    "stage": profile.stage,
+                    "backend": profile.backend,
+                    "host": host,
+                    "resolved_skills": crate::dispatch_profile::profile_required_skill_ids(profile),
+                    "skill_loadout": crate::dispatch_profile::profile_skill_loadout_json(profile),
+                    "evidence_required": profile.evidence_required,
+                    "strong_against": profile.strong_against,
+                    "weak_against": profile.weak_against,
+                    "auto_capability_bundle": profile.auto_capability_bundle,
+                    "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
+                    "mbit_card": crate::dispatch_profile::profile_json(profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+                }))
+                .map_err(|e| format!("serialize skill loadout: {e}"))
+            }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'discover' or 'run'.",
+                "Invalid action '{}'. Use 'discover', 'bundle', 'loadout', or 'run'.",
                 params.action
             )),
         }
@@ -2100,6 +2162,31 @@ fn canonical_skill_name(cap: &Value) -> Option<String> {
     let trimmed = without_kind.strip_prefix("waza/").unwrap_or(without_kind);
     let normalized = trimmed.trim().to_ascii_lowercase();
     (!normalized.is_empty()).then_some(normalized)
+}
+
+fn required_skill_query(params: &TachiSkillParams, action: &str) -> Result<String, String> {
+    params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("query is required when action='{action}'"))
+}
+
+fn skill_bundle_params(
+    params: &TachiSkillParams,
+    query: String,
+    host: Option<String>,
+) -> PrepareCapabilityBundleParams {
+    PrepareCapabilityBundleParams {
+        query,
+        host,
+        skill_limit: params.skill_limit.unwrap_or(3).max(1),
+        capability_limit: params.capability_limit.unwrap_or(3).max(1),
+        pack_limit: params.pack_limit.unwrap_or(3).max(1),
+        include_section: params.include_section.unwrap_or(true),
+    }
 }
 
 fn discover_local_host_skills(query: &str, limit: usize) -> Vec<Value> {

@@ -400,6 +400,12 @@ async fn tachi_skill_discover_matches_tokenized_query_and_compacts_output() {
             limit: Some(5),
             skill_id: None,
             args: None,
+            profile: None,
+            host: None,
+            skill_limit: None,
+            capability_limit: None,
+            pack_limit: None,
+            include_section: None,
         }))
         .await
         .expect("tachi_skill discover should succeed");
@@ -476,6 +482,12 @@ async fn tachi_skill_discover_defaults_to_callable_approved_skills() {
             limit: Some(10),
             skill_id: None,
             args: None,
+            profile: None,
+            host: None,
+            skill_limit: None,
+            capability_limit: None,
+            pack_limit: None,
+            include_section: None,
         }))
         .await
         .expect("tachi_skill discover should succeed");
@@ -538,6 +550,12 @@ fn tachi_skill_discover_prefers_hub_waza_skill_over_host_duplicate() {
                     limit: Some(10),
                     skill_id: None,
                     args: None,
+                    profile: None,
+                    host: None,
+                    skill_limit: None,
+                    capability_limit: None,
+                    pack_limit: None,
+                    include_section: None,
                 }))
                 .await
         })
@@ -969,6 +987,188 @@ async fn prepare_capability_bundle_returns_primary_skill_and_section() {
         .as_str()
         .unwrap_or("")
         .contains("Capability Bundle"));
+}
+
+#[tokio::test]
+async fn tachi_skill_bundle_wraps_capability_bundle_under_skill_facade() {
+    let server = make_server();
+    let excel = make_skill_capability(
+        "skill:excel-automation",
+        "excel-automation",
+        "Build spreadsheet workflows and Excel reports from CSV data.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| store.hub_register(&excel).map_err(|e| e.to_string()))
+        .expect("seed skill registry");
+
+    let result = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "bundle".to_string(),
+            query: Some("build an excel spreadsheet from csv exports".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: None,
+            skill_id: None,
+            args: None,
+            profile: None,
+            host: Some("codex".to_string()),
+            skill_limit: Some(3),
+            capability_limit: Some(3),
+            pack_limit: Some(1),
+            include_section: Some(true),
+        }))
+        .await
+        .expect("tachi_skill bundle should succeed");
+
+    let json: Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(
+        json["bundle"]["primary_skill"]["id"],
+        json!("skill:excel-automation")
+    );
+    assert!(json["bundle"]["section"]["block"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Capability Bundle"));
+}
+
+#[tokio::test]
+async fn tachi_skill_bundle_requires_query() {
+    let server = make_server();
+
+    let err = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "bundle".to_string(),
+            query: None,
+            cap_type: None,
+            enabled_only: None,
+            limit: None,
+            skill_id: None,
+            args: None,
+            profile: None,
+            host: Some("codex".to_string()),
+            skill_limit: None,
+            capability_limit: None,
+            pack_limit: None,
+            include_section: None,
+        }))
+        .await
+        .expect_err("missing bundle query should fail");
+
+    assert!(
+        err.contains("query is required when action='bundle'"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            for (id, name, description) in [
+                (
+                    "skill:superpowers-writing-plans",
+                    "superpowers-writing-plans",
+                    "Write implementation plans and validate architecture before execution.",
+                ),
+                (
+                    "skill:waza-think",
+                    "waza-think",
+                    "Think through architecture decisions and tradeoffs.",
+                ),
+                (
+                    "skill:superpowers-subagent-driven-development",
+                    "superpowers-subagent-driven-development",
+                    "Split implementation plans into bounded subagent work.",
+                ),
+                (
+                    "skill:coding-architecture-decision",
+                    "coding-architecture-decision",
+                    "Record architecture decisions for coding tasks.",
+                ),
+            ] {
+                store
+                    .hub_register(&make_skill_capability(id, name, description, "listed"))
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed skill registry");
+
+    let result = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "loadout".to_string(),
+            query: Some("plan a dispatch policy change before implementation".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: None,
+            skill_id: None,
+            args: None,
+            profile: Some("claude_plan".to_string()),
+            host: Some("codex".to_string()),
+            skill_limit: Some(3),
+            capability_limit: Some(2),
+            pack_limit: Some(1),
+            include_section: Some(true),
+        }))
+        .await
+        .expect("tachi_skill loadout should succeed");
+
+    let json: Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(json["profile"], json!("claude_plan"));
+    assert_eq!(json["role"], json!("planner"));
+    assert!(json["resolved_skills"]
+        .as_array()
+        .expect("resolved skills")
+        .iter()
+        .any(|skill| skill == "skill:superpowers-subagent-driven-development"));
+    assert_eq!(
+        json["skill_loadout"]["passive_traits"][0],
+        json!("plan_before_execute")
+    );
+    assert!(json["strong_against"]
+        .as_array()
+        .expect("strong_against array")
+        .contains(&json!("planning")));
+    assert!(json["weak_against"]
+        .as_array()
+        .expect("weak_against array")
+        .contains(&json!("direct_execution")));
+    assert!(json["capability_bundle"]["section"]["block"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Capability Bundle"));
+    assert_eq!(json["mbit_card"]["auto_capability_bundle"], json!(true));
+}
+
+#[tokio::test]
+async fn tachi_skill_loadout_rejects_unknown_profile() {
+    let server = make_server();
+
+    let err = server
+        .tachi_skill(Parameters(TachiSkillParams {
+            action: "loadout".to_string(),
+            query: Some("plan a dispatch policy change".to_string()),
+            cap_type: None,
+            enabled_only: None,
+            limit: None,
+            skill_id: None,
+            args: None,
+            profile: Some("unknown_profile".to_string()),
+            host: None,
+            skill_limit: None,
+            capability_limit: None,
+            pack_limit: None,
+            include_section: None,
+        }))
+        .await
+        .expect_err("unknown loadout profile should fail");
+
+    assert!(err.contains("Unknown dispatch profile 'unknown_profile'"));
+    assert!(err.contains("claude_plan"));
 }
 
 #[tokio::test]
