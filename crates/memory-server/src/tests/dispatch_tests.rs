@@ -2302,6 +2302,171 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     assert!(prompt.contains("## Capability Bundle"), "{prompt}");
 }
 
+#[tokio::test]
+async fn dispatch_prompt_trace_records_capability_bundle_injection() {
+    let server = make_server();
+    let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
+    params.profile = Some("claude_plan".to_string());
+    params.stage = Some("plan".to_string());
+    params.auto_capability_bundle = Some(true);
+
+    let assembly = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params).await;
+
+    assert!(
+        assembly.prompt.contains("## Capability Bundle"),
+        "{}",
+        assembly.prompt
+    );
+    assert_eq!(assembly.capability_bundle["requested"], json!(true));
+    assert_eq!(assembly.capability_bundle["status"], json!("injected"));
+    assert_eq!(assembly.capability_bundle["source"], json!("params"));
+    assert_eq!(assembly.capability_bundle["disabled"], json!(false));
+    assert_eq!(assembly.capability_bundle["injected"], json!(true));
+    assert!(
+        assembly.capability_bundle["section"]["block"]
+            .as_str()
+            .is_some_and(|block| block.contains("## Capability Bundle")),
+        "trace should retain the injected section: {}",
+        assembly.capability_bundle
+    );
+}
+
+#[tokio::test]
+async fn dispatch_prompt_trace_records_capability_bundle_disabled() {
+    let server = make_server();
+    let mut params = dispatch_params(Some("claude"), "Plan profile-based MCP access");
+    params.profile = Some("claude_plan".to_string());
+    params.stage = Some("plan".to_string());
+    params.auto_capability_bundle = Some(false);
+
+    let assembly = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params).await;
+
+    assert!(
+        !assembly.prompt.contains("## Capability Bundle"),
+        "disabled bundle should not be injected: {}",
+        assembly.prompt
+    );
+    assert_eq!(assembly.capability_bundle["requested"], json!(false));
+    assert_eq!(assembly.capability_bundle["status"], json!("disabled"));
+    assert_eq!(assembly.capability_bundle["source"], json!("params"));
+    assert_eq!(assembly.capability_bundle["disabled"], json!(true));
+    assert_eq!(assembly.capability_bundle["injected"], json!(false));
+    assert_eq!(
+        assembly.capability_bundle["reason"],
+        json!("auto_capability_bundle=false")
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let flow_id = "flow_20260609T000003Z_capability_bundle_card";
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    std::fs::create_dir_all(&run_dir).expect("create flow run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string_pretty(&json!({
+            "flow_id": flow_id,
+            "status": "active",
+            "dispatch_ids": [],
+        }))
+        .expect("serialize status"),
+    )
+    .expect("seed status");
+
+    let mut params = dispatch_params(Some("custom"), "smoke capability bundle artifact");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.profile = Some("glm_51_impl".to_string());
+    params.flow_id = Some(flow_id.to_string());
+    params.auto_capability_bundle = Some(true);
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+
+    assert_eq!(response["capability_bundle"]["requested"], json!(true));
+    assert_eq!(response["capability_bundle"]["status"], json!("injected"));
+    assert_eq!(response["capability_bundle"]["injected"], json!(true));
+    let artifact_file = response["capability_bundle_file"]
+        .as_str()
+        .expect("capability bundle file");
+    let artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(artifact_file).expect("artifact"))
+            .expect("artifact JSON");
+    assert_eq!(artifact["requested"], json!(true));
+    assert_eq!(artifact["status"], json!("injected"));
+    assert_eq!(artifact["injected"], json!(true));
+
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    let card_path = status["artifacts"]["dispatches"][dispatch_id]
+        .as_str()
+        .expect("dispatch card path");
+    let card: Value = serde_json::from_str(&std::fs::read_to_string(card_path).expect("card"))
+        .expect("card JSON");
+    assert_eq!(card["capability_bundle"]["requested"], json!(true));
+    assert_eq!(card["capability_bundle"]["injected"], json!(true));
+    assert_eq!(
+        card["capability_bundle_file"].as_str(),
+        Some(artifact_file),
+        "flow card should link the same capability bundle artifact"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn dispatch_explicit_false_writes_disabled_capability_bundle_artifact() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+    let mut params = dispatch_params(Some("custom"), "smoke disabled capability bundle artifact");
+    params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+    params.profile = Some("glm_51_impl".to_string());
+    params.auto_capability_bundle = Some(false);
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    assert_eq!(response["capability_bundle"]["status"], json!("disabled"));
+    assert_eq!(response["capability_bundle"]["requested"], json!(false));
+    assert_eq!(response["capability_bundle"]["disabled"], json!(true));
+    assert_eq!(response["capability_bundle"]["injected"], json!(false));
+
+    let artifact_file = response["capability_bundle_file"]
+        .as_str()
+        .expect("capability bundle file");
+    let artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(artifact_file).expect("artifact"))
+            .expect("artifact JSON");
+    assert_eq!(artifact["status"], json!("disabled"));
+    assert_eq!(artifact["source"], json!("params"));
+
+    let prompt_file = response["prompt_file"].as_str().expect("prompt file");
+    let prompt = std::fs::read_to_string(prompt_file).expect("prompt");
+    assert!(
+        !prompt.contains("## Capability Bundle"),
+        "disabled dispatch should not inject bundle section: {prompt}"
+    );
+}
+
 #[test]
 fn dispatch_ids_are_unique_within_same_second() {
     let now = chrono::Utc::now();

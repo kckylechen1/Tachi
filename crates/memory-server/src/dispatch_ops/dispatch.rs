@@ -8,7 +8,7 @@ use super::kanban_helpers::{
     get_kanban_state, init_kanban_task, should_cleanup_run, update_kanban_state,
 };
 use super::mcp_config::generate_mcp_config;
-use super::prompt::{assemble_prompt, resolve_effective_skills};
+use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};
 use super::subprocess::{
     build_claude_command, build_codex_command, build_custom_command, build_grok_command,
     build_kimi_command, run_agent_subprocess, tail_chars,
@@ -260,6 +260,40 @@ fn suggested_complete_payload(
     })
 }
 
+fn capability_bundle_summary(
+    trace: &serde_json::Value,
+    artifact_file: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "status": trace.get("status").cloned().unwrap_or(serde_json::Value::Null),
+        "requested": trace.get("requested").and_then(|value| value.as_bool()).unwrap_or(false),
+        "disabled": trace.get("disabled").and_then(|value| value.as_bool()).unwrap_or(false),
+        "injected": trace.get("injected").and_then(|value| value.as_bool()).unwrap_or(false),
+        "host": trace.get("host").cloned().unwrap_or(serde_json::Value::Null),
+        "query": trace.get("query").cloned().unwrap_or(serde_json::Value::Null),
+        "source": trace.get("source").cloned().unwrap_or(serde_json::Value::Null),
+        "primary_skill": trace.get("primary_skill").cloned().unwrap_or(serde_json::Value::Null),
+        "supporting_capabilities_count": trace
+            .get("supporting_capabilities")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or(0),
+        "packs_count": trace
+            .get("packs")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or(0),
+        "host_tools_count": trace
+            .get("host_tools")
+            .and_then(|value| value.as_array())
+            .map(|items| items.len())
+            .unwrap_or(0),
+        "reason": trace.get("reason").cloned().unwrap_or(serde_json::Value::Null),
+        "error": trace.get("error").cloned().unwrap_or(serde_json::Value::Null),
+        "artifact_file": artifact_file,
+    })
+}
+
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -347,7 +381,8 @@ pub(crate) async fn handle_tachi_dispatch(
     };
 
     // 3. Assemble prompt & write audit files to workspace
-    let base_prompt = assemble_prompt(server, &params).await;
+    let prompt_assembly = assemble_prompt_with_trace(server, &params).await;
+    let base_prompt = prompt_assembly.prompt.clone();
     let (effective_skills_for_files, _) = resolve_effective_skills(&params);
 
     // ─── Dispatch V2 decision ────────────────────────────────────────────
@@ -371,6 +406,17 @@ pub(crate) async fn handle_tachi_dispatch(
     tokio::fs::write(&prompt_md_path, &base_prompt)
         .await
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
+
+    let capability_bundle_path = workspace_dir.join("capability_bundle.json");
+    let capability_bundle_trace = prompt_assembly.capability_bundle.clone();
+    let capability_bundle_artifact = serde_json::to_string_pretty(&capability_bundle_trace)
+        .map_err(|e| format!("Failed to serialize capability bundle artifact: {e}"))?;
+    tokio::fs::write(&capability_bundle_path, capability_bundle_artifact)
+        .await
+        .map_err(|e| format!("Failed to write capability_bundle.json: {e}"))?;
+    let capability_bundle_file = capability_bundle_path.to_string_lossy().to_string();
+    let capability_bundle_card =
+        capability_bundle_summary(&capability_bundle_trace, Some(&capability_bundle_file));
 
     // Write context.md (summary of injected context/skills — for MVP, same as prompt)
     let context_md_path = workspace_dir.join("context.md");
@@ -401,6 +447,22 @@ pub(crate) async fn handle_tachi_dispatch(
         ));
         sections.push(format!("V2: {}", v2));
         sections.push(format!("Skills: {:?}", effective_skills_for_files));
+        sections.push(format!(
+            "Capability bundle: status={} requested={} injected={} artifact={}",
+            capability_bundle_trace
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            capability_bundle_trace
+                .get("requested")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            capability_bundle_trace
+                .get("injected")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+            capability_bundle_file
+        ));
         sections.push(String::new());
         sections.push(base_prompt.clone());
         sections.join("\n\n")
@@ -425,6 +487,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "pr_ref": params.pr_ref,
             "flow_id": params.flow_id,
             "auto_capability_bundle": params.auto_capability_bundle,
+            "capability_bundle": capability_bundle_card.clone(),
             "v2": v2,
             "timestamp": Utc::now().to_rfc3339(),
         });
@@ -458,6 +521,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "updated_at": Utc::now().to_rfc3339(),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
+            "capability_bundle": capability_bundle_card.clone(),
             "timeout_secs": timeout_secs_for_status,
         })),
     );
@@ -493,7 +557,10 @@ pub(crate) async fn handle_tachi_dispatch(
                     None,
                     None,
                     None,
-                    Some(json!({ "error": e })),
+                    Some(json!({
+                        "error": e,
+                        "capability_bundle": capability_bundle_card.clone(),
+                    })),
                 );
                 return Err(e);
             }
@@ -522,7 +589,10 @@ pub(crate) async fn handle_tachi_dispatch(
                     None,
                     None,
                     None,
-                    Some(json!({ "error": e })),
+                    Some(json!({
+                        "error": e,
+                        "capability_bundle": capability_bundle_card.clone(),
+                    })),
                 );
                 return Err(e);
             }
@@ -561,7 +631,9 @@ pub(crate) async fn handle_tachi_dispatch(
                 plan_duration_ms,
                 None,
                 plan_duration_ms,
-                None,
+                Some(json!({
+                    "capability_bundle": capability_bundle_card.clone(),
+                })),
             );
             append_trajectory_event(
                 &trajectory_path,
@@ -588,6 +660,8 @@ pub(crate) async fn handle_tachi_dispatch(
                 "pr_ref": params.pr_ref,
                 "flow_id": params.flow_id,
                 "auto_capability_bundle": resolved_profile.auto_capability_bundle,
+                "capability_bundle": capability_bundle_card,
+                "capability_bundle_file": capability_bundle_file,
                 "v2": true,
                 "plan_review_status": "pending_review",
                 "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
@@ -642,6 +716,8 @@ pub(crate) async fn handle_tachi_dispatch(
                 "context_file": context_md_path.to_string_lossy(),
                 "trajectory_file": trajectory_path.to_string_lossy(),
                 "plan_file": plan_path.to_string_lossy(),
+                "capability_bundle": capability_bundle_card.clone(),
+                "capability_bundle_file": capability_bundle_file.clone(),
                 "evidence_required": resolved_profile.evidence_required.clone(),
                 "route_explanation": resolved_profile.route_explanation.clone(),
                 "suggested_complete": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
@@ -730,6 +806,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": workspace_dir.to_string_lossy(),
                     "result_written": false,
+                    "capability_bundle": capability_bundle_card.clone(),
                     "timeout_secs": timeout_secs_for_status,
                     "error": err.clone(),
                 })),
@@ -775,6 +852,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_generated_at_for_spawn = plan_generated_at.clone();
     let plan_duration_ms_for_spawn = plan_duration_ms;
     let timeout_secs_for_spawn = timeout_secs_for_status;
+    let capability_bundle_card_for_spawn = capability_bundle_card.clone();
 
     // Scope guard for MCP config cleanup (moved into spawned task)
     struct McpCleanup(Option<PathBuf>);
@@ -1025,6 +1103,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                     "result_written": true,
+                    "capability_bundle": capability_bundle_card_for_spawn,
                     "timeout_secs": timeout_secs_for_spawn,
                 })),
             );
@@ -1074,6 +1153,8 @@ pub(crate) async fn handle_tachi_dispatch(
         "pr_ref": params.pr_ref,
         "flow_id": params.flow_id,
         "auto_capability_bundle": resolved_profile.auto_capability_bundle,
+        "capability_bundle": capability_bundle_card,
+        "capability_bundle_file": capability_bundle_file,
         "v2": v2,
         "plan_review_status": if v2 { "approved" } else { "n/a" },
         "duration_ms_plan": plan_duration_ms,
