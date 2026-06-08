@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-06-08
+
+Patch release for safe merge gate correctness and agent-facing merge workflow clarity.
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, and `@chaoxlabs/tachi-node` versions are aligned to `1.5.2`.
+- Installer URLs across READMEs and `docs/INSTALL.md` now point at the `v1.5.2` release tag.
+- `tachi_gh(action="safe_merge")` now reports requested merge mode separately from actual merge execution so dry-run previews cannot be mistaken for completed merges.
+- Agent-facing tool descriptions now separate GitHub PR safe merge from local dispatched worktree merges.
+
+### Fixed
+
+- PRs with no GitHub check runs now surface structured `checks:none` gate state instead of failing the whole safe-merge call.
+- Safe merge no longer reports head consistency as proven when GitHub does not expose independent check/review head SHAs.
+- Strict safe-merge policy accepts either an explicit Tachi `flow_id` or GitHub closing issue reference, rather than requiring both.
+
 ## [1.5.1] - 2026-06-08
 
 Patch release for post-1.5.0 MCP and agent workflow hardening.
