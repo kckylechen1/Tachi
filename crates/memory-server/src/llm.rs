@@ -4,6 +4,7 @@
 // SiliconFlow/Qwen still gets `enable_thinking: false` to avoid empty content.
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -24,6 +25,22 @@ struct ChatLaneConfig {
 pub(crate) struct ProviderSecret {
     pub(crate) key_id: String,
     pub(crate) value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderKeyCooldownStatus {
+    pub(crate) key_id: String,
+    pub(crate) remaining_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderPoolStatus {
+    pub(crate) logical_name: String,
+    pub(crate) total_keys: usize,
+    pub(crate) available_keys: usize,
+    pub(crate) rate_limited_keys: Vec<ProviderKeyCooldownStatus>,
+    pub(crate) current_index: usize,
+    pub(crate) strategy: &'static str,
 }
 
 #[derive(Clone)]
@@ -319,6 +336,61 @@ impl LlmClient {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
+    }
+
+    pub(crate) fn provider_pool_statuses(&self) -> Vec<ProviderPoolStatus> {
+        let now = Instant::now();
+        {
+            let mut cooldowns = self
+                .provider_cooldowns
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cooldowns.retain(|_, until| *until > now);
+        }
+
+        let secrets = self
+            .provider_secrets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cooldowns = self
+            .provider_cooldowns
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let indices = self
+            .provider_indices
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut statuses = secrets
+            .iter()
+            .map(|(logical_name, entries)| {
+                let mut rate_limited_keys = entries
+                    .iter()
+                    .filter_map(|entry| {
+                        cooldowns
+                            .get(&entry.key_id)
+                            .map(|until| ProviderKeyCooldownStatus {
+                                key_id: entry.key_id.clone(),
+                                remaining_seconds: until
+                                    .saturating_duration_since(now)
+                                    .as_secs()
+                                    .max(1),
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                rate_limited_keys.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+                ProviderPoolStatus {
+                    logical_name: logical_name.clone(),
+                    total_keys: entries.len(),
+                    available_keys: entries.len().saturating_sub(rate_limited_keys.len()),
+                    rate_limited_keys,
+                    current_index: *indices.get(logical_name).unwrap_or(&0),
+                    strategy: "round_robin_skip_cooldown",
+                }
+            })
+            .collect::<Vec<_>>();
+        statuses.sort_by(|a, b| a.logical_name.cmp(&b.logical_name));
+        statuses
     }
 
     fn select_secret(&self, keys: &[&str]) -> Option<SelectedProviderSecret> {
@@ -1224,6 +1296,44 @@ mod tests {
             "vault-value"
         );
         std::env::remove_var(KEY);
+    }
+
+    #[test]
+    fn provider_pool_status_reports_cooldown_without_secret_values() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_POOL_STATUS";
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "secret-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "secret-two".to_string(),
+                },
+            ],
+        );
+        let first_key = format!("{KEY}_1");
+        assert_eq!(
+            client.provider_key_id_for_tests(&[KEY]).as_deref(),
+            Some(first_key.as_str())
+        );
+        client.mark_provider_key_rate_limited_for_tests(&first_key, Some(60));
+
+        let statuses = client.provider_pool_statuses();
+        let status = statuses
+            .iter()
+            .find(|status| status.logical_name == KEY)
+            .expect("pool status should include logical key");
+        assert_eq!(status.total_keys, 2);
+        assert_eq!(status.available_keys, 1);
+        assert_eq!(status.rate_limited_keys[0].key_id, first_key);
+        assert_eq!(status.current_index, 1);
+        let raw = serde_json::to_string(&statuses).expect("serialize statuses");
+        assert!(!raw.contains("secret-one"));
+        assert!(!raw.contains("secret-two"));
     }
 
     #[test]
