@@ -448,27 +448,15 @@ fn render_dispatch_profile_overlay(params: &TachiDispatchParams) -> String {
     if let Some(profile) = params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- profile: {profile}"));
         if let Some(profile_def) = crate::dispatch_profile::resolve_dispatch_profile(profile) {
-            let loadout = crate::dispatch_profile::profile_skill_loadout_json(profile_def);
             lines.push("- skill_loadout:".to_string());
-            for (key, label) in [
-                ("common_skills", "common_skills"),
-                ("signature_skills", "signature_skills"),
-                ("passive_traits", "passive_traits"),
-                ("forbidden_skills", "forbidden_skills"),
+            for (label, items) in [
+                ("common_skills", profile_def.common_skills),
+                ("signature_skills", profile_def.signature_skills),
+                ("passive_traits", profile_def.passive_traits),
+                ("forbidden_skills", profile_def.forbidden_skills),
             ] {
-                let values = loadout
-                    .get(key)
-                    .and_then(|value| value.as_array())
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    })
-                    .unwrap_or_default();
-                if !values.is_empty() {
-                    lines.push(format!("  - {label}: {values}"));
+                if !items.is_empty() {
+                    lines.push(format!("  - {label}: {}", items.join(", ")));
                 }
             }
         }
