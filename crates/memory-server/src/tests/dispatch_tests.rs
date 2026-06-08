@@ -40,6 +40,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         path_prefix: None,
         top_k: None,
         doc_paths: Vec::new(),
+        related_issues: Vec::new(),
         spec_paths: Vec::new(),
         include_global: false,
         compact: None,
@@ -75,6 +76,18 @@ fn task_params(action: &str) -> TachiTaskParams {
         strategy: None,
         delete_worktree: true,
         confirm: false,
+        wiki_title: None,
+        wiki_text: None,
+        wiki_path: None,
+        wiki_topic: None,
+        wiki_summary: None,
+        wiki_category: None,
+        wiki_keywords: Vec::new(),
+        wiki_entities: Vec::new(),
+        wiki_importance: None,
+        wiki_scope: None,
+        wiki_domain: None,
+        force: false,
     }
 }
 
@@ -1007,6 +1020,68 @@ async fn tachi_task_briefing_defaults_to_markdown_layered_sections() {
         assert!(body.contains(section), "missing {section}: {body}");
     }
     assert!(body.contains("Dispatch args:"), "{body}");
+}
+
+#[tokio::test]
+async fn tachi_task_build_references_reuses_workflow_closure() {
+    let server = make_server();
+    let mut params = task_params("build_references");
+    params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+    params.doc_paths = vec!["docs/engineering/architecture/agent-flow.md".to_string()];
+    params.related_issues = vec!["#153".to_string(), "kckylechen1/tachi#194".to_string()];
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("task build_references should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("task response JSON");
+    assert_eq!(
+        parsed["references"],
+        json!([
+            "kckylechen1/tachi#194",
+            "docs/engineering/architecture/agent-flow.md",
+            "#153"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn tachi_task_close_loop_writes_wiki_with_references() {
+    let server = make_server();
+    let mut params = task_params("close_loop");
+    params.issue_ref = Some("kckylechen1/tachi#194".to_string());
+    params.doc_paths = vec!["docs/engineering/architecture/agent-flow.md".to_string()];
+    params.related_issues = vec!["#153".to_string()];
+    params.wiki_title = Some("Task closure facade smoke".to_string());
+    params.wiki_text = Some("Closed loop lesson through tachi_task facade.".to_string());
+    params.wiki_topic = Some("task-closure-facade".to_string());
+    params.force = true;
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("task close_loop should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("task response JSON");
+    assert_eq!(parsed["ok"], json!(true));
+    assert_eq!(parsed["action"], json!("close_loop"));
+    let wiki_id = parsed["wiki"]["id"].as_str().expect("wiki id");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: wiki_id.to_string(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get wiki entry");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry JSON");
+    assert_eq!(
+        entry["metadata"]["source_refs"],
+        json!([
+            "kckylechen1/tachi#194",
+            "docs/engineering/architecture/agent-flow.md",
+            "#153"
+        ])
+    );
 }
 
 #[tokio::test]

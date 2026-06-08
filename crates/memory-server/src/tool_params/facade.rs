@@ -78,8 +78,10 @@ fn tachi_task_action_schema(
             "card",
             "board",
             "merge",
+            "build_references",
+            "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
         generator,
     )
 }
@@ -1072,13 +1074,15 @@ pub(crate) struct TachiSkillParams {
     pub args: Option<serde_json::Value>,
 }
 
-// ─── Facade: task (plan / recommend / dispatch / board / merge) ──────────────
+// ─── Facade: task (plan / recommend / dispatch / board / merge / close_loop) ─
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.
+    /// action="build_references" previews the issue/doc/related reference array.
+    /// action="close_loop" writes durable wiki closure through the task lifecycle.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
     /// from the task, risk, and live eval evidence.
     #[schemars(schema_with = "tachi_task_action_schema")]
@@ -1103,6 +1107,11 @@ pub(crate) struct TachiTaskParams {
         description = "Canonical docs to prioritize in action='briefing', e.g. docs/engineering/architecture/subagent-eval-system.md."
     )]
     pub doc_paths: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Related GitHub issues/PRs for action='close_loop' or action='build_references'."
+    )]
+    pub related_issues: Vec<String>,
     #[serde(default)]
     #[schemars(
         description = "Canonical spec docs to prioritize in action='briefing'. Kept separate from memory/wiki fragments."
@@ -1204,6 +1213,37 @@ pub(crate) struct TachiTaskParams {
     pub delete_worktree: bool,
     #[serde(default)]
     pub confirm: bool,
+    // close_loop fields
+    #[serde(default)]
+    pub wiki_title: Option<String>,
+    #[serde(default)]
+    pub wiki_text: Option<String>,
+    #[serde(default)]
+    pub wiki_path: Option<String>,
+    #[serde(default)]
+    pub wiki_topic: Option<String>,
+    #[serde(default)]
+    pub wiki_summary: Option<String>,
+    #[serde(default)]
+    pub wiki_category: Option<String>,
+    #[serde(default)]
+    pub wiki_keywords: Vec<String>,
+    #[serde(default)]
+    pub wiki_entities: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub wiki_importance: Option<f64>,
+    #[serde(default)]
+    pub wiki_scope: Option<String>,
+    #[serde(default)]
+    pub wiki_domain: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Bypass wiki noise filtering for action='close_loop'. Does not force dispatch or merge behavior."
+    )]
+    pub force: bool,
 }
 
 // ─── Facade: tachi_arena (tracked worker mission ledger) ────────────────────
