@@ -9,7 +9,7 @@
 //! - per-DB foundry job counts + GC-eligible terminal jobs
 //! - orphan warnings: manifest entries the running daemon's scheduler
 //!   cannot route to (agents/, hub/, vault/, dark DBs)
-//! - stuck-in_progress warnings: jobs older than [`STUCK_THRESHOLD_SECS`]
+//! - stuck running warnings: jobs older than [`STUCK_THRESHOLD_SECS`]
 //!   that the safety-net poll should have re-injected by now
 //!
 //! All output uses ASCII severity icons (`[OK]`, `[!]`, `[X]`) — no
@@ -31,7 +31,7 @@ use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
 use crate::daemon_lock::{process_alive, read_pid_file};
 use crate::manifest::{DbRole, Manifest};
 
-const STUCK_THRESHOLD_SECS: i64 = 600;
+pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
@@ -760,7 +760,7 @@ fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlit
     let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::seconds(STUCK_THRESHOLD_SECS);
     let cutoff_s = cutoff.to_rfc3339();
     conn.query_row(
-        "SELECT COUNT(*) FROM foundry_jobs WHERE status = 'in_progress' AND updated_at < ?1",
+        "SELECT COUNT(*) FROM foundry_jobs WHERE status = 'running' AND updated_at < ?1",
         rusqlite::params![cutoff_s],
         |row| row.get::<_, i64>(0).map(|n| n as usize),
     )
@@ -1534,7 +1534,7 @@ fn build_status_warnings(
             format!(" — affected: {}", stuck_dbs.join(", "))
         };
         warnings.push(format!(
-            "{total_stuck} foundry job(s) stuck in_progress for over {STUCK_THRESHOLD_SECS}s{db_list}"
+            "{total_stuck} foundry job(s) stuck running for over {STUCK_THRESHOLD_SECS}s{db_list}"
         ));
     }
     if snapshot
@@ -1919,7 +1919,7 @@ mod tests {
         let warnings = build_status_warnings(&snapshot, &daemon_running());
         let stuck = warnings
             .iter()
-            .find(|w| w.contains("stuck in_progress"))
+            .find(|w| w.contains("stuck running"))
             .expect("stuck-jobs warning present");
         assert!(
             stuck.contains("sigil"),

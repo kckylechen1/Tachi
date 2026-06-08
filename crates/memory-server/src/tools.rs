@@ -1728,6 +1728,7 @@ impl MemoryServer {
                     "weak_against": profile.weak_against,
                     "auto_capability_bundle": profile.auto_capability_bundle,
                     "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
+                    "eval_feedback": crate::dispatch_profile::profile_eval_feedback_json(self, profile, params.limit.unwrap_or(500))?,
                     "mbit_card": crate::dispatch_profile::profile_json(profile).get("mbit_card").cloned().unwrap_or(Value::Null),
                 }))
                 .map_err(|e| format!("serialize skill loadout: {e}"))

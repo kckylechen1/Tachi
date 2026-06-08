@@ -5,7 +5,7 @@
 //! periodically rescans `~/.tachi/manifest.json` and, for every DB it lists,
 //! runs a per-DB **safety-net poll** every [`POLL_INTERVAL`]. Each poll opens
 //! the DB by absolute path, calls [`memory_core::load_pending_foundry_jobs`]
-//! to find queued or stuck `in_progress` jobs, and (for DBs the existing
+//! to find queued or stale `running` jobs, and (for DBs the existing
 //! single-process foundry worker can route to) re-injects them into the
 //! shared `foundry_tx` mpsc channel for execution. For DBs the existing
 //! worker does **not** know how to route to (agents/, hub/, vault/, anything
@@ -41,7 +41,7 @@ use crate::DbScope;
 
 /// How often each per-DB worker scans `foundry_jobs` for pending work the
 /// in-process channel may have missed (cross-process writes, post-crash
-/// in_progress jobs, dark DBs).
+/// running jobs, dark DBs).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How often the scheduler re-reads the manifest to spawn workers for new
@@ -269,7 +269,7 @@ fn reconcile_workers(
 }
 
 /// Per-DB worker task. Wakes every [`POLL_INTERVAL`], opens the DB by
-/// absolute path, scans `foundry_jobs` for pending or stuck-in-progress
+/// absolute path, scans `foundry_jobs` for queued or stale running
 /// rows, and either re-injects them into the shared `foundry_tx` (for
 /// routable DBs) or counts them as orphans (for everything else).
 async fn run_db_worker(
@@ -325,6 +325,9 @@ async fn run_one_poll(
     // happens to be locked by a writer.
     let path_owned = db_path.to_path_buf();
     let label_owned = label.to_string();
+    let running_cutoff = (chrono::Utc::now()
+        - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
+    .to_rfc3339();
     let pending: Result<Vec<PersistedFoundryJob>, String> =
         tokio::task::spawn_blocking(move || -> Result<Vec<PersistedFoundryJob>, String> {
             let path_str = path_owned
@@ -332,7 +335,8 @@ async fn run_one_poll(
                 .ok_or_else(|| format!("non-utf8 db path: {}", path_owned.display()))?;
             let store = MemoryStore::open_with_label(path_str, &label_owned)
                 .map_err(|e| format!("open {}: {e}", path_owned.display()))?;
-            load_pending_foundry_jobs(store.connection()).map_err(|e| format!("load pending: {e}"))
+            load_pending_foundry_jobs(store.connection(), &running_cutoff)
+                .map_err(|e| format!("load pending: {e}"))
         })
         .await
         .unwrap_or_else(|e| Err(format!("poll join error: {e}")));

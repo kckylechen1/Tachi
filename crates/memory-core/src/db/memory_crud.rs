@@ -631,11 +631,15 @@ pub fn update_enrichment_fields(
     };
     tx.execute(
         r#"UPDATE memories
-           SET metadata = json_set(
-                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                 '$.enrichment.status', ?1,
-                 '$.enrichment.last_success_at', ?2,
-                 '$.enrichment.last_error', NULL
+           SET metadata = json_remove(
+                 json_set(
+                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                   '$.enrichment.status', ?1,
+                   '$.enrichment.last_success_at', ?2,
+                   '$.enrichment.last_error', NULL
+                 ),
+                 '$.enrichment.failed_stage',
+                 '$.enrichment.last_failure_at'
                )
            WHERE id = ?3"#,
         params![status, &now, id],

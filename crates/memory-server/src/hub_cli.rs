@@ -419,13 +419,7 @@ fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Erro
             }
         }
 
-        let missing_vec: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE vector IS NULL OR length(vector) = 0",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
+        let missing_vec = count_memories_missing_vectors(&conn).unwrap_or(0);
         if missing_vec > 0 {
             println!(
                 "  [info] {missing_vec} memories without vectors (run `tachi backfill-vectors --db {}`)",
@@ -473,4 +467,42 @@ fn cmd_doctor(app_home: &Path, fix: bool) -> Result<(), Box<dyn std::error::Erro
         );
     }
     Ok(())
+}
+
+pub(crate) fn count_memories_missing_vectors(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*)
+         FROM memories m
+         WHERE m.id NOT IN (SELECT id FROM memories_vec)",
+        [],
+        |r| r.get(0),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn doctor_vector_count_uses_memories_vec_table() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let db = dir.path().join("memory.db");
+        let store = memory_core::MemoryStore::open(db.to_str().expect("db path"))
+            .expect("open memory store");
+        let now = Utc::now().to_rfc3339();
+
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, '/facts/doctor-vector', 'missing vector', 'doctor vector diagnostic memory', 0.8, ?2, 'fact', 'doctor', '[]', '[]', 'manual', 'project', 0, ?2, ?2, 0, 1, '{}')",
+                rusqlite::params!["doctor-vector-missing", now],
+            )
+            .expect("insert memory without vector");
+
+        let missing = count_memories_missing_vectors(store.connection()).expect("missing count");
+        assert_eq!(missing, 1);
+    }
 }

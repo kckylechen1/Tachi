@@ -226,6 +226,10 @@ As of 2026-06-09, the baseline includes:
 - skill loadout fields on profiles;
 - `tachi_skill(action="bundle"|"loadout")` maps worker tasks and dispatch
   profiles to sparse skill loadouts plus capability bundles;
+- capability bundle auto-injection is visible in dispatch prompt artifacts and
+  can be disabled per dispatch;
+- `tachi_skill(action="loadout")` includes live `/eval` feedback summaries,
+  sample thresholds, and guidance before any loadout evolution proposal is made;
 - credentialed `opencode_builder` profile;
 - feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
   `ux_matrix`, `build_references`, and `close_loop`;
@@ -240,12 +244,8 @@ As of 2026-06-09, the baseline includes:
 
 The next policy-learning slices should focus on evidence and replay:
 
-- ensure capability bundle auto-injection is visible in the dispatch prompt
-  artifact and can be disabled;
-- extend skill loadout results with completion/eval feedback once routing
-  policy proposals consume enough samples;
-- feed completion/eval feedback back into skill loadout summaries once routing
-  policy rules have enough post-apply samples;
+- convert loadout eval feedback into human-reviewed loadout evolution proposals
+  once each profile has enough post-apply samples;
 - project approved MBIT/card evolution proposals into profile/card definitions
   after the route-policy rule loader is stable;
 - add regression tests for high-risk review routing, low-risk fast-check routing,

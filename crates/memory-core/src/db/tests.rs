@@ -97,6 +97,52 @@ fn upsert_idempotent() {
 }
 
 #[test]
+fn update_enrichment_fields_clears_stale_failure_metadata() {
+    let mut conn = make_conn();
+    let mut entry = make_entry(
+        "enrich-reset",
+        "entry with stale enrichment failure metadata",
+    );
+    entry.metadata = json!({
+        "enrichment": {
+            "status": "failed",
+            "failed_stage": "embedding",
+            "last_error": "Voyage 429",
+            "last_failure_at": "2026-06-01T00:00:00Z"
+        }
+    });
+    upsert(&mut conn, &entry, false).unwrap();
+
+    let vec_blob = serialize_f32(&vec![0.1_f32; 1024]);
+    update_enrichment_fields(
+        &mut conn,
+        "enrich-reset",
+        None,
+        Some(&vec_blob),
+        None,
+        None,
+        1,
+    )
+    .unwrap();
+
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id='enrich-reset'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(metadata["enrichment"]["status"], "embedded");
+    assert_eq!(
+        metadata["enrichment"]["last_error"],
+        serde_json::Value::Null
+    );
+    assert!(metadata["enrichment"].get("failed_stage").is_none());
+    assert!(metadata["enrichment"].get("last_failure_at").is_none());
+}
+
+#[test]
 fn upsert_defaults_valid_from_to_timestamp() {
     let mut conn = make_conn();
     let mut entry = make_entry("temporal-default", "temporal default memory");
