@@ -1818,6 +1818,7 @@ impl MemoryServer {
                 let gh_params = build_task_pr_status_gh_params(&params)?;
                 crate::gh_ops::handle_tachi_gh(self, gh_params).await
             }
+            "release_note" => crate::task_lifecycle::handle_task_release_note(self, &params).await,
             "build_references" | "close_loop" => {
                 let workflow_params = TachiWorkflowParams {
                     action: action.clone(),
@@ -1841,7 +1842,7 @@ impl MemoryServer {
                 crate::workflow_closure::handle_workflow(self, workflow_params).await
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'release_note', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;
