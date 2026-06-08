@@ -624,6 +624,39 @@ pub(crate) async fn handle_tachi_dispatch(
         Some(&plan_path.to_string_lossy()),
     )
     .await?;
+    if let Some(flow_id) = params.flow_id.as_deref().filter(|id| !id.trim().is_empty()) {
+        if let Err(error) = crate::task_lifecycle::mark_task_dispatch(
+            flow_id,
+            &dispatch_id,
+            json!({
+                "agent": agent_norm.clone(),
+                "profile": params.profile.clone(),
+                "tool_profile": params.tool_profile.clone(),
+                "stage": params.stage.clone(),
+                "task": params.task.clone(),
+                "issue_ref": params.issue_ref.clone(),
+                "pr_ref": params.pr_ref.clone(),
+                "run_dir": workspace_dir.to_string_lossy(),
+                "prompt_file": prompt_md_path.to_string_lossy(),
+                "context_file": context_md_path.to_string_lossy(),
+                "trajectory_file": trajectory_path.to_string_lossy(),
+                "plan_file": plan_path.to_string_lossy(),
+                "evidence_required": resolved_profile.evidence_required.clone(),
+                "route_explanation": resolved_profile.route_explanation.clone(),
+            }),
+        ) {
+            append_trajectory_event(
+                &trajectory_path,
+                json!({
+                    "event": "flow_dispatch_marker_failed",
+                    "dispatch_id": dispatch_id,
+                    "flow_id": flow_id,
+                    "error": error,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+    }
 
     // 5. Build command
     let mut cmd = match agent_norm.as_str() {

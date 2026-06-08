@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 const UX_CLOSURE_STATES: &[&str] = &["closed_loop", "closed", "shipped"];
+static FLOW_MARKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GithubTarget {
@@ -684,6 +685,117 @@ pub(crate) fn mark_task_close_loop(flow_id: &str, raw_result: &str) -> Result<()
         }),
     )?;
     Ok(())
+}
+
+pub(crate) fn mark_task_dispatch(
+    flow_id: &str,
+    dispatch_id: &str,
+    mut card: Value,
+) -> Result<(), String> {
+    if !is_safe_dispatch_marker_id(dispatch_id) {
+        return Err(format!(
+            "invalid dispatch_id for flow marker: {dispatch_id}"
+        ));
+    }
+    let _guard = FLOW_MARKER_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let run_dir = run_dir_for_flow_id(flow_id)?;
+    std::fs::create_dir_all(run_dir.join("artifacts"))
+        .map_err(|e| format!("create dispatch artifact dir: {e}"))?;
+
+    let recorded_at = Utc::now().to_rfc3339();
+    if !card.is_object() {
+        card = json!({ "details": card });
+    }
+    if let Some(obj) = card.as_object_mut() {
+        obj.insert("flow_id".to_string(), json!(flow_id));
+        obj.insert("dispatch_id".to_string(), json!(dispatch_id));
+        obj.insert("recorded_at".to_string(), json!(recorded_at));
+    }
+
+    let card_path = run_dir
+        .join("artifacts")
+        .join(format!("dispatch-{dispatch_id}.json"));
+    write_json_atomic(&card_path, &card)?;
+    let card_path_string = card_path.to_string_lossy().to_string();
+
+    let status_path = run_dir.join("status.json");
+    let mut status = read_json_file(&status_path)?.unwrap_or_else(|| json!({}));
+    if !status.is_object() {
+        status = json!({});
+    }
+    let obj = status.as_object_mut().expect("status object");
+    let dispatch_ids = obj
+        .entry("dispatch_ids".to_string())
+        .or_insert_with(|| json!([]));
+    if !dispatch_ids.is_array() {
+        *dispatch_ids = json!([]);
+    }
+    if let Some(ids) = dispatch_ids.as_array_mut() {
+        let already_present = ids.iter().any(|value| value.as_str() == Some(dispatch_id));
+        if !already_present {
+            ids.push(json!(dispatch_id));
+        }
+    }
+    let dispatch_cards = obj
+        .entry("dispatch_cards".to_string())
+        .or_insert_with(|| json!([]));
+    if !dispatch_cards.is_array() {
+        *dispatch_cards = json!([]);
+    }
+    if let Some(cards) = dispatch_cards.as_array_mut() {
+        let already_present = cards
+            .iter()
+            .any(|value| value.as_str() == Some(card_path_string.as_str()));
+        if !already_present {
+            cards.push(json!(card_path_string));
+        }
+    }
+    let artifacts = obj
+        .entry("artifacts".to_string())
+        .or_insert_with(|| json!({}));
+    if !artifacts.is_object() {
+        *artifacts = json!({});
+    }
+    if let Some(artifact_obj) = artifacts.as_object_mut() {
+        let dispatch_artifacts = artifact_obj
+            .entry("dispatches".to_string())
+            .or_insert_with(|| json!({}));
+        if !dispatch_artifacts.is_object() {
+            *dispatch_artifacts = json!({});
+        }
+        if let Some(dispatch_obj) = dispatch_artifacts.as_object_mut() {
+            dispatch_obj.insert(dispatch_id.to_string(), json!(card_path_string));
+        }
+    }
+    obj.insert("stage".to_string(), json!("dispatch"));
+    obj.insert("state".to_string(), json!("dispatched"));
+    obj.insert("last_dispatch_id".to_string(), json!(dispatch_id));
+    obj.insert("updated_at".to_string(), json!(recorded_at.clone()));
+    if obj.get("created_at").is_none() {
+        obj.insert("created_at".to_string(), json!(recorded_at.clone()));
+    }
+    write_json_atomic(&status_path, &status)?;
+
+    append_flow_event(
+        &run_dir,
+        json!({
+            "event": "dispatch_linked",
+            "flow_id": flow_id,
+            "dispatch_id": dispatch_id,
+            "dispatch_card": card_path_string,
+            "timestamp": recorded_at,
+        }),
+    )?;
+    Ok(())
+}
+
+fn is_safe_dispatch_marker_id(dispatch_id: &str) -> bool {
+    !dispatch_id.trim().is_empty()
+        && dispatch_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 pub(crate) fn write_intake_flow_artifacts(
@@ -1546,6 +1658,20 @@ fn write_text_atomic(path: &Path, body: &str) -> Result<(), String> {
     let tmp = path.with_extension("md.tmp");
     std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
+fn append_flow_event(run_dir: &Path, event: Value) -> Result<(), String> {
+    use std::io::Write;
+    let mut line =
+        serde_json::to_string(&event).map_err(|e| format!("serialize flow event: {e}"))?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_dir.join("events.jsonl"))
+        .map_err(|e| format!("open events.jsonl: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("write events.jsonl: {e}"))
 }
 
 fn deep_merge(target: &mut Value, patch: Value) {
