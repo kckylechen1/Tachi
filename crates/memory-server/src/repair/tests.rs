@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 use super::domain::DomainRepair;
 use super::edges::OrphanRefs;
+use super::enrichment::EnrichmentFailureReset;
 use super::fts::FtsRebuild;
 use super::integrity::IntegrityCheck;
 use super::jobs::JobsPurge;
@@ -525,6 +526,108 @@ fn r7_orphan_vectors_and_superseded_refs_detected_and_purged() {
         dry2.findings.is_empty(),
         "post-purge should be clean: {dry2:?}"
     );
+}
+
+#[test]
+fn r10_enrichment_failure_reset_clears_failed_markers_only() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "enrichment.db");
+    insert_memory(
+        &conn,
+        "m1",
+        "/a",
+        "x",
+        &serde_json::json!({
+            "enrichment": {
+                "status": "failed",
+                "failed_stage": "embedding",
+                "last_error": "Voyage batch API error: 401 Unauthorized",
+                "last_failure_at": "2026-06-08T00:00:00Z",
+                "attempts": 3
+            }
+        })
+        .to_string(),
+        None,
+        None,
+    );
+    insert_memory(
+        &conn,
+        "m2",
+        "/b",
+        "y",
+        &serde_json::json!({
+            "enrichment": {
+                "status": "failed",
+                "failed_stage": "db_update",
+                "last_error": "no such column: persons",
+                "last_failure_at": "2026-06-08T00:00:00Z"
+            }
+        })
+        .to_string(),
+        None,
+        None,
+    );
+    insert_memory(
+        &conn,
+        "m3",
+        "/c",
+        "z",
+        &serde_json::json!({
+            "enrichment": {
+                "status": "complete",
+                "attempts": 1
+            }
+        })
+        .to_string(),
+        None,
+        None,
+    );
+    drop(conn);
+
+    let mut ctx = open_ctx(&path, "test");
+    let dry = EnrichmentFailureReset.dry_run(&mut ctx).unwrap();
+    assert_eq!(
+        dry.finding_total(),
+        2,
+        "expected two failed markers: {dry:?}"
+    );
+    assert!(dry
+        .findings
+        .iter()
+        .any(|finding| finding.kind == "enrichment_failed_embedding"));
+    assert!(dry
+        .findings
+        .iter()
+        .any(|finding| finding.kind == "enrichment_failed_db_update"));
+
+    let applied = EnrichmentFailureReset.apply(&mut ctx).unwrap();
+    assert_eq!(applied.applied, 2);
+    let remaining = EnrichmentFailureReset.dry_run(&mut ctx).unwrap();
+    assert!(
+        remaining.findings.is_empty(),
+        "failed markers should be cleared: {remaining:?}"
+    );
+
+    let metadata: String = ctx
+        .conn
+        .query_row("SELECT metadata FROM memories WHERE id = 'm1'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(parsed["enrichment"]["attempts"], serde_json::json!(3));
+    assert!(parsed["enrichment"].get("status").is_none());
+    assert!(parsed["enrichment"].get("last_error").is_none());
+
+    let complete_status: Option<String> = ctx
+        .conn
+        .query_row(
+            "SELECT json_extract(metadata, '$.enrichment.status') FROM memories WHERE id = 'm3'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(complete_status.as_deref(), Some("complete"));
 }
 
 #[test]

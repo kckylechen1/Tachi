@@ -1225,7 +1225,7 @@ async fn handle_tachi_status_detail(
                 "path": d.path,
                 "enrichment_failed": d.enrichment_failed_recent,
                 "failures": d.enrichment_failures,
-                "remediation": "Inspect failed enrichment metadata and provider probes; vector backfill will not retry summary/metadata enrichment failures.",
+                "remediation": "Inspect failed enrichment metadata and provider probes; vector backfill will not retry summary/metadata enrichment failures. After fixing provider/schema issues, run `tachi repair --rule R10 --apply --db <label>` to clear stale failed markers.",
             })
         })
         .collect();
