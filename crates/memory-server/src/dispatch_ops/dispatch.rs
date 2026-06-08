@@ -110,7 +110,8 @@ pub(crate) async fn handle_tachi_dispatch(
     params.agent = Some(agent_norm.clone());
     let profile_payload =
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
-    let timeout = Duration::from_secs(params.timeout_secs);
+    let timeout_secs_for_status = params.timeout_secs;
+    let timeout = Duration::from_secs(timeout_secs_for_status);
 
     // 1. Create isolated workspace directory
     let workspace_dir = {
@@ -281,6 +282,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "updated_at": Utc::now().to_rfc3339(),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
+            "timeout_secs": timeout_secs_for_status,
         })),
     );
 
@@ -480,6 +482,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let v2_for_spawn = v2;
     let plan_generated_at_for_spawn = plan_generated_at.clone();
     let plan_duration_ms_for_spawn = plan_duration_ms;
+    let timeout_secs_for_spawn = timeout_secs_for_status;
 
     // Scope guard for MCP config cleanup (moved into spawned task)
     struct McpCleanup(Option<PathBuf>);
@@ -730,6 +733,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                     "result_written": true,
+                    "timeout_secs": timeout_secs_for_spawn,
                 })),
             );
         }
