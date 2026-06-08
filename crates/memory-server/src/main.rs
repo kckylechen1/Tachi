@@ -45,6 +45,7 @@ mod cli;
 mod cli_client;
 mod complete_ops;
 mod copilot_ops;
+mod credential_profile;
 mod daemon_lock;
 mod daily_pipeline;
 mod dispatch_ops;

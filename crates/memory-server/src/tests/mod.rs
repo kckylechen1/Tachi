@@ -283,6 +283,7 @@ fn make_skill_capability(
 }
 
 mod bootstrap_tests;
+mod credential_tests;
 mod dispatch_tests;
 mod docs_tests;
 mod facade_tests;
