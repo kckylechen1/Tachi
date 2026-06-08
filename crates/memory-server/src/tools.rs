@@ -1701,10 +1701,10 @@ impl MemoryServer {
         }
     }
 
-    // ─── Facade: task (plan / recommend / dispatch / board / merge / closure)
+    // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. For GitHub PR gates/merges use tachi_gh(action='safe_merge'). Typical worker flow: briefing → plan → recommend → dispatch → board → complete/eval → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: briefing → plan → recommend → dispatch → board → complete/eval → pr_status → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1812,6 +1812,10 @@ impl MemoryServer {
                 };
                 crate::dispatch_ops::handle_approve_merge(merge_params).await
             }
+            "pr_status" => {
+                let gh_params = build_task_pr_status_gh_params(&params)?;
+                crate::gh_ops::handle_tachi_gh(self, gh_params).await
+            }
             "build_references" | "close_loop" => {
                 let workflow_params = TachiWorkflowParams {
                     action: action.clone(),
@@ -1835,7 +1839,7 @@ impl MemoryServer {
                 crate::workflow_closure::handle_workflow(self, workflow_params).await
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'pr_status', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;
@@ -1916,6 +1920,75 @@ fn wants_json_format(format: Option<&str>) -> bool {
     format
         .map(|format| format.eq_ignore_ascii_case("json"))
         .unwrap_or(false)
+}
+
+pub(crate) fn parse_pr_ref(raw: &str) -> Option<(String, u64)> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        let parts = rest.split('/').collect::<Vec<_>>();
+        if parts.len() == 4 && parts[2] == "pull" {
+            let repo = format!("{}/{}", parts[0], parts[1]);
+            let number = parts[3].parse::<u64>().ok()?;
+            return Some((repo, number));
+        }
+    }
+
+    let (repo, number) = trimmed.rsplit_once('#')?;
+    if repo.matches('/').count() != 1 {
+        return None;
+    }
+    let number = number.parse::<u64>().ok()?;
+    Some((repo.to_string(), number))
+}
+
+pub(crate) fn resolve_task_pr_status_target(
+    params: &TachiTaskParams,
+) -> Result<(String, u64), String> {
+    if let (Some(repo), Some(number)) = (
+        params
+            .repo
+            .as_deref()
+            .filter(|repo| !repo.trim().is_empty()),
+        params.number,
+    ) {
+        return Ok((repo.trim().to_string(), number));
+    }
+    if let Some(pr_ref) = params.pr_ref.as_deref() {
+        if let Some((repo, number)) = parse_pr_ref(pr_ref) {
+            return Ok((repo, number));
+        }
+    }
+    Err(
+        "pr_status requires either repo+number or pr_ref='owner/repo#123' / GitHub PR URL"
+            .to_string(),
+    )
+}
+
+pub(crate) fn build_task_pr_status_gh_params(
+    params: &TachiTaskParams,
+) -> Result<TachiGhParams, String> {
+    let (repo, number) = resolve_task_pr_status_target(params)?;
+    Ok(TachiGhParams {
+        action: "safe_merge".to_string(),
+        repo,
+        number: Some(number),
+        title: None,
+        body: None,
+        labels: Vec::new(),
+        state: None,
+        limit: None,
+        merge_strategy: None,
+        dry_run: Some(true),
+        confirm: false,
+        flow_id: params.flow_id.clone(),
+        merge_policy: params.merge_policy.clone(),
+        author_filter: None,
+        write_digest: None,
+    })
 }
 
 fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&str>) -> String {
