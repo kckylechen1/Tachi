@@ -97,6 +97,7 @@ mod shell_ops;
 mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
+mod task_lifecycle;
 mod tool_params;
 mod tools;
 mod utils;
