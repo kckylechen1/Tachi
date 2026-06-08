@@ -46,14 +46,11 @@ pub(super) async fn run_vault_command(
             config,
             dry_run: _,
             apply,
+            allow_existing,
+            stdin_password,
+            keychain,
+            password_file,
         } => {
-            if apply {
-                return Err(
-                    "credential materialize --apply is not implemented yet; run without --apply for a redacted dry-run plan"
-                        .into(),
-                );
-            }
-
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
                     crate::credential_profile::load_credential_profile_from_path(&path, &profile)?;
@@ -65,14 +62,44 @@ pub(super) async fn run_vault_command(
                 )?
             };
 
-            let store = open_cli_store_read_only(global_db_path)?;
+            let store = if apply {
+                open_cli_store(global_db_path)?
+            } else {
+                open_cli_store_read_only(global_db_path)?
+            };
             let report = crate::credential_profile::plan_credential_materialization(
                 &profile,
                 &profile_def,
                 &consumer,
                 &store,
             )?;
-            let mut body = crate::credential_profile::credential_materialize_report_json(&report);
+            let mut body = if apply {
+                let secret_values = decrypt_profile_secret_values(
+                    global_db_path,
+                    &profile_def,
+                    stdin_password,
+                    keychain,
+                    password_file.as_deref(),
+                )?;
+                let result = crate::credential_profile::apply_credential_materialization(
+                    &profile,
+                    &profile_def,
+                    &consumer,
+                    &store,
+                    &secret_values,
+                    &crate::credential_profile::CredentialApplyOptions { allow_existing },
+                )?;
+                let mut value =
+                    crate::credential_profile::credential_materialize_report_json(&result.report);
+                value["env_outputs"] = serde_json::json!(result
+                    .env
+                    .keys()
+                    .map(|key| format!("env:{key}"))
+                    .collect::<Vec<_>>());
+                value
+            } else {
+                crate::credential_profile::credential_materialize_report_json(&report)
+            };
             body["config_path"] = serde_json::json!(config_path.to_string_lossy());
             println!("{}", serde_json::to_string_pretty(&body)?);
             Ok(())
@@ -385,6 +412,43 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
     }
+}
+
+fn decrypt_profile_secret_values(
+    global_db_path: &PathBuf,
+    profile: &crate::credential_profile::CredentialProfile,
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&Path>,
+) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let store = open_cli_store_read_only(global_db_path)?;
+    let config = store
+        .vault_get_config()
+        .map_err(|e| format!("vault_get_config: {e}"))?
+        .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+    let password = read_vault_password(stdin_password, keychain, password_file)?;
+    let salt = B64
+        .decode(&config.salt)
+        .map_err(|e| format!("Invalid vault salt: {e}"))?;
+    let key = crate::vault_crypto::derive_key(&password, &salt)?;
+    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+        return Err("Wrong password".into());
+    }
+
+    let mut values = std::collections::HashMap::new();
+    for name in crate::credential_profile::profile_secret_names(profile) {
+        let entry = store
+            .vault_get_entry(&name)
+            .map_err(|e| format!("vault_get_entry: {e}"))?
+            .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
+        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{name}' is not valid UTF-8: {e}"))?;
+        values.insert(name, value);
+    }
+    Ok(values)
 }
 
 fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> {

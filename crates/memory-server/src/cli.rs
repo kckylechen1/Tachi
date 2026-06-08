@@ -886,7 +886,7 @@ pub(crate) enum VaultAction {
     Lock,
     /// Show vault status (initialized, locked/unlocked, entry count).
     Status,
-    /// Dry-run a credential profile materialization plan without exposing secret values.
+    /// Plan or apply credential profile materialization without exposing secret values.
     Materialize {
         /// Credential profile name to materialize.
         #[arg(long)]
@@ -897,12 +897,24 @@ pub(crate) enum VaultAction {
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
-        /// Preview only. This is the default for the first credential-profile slice.
+        /// Preview only. This is the default when --apply is not passed.
         #[arg(long)]
         dry_run: bool,
-        /// Apply materialization. Not implemented in this first dry-run slice.
+        /// Apply supported materializers. Requires vault password input.
         #[arg(long)]
         apply: bool,
+        /// Allow overwriting existing file_copy targets after creating a backup.
+        #[arg(long)]
+        allow_existing: bool,
+        /// Read vault password from stdin when --apply needs decrypted values.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain when --apply needs decrypted values.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file when --apply needs decrypted values.
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// Export encrypted Vault rows to an iCloud-compatible sync bundle.
     SyncExport {
