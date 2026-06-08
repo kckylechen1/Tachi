@@ -1840,7 +1840,18 @@ impl MemoryServer {
                     project: params.project.clone(),
                     force: params.force,
                 };
-                crate::workflow_closure::handle_workflow(self, workflow_params).await
+                let result = crate::workflow_closure::handle_workflow(self, workflow_params).await?;
+                if action == "close_loop" {
+                    if let Some(flow_id) = params
+                        .flow_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                    {
+                        crate::task_lifecycle::mark_task_close_loop(flow_id, &result)?;
+                    }
+                }
+                Ok(result)
             }
             _ => Err(format!(
                 "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
