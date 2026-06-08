@@ -6,6 +6,12 @@ use crate::agent_eval::{
     aggregate_subagent_scores, load_live_eval_rows, CompletionStatus, EvalRow,
 };
 use crate::agent_registry::{fallback_chain, resolve_dispatch_agent};
+use crate::skill_policy::{
+    CODING_ARCHITECTURE_DECISION, CODING_REFACTOR_CHECKLIST, CODING_TEST_STRATEGY,
+    SUPERPOWER_EXECUTING_PLANS, SUPERPOWER_REQUESTING_CODE_REVIEW,
+    SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
+    SUPERPOWER_WRITING_PLANS, WAZA_CHECK, WAZA_LEARN, WAZA_READ, WAZA_TACHI, WAZA_THINK,
+};
 use crate::tool_params::{DispatchMcpAccessParams, TachiDispatchParams};
 use crate::MemoryServer;
 use serde::Serialize;
@@ -28,6 +34,9 @@ pub(crate) struct DispatchProfileDef {
     pub allowed_facades: &'static [&'static str],
     pub allowed_mcp_servers: &'static [&'static str],
     pub common_skills: &'static [&'static str],
+    pub signature_skills: &'static [&'static str],
+    pub passive_traits: &'static [&'static str],
+    pub forbidden_skills: &'static [&'static str],
     pub evidence_required: &'static [&'static str],
     pub strong_against: &'static [&'static str],
     pub weak_against: &'static [&'static str],
@@ -49,7 +58,13 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
-        common_skills: &["skill:think"],
+        common_skills: &[SUPERPOWER_WRITING_PLANS, WAZA_THINK],
+        signature_skills: &[
+            SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT,
+            CODING_ARCHITECTURE_DECISION,
+        ],
+        passive_traits: &["plan_before_execute", "surface_open_questions"],
+        forbidden_skills: &["direct_file_edits_without_plan"],
         evidence_required: &["plan", "risks", "validation_plan"],
         strong_against: &["planning", "requirements", "feature_breakdown"],
         weak_against: &["direct_execution", "merge"],
@@ -69,7 +84,10 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_task"],
         allowed_mcp_servers: &[],
-        common_skills: &["skill:superpowers-executing-plans"],
+        common_skills: &[SUPERPOWER_EXECUTING_PLANS],
+        signature_skills: &[WAZA_TACHI, CODING_TEST_STRATEGY],
+        passive_traits: &["bounded_diff", "tests_required", "leader_owns_merge"],
+        forbidden_skills: &["unbounded_redesign", "silent_test_workaround"],
         evidence_required: &["diff", "tests_run", "files_changed"],
         strong_against: &["bounded_patch", "implementation"],
         weak_against: &["ambiguous_architecture", "unbounded_refactor"],
@@ -89,7 +107,14 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
-        common_skills: &["skill:check"],
+        common_skills: &[
+            SUPERPOWER_REQUESTING_CODE_REVIEW,
+            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
+            WAZA_CHECK,
+        ],
+        signature_skills: &[CODING_REFACTOR_CHECKLIST],
+        passive_traits: &["strict_on_missing_tests", "schema_boundary_sense"],
+        forbidden_skills: &["large_rewrite", "merge_without_evidence"],
         evidence_required: &["findings_by_severity", "file_refs", "verification_advice"],
         strong_against: &[
             "schema_migration",
@@ -113,7 +138,10 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: false,
         allowed_facades: &["tachi_memory"],
         allowed_mcp_servers: &[],
-        common_skills: &["workflow:targeted-verification"],
+        common_skills: &[WAZA_CHECK],
+        signature_skills: &[SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
+        passive_traits: &["fast_sanity_only", "flag_uncertainty"],
+        forbidden_skills: &["deep_architecture_review", "write_actions"],
         evidence_required: &["summary", "risk_flags"],
         strong_against: &["quick_sanity", "low_risk_review"],
         weak_against: &["schema_migration", "security_review"],
@@ -133,7 +161,10 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_wiki"],
         allowed_mcp_servers: &[],
-        common_skills: &["skill:think"],
+        common_skills: &[WAZA_THINK, CODING_ARCHITECTURE_DECISION],
+        signature_skills: &[SUPERPOWER_WRITING_PLANS],
+        passive_traits: &["challenge_assumptions", "prefer_rejected_options"],
+        forbidden_skills: &["shell_execution", "git_write"],
         evidence_required: &["risks", "rejected_options", "file_refs"],
         strong_against: &["architecture", "schema_boundary", "lifecycle_design"],
         weak_against: &["shell_execution", "git_write"],
@@ -153,7 +184,10 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: false,
         allowed_facades: &["tachi_memory"],
         allowed_mcp_servers: &[],
-        common_skills: &["workflow:codebase-map"],
+        common_skills: &[WAZA_READ],
+        signature_skills: &[WAZA_LEARN],
+        passive_traits: &["read_only_mapping", "cite_files"],
+        forbidden_skills: &["implementation", "final_claims_without_verification"],
         evidence_required: &["file_map", "caveats", "test_targets"],
         strong_against: &["repo_mapping", "symbol_search"],
         weak_against: &["implementation", "final_verification"],
@@ -254,7 +288,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "recommended_agent": best.agent,
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
-        "resolved_skills": best_profile.common_skills,
+        "resolved_skills": profile_required_skill_ids(best_profile),
+        "resolved_skill_loadout": profile_skill_loadout_json(best_profile),
         "fallback_chain": fallback,
         "reason": best.reasons,
         "route_explanation": best.reasons,
@@ -338,11 +373,7 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
             params.auto_capability_bundle = Some(profile.auto_capability_bundle);
         }
         if params.skills.is_empty() {
-            params.skills = profile
-                .common_skills
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
+            params.skills = profile_required_skill_ids(profile);
         }
         if params.mcp_access.is_none() {
             params.mcp_access = Some(DispatchMcpAccessParams {
@@ -451,9 +482,7 @@ fn profile_json(profile: &DispatchProfileDef) -> Value {
             "github_read": profile.github_read,
             "write_actions": profile.write_actions,
         },
-        "skill_loadout": {
-            "common_skills": profile.common_skills,
-        },
+        "skill_loadout": profile_skill_loadout_json(profile),
         "evidence_contract": {
             "required": profile.evidence_required,
         },
@@ -464,6 +493,26 @@ fn profile_json(profile: &DispatchProfileDef) -> Value {
             "weak_against": profile.weak_against,
             "auto_capability_bundle": profile.auto_capability_bundle,
         }
+    })
+}
+
+pub(crate) fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
+    let mut skills = profile
+        .common_skills
+        .iter()
+        .chain(profile.signature_skills.iter())
+        .map(|s| s.to_string())
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
+    skills
+}
+
+pub(crate) fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
+    json!({
+        "common_skills": profile.common_skills,
+        "signature_skills": profile.signature_skills,
+        "passive_traits": profile.passive_traits,
+        "forbidden_skills": profile.forbidden_skills,
     })
 }
 
@@ -723,6 +772,19 @@ mod tests {
             vec!["kckylechen1/tachi#194".to_string()]
         );
         assert!(resolved.auto_capability_bundle);
+        assert!(params
+            .skills
+            .iter()
+            .any(|skill| skill == SUPERPOWER_WRITING_PLANS));
+        assert!(params
+            .skills
+            .iter()
+            .any(|skill| skill == CODING_ARCHITECTURE_DECISION));
+        assert_eq!(
+            profile_skill_loadout_json(resolve_dispatch_profile("claude_plan").unwrap())
+                ["passive_traits"][0],
+            json!("plan_before_execute")
+        );
     }
 
     #[test]
