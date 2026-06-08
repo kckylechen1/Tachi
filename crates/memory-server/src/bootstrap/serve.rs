@@ -330,6 +330,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         db,
         batch_size,
         dry_run,
+        include_cache,
     } = &command
     {
         let target_path = if let Some(p) = db {
@@ -342,6 +343,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             &global_db_path,
             *batch_size,
             *dry_run,
+            *include_cache,
         )
         .await;
     }

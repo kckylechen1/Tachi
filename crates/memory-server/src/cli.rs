@@ -158,6 +158,10 @@ pub(crate) enum Commands {
         /// Only count missing entries, don't embed
         #[arg(long)]
         dry_run: bool,
+        /// Include ephemeral recall-rerank cache rows. Defaults to false so
+        /// output matches `tachi status` vector-health coverage.
+        #[arg(long)]
+        include_cache: bool,
     },
     /// Backfill missing summaries using the configured summary LLM
     BackfillSummaries {
