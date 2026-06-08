@@ -125,8 +125,8 @@ pub(crate) fn fallback_chain(primary: &str) -> &'static [&'static str] {
     }
 }
 
-pub(crate) fn registry_json() -> serde_json::Value {
-    serde_json::json!({
+pub(crate) fn registry_json(server: &crate::MemoryServer) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
         "agents": DISPATCH_AGENTS.iter().map(|a| serde_json::json!({
             "name": a.name,
             "display_name": a.display_name,
@@ -135,22 +135,22 @@ pub(crate) fn registry_json() -> serde_json::Value {
             "default_timeout_secs": a.default_timeout_secs,
             "mcp_inject": mcp_inject_supported(a),
         })).collect::<Vec<_>>(),
-        "dispatch_profiles": crate::dispatch_profile::dispatch_profiles_json()
+        "dispatch_profiles": crate::dispatch_profile::dispatch_profiles_json_for_server(server)?
             .get("dispatch_profiles")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
         "fleet_policy": "docs/agent-fleet.md",
-    })
+    }))
 }
 
 pub(crate) async fn handle_agents(
-    _server: &crate::MemoryServer,
+    server: &crate::MemoryServer,
     params: crate::tool_params::TachiAgentsParams,
 ) -> Result<String, String> {
     let action = params.action.trim().to_ascii_lowercase();
     match action.as_str() {
         "list" | "profiles" => {
-            serde_json::to_string(&registry_json()).map_err(|e| format!("serialize: {e}"))
+            serde_json::to_string(&registry_json(server)?).map_err(|e| format!("serialize: {e}"))
         }
         "select" => {
             let intent = params.intent.as_deref().unwrap_or("other");

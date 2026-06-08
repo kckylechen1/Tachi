@@ -1415,6 +1415,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chat_lane_retries_with_next_pool_key_after_429() {
         use axum::{
             extract::State,

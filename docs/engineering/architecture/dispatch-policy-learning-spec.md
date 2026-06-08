@@ -230,9 +230,10 @@ As of 2026-06-09, the baseline includes:
   can be disabled per dispatch;
 - `tachi_skill(action="loadout")` includes live `/eval` feedback summaries,
   sample thresholds, and guidance before any loadout evolution proposal is made;
-- `tachi_task(action="proposals"|"review_proposal")` includes human-reviewed
-  `loadout_evolution` proposals once profile samples, verification, and
-  observed skill usage pass the evidence thresholds;
+- `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` includes
+  human-reviewed `loadout_evolution` proposals once profile samples,
+  verification, and observed skill usage pass the evidence thresholds, then
+  projects approved changes into durable profile/card loadout overlays;
 - credentialed `opencode_builder` profile;
 - feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
   `ux_matrix`, `build_references`, and `close_loop`;
@@ -245,10 +246,10 @@ As of 2026-06-09, the baseline includes:
 
 ## Remaining Work
 
-The next policy-learning slices should focus on projection and replay:
+The next policy-learning slices should focus on replay and projection hardening:
 
-- project approved MBIT/card evolution proposals into profile/card definitions
-  after the route-policy rule loader is stable;
+- expand approved MBIT/card evolution beyond signature-skill overlays into
+  richer card/passive-trait projection targets;
 - add regression tests for high-risk review routing, low-risk fast-check routing,
   human override weighting, retry weighting, and MBIT card parsing.
 

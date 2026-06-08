@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 
 const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
+const PROFILE_CARD_OVERLAY_NS: &str = "dispatch_profile_card_overlays";
 const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
 const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
@@ -260,11 +261,15 @@ pub(crate) fn resolve_dispatch_profile(raw: &str) -> Option<&'static DispatchPro
         .find(|profile| profile.name == norm)
 }
 
-pub(crate) fn dispatch_profiles_json() -> Value {
-    json!({
-        "dispatch_profiles": DISPATCH_PROFILES.iter().map(profile_json).collect::<Vec<_>>(),
+pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result<Value, String> {
+    Ok(json!({
+        "dispatch_profiles": DISPATCH_PROFILES
+            .iter()
+            .map(|profile| profile_json_for_server(server, profile))
+            .collect::<Result<Vec<_>, _>>()?,
         "note": "DispatchProfile routes agents/context/evidence; ToolProfile gates visible tools.",
-    })
+        "projection_namespace": PROFILE_CARD_OVERLAY_NS,
+    }))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -415,8 +420,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
         "evidence_required": best_profile.evidence_required,
-        "resolved_skills": profile_required_skill_ids(best_profile),
-        "resolved_skill_loadout": profile_skill_loadout_json(best_profile),
+        "resolved_skills": profile_required_skill_ids_for_server(server, best_profile)?,
+        "resolved_skill_loadout": profile_skill_loadout_json_for_server(server, best_profile)?,
         "fallback_chain": fallback,
         "reason": best.reasons,
         "route_explanation": best.reasons,
@@ -427,7 +432,7 @@ pub(crate) fn handle_dispatch_recommendation(
             "performance_matrix_hits": performance_matrix_hits,
         },
         "route_policy_rules": route_policy_rules,
-        "mbit_card": profile_json(best_profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+        "mbit_card": profile_json_for_server(server, best_profile)?.get("mbit_card").cloned().unwrap_or(Value::Null),
         "candidates": candidates,
     }))
     .map_err(|e| format!("serialize recommendation: {e}"))
@@ -448,7 +453,7 @@ pub(crate) fn handle_route_simulation(
 
     let summaries = ["current", "cost_sensitive", "quality_first"]
         .iter()
-        .map(|policy| simulate_route_policy(*policy, &performance_matrix, focus.as_ref()))
+        .map(|policy| simulate_route_policy(policy, &performance_matrix, focus.as_ref()))
         .collect::<Vec<_>>();
 
     serde_json::to_string(&json!({
@@ -569,7 +574,7 @@ pub(crate) fn handle_route_policy_proposals(
         "next_actions": [
             "tachi_task(action='review_proposal', proposal_id=..., review_status='approved')",
             "tachi_task(action='apply_proposals', proposal_id=..., confirm=true) for approved route_policy rules",
-            "approved loadout_evolution proposals wait for the profile/card projection slice"
+            "tachi_task(action='apply_proposals', proposal_id=..., confirm=true) for approved loadout_evolution proposals to project reviewed profile/card loadout overlays"
         ],
     }))
     .map_err(|e| format!("serialize route policy proposals: {e}"))
@@ -661,32 +666,156 @@ pub(crate) fn handle_route_policy_apply(
             .get("kind")
             .and_then(Value::as_str)
             .unwrap_or("route_policy");
-        if kind != "route_policy" {
-            return Err(format!(
-                "apply_proposals currently persists only approved route_policy rules; {kind} proposal {proposal_id} remains approved until the MBIT/profile-card projection slice"
-            ));
+        match kind {
+            "route_policy" => {
+                value["status"] = json!("applied");
+                value["applied_at"] = json!(applied_at);
+                let next = serde_json::to_string(&value)
+                    .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
+                store
+                    .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
+                    .map_err(|e| format!("persist applied route policy proposal: {e}"))?;
+                store
+                    .set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
+                    .map_err(|e| format!("persist route policy rule: {e}"))?;
+            }
+            "loadout_evolution" => {
+                let profile_name = value
+                    .get("profile")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        format!("loadout_evolution proposal {proposal_id} missing profile")
+                    })?;
+                let profile = resolve_dispatch_profile(profile_name).ok_or_else(|| {
+                    format!(
+                        "loadout_evolution proposal {proposal_id} references unknown profile {profile_name}"
+                    )
+                })?;
+                let operation = value
+                    .get("operation")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if operation != "promote_observed_skill_to_signature" {
+                    return Err(format!(
+                        "unsupported loadout_evolution operation for {proposal_id}: {operation}"
+                    ));
+                }
+                let skill_id = value
+                    .get("skill_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|skill| !skill.is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        format!("loadout_evolution proposal {proposal_id} missing skill_id")
+                    })?;
+                if profile
+                    .forbidden_skills
+                    .iter()
+                    .any(|skill| *skill == skill_id)
+                {
+                    return Err(format!(
+                        "loadout_evolution proposal {proposal_id} targets forbidden skill {skill_id}"
+                    ));
+                }
+
+                let mut overlay = if let Some((raw, _version)) = store
+                    .get_state_kv(PROFILE_CARD_OVERLAY_NS, profile.name)
+                    .map_err(|e| format!("load profile/card overlay: {e}"))?
+                {
+                    serde_json::from_str::<Value>(&raw)
+                        .map_err(|e| format!("parse profile/card overlay: {e}"))?
+                } else {
+                    json!({
+                        "kind": "profile_card_loadout_overlay",
+                        "profile": profile.name,
+                        "add_signature_skills": [],
+                        "source_proposal_ids": [],
+                        "created_at": applied_at,
+                    })
+                };
+
+                let baseline_skills = profile_required_skill_ids(profile);
+                if baseline_skills.iter().any(|skill| skill == &skill_id) {
+                    return Err(format!(
+                        "loadout_evolution proposal {proposal_id} targets existing baseline skill {skill_id}"
+                    ));
+                }
+                let mut overlay_skills =
+                    profile_projected_signature_skills_from_overlay(profile, Some(&overlay));
+                let already_projected = overlay_skills.iter().any(|skill| skill == &skill_id);
+
+                if !overlay_skills.iter().any(|skill| skill == &skill_id) {
+                    overlay_skills.push(skill_id.clone());
+                }
+                crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
+
+                let mut source_proposals = overlay
+                    .get("source_proposal_ids")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                source_proposals.push(proposal_id.to_string());
+                crate::skill_policy::dedupe_preserve_order(&mut source_proposals);
+
+                overlay["profile"] = json!(profile.name);
+                overlay["kind"] = json!("profile_card_loadout_overlay");
+                overlay["add_signature_skills"] = json!(overlay_skills);
+                overlay["source_proposal_ids"] = json!(source_proposals);
+                overlay["updated_at"] = json!(applied_at);
+                overlay["last_applied_proposal_id"] = json!(proposal_id);
+                let overlay_raw = serde_json::to_string(&overlay)
+                    .map_err(|e| format!("serialize profile/card overlay: {e}"))?;
+                store
+                    .set_state(PROFILE_CARD_OVERLAY_NS, profile.name, &overlay_raw)
+                    .map_err(|e| format!("persist profile/card overlay: {e}"))?;
+
+                value["status"] = json!("applied");
+                value["applied_at"] = json!(applied_at);
+                value["projection"] = json!({
+                    "status": "applied_profile_card_overlay",
+                    "namespace": PROFILE_CARD_OVERLAY_NS,
+                    "key": profile.name,
+                    "already_projected": already_projected,
+                    "added_signature_skills": [skill_id],
+                    "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
+                });
+                let next = serde_json::to_string(&value)
+                    .map_err(|e| format!("serialize applied loadout proposal: {e}"))?;
+                store
+                    .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
+                    .map_err(|e| format!("persist applied loadout proposal: {e}"))?;
+            }
+            other => {
+                return Err(format!(
+                    "apply_proposals does not support proposal kind {other} for {proposal_id}"
+                ));
+            }
         }
-        value["status"] = json!("applied");
-        value["applied_at"] = json!(applied_at);
-        let next = serde_json::to_string(&value)
-            .map_err(|e| format!("serialize applied route policy proposal: {e}"))?;
-        store
-            .set_state(DISPATCH_POLICY_PROPOSAL_NS, proposal_id, &next)
-            .map_err(|e| format!("persist applied route policy proposal: {e}"))?;
-        store
-            .set_state(ROUTE_POLICY_RULE_NS, proposal_id, &next)
-            .map_err(|e| format!("persist route policy rule: {e}"))?;
         Ok(value)
     })?;
+    let applied_kind = updated
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("route_policy");
 
     serde_json::to_string(&json!({
         "action": "apply_proposals",
         "proposal_id": proposal_id,
         "applied": true,
-        "routing_mutated": true,
-        "rule_namespace": ROUTE_POLICY_RULE_NS,
+        "routing_mutated": applied_kind == "route_policy",
+        "profile_card_mutated": applied_kind == "loadout_evolution",
+        "rule_namespace": if applied_kind == "route_policy" { Value::String(ROUTE_POLICY_RULE_NS.to_string()) } else { Value::Null },
+        "projection_namespace": if applied_kind == "loadout_evolution" { Value::String(PROFILE_CARD_OVERLAY_NS.to_string()) } else { Value::Null },
         "proposal": updated,
-        "note": "Approved route-policy rule was persisted and will be consumed by recommend() when task type, risk gates, and sample thresholds match.",
+        "note": if applied_kind == "route_policy" {
+            "Approved route-policy rule was persisted and will be consumed by recommend() when task type, risk gates, and sample thresholds match."
+        } else {
+            "Approved loadout-evolution proposal was projected into the profile/card overlay and will be visible in profile, loadout, recommend, and dispatch prompt surfaces."
+        },
     }))
     .map_err(|e| format!("serialize route policy apply response: {e}"))
 }
@@ -852,7 +981,22 @@ fn apply_route_policy_rules_to_candidates(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn resolve_and_apply_dispatch_profile(
+    params: &mut TachiDispatchParams,
+) -> Result<ResolvedDispatchProfile, String> {
+    resolve_and_apply_dispatch_profile_inner(None, params)
+}
+
+pub(crate) fn resolve_and_apply_dispatch_profile_for_server(
+    server: &MemoryServer,
+    params: &mut TachiDispatchParams,
+) -> Result<ResolvedDispatchProfile, String> {
+    resolve_and_apply_dispatch_profile_inner(Some(server), params)
+}
+
+fn resolve_and_apply_dispatch_profile_inner(
+    server: Option<&MemoryServer>,
     params: &mut TachiDispatchParams,
 ) -> Result<ResolvedDispatchProfile, String> {
     let mut route_explanation = Vec::new();
@@ -921,7 +1065,10 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
             params.auto_capability_bundle = Some(profile.auto_capability_bundle);
         }
         if params.skills.is_empty() {
-            params.skills = profile_required_skill_ids(profile);
+            params.skills = match server {
+                Some(server) => profile_required_skill_ids_for_server(server, profile)?,
+                None => profile_required_skill_ids(profile),
+            };
         }
         if params.mcp_access.is_none() {
             params.mcp_access = Some(DispatchMcpAccessParams {
@@ -1036,11 +1183,30 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
         fallback_chain,
         credential_profiles,
         route_explanation,
-        mbit_card: profile.map(profile_json),
+        mbit_card: profile
+            .map(|profile| match server {
+                Some(server) => profile_json_for_server(server, profile),
+                None => Ok(profile_json(profile)),
+            })
+            .transpose()?,
     })
 }
 
 pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
+    profile_json_with_loadout(profile, profile_skill_loadout_json(profile))
+}
+
+pub(crate) fn profile_json_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Value, String> {
+    Ok(profile_json_with_loadout(
+        profile,
+        profile_skill_loadout_json_for_server(server, profile)?,
+    ))
+}
+
+fn profile_json_with_loadout(profile: &DispatchProfileDef, skill_loadout: Value) -> Value {
     json!({
         "name": profile.name,
         "display_name": profile.display_name,
@@ -1058,7 +1224,7 @@ pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
             "write_actions": profile.write_actions,
         },
         "credential_profiles": profile.credential_profiles,
-        "skill_loadout": profile_skill_loadout_json(profile),
+        "skill_loadout": skill_loadout,
         "evidence_contract": {
             "required": profile.evidence_required,
         },
@@ -1068,6 +1234,7 @@ pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
             "strong_against": profile.strong_against,
             "weak_against": profile.weak_against,
             "auto_capability_bundle": profile.auto_capability_bundle,
+            "skill_loadout": skill_loadout,
         }
     })
 }
@@ -1083,13 +1250,114 @@ pub(crate) fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<St
     skills
 }
 
+pub(crate) fn profile_required_skill_ids_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let mut skills = profile
+        .common_skills
+        .iter()
+        .chain(profile.signature_skills.iter())
+        .map(|skill| skill.to_string())
+        .collect::<Vec<_>>();
+    skills.extend(profile_projected_signature_skills(server, profile)?);
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
+    Ok(skills)
+}
+
 pub(crate) fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "common_skills": profile.common_skills,
         "signature_skills": profile.signature_skills,
         "passive_traits": profile.passive_traits,
         "forbidden_skills": profile.forbidden_skills,
+        "projection": {
+            "status": "baseline",
+        },
     })
+}
+
+pub(crate) fn profile_skill_loadout_json_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Value, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    let projected_signature_skills =
+        profile_projected_signature_skills_from_overlay(profile, overlay.as_ref());
+    let mut signature_skills = profile
+        .signature_skills
+        .iter()
+        .map(|skill| skill.to_string())
+        .collect::<Vec<_>>();
+    signature_skills.extend(projected_signature_skills.iter().cloned());
+    crate::skill_policy::dedupe_preserve_order(&mut signature_skills);
+    let source_proposal_ids = overlay
+        .as_ref()
+        .and_then(|overlay| overlay.get("source_proposal_ids"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "common_skills": profile.common_skills,
+        "signature_skills": signature_skills,
+        "projected_signature_skills": projected_signature_skills,
+        "passive_traits": profile.passive_traits,
+        "forbidden_skills": profile.forbidden_skills,
+        "projection": {
+            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
+            "namespace": PROFILE_CARD_OVERLAY_NS,
+            "key": profile.name,
+            "source_proposal_ids": source_proposal_ids,
+        },
+    }))
+}
+
+fn profile_projected_signature_skills(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    Ok(profile_projected_signature_skills_from_overlay(
+        profile,
+        overlay.as_ref(),
+    ))
+}
+
+fn profile_projected_signature_skills_from_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let Some(overlay) = overlay else {
+        return Vec::new();
+    };
+    let forbidden = profile.forbidden_skills.iter().collect::<HashSet<_>>();
+    let mut skills = overlay
+        .get("add_signature_skills")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|skill| !skill.is_empty())
+        .filter(|skill| !forbidden.contains(skill))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
+    skills
+}
+
+fn load_profile_overlay(server: &MemoryServer, profile: &str) -> Result<Option<Value>, String> {
+    server
+        .with_global_store_read(|store| {
+            store
+                .get_state_kv(PROFILE_CARD_OVERLAY_NS, profile)
+                .map_err(|e| format!("load profile/card overlay: {e}"))
+        })?
+        .map(|(raw, _version)| {
+            serde_json::from_str::<Value>(&raw)
+                .map_err(|e| format!("parse profile/card overlay: {e}"))
+        })
+        .transpose()
 }
 
 pub(crate) fn profile_eval_feedback_json(
@@ -1651,7 +1919,7 @@ fn simulate_route_policy(
         let Some(profile) = row.profile.as_deref() else {
             continue;
         };
-        if !profile_names.iter().any(|name| *name == profile) {
+        if !profile_names.contains(&profile) {
             continue;
         }
         if let Some(focus) = focus {
@@ -1816,7 +2084,7 @@ fn build_loadout_evolution_proposals(
             continue;
         }
 
-        let existing_skills = profile_required_skill_ids(profile)
+        let existing_skills = profile_required_skill_ids_for_server(server, profile)?
             .into_iter()
             .chain(
                 profile
@@ -2148,9 +2416,11 @@ fn summarize_route_simulation(
         avg_latency_ms: (latency_samples > 0).then(|| round2(latency_sum / latency_samples as f64)),
         avg_cost_usd: (cost_samples > 0).then(|| round4(cost_sum / cost_samples as f64)),
         total_cost_usd: (cost_samples > 0).then(|| round4(cost_sum)),
-        score: (sample_count > 0)
-            .then(|| round2(score_sum / sample_count_f))
-            .unwrap_or(0.0),
+        score: if sample_count > 0 {
+            round2(score_sum / sample_count_f)
+        } else {
+            0.0
+        },
         route_choices: choices,
         caveats,
     }

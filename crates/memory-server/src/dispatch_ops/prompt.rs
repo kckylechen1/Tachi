@@ -106,7 +106,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         || params.pr_ref.is_some()
         || params.flow_id.is_some()
     {
-        parts.push(render_dispatch_profile_overlay(params));
+        parts.push(render_dispatch_profile_overlay(server, params));
     }
 
     // Resolve skills with stage defaults
@@ -562,20 +562,45 @@ fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRouting) -> St
     lines.join("\n")
 }
 
-fn render_dispatch_profile_overlay(params: &TachiDispatchParams) -> String {
+fn render_dispatch_profile_overlay(server: &MemoryServer, params: &TachiDispatchParams) -> String {
     let mut lines = vec!["## Dispatch profile".to_string()];
     if let Some(profile) = params.profile.as_deref().filter(|s| !s.trim().is_empty()) {
         lines.push(format!("- profile: {profile}"));
         if let Some(profile_def) = crate::dispatch_profile::resolve_dispatch_profile(profile) {
             lines.push("- skill_loadout:".to_string());
-            for (label, items) in [
-                ("common_skills", profile_def.common_skills),
-                ("signature_skills", profile_def.signature_skills),
-                ("passive_traits", profile_def.passive_traits),
-                ("forbidden_skills", profile_def.forbidden_skills),
-            ] {
-                if !items.is_empty() {
-                    lines.push(format!("  - {label}: {}", items.join(", ")));
+            match crate::dispatch_profile::profile_skill_loadout_json_for_server(
+                server,
+                profile_def,
+            ) {
+                Ok(loadout) => {
+                    for label in [
+                        "common_skills",
+                        "signature_skills",
+                        "projected_signature_skills",
+                        "passive_traits",
+                        "forbidden_skills",
+                    ] {
+                        let items = loadout
+                            .get(label)
+                            .and_then(|value| value.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|value| value.as_str())
+                            .collect::<Vec<_>>();
+                        if !items.is_empty() {
+                            lines.push(format!("  - {label}: {}", items.join(", ")));
+                        }
+                    }
+                    if let Some(status) = loadout
+                        .get("projection")
+                        .and_then(|projection| projection.get("status"))
+                        .and_then(|status| status.as_str())
+                    {
+                        lines.push(format!("  - projection_status: {status}"));
+                    }
+                }
+                Err(err) => {
+                    lines.push(format!("  - loadout_error: {err}"));
                 }
             }
         }

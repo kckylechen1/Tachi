@@ -1721,15 +1721,15 @@ impl MemoryServer {
                     "stage": profile.stage,
                     "backend": profile.backend,
                     "host": host,
-                    "resolved_skills": crate::dispatch_profile::profile_required_skill_ids(profile),
-                    "skill_loadout": crate::dispatch_profile::profile_skill_loadout_json(profile),
+                    "resolved_skills": crate::dispatch_profile::profile_required_skill_ids_for_server(self, profile)?,
+                    "skill_loadout": crate::dispatch_profile::profile_skill_loadout_json_for_server(self, profile)?,
                     "evidence_required": profile.evidence_required,
                     "strong_against": profile.strong_against,
                     "weak_against": profile.weak_against,
                     "auto_capability_bundle": profile.auto_capability_bundle,
                     "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
                     "eval_feedback": crate::dispatch_profile::profile_eval_feedback_json(self, profile, params.limit.unwrap_or(500))?,
-                    "mbit_card": crate::dispatch_profile::profile_json(profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+                    "mbit_card": crate::dispatch_profile::profile_json_for_server(self, profile)?.get("mbit_card").cloned().unwrap_or(Value::Null),
                 }))
                 .map_err(|e| format!("serialize skill loadout: {e}"))
             }
@@ -1743,7 +1743,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule, requiring confirm=true; approved loadout-evolution proposals wait for the MBIT/profile-card projection slice; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1856,7 +1856,7 @@ impl MemoryServer {
                 crate::dispatch_ops::handle_tachi_board(self, board_params).await
             }
             "profiles" | "profile" | "card" => serde_json::to_string(
-                &crate::dispatch_profile::dispatch_profiles_json(),
+                &crate::dispatch_profile::dispatch_profiles_json_for_server(self)?,
             )
             .map_err(|e| format!("serialize dispatch profiles: {e}")),
             "intake" => crate::task_lifecycle::handle_task_intake(self, &params).await,
