@@ -22,7 +22,7 @@ fn registry() -> &'static HashMap<&'static str, PromptEnvelope> {
                 constraints:
                     "No scope creep. Prefer small diffs. Run verification before claiming done.",
                 output_contract:
-                    "Summarize changes, list commands run, call tachi_complete when finished.",
+                    "Summarize changes, list commands run, call tachi_task(action=\"complete\") when finished.",
             },
             PromptEnvelope {
                 id: "pair_programming",

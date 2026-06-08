@@ -242,8 +242,9 @@ fn suggested_complete_payload(
     params: &TachiDispatchParams,
 ) -> serde_json::Value {
     json!({
-        "tool": "tachi_complete",
+        "tool": "tachi_task",
         "arguments": {
+            "action": "complete",
             "dispatch_id": dispatch_id,
             "task": params.task,
             "agent": agent,

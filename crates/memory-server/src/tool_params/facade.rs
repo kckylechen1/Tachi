@@ -73,6 +73,7 @@ fn tachi_task_action_schema(
             "briefing",
             "recommend",
             "dispatch",
+            "complete",
             "profiles",
             "profile",
             "card",
@@ -86,7 +87,7 @@ fn tachi_task_action_schema(
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='complete' records evaluated completion evidence; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -1101,7 +1102,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
@@ -1154,9 +1155,69 @@ pub(crate) struct TachiTaskParams {
     pub include_global: bool,
     #[serde(default)]
     pub compact: Option<bool>,
-    // dispatch fields
+    // dispatch / complete fields
     #[serde(default)]
     pub agent: Option<String>,
+    /// Outcome for action="complete": success | failure | partial | aborted.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Optional task id for action="complete".
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// Standard task type for action="complete", e.g. fix_request or plan_request.
+    #[serde(default)]
+    pub task_type: Option<String>,
+    /// Execution duration in milliseconds for action="complete".
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub duration_ms: Option<u64>,
+    /// Skills actually used during action="complete". Distinct from dispatch prompt skills.
+    #[serde(default)]
+    pub skills_used: Vec<String>,
+    /// Cost in tokens for action="complete".
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u64_from_string_or_number"
+    )]
+    pub cost_tokens: Option<u64>,
+    /// Cost in USD for action="complete".
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub cost_usd: Option<f64>,
+    /// Quality score 0.0-1.0 for action="complete".
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_f64_from_string_or_number"
+    )]
+    pub quality_score: Option<f64>,
+    /// Completion notes or summary for action="complete".
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// Execution trajectory for action="complete". Store compact step objects, not raw transcripts.
+    #[serde(default)]
+    pub trajectory: Option<serde_json::Value>,
+    /// Unified diff or patch evidence for action="complete".
+    #[serde(default)]
+    pub diff: Option<String>,
+    /// Structured subagent eval records for action="complete".
+    #[serde(default)]
+    pub subagents: Vec<TachiSubagentEvalParams>,
+    /// Evidence references for action="complete" verification.
+    #[serde(default)]
+    pub evidence_refs: Vec<String>,
+    /// Verification commands run for action="complete".
+    #[serde(default)]
+    pub tests_run: Vec<String>,
+    /// Whether a diff was present for action="complete"; inferred from diff if absent.
+    #[serde(default)]
+    pub diff_present: Option<bool>,
+    /// Target DB scope for action="complete": global or project.
+    #[serde(default)]
+    pub scope: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
     #[serde(default)]
@@ -1220,6 +1281,9 @@ pub(crate) struct TachiTaskParams {
     pub pr_ref: Option<String>,
     #[serde(default)]
     pub flow_id: Option<String>,
+    /// Dispatch id linked to action="complete".
+    #[serde(default)]
+    pub dispatch_id: Option<String>,
     #[serde(default)]
     #[schemars(
         description = "Risk override for recommendation/routing: low | medium | high | critical."

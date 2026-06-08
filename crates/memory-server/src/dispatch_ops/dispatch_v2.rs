@@ -57,7 +57,7 @@ the whole document."#;
 pub(super) const IMPLEMENT_PLAN_SKILL_FALLBACK: &str = r#"## Skill: implement-plan
 Follow the attached plan step by step. Do not redesign it. After each step run
 the relevant Validation command. Stop and report blockers instead of improvising
-outside the plan. When done, call tachi_complete with the dispatch_id."#;
+outside the plan. When done, call tachi_task(action="complete") with the dispatch_id."#;
 
 /// Default wall-clock budget for Stage 1 (`claude_pool.call`). Independent of
 /// the broader dispatch timeout so a slow planner can't burn the execute
@@ -269,7 +269,7 @@ pub(super) fn build_execute_prompt(
     out.push_str(base_prompt.trim());
     out.push_str(
         "\n\nExecute the plan step by step. Do not redesign it. \
-         When done, call `tachi_complete` with the dispatch_id.\n",
+         When done, call `tachi_task(action=\"complete\")` with the dispatch_id.\n",
     );
     out
 }

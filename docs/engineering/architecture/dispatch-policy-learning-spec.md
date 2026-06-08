@@ -198,7 +198,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 5. `tachi_task(action="dispatch", profile=..., flow_id=..., issue_ref=...)`
 6. `tachi_task(action="board", flow_id=...)`
 7. leader verification and `tachi_verify`
-8. `tachi_complete(flow_id=..., dispatch_id=...)`
+8. `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 9. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
 10. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
 11. `tachi_task(action="release_note", flow_id=...)`
@@ -224,9 +224,9 @@ As of 2026-06-09, the baseline includes:
   `ux_matrix`, `build_references`, and `close_loop`;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;
-- dispatch card artifacts include the suggested `tachi_complete` payload, and
-  `tachi_complete(flow_id=..., dispatch_id=...)` links the `/eval` result back
-  into the dispatch card, flow status, and UX matrix;
+- dispatch card artifacts include the suggested completion payload, and
+  `tachi_task(action="complete", flow_id=..., dispatch_id=...)` links the
+  `/eval` result back into the dispatch card, flow status, and UX matrix;
 - close-loop marker persistence for UX matrix completion.
 
 ## Remaining Work

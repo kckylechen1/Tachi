@@ -1766,7 +1766,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='profiles'/'profile'/'card': inspect built-in dispatch profiles; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1826,6 +1826,49 @@ impl MemoryServer {
                     allowed_mcp_servers: params.allowed_mcp_servers.clone(),
                 };
                 crate::dispatch_ops::handle_tachi_dispatch(self, dispatch_params).await
+            }
+            "complete" => {
+                let task = params
+                    .task
+                    .clone()
+                    .ok_or_else(|| "task is required when action='complete'".to_string())?;
+                let agent = params
+                    .agent
+                    .clone()
+                    .ok_or_else(|| "agent is required when action='complete'".to_string())?;
+                let outcome = params
+                    .outcome
+                    .clone()
+                    .ok_or_else(|| "outcome is required when action='complete'".to_string())?;
+                let complete_params = TachiCompleteParams {
+                    task_id: params.task_id.clone(),
+                    task,
+                    agent,
+                    outcome,
+                    task_type: params.task_type.clone(),
+                    profile: params.profile.clone(),
+                    risk: params.risk.clone(),
+                    duration_ms: params.duration_ms,
+                    skills_used: params.skills_used.clone(),
+                    cost_tokens: params.cost_tokens,
+                    cost_usd: params.cost_usd,
+                    quality_score: params.quality_score,
+                    notes: params.notes.clone(),
+                    trajectory: params.trajectory.clone(),
+                    diff: params.diff.clone(),
+                    worktree: params.worktree.clone(),
+                    subagents: params.subagents.clone(),
+                    dispatch_id: params.dispatch_id.clone(),
+                    flow_id: params.flow_id.clone(),
+                    issue_ref: params.issue_ref.clone(),
+                    pr_ref: params.pr_ref.clone(),
+                    evidence_refs: params.evidence_refs.clone(),
+                    tests_run: params.tests_run.clone(),
+                    diff_present: params.diff_present,
+                    scope: params.scope.clone(),
+                    project: params.project.clone(),
+                };
+                crate::complete_ops::handle_tachi_complete(self, complete_params).await
             }
             "board" => {
                 let board_params = TachiBoardParams {
@@ -1916,7 +1959,7 @@ impl MemoryServer {
                 Ok(result)
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'complete', 'board', 'profiles', 'profile', 'card', 'recommend', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;
