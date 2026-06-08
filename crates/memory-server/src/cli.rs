@@ -916,6 +916,18 @@ pub(crate) enum VaultAction {
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
     },
+    /// Diagnose a credential profile without decrypting or writing secrets.
+    Doctor {
+        /// Credential profile name to diagnose.
+        #[arg(long)]
+        profile: String,
+        /// Agent or dispatch-profile consumer id requesting the credential.
+        #[arg(long)]
+        consumer: String,
+        /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
+        #[arg(long, value_name = "PATH")]
+        config: Option<PathBuf>,
+    },
     /// Export encrypted Vault rows to an iCloud-compatible sync bundle.
     SyncExport {
         /// Output bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.

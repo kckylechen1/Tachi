@@ -84,6 +84,32 @@ pub(crate) struct CredentialMaterializeStepReport {
     pub chmod: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CredentialDoctorReport {
+    pub profile: String,
+    pub consumer: String,
+    pub issues: Vec<CredentialDoctorIssue>,
+    pub summary: CredentialDoctorSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CredentialDoctorIssue {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct CredentialDoctorSummary {
+    pub issue_count: usize,
+    pub high_count: usize,
+    pub medium_count: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CredentialApplyOptions {
     pub allow_existing: bool,
@@ -307,12 +333,15 @@ fn mode_from_chmod(chmod: Option<&str>) -> Result<u32, String> {
     u32::from_str_radix(raw, 8).map_err(|e| format!("invalid chmod '{raw}': {e}"))
 }
 
-fn ensure_safe_file_copy_target(path: &Path) -> Result<(), String> {
+fn is_high_risk_file_copy_target(path: &Path) -> bool {
     let raw = path.to_string_lossy();
-    if raw.ends_with("/.claude.json")
+    raw.ends_with("/.claude.json")
         || raw.contains("/.claude/")
         || raw.contains("/.claude-code-router/")
-    {
+}
+
+fn ensure_safe_file_copy_target(path: &Path) -> Result<(), String> {
+    if is_high_risk_file_copy_target(path) {
         return Err(format!(
             "refusing high-risk credential target '{}'; use a narrower generated credential path",
             path.display()
@@ -480,4 +509,124 @@ pub(crate) fn credential_materialize_report_json(
     report: &CredentialMaterializeReport,
 ) -> serde_json::Value {
     json!(report)
+}
+
+pub(crate) fn doctor_credential_profile(
+    profile_name: &str,
+    profile: &CredentialProfile,
+    consumer: &str,
+    store: &MemoryStore,
+) -> Result<CredentialDoctorReport, String> {
+    let plan = plan_credential_materialization(profile_name, profile, consumer, store)?;
+    let mut issues = Vec::new();
+
+    if !plan.allowed {
+        issues.push(CredentialDoctorIssue {
+            severity: "high".to_string(),
+            code: "consumer_denied".to_string(),
+            message: format!(
+                "consumer '{}' is not allowed by credential profile '{}'",
+                consumer, profile_name
+            ),
+            source: None,
+            target: None,
+        });
+    }
+
+    for step in &plan.steps {
+        match step.status.as_str() {
+            "missing_secret" => issues.push(CredentialDoctorIssue {
+                severity: "high".to_string(),
+                code: "missing_secret".to_string(),
+                message: format!("Vault secret '{}' is missing", step.resolved_secret),
+                source: Some(step.resolved_secret.clone()),
+                target: Some(step.target.clone()),
+            }),
+            "denied_secret" => issues.push(CredentialDoctorIssue {
+                severity: "high".to_string(),
+                code: "secret_denied_for_consumer".to_string(),
+                message: format!(
+                    "Vault secret '{}' does not allow consumer '{}'",
+                    step.resolved_secret, consumer
+                ),
+                source: Some(step.resolved_secret.clone()),
+                target: Some(step.target.clone()),
+            }),
+            "unsupported" => issues.push(CredentialDoctorIssue {
+                severity: "medium".to_string(),
+                code: "unsupported_materializer".to_string(),
+                message: format!(
+                    "materializer '{}' is not supported by this credential slice",
+                    step.materializer_type
+                ),
+                source: Some(step.resolved_secret.clone()),
+                target: Some(step.target.clone()),
+            }),
+            _ => {}
+        }
+
+        if step.materializer_type == "file_copy" {
+            let target = PathBuf::from(&step.target);
+            if is_high_risk_file_copy_target(&target) {
+                issues.push(CredentialDoctorIssue {
+                    severity: "high".to_string(),
+                    code: "high_risk_target".to_string(),
+                    message: format!(
+                        "target '{}' is a broad session/auth path and is rejected by apply",
+                        target.display()
+                    ),
+                    source: Some(step.resolved_secret.clone()),
+                    target: Some(step.target.clone()),
+                });
+            }
+            if let Ok(meta) = fs::metadata(&target) {
+                issues.push(CredentialDoctorIssue {
+                    severity: "medium".to_string(),
+                    code: "existing_target".to_string(),
+                    message: format!(
+                        "target '{}' already exists; apply will require allow_existing and create a backup",
+                        target.display()
+                    ),
+                    source: Some(step.resolved_secret.clone()),
+                    target: Some(step.target.clone()),
+                });
+                #[cfg(unix)]
+                {
+                    let mode = meta.permissions().mode() & 0o777;
+                    if mode & 0o077 != 0 {
+                        issues.push(CredentialDoctorIssue {
+                            severity: "high".to_string(),
+                            code: "target_permissions_too_broad".to_string(),
+                            message: format!(
+                                "target '{}' permissions are {:o}; credential files should be 0600",
+                                target.display(),
+                                mode
+                            ),
+                            source: Some(step.resolved_secret.clone()),
+                            target: Some(step.target.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let high_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "high")
+        .count();
+    let medium_count = issues
+        .iter()
+        .filter(|issue| issue.severity == "medium")
+        .count();
+    Ok(CredentialDoctorReport {
+        profile: profile_name.to_string(),
+        consumer: consumer.to_string(),
+        summary: CredentialDoctorSummary {
+            issue_count: issues.len(),
+            high_count,
+            medium_count,
+        },
+        issues,
+    })
 }
