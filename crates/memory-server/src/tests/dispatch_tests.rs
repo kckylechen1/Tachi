@@ -774,11 +774,12 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
     let server = make_server();
 
     for idx in 0..10 {
+        let agent = if idx < 5 { "claude" } else { "claude-alt" };
         server
             .tachi_complete(Parameters(TachiCompleteParams {
                 task_id: Some(format!("loadout-proposal-plan-{idx}")),
                 task: "Plan a dispatch loadout evolution slice".to_string(),
-                agent: "claude".to_string(),
+                agent: agent.to_string(),
                 outcome: "success".to_string(),
                 task_type: Some("plan_request".to_string()),
                 profile: Some("claude_plan".to_string()),
@@ -857,6 +858,38 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_str()
         .expect("proposal id")
         .to_string();
+    let passive_proposal = proposals["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["operation"] == json!("add_evidence_backed_passive_trait")
+                    && proposal["trait_id"] == json!("evidence_backed_planning")
+            })
+        })
+        .expect("passive trait evolution proposal");
+    assert_eq!(
+        proposal_items
+            .iter()
+            .filter(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["operation"] == json!("add_evidence_backed_passive_trait")
+                    && proposal["trait_id"] == json!("evidence_backed_planning")
+            })
+            .count(),
+        1,
+        "duplicate agent/model matrix rows should not emit duplicate passive trait proposals: {proposal_items:?}"
+    );
+    assert_eq!(
+        passive_proposal["proposed_patch"]["add_passive_traits"][0],
+        json!("evidence_backed_planning")
+    );
+    let passive_proposal_id = passive_proposal["proposal_id"]
+        .as_str()
+        .expect("passive proposal id")
+        .to_string();
 
     let mut review = task_params("review_proposal");
     review.proposal_id = Some(proposal_id.clone());
@@ -899,6 +932,35 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .expect_err("applied proposal should require a fresh approved proposal");
     assert!(err.contains("must be approved before apply"), "{err}");
 
+    let mut passive_review = task_params("review_proposal");
+    passive_review.proposal_id = Some(passive_proposal_id.clone());
+    passive_review.review_status = Some("approved".to_string());
+    passive_review.notes = Some("Human approved passive trait projection.".to_string());
+    let passive_reviewed_raw = server
+        .tachi_task(Parameters(passive_review))
+        .await
+        .expect("passive review should succeed");
+    let passive_reviewed: serde_json::Value =
+        serde_json::from_str(&passive_reviewed_raw).expect("passive review JSON");
+    assert_eq!(
+        passive_reviewed["proposal"]["operation"],
+        json!("add_evidence_backed_passive_trait")
+    );
+
+    let mut passive_apply = task_params("apply_proposals");
+    passive_apply.proposal_id = Some(passive_proposal_id);
+    passive_apply.confirm = true;
+    let passive_applied_raw = server
+        .tachi_task(Parameters(passive_apply))
+        .await
+        .expect("approved passive trait should project");
+    let passive_applied: serde_json::Value =
+        serde_json::from_str(&passive_applied_raw).expect("passive apply JSON");
+    assert_eq!(
+        passive_applied["proposal"]["projection"]["added_passive_traits"][0],
+        json!("evidence_backed_planning")
+    );
+
     let loadout_raw = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "loadout".to_string(),
@@ -930,6 +992,20 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         loadout["skill_loadout"]["projection"]["status"],
         json!("applied_overlay")
     );
+    assert!(loadout["skill_loadout"]["passive_traits"]
+        .as_array()
+        .expect("passive traits")
+        .contains(&json!("evidence_backed_planning")));
+    assert!(loadout["skill_loadout"]["projected_passive_traits"]
+        .as_array()
+        .expect("projected passive traits")
+        .contains(&json!("evidence_backed_planning")));
+    assert!(
+        loadout["mbit_card"]["skill_loadout"]["projected_passive_traits"]
+            .as_array()
+            .expect("mbit projected passive traits")
+            .contains(&json!("evidence_backed_planning"))
+    );
 
     let profiles_raw = server
         .tachi_task(Parameters(task_params("profiles")))
@@ -946,6 +1022,12 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("signature skills")
         .contains(&json!("skill:planning-ux-review")));
+    assert!(
+        claude_profile["mbit_card"]["skill_loadout"]["projected_passive_traits"]
+            .as_array()
+            .expect("profile mbit projected passive traits")
+            .contains(&json!("evidence_backed_planning"))
+    );
 
     let mut recommend_params = task_params("recommend");
     recommend_params.task = Some("Plan a dispatch loadout evolution slice".to_string());
@@ -960,6 +1042,18 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("recommend resolved skills")
         .contains(&json!("skill:planning-ux-review")));
+    assert!(
+        recommend["resolved_skill_loadout"]["projected_passive_traits"]
+            .as_array()
+            .expect("recommend projected passive traits")
+            .contains(&json!("evidence_backed_planning"))
+    );
+    assert!(
+        recommend["mbit_card"]["skill_loadout"]["projected_passive_traits"]
+            .as_array()
+            .expect("recommend mbit projected passive traits")
+            .contains(&json!("evidence_backed_planning"))
+    );
 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
@@ -980,6 +1074,12 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_array()
         .expect("agent signature skills")
         .contains(&json!("skill:planning-ux-review")));
+    assert!(
+        agent_claude_profile["skill_loadout"]["projected_passive_traits"]
+            .as_array()
+            .expect("agent projected passive traits")
+            .contains(&json!("evidence_backed_planning"))
+    );
 }
 
 #[tokio::test]
@@ -2982,6 +3082,7 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
                         "kind": "profile_card_loadout_overlay",
                         "profile": "claude_plan",
                         "add_signature_skills": ["skill:planning-ux-review"],
+                        "add_passive_traits": ["evidence_backed_planning"],
                         "source_proposal_ids": ["proposal-fixture"],
                     })
                     .to_string(),
@@ -3034,6 +3135,10 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     );
     assert!(
         prompt.contains("projection_status: applied_overlay"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("projected_passive_traits: evidence_backed_planning"),
         "{prompt}"
     );
     assert!(

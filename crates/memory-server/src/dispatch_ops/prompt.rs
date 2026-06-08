@@ -578,6 +578,7 @@ fn render_dispatch_profile_overlay(server: &MemoryServer, params: &TachiDispatch
                         "signature_skills",
                         "projected_signature_skills",
                         "passive_traits",
+                        "projected_passive_traits",
                         "forbidden_skills",
                     ] {
                         let items = loadout
