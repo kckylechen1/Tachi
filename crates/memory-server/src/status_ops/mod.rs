@@ -1131,7 +1131,7 @@ async fn handle_tachi_status_detail(
             "api_keys": {
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
-                "runtime_pools": server.llm.provider_pool_statuses(),
+                "provider_pools": server.llm.provider_pool_statuses(),
             },
             "provider_probe_cache": snapshot.provider_probe_cache,
             "doctor_hint": readiness.get("doctor_hint"),
