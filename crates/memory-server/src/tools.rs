@@ -1753,6 +1753,7 @@ impl MemoryServer {
                     command: params.command.clone(),
                     project: params.project.clone(),
                     stage: params.stage.clone(),
+                    credential_profiles: params.credential_profiles.clone(),
                     issue_ref: params.issue_ref.clone(),
                     pr_ref: params.pr_ref.clone(),
                     flow_id: params.flow_id.clone(),

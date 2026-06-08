@@ -605,6 +605,12 @@ pub(crate) struct TachiDispatchParams {
     #[serde(default, alias = "dispatch_profile")]
     pub profile: Option<String>,
 
+    /// Credential profile ids to materialize before spawning the worker.
+    /// Values resolve from `.tachi/credentials/*.json`; materialization returns
+    /// only redacted status while injecting concrete env/file outputs internally.
+    #[serde(default)]
+    pub credential_profiles: Vec<String>,
+
     /// Task description / prompt for the agent
     pub task: String,
 
@@ -1132,6 +1138,11 @@ pub(crate) struct TachiTaskParams {
         description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
     )]
     pub profile: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Credential profile ids to materialize before spawning the worker, e.g. codex_shared. Values resolve from .tachi/credentials/*.json."
+    )]
+    pub credential_profiles: Vec<String>,
     #[serde(default)]
     pub issue_ref: Option<String>,
     #[serde(default)]

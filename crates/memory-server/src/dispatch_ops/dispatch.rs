@@ -16,7 +16,15 @@ use super::subprocess::{
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
 };
+use crate::credential_profile::{
+    apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,
+    find_credential_profile, plan_credential_materialization, profile_secret_names,
+    CredentialApplyOptions, CredentialMaterializeReport,
+};
 use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
+use crate::vault_ops::read_unlocked_vault_secret;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
@@ -59,6 +67,164 @@ pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String
     let sanitized = agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!("{}-{}-{}", timestamp, sanitized, suffix)
+}
+
+fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(cwd) = cwd {
+        for ancestor in cwd.ancestors() {
+            let dir = ancestor.join(default_credentials_dir());
+            let key = dir.to_string_lossy().to_string();
+            if seen.insert(key) {
+                dirs.push(dir);
+            }
+        }
+    }
+
+    let default_dir = default_credentials_dir();
+    let key = default_dir.to_string_lossy().to_string();
+    if seen.insert(key) {
+        dirs.push(default_dir);
+    }
+
+    dirs
+}
+
+fn find_dispatch_credential_profile(
+    profile_name: &str,
+    cwd: Option<&Path>,
+) -> Result<(PathBuf, crate::credential_profile::CredentialProfile), String> {
+    let mut searched = Vec::new();
+    let mut skipped = Vec::new();
+    for dir in credential_search_dirs(cwd) {
+        searched.push(dir.display().to_string());
+        if !dir.exists() {
+            continue;
+        }
+        match find_credential_profile(&dir, profile_name) {
+            Ok(found) => return Ok(found),
+            Err(err) => skipped.push(err),
+        }
+    }
+
+    let mut msg = format!(
+        "Credential profile '{}' not found. Searched: {}",
+        profile_name,
+        searched.join(", ")
+    );
+    if !skipped.is_empty() {
+        msg.push_str(&format!("; skipped: {}", skipped.join(" | ")));
+    }
+    Err(msg)
+}
+
+fn dispatch_credential_consumer(
+    agent_norm: &str,
+    selected_profile: Option<&str>,
+    profile: &crate::credential_profile::CredentialProfile,
+) -> String {
+    let allowed = &profile.allowed_consumers;
+    if allowed.agents.is_empty() && allowed.profiles.is_empty() {
+        return agent_norm.to_string();
+    }
+    if allowed.agents.iter().any(|agent| agent == agent_norm) {
+        return agent_norm.to_string();
+    }
+    if let Some(selected_profile) = selected_profile {
+        if allowed
+            .profiles
+            .iter()
+            .any(|profile| profile == selected_profile)
+        {
+            return selected_profile.to_string();
+        }
+    }
+    selected_profile.unwrap_or(agent_norm).to_string()
+}
+
+struct DispatchCredentialMaterialization {
+    reports: Vec<CredentialMaterializeReport>,
+    env: HashMap<String, String>,
+}
+
+fn credential_report_ready(report: &CredentialMaterializeReport) -> bool {
+    report.allowed
+        && report.missing_secrets.is_empty()
+        && report.denied_secrets.is_empty()
+        && report.steps.iter().all(|step| step.status == "ready")
+}
+
+fn materialize_dispatch_credentials(
+    server: &MemoryServer,
+    params: &TachiDispatchParams,
+    agent_norm: &str,
+    selected_profile: Option<&str>,
+) -> Result<DispatchCredentialMaterialization, String> {
+    if params.credential_profiles.is_empty() {
+        return Ok(DispatchCredentialMaterialization {
+            reports: Vec::new(),
+            env: HashMap::new(),
+        });
+    }
+
+    let cwd = params.cwd.as_deref().map(Path::new);
+    let mut profile_names = params
+        .credential_profiles
+        .iter()
+        .map(|profile| profile.trim().to_string())
+        .filter(|profile| !profile.is_empty())
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut profile_names);
+
+    let mut reports = Vec::new();
+    let mut env = HashMap::new();
+    for profile_name in profile_names {
+        let (_, profile) = find_dispatch_credential_profile(&profile_name, cwd)?;
+        let consumer = dispatch_credential_consumer(agent_norm, selected_profile, &profile);
+        let plan = server.with_global_store(|store| {
+            plan_credential_materialization(&profile_name, &profile, &consumer, store)
+        })?;
+        if !credential_report_ready(&plan) {
+            let plan_json = serde_json::to_string(&credential_materialize_report_json(&plan))
+                .map_err(|e| format!("serialize credential plan: {e}"))?;
+            return Err(format!(
+                "Credential profile '{}' is not ready for consumer '{}': {}",
+                profile_name, consumer, plan_json
+            ));
+        }
+
+        let secret_names = profile_secret_names(&profile);
+        let mut secret_values = HashMap::new();
+        for secret_name in secret_names {
+            let value = read_unlocked_vault_secret(server, &secret_name, Some(&consumer), false)
+                .map_err(|err| {
+                    format!(
+                        "Credential profile '{}' requires unlocked Vault secret '{}' for consumer '{}': {}",
+                        profile_name, secret_name, consumer, err
+                    )
+                })?;
+            secret_values.insert(secret_name, value);
+        }
+
+        let result = server.with_global_store(|store| {
+            apply_credential_materialization(
+                &profile_name,
+                &profile,
+                &consumer,
+                store,
+                &secret_values,
+                &CredentialApplyOptions {
+                    allow_existing: false,
+                },
+            )
+        })?;
+        env.extend(result.env);
+        reports.push(result.report);
+    }
+
+    Ok(DispatchCredentialMaterialization { reports, env })
 }
 
 fn suggested_complete_payload(
@@ -465,11 +631,92 @@ pub(crate) async fn handle_tachi_dispatch(
             ));
         }
     };
-    let _ = apply_unlocked_vault_env(
+    let legacy_vault_env_count = apply_unlocked_vault_env(
         &mut cmd,
         server,
         params.cwd.as_deref().map(std::path::Path::new),
     );
+    if legacy_vault_env_count > 0 {
+        append_trajectory_event(
+            &trajectory_path,
+            json!({
+                "event": "legacy_vault_env_injected",
+                "dispatch_id": dispatch_id,
+                "agent": agent_norm.clone(),
+                "count": legacy_vault_env_count,
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+    }
+    let dispatch_credentials = match materialize_dispatch_credentials(
+        server,
+        &params,
+        &agent_norm,
+        resolved_profile.selected_profile.as_deref(),
+    ) {
+        Ok(materialized) => materialized,
+        Err(err) => {
+            append_trajectory_event(
+                &trajectory_path,
+                json!({
+                    "event": "credentials_materialization_failed",
+                    "dispatch_id": dispatch_id,
+                    "agent": agent_norm.clone(),
+                    "credential_profiles": params.credential_profiles.clone(),
+                    "error": err.clone(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                Some(1),
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": agent_norm.clone(),
+                    "task": params.task.clone(),
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "result_written": false,
+                    "timeout_secs": timeout_secs_for_status,
+                    "error": err.clone(),
+                })),
+            );
+            return Err(err);
+        }
+    };
+    for (name, value) in &dispatch_credentials.env {
+        cmd.env(name, value);
+    }
+    if !dispatch_credentials.reports.is_empty() {
+        append_trajectory_event(
+            &trajectory_path,
+            json!({
+                "event": "credentials_materialized",
+                "dispatch_id": dispatch_id,
+                "agent": agent_norm.clone(),
+                "credential_profiles": params.credential_profiles.clone(),
+                "reports": dispatch_credentials
+                    .reports
+                    .iter()
+                    .map(credential_materialize_report_json)
+                    .collect::<Vec<_>>(),
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+    }
+    let credential_reports_json = dispatch_credentials
+        .reports
+        .iter()
+        .map(credential_materialize_report_json)
+        .collect::<Vec<_>>();
 
     // 6. Spawn background task with Watchdog
     let server_clone = server.clone();
@@ -755,6 +1002,7 @@ pub(crate) async fn handle_tachi_dispatch(
         "selected_profile": resolved_profile.selected_profile,
         "tool_access": resolved_profile.mcp_access,
         "dispatch_profile": resolved_profile.mbit_card,
+        "credentials": credential_reports_json,
         "route_explanation": resolved_profile.route_explanation,
         "fallback_chain": resolved_profile.fallback_chain,
         "issue_ref": params.issue_ref,

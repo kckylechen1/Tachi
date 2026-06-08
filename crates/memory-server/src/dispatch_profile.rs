@@ -33,6 +33,7 @@ pub(crate) struct DispatchProfileDef {
     pub auto_capability_bundle: bool,
     pub allowed_facades: &'static [&'static str],
     pub allowed_mcp_servers: &'static [&'static str],
+    pub credential_profiles: &'static [&'static str],
     pub common_skills: &'static [&'static str],
     pub signature_skills: &'static [&'static str],
     pub passive_traits: &'static [&'static str],
@@ -58,6 +59,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[SUPERPOWER_WRITING_PLANS, WAZA_THINK],
         signature_skills: &[
             SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT,
@@ -84,6 +86,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_task"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[SUPERPOWER_EXECUTING_PLANS],
         signature_skills: &[WAZA_TACHI, CODING_TEST_STRATEGY],
         passive_traits: &["bounded_diff", "tests_required", "leader_owns_merge"],
@@ -107,6 +110,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_wiki", "tachi_task"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[
             SUPERPOWER_REQUESTING_CODE_REVIEW,
             SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
@@ -138,6 +142,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: false,
         allowed_facades: &["tachi_memory"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[WAZA_CHECK],
         signature_skills: &[SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
         passive_traits: &["fast_sanity_only", "flag_uncertainty"],
@@ -161,6 +166,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: true,
         allowed_facades: &["tachi_memory", "tachi_wiki"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[WAZA_THINK, CODING_ARCHITECTURE_DECISION],
         signature_skills: &[SUPERPOWER_WRITING_PLANS],
         passive_traits: &["challenge_assumptions", "prefer_rejected_options"],
@@ -184,6 +190,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         auto_capability_bundle: false,
         allowed_facades: &["tachi_memory"],
         allowed_mcp_servers: &[],
+        credential_profiles: &[],
         common_skills: &[WAZA_READ],
         signature_skills: &[WAZA_LEARN],
         passive_traits: &["read_only_mapping", "cite_files"],
@@ -204,6 +211,7 @@ pub(crate) struct ResolvedDispatchProfile {
     pub mcp_access: DispatchMcpAccessParams,
     pub evidence_required: Vec<String>,
     pub fallback_chain: Vec<String>,
+    pub credential_profiles: Vec<String>,
     pub route_explanation: Vec<String>,
     pub mbit_card: Option<Value>,
 }
@@ -407,6 +415,13 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
                 .map(|s| s.to_string())
                 .collect();
         }
+        if params.credential_profiles.is_empty() {
+            params.credential_profiles = profile
+                .credential_profiles
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
     }
     if params.allowed_mcp_servers.is_empty() {
         if let Some(access) = params.mcp_access.as_ref() {
@@ -450,6 +465,13 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let mut credential_profiles = params
+        .credential_profiles
+        .iter()
+        .map(|profile| profile.trim().to_string())
+        .filter(|profile| !profile.is_empty())
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut credential_profiles);
 
     Ok(ResolvedDispatchProfile {
         selected_profile: profile.map(|p| p.name.to_string()),
@@ -460,6 +482,7 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
         mcp_access,
         evidence_required,
         fallback_chain,
+        credential_profiles,
         route_explanation,
         mbit_card: profile.map(profile_json),
     })
@@ -482,6 +505,7 @@ fn profile_json(profile: &DispatchProfileDef) -> Value {
             "github_read": profile.github_read,
             "write_actions": profile.write_actions,
         },
+        "credential_profiles": profile.credential_profiles,
         "skill_loadout": profile_skill_loadout_json(profile),
         "evidence_contract": {
             "required": profile.evidence_required,
@@ -747,6 +771,7 @@ mod tests {
             command: Vec::new(),
             project: None,
             stage: None,
+            credential_profiles: Vec::new(),
             issue_ref: Some("kckylechen1/tachi#194".to_string()),
             pr_ref: None,
             flow_id: Some("flow-194".to_string()),
