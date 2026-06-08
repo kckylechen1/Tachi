@@ -494,7 +494,7 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
     matrix.push(ux_step(
         "complete_eval",
         "Completion / eval linkage",
-        "tachi_complete(dispatch_id=..., flow_id=...)",
+        "tachi_task(action='complete', dispatch_id=..., flow_id=...)",
         if !completed_dispatch_ids.is_empty() {
             "passed"
         } else if !dispatch_ids.is_empty() {
@@ -513,7 +513,7 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
                 "no tachi_complete eval linked to a dispatch card",
             ),
         ]),
-        "Call tachi_complete with flow_id and dispatch_id so /eval evidence links back to the dispatch card.",
+        "Call tachi_task(action='complete') with flow_id and dispatch_id so /eval evidence links back to the dispatch card.",
         true,
     ));
     matrix.push(ux_step(
