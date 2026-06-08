@@ -95,6 +95,16 @@ fn tachi_arena_action_schema(
     )
 }
 
+fn tachi_verify_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["start", "record", "status", "board"],
+        "Required Tachi verification ledger action.",
+        generator,
+    )
+}
+
 fn tachi_shell_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
@@ -1244,6 +1254,81 @@ pub(crate) struct TachiArenaParams {
     /// Close requires written results to have been collected. Defaults to true.
     #[serde(default)]
     pub require_collected: Option<bool>,
+}
+
+// ─── Facade: tachi_verify (background verification ledger) ──────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TachiVerifyParams {
+    /// Action: "start", "record", "status", or "board".
+    #[schemars(schema_with = "tachi_verify_action_schema")]
+    pub action: String,
+
+    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Tachi flow id whose .tachi/runs/<flow_id>/verification.json ledger is read or updated.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// Optional GitHub PR reference, e.g. owner/repo#209.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Git head SHA the check result was produced for. Safe-merge treats mismatched required checks as stale.
+    #[serde(default)]
+    pub head_sha: Option<String>,
+
+    /// Stable check id, e.g. gitleaks, cargo-check, clippy, memory-server-tests.
+    #[serde(default)]
+    pub check_id: Option<String>,
+
+    /// Check kind, e.g. gitleaks, cargo_check, clippy, cargo_test, custom.
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    /// Command recorded for a single verification result.
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Commands to seed or update in bulk. Used by action=start to mark multiple gates pending.
+    #[serde(default)]
+    pub commands: Vec<String>,
+
+    /// Verification status: pending, running, passed, failed, skipped, or stale.
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Process exit code when known.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_i64_from_string_or_number"
+    )]
+    pub exit_code: Option<i64>,
+
+    /// Path to a durable log/artifact for this verification run.
+    #[serde(default)]
+    pub log_path: Option<String>,
+
+    /// Short result summary, e.g. "no leaks found" or "608 passed; 1 ignored".
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Working directory the command was run in.
+    #[serde(default)]
+    pub cwd: Option<String>,
+
+    /// Whether this check is required for safe_merge. Defaults true.
+    #[serde(default)]
+    pub required: Option<bool>,
+
+    /// Board/status result limit when flow_id is omitted.
+    #[serde(
+        default,
+        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
+    )]
+    pub limit: Option<u32>,
 }
 
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────

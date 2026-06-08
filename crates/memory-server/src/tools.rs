@@ -76,6 +76,7 @@ use crate::vault_ops::{
     VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
+use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read, handle_wiki_search,
 };
@@ -1822,7 +1823,7 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates that require leader verdict before promotion. safe_merge is for GitHub PR merges, returns requested_mode=preview unless confirm=true and dry_run!=true, and reports merge_attempted/merge_executed separately. Standard policy waits on missing checks/reviews. Use approve_merge/tachi_task for local dispatched worktree merges. Requires GH_TOKEN in Vault or environment."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates that require leader verdict before promotion. safe_merge is for GitHub PR merges, returns requested_mode=preview unless confirm=true and dry_run!=true, and reports merge_attempted/merge_executed separately. When flow_id is supplied, safe_merge consumes .tachi/runs/<flow_id>/verification.json from tachi_verify; standard/strict wait on missing required verification and block on failed/stale verification. Use approve_merge/tachi_task for local dispatched worktree merges. Requires GH_TOKEN in Vault or environment."
     )]
     pub(crate) async fn tachi_gh(
         &self,
@@ -1849,6 +1850,18 @@ impl MemoryServer {
             &raw,
             format.as_deref(),
         ))
+    }
+
+    // ─── Tachi Verify: background verification evidence ledger ─────────────
+
+    #[tool(
+        description = "Background verification ledger. action='start' seeds pending checks; action='record' stores results from external runners (gitleaks, cargo check, clippy, tests); action='status'/'board' reads .tachi/runs/<flow_id>/verification.json. Safe-merge consumes required checks for the matching flow/head SHA: failed or stale required checks block merges, and missing required checks wait in standard/strict mode."
+    )]
+    pub(crate) async fn tachi_verify(
+        &self,
+        Parameters(params): Parameters<TachiVerifyParams>,
+    ) -> Result<String, String> {
+        handle_tachi_verify(self, params).await
     }
 
     // ─── Tachi Shell: skill-gated flow orchestration facade ─────────────────

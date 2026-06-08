@@ -103,6 +103,7 @@ mod vault_crypto;
 mod vault_ops;
 mod vector_backfill;
 mod vector_sweep;
+mod verify_ops;
 mod web_search_ops;
 mod wiki_ops;
 mod workflow_closure;
@@ -330,6 +331,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_wiki",
     "tachi_skill",
     "tachi_arena",
+    "tachi_verify",
     "tachi_shell",
 ];
 

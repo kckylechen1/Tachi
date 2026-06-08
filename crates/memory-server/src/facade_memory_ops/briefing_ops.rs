@@ -51,6 +51,7 @@ pub(crate) async fn handle_memory_briefing(
     let kanban_cap = if compact { 3 } else { 5 };
     let checkpoint_cap = if compact { 2 } else { 3 };
     let cross_project_cap = if compact { 3 } else { 5 };
+    let verification_cap = if compact { 3 } else { 6 };
 
     let mem_params = SearchMemoryParams {
         query: query.clone(),
@@ -158,6 +159,7 @@ pub(crate) async fn handle_memory_briefing(
     let warnings: Vec<String> = warnings_res;
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
+    let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
     let wiki_counts: serde_json::Value = wiki_counts_res?;
     let health_summary = if compact {
         json!({"health_score": 95, "warnings": [], "wiki": wiki_counts, "compact": true})
@@ -178,6 +180,7 @@ pub(crate) async fn handle_memory_briefing(
             "wiki": wiki,
             "cross_project": cross_project,
             "health": health_summary,
+            "verification": verification,
             "kanban": board,
             "recent_checkpoints": checkpoints,
             "compact": compact,
@@ -187,6 +190,7 @@ pub(crate) async fn handle_memory_briefing(
                 "kanban": kanban_cap,
                 "checkpoints": checkpoint_cap,
                 "cross_project": cross_project_cap,
+                "verification": verification_cap,
             },
         }));
     }
@@ -198,6 +202,7 @@ pub(crate) async fn handle_memory_briefing(
         &wiki,
         &cross_project,
         &health_summary,
+        &verification,
         &board,
         &checkpoints,
         compact,

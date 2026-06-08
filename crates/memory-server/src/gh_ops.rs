@@ -9,6 +9,7 @@ use crate::tool_params::{
     GhPrReadParams, GhRepoViewParams, TachiGhParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
+use crate::verify_ops::evaluate_verification_gate;
 use crate::MemoryServer;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -1052,6 +1053,92 @@ fn effective_safe_merge_dry_run(confirm: bool, requested_dry_run: Option<bool>) 
     !confirm || requested_dry_run.unwrap_or(false)
 }
 
+fn verification_satisfies_head_consistency(gate: Option<&Value>, policy: MergeGatePolicy) -> bool {
+    policy.require_head_consistency
+        && gate.and_then(|v| v.get("overall")).and_then(Value::as_str) == Some("passed")
+}
+
+fn remove_waiting_on(decision: MergeDecision, reason: &str) -> MergeDecision {
+    match decision {
+        MergeDecision::Pending { mut waiting_on } => {
+            waiting_on.retain(|item| item != reason);
+            if waiting_on.is_empty() {
+                MergeDecision::Ready
+            } else {
+                MergeDecision::Pending { waiting_on }
+            }
+        }
+        other => other,
+    }
+}
+
+fn apply_verification_gate_to_decision(
+    decision: MergeDecision,
+    gate: Option<&Value>,
+    policy: MergeGatePolicy,
+) -> MergeDecision {
+    let Some(gate) = gate else {
+        return decision;
+    };
+    let reasons: Vec<String> = gate
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !reasons.is_empty() {
+        return match decision {
+            MergeDecision::Blocked {
+                reasons: mut existing,
+            } => {
+                existing.extend(reasons);
+                existing.sort();
+                existing.dedup();
+                MergeDecision::Blocked { reasons: existing }
+            }
+            _ => MergeDecision::Blocked { reasons },
+        };
+    }
+
+    let decision = if verification_satisfies_head_consistency(Some(gate), policy) {
+        remove_waiting_on(decision, "head:consistency_unavailable")
+    } else {
+        decision
+    };
+
+    let waiting_on: Vec<String> = gate
+        .get("waiting_on")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if waiting_on.is_empty() {
+        return decision;
+    }
+    match decision {
+        MergeDecision::Ready => MergeDecision::Pending { waiting_on },
+        MergeDecision::Pending {
+            waiting_on: mut existing,
+        } => {
+            existing.extend(waiting_on);
+            existing.sort();
+            existing.dedup();
+            MergeDecision::Pending {
+                waiting_on: existing,
+            }
+        }
+        blocked => blocked,
+    }
+}
+
 fn parse_merge_gate_policy(raw: Option<&str>) -> Result<MergeGatePolicy, String> {
     let mode = match raw
         .unwrap_or("standard")
@@ -1378,7 +1465,42 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .pr_view(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
+    let mut verification_gate = match evaluate_verification_gate(flow_id, &pr.head_sha) {
+        Ok(gate) => gate,
+        Err(err) if flow_id.is_some() => Some(json!({
+            "flow_id": flow_id,
+            "overall": "failed",
+            "required_total": 0,
+            "current_head_sha": pr.head_sha,
+            "passed": [],
+            "failed": [],
+            "pending": [],
+            "stale": [],
+            "waiting_on": [],
+            "reasons": ["verification:invalid"],
+            "error": err,
+        })),
+        Err(err) => return Err(err),
+    };
+    if verification_gate.is_none()
+        && flow_id.is_some()
+        && !matches!(policy.mode, MergeGatePolicyMode::Permissive)
+    {
+        verification_gate = Some(json!({
+            "flow_id": flow_id,
+            "overall": "pending",
+            "required_total": 0,
+            "current_head_sha": pr.head_sha,
+            "passed": [],
+            "failed": [],
+            "pending": [],
+            "stale": [],
+            "waiting_on": ["verification:missing"],
+            "reasons": [],
+        }));
+    }
     let mut decision = evaluate_merge_gate_with_policy(&pr, policy);
+    decision = apply_verification_gate_to_decision(decision, verification_gate.as_ref(), policy);
     let has_linked_issue = !pr.linked_issue_refs.is_empty();
     if policy.require_linked_issue_or_flow && flow_id.is_none() && !has_linked_issue {
         decision = match decision {
@@ -1489,11 +1611,23 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "head_sha": pr.head_sha,
             "checks_head_sha": null,
             "review_decision_head_sha": null,
-            "head_consistent": false,
-            "state": "unknown",
+            "head_consistent": verification_satisfies_head_consistency(verification_gate.as_ref(), policy),
+            "state": if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
+                "verified_by_tachi_verification"
+            } else {
+                "unknown"
+            },
             "requirement": policy.require_head_consistency,
-            "source": "single_pr_snapshot",
-            "note": "gh_pr_checks does not expose independent head SHA data; match-head-commit still pins the final merge command",
+            "source": if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
+                "verification_ledger"
+            } else {
+                "single_pr_snapshot"
+            },
+            "note": if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
+                "required verification ledger passed for the same PR head SHA; match-head-commit still pins the final merge command"
+            } else {
+                "gh_pr_checks does not expose independent head SHA data; match-head-commit still pins the final merge command"
+            },
         },
         "checks": {
             "state": match pr.checks {
@@ -1525,6 +1659,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "has_linked_issue": has_linked_issue,
             "required": policy.require_linked_issue_or_flow,
         },
+        "verification": verification_gate,
     });
 
     let mut persisted = false;
@@ -1592,6 +1727,32 @@ mod safe_merge_tests {
             mergeable: Mergeable::Unknown,
             ..ready_pr()
         }
+    }
+
+    fn write_verification(root: &std::path::Path, flow: &str, status: &str, head_sha: &str) {
+        let run_dir = root.join(flow);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("verification.json"),
+            serde_json::to_string_pretty(&json!({
+                "flow_id": flow,
+                "head_sha": head_sha,
+                "overall": status,
+                "updated_at": "2026-06-08T00:00:00Z",
+                "items": [
+                    {
+                        "id": "gitleaks",
+                        "kind": "gitleaks",
+                        "status": status,
+                        "head_sha": head_sha,
+                        "required": true,
+                        "summary": "verification fixture"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1959,6 +2120,235 @@ mod safe_merge_tests {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
+    async fn safe_merge_with_flow_id_missing_verification_waits() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some("flow_missing-verification"),
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("ok");
+
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(v["will_merge"], false);
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "verification:missing"));
+        assert!(client.merge_calls().is_empty());
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safe_merge_failed_verification_blocks_even_permissive() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let flow = "flow_failed-verification";
+        write_verification(tmp.path(), flow, "failed", "deadbeef");
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some(flow),
+            MergeGatePolicy::permissive(),
+        )
+        .await
+        .expect("ok");
+
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "blocked");
+        assert!(v["decision"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "verification:gitleaks:failed"));
+        assert!(client.merge_calls().is_empty());
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safe_merge_stale_verification_waits_on_head_mismatch() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let flow = "flow_stale-verification";
+        write_verification(tmp.path(), flow, "passed", "oldsha");
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some(flow),
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("ok");
+
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "verification:gitleaks:stale"));
+        assert!(client.merge_calls().is_empty());
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safe_merge_strict_uses_passed_verification_for_head_consistency() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let flow = "flow_strict-verification";
+        write_verification(tmp.path(), flow, "passed", "deadbeef");
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            true,
+            Some(flow),
+            MergeGatePolicy::strict(),
+        )
+        .await
+        .expect("ok");
+
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "ready");
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["state"],
+            "verified_by_tachi_verification"
+        );
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["head_consistent"],
+            true
+        );
+        assert!(client.merge_calls().is_empty());
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn safe_merge_strict_does_not_treat_not_required_verification_as_head_proof() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let original = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+        let flow = "flow_strict-not-required";
+        let run_dir = tmp.path().join(flow);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("verification.json"),
+            serde_json::to_string_pretty(&json!({
+                "flow_id": flow,
+                "overall": "passed",
+                "items": [
+                    {"id":"optional-check","status":"passed","head_sha":"deadbeef","required":false}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let client = MockGhClient::new()
+            .with_pr("o/r", ready_pr())
+            .with_checks("o/r", 42, vec![]);
+
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            Some(flow),
+            MergeGatePolicy::strict(),
+        )
+        .await
+        .expect("ok");
+
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(
+            v["status_patch"]["head_consistency"]["head_consistent"],
+            false
+        );
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "head:consistency_unavailable"));
+        assert!(client.merge_calls().is_empty());
+        if let Some(v) = original {
+            std::env::set_var("TACHI_RUN_ROOT", v);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
     async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()
             .lock()
@@ -1971,6 +2361,7 @@ mod safe_merge_tests {
             .with_pr("o/r", ready_pr())
             .with_checks("o/r", 42, vec![]);
         let flow = "flow_test-safe-merge";
+        write_verification(tmp.path(), flow, "passed", "deadbeef");
         let out = handle_github_safe_merge(
             &client,
             "o/r",
@@ -2078,6 +2469,7 @@ mod safe_merge_tests {
             MockGhClient::new()
                 .with_pr("o/r", ready_pr())
                 .with_checks("o/r", 42, vec![]);
+        write_verification(tmp.path(), "flow_merged-safe-merge", "passed", "deadbeef");
         handle_github_safe_merge(
             &merged_client,
             "o/r",
