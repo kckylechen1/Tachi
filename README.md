@@ -142,13 +142,13 @@
 > 以此仙链馈入灵核对话，其当自阅安装仙谱，百事自理。
 >
 > ```
-> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/docs/INSTALL.md
+> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/docs/INSTALL.md
 > ```
 
 **【中策】 一符召灵（终端法诏）**
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/scripts/install.sh)"
 ```
 
 此符诏将自行：
@@ -197,7 +197,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
 1. 一键安装 Tachi + OpenClaw 扩展（推荐）：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/scripts/install.sh)"
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/scripts/install.sh)"
 
    该脚本会自动：
    - 通过 Homebrew 安装或升级 `tachi`

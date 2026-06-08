@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-06-08
+
+Patch release for post-1.5.0 MCP and agent workflow hardening.
+
+### Added
+
+- `tachi_memory(action="get")` on the unified memory facade, so standard-profile agents can fetch a full memory entry without exposing raw lower-level tools.
+- Vault provider key pools that materialize rotation members under logical env names, rotate concrete keys in process, cool down keys on HTTP 429, and surface provider key metadata in status output.
+- `tachi vault sync-export`, `sync-import`, and `sync-status` for encrypted Vault ciphertext bundles that can live in iCloud Drive without moving live SQLite databases into cloud sync.
+- Agent credential-surface documentation for future Codex, Claude Code, OpenCode, Hermes, OpenClaw, and Gemini materializers.
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, and `@chaoxlabs/tachi-node` versions are aligned to `1.5.1`.
+- Installer URLs across READMEs and `docs/INSTALL.md` now point at the `v1.5.1` release tag.
+- Tachi status now reports broader provider-key coverage, including search, OpenAI-compatible, Anthropic-compatible, Google/Gemini, DeepSeek, Zhipu/BigModel, Tavily, and Exa lanes.
+
+### Fixed
+
+- Precise memory recall for exact ids, path slugs, hyphenated technical terms, short technical tokens, and deep scoped superseded rows.
+- Run-ledger board ordering for mixed dispatch id formats such as timestamp-leading ids and `flow_YYYYMMDDTHHMMSSZ_...` ids.
+- Async board handling avoids running synchronous filesystem scans on the Tokio reactor.
+- Vault keychain loading no longer collapses standalone `*_2` style secret names unless a rotation prefix is explicitly configured.
+- Vault env materialization uses already decrypted pool entries instead of triggering DB-writing reads while preparing child env.
+- Vault sync bundle export creates temporary bundle files with private `0600` permissions before writing bytes.
+
 ## [1.5.0] - 2026-06-07
 
 Release focused on turning Tachi into a more complete agent engineering surface: native multi-agent coordination, auditable worker runs, skill policy, cleanup utilities, runtime observability, and release-ready package alignment.

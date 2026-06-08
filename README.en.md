@@ -94,13 +94,13 @@ For environments like Claude Desktop, Cursor, OpenCode, Gemini CLI, or AutoGen.
 > Copy the URL below into your AI assistant's chat. It will read the installation guide and configure everything automatically.
 >
 > ```
-> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/docs/INSTALL.md
+> https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/docs/INSTALL.md
 > ```
 
 ### Option 2: One-Line Install (Terminal)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/scripts/install.sh)"
 ```
 
 The installer will:
@@ -151,7 +151,7 @@ Tachi can be integrated as a native OpenClaw extension plugin.
 Please install the Tachi memory extension for OpenClaw:
 
 1. One-command install for Tachi + the OpenClaw plugin (recommended):
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.0/scripts/install.sh)"
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.1/scripts/install.sh)"
 
    The installer will:
    - install or upgrade `tachi` through Homebrew
