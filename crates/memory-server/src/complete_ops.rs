@@ -331,6 +331,57 @@ pub(crate) async fn handle_tachi_complete(
         .await;
     }
 
+    let dispatch_completion_link = match (
+        params.flow_id.as_deref().filter(|flow| !flow.is_empty()),
+        params
+            .dispatch_id
+            .as_deref()
+            .filter(|dispatch_id| !dispatch_id.is_empty()),
+    ) {
+        (Some(flow_id), Some(dispatch_id)) => {
+            let completion_payload = json!({
+                "task_id": task_id.clone(),
+                "task": params.task.clone(),
+                "agent": params.agent.clone(),
+                "outcome": outcome_norm.clone(),
+                "profile": params.profile.clone(),
+                "risk": params.risk.clone(),
+                "eval_memory_id": eval_memory_id.clone(),
+                "eval_path": path.clone(),
+                "verification_present": verification_present,
+                "diff_present": diff_present,
+                "evidence_refs": params.evidence_refs.clone(),
+                "tests_run": params.tests_run.clone(),
+                "subagent_count": params.subagents.len(),
+                "skills_used": params.skills_used.clone(),
+                "issue_ref": params.issue_ref.clone(),
+                "pr_ref": params.pr_ref.clone(),
+                "duration_ms": params.duration_ms,
+                "cost_tokens": params.cost_tokens,
+                "cost_usd": params.cost_usd,
+                "quality_score": params.quality_score,
+            });
+            match crate::task_lifecycle::mark_task_dispatch_completion(
+                flow_id,
+                dispatch_id,
+                completion_payload,
+            ) {
+                Ok(value) => value,
+                Err(error) => json!({
+                    "recorded": false,
+                    "flow_id": flow_id,
+                    "dispatch_id": dispatch_id,
+                    "error": error,
+                }),
+            }
+        }
+        _ => json!({
+            "recorded": false,
+            "reason": "missing flow_id or dispatch_id",
+        }),
+    };
+    pipeline_status["dispatch_completion_link"] = dispatch_completion_link;
+
     // --- Post-complete hooks MVP ---
     // On failure/partial with non-empty notes, auto-save a lesson learned entry.
     // Dedup: if a similar lesson already exists (same task text or overlapping
