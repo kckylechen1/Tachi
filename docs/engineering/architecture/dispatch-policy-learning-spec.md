@@ -244,12 +244,22 @@ The next policy-learning slices should focus on evidence and replay:
   artifact and can be disabled;
 - extend skill loadout results with completion/eval feedback once routing
   policy proposals consume enough samples;
-- teach `recommend` how to consume approved route-policy rules after enough
-  samples and review history exist;
+- feed completion/eval feedback back into skill loadout summaries once routing
+  policy rules have enough post-apply samples;
 - project approved MBIT/card evolution proposals into profile/card definitions
   after the route-policy rule loader is stable;
 - add regression tests for high-risk review routing, low-risk fast-check routing,
   human override weighting, retry weighting, and MBIT card parsing.
+
+Implemented route-policy loader:
+
+- `tachi_task(action="apply_proposals")` persists approved route-policy rules
+  into `dispatch_route_policy_rules`.
+- `tachi_task(action="recommend")` now loads applied rules, requires approved
+  review plus a minimum sample threshold, respects risk `blocked_profiles`, and
+  explains applied/skipped rules under `route_policy_rules`.
+- Applied rules add explainable weight rather than hard-overriding routing, so
+  high-risk tasks can still block fast/unsafe profiles.
 
 ## Non-Goals
 
