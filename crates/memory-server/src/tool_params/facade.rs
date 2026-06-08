@@ -1175,7 +1175,7 @@ pub(crate) struct TachiTaskParams {
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
-        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
+        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
     )]
     pub profile: Option<String>,
     #[serde(default)]

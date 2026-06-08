@@ -97,6 +97,34 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         weak_against: &["ambiguous_architecture", "unbounded_refactor"],
     },
     DispatchProfileDef {
+        name: "opencode_builder",
+        display_name: "OpenCode Credentialed Builder",
+        backend: "custom",
+        role: "executor",
+        stage: Some("execute"),
+        model: Some("zhipuai-coding-plan/glm-5.1"),
+        tool_profile: "delegate",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: true,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_memory", "tachi_task"],
+        allowed_mcp_servers: &[],
+        credential_profiles: &["opencode_shared"],
+        common_skills: &[SUPERPOWER_EXECUTING_PLANS],
+        signature_skills: &[WAZA_TACHI, CODING_TEST_STRATEGY],
+        passive_traits: &[
+            "bounded_diff",
+            "tests_required",
+            "credentialed_opencode_config",
+        ],
+        forbidden_skills: &["unbounded_redesign", "silent_test_workaround"],
+        evidence_required: &["diff", "tests_run", "files_changed"],
+        strong_against: &["bounded_patch", "implementation", "credentialed_dispatch"],
+        weak_against: &["ambiguous_architecture", "unbounded_refactor"],
+    },
+    DispatchProfileDef {
         name: "codex_55_review",
         display_name: "Codex Senior Reviewer",
         backend: "codex",
@@ -431,12 +459,24 @@ pub(crate) fn resolve_and_apply_dispatch_profile(
                 .map(|s| s.to_string())
                 .collect();
         }
-        if params.credential_profiles.is_empty() {
-            params.credential_profiles = profile
+        let mut added_credential_profiles = Vec::new();
+        for credential_profile in profile.credential_profiles {
+            if !params
                 .credential_profiles
                 .iter()
-                .map(|s| s.to_string())
-                .collect();
+                .any(|existing| existing == credential_profile)
+            {
+                params
+                    .credential_profiles
+                    .push((*credential_profile).to_string());
+                added_credential_profiles.push(*credential_profile);
+            }
+        }
+        if !added_credential_profiles.is_empty() {
+            route_explanation.push(format!(
+                "profile requires credential profile(s): {}",
+                added_credential_profiles.join(", ")
+            ));
         }
     }
     if params.allowed_mcp_servers.is_empty() {
@@ -1026,6 +1066,49 @@ mod tests {
         let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
         assert_eq!(params.agent.as_deref(), Some("claude"));
         assert_eq!(resolved.agent, "claude");
+    }
+
+    #[test]
+    fn credentialed_dispatch_profile_applies_default_credential_profiles() {
+        let mut params = params();
+        params.profile = Some("opencode_builder".to_string());
+        params.issue_ref = None;
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        assert_eq!(params.agent.as_deref(), Some("custom"));
+        assert_eq!(params.stage.as_deref(), Some("execute"));
+        assert_eq!(params.credential_profiles, vec!["opencode_shared"]);
+        assert_eq!(
+            resolved.credential_profiles,
+            vec!["opencode_shared".to_string()]
+        );
+        assert_eq!(
+            profile_json(resolve_dispatch_profile("opencode_builder").unwrap())
+                ["credential_profiles"][0],
+            json!("opencode_shared")
+        );
+    }
+
+    #[test]
+    fn dispatch_profile_merges_default_and_explicit_credential_profiles() {
+        let mut params = params();
+        params.profile = Some("opencode_builder".to_string());
+        params.credential_profiles = vec!["extra_project_secret".to_string()];
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        assert_eq!(
+            params.credential_profiles,
+            vec!["extra_project_secret", "opencode_shared"]
+        );
+        assert_eq!(
+            resolved.credential_profiles,
+            vec![
+                "extra_project_secret".to_string(),
+                "opencode_shared".to_string()
+            ]
+        );
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("profile requires credential profile(s): opencode_shared")));
     }
 
     #[test]
