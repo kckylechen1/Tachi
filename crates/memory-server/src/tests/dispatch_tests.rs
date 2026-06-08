@@ -1632,7 +1632,10 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     assert!(
         ux["matrix"].as_array().is_some_and(|steps| {
             steps.iter().any(|step| {
-                step["id"] == json!("complete_eval") && step["status"] == json!("passed")
+                step["id"] == json!("complete_eval")
+                    && step["status"] == json!("passed")
+                    && step["tool"]
+                        == json!("tachi_task(action='complete', dispatch_id=..., flow_id=...)")
             })
         }),
         "{ux:#}"
