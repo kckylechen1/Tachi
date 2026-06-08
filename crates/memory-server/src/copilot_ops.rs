@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 const DEBUG_CHECKLIST_LIMIT: usize = 4;
 const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
@@ -671,6 +673,528 @@ pub(crate) async fn handle_tachi_task_brief(
         ],
     }))
     .map_err(|e| format!("serialize task_brief: {e}"))
+}
+
+pub(crate) async fn handle_tachi_feature_briefing(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Result<String, String> {
+    let top_k = if params.compact.unwrap_or(false) {
+        params.top_k.unwrap_or(4).clamp(1, 4)
+    } else {
+        params.top_k.unwrap_or(6).max(1)
+    };
+    let query = feature_briefing_query(params);
+    let board = feature_board(server, params, top_k).await;
+    let canonical_docs = canonical_doc_refs(params);
+    let run_artifacts = feature_run_artifacts(params.flow_id.as_deref())?;
+
+    let wiki_rows = search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: query.clone(),
+            query_vec: None,
+            top_k,
+            path_prefix: Some("/wiki".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: params.agent_id.clone(),
+            project: None,
+            domain: params.domain.clone(),
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        },
+        false,
+    )
+    .await
+    .unwrap_or_default();
+
+    let memory_rows = search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: query.clone(),
+            query_vec: None,
+            top_k,
+            path_prefix: params.path_prefix.clone(),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: params.agent_id.clone(),
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        },
+        !params.include_global,
+    )
+    .await
+    .unwrap_or_default();
+
+    let eval_rows = search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: query.clone(),
+            query_vec: None,
+            top_k: top_k.min(5),
+            path_prefix: Some("/eval".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: params.agent_id.clone(),
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        },
+        !params.include_global,
+    )
+    .await
+    .unwrap_or_default();
+
+    let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
+    let routing = build_task_brief_routing(&query, &skills);
+    let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
+    let response = json!({
+        "status": "ok",
+        "kind": "feature_briefing",
+        "objective": params.task.clone().unwrap_or_else(|| query.clone()),
+        "scope": {
+            "project": params.project,
+            "flow_id": params.flow_id,
+            "issue_ref": params.issue_ref,
+            "pr_ref": params.pr_ref,
+            "cwd": params.cwd,
+            "include_global": params.include_global,
+        },
+        "current_stage": infer_feature_stage(&run_artifacts, &board),
+        "board_state": board,
+        "canonical_docs": canonical_docs,
+        "run_artifacts": run_artifacts,
+        "guide_sop": {
+            "intent": routing.intent,
+            "selected_sops": routing.selected_sops,
+            "tool_plan": routing.tool_plan,
+            "recommended_skills": skills,
+        },
+        "wiki_hits": compact_rows(wiki_rows, top_k),
+        "memory_fragments": compact_rows(memory_rows, top_k),
+        "eval_evidence": compact_rows(eval_rows, top_k.min(5)),
+        "next_action": next_action,
+        "layering": {
+            "docs": "canonical specs/design docs; highest authority for feature truth",
+            "guide": "workflow/SOP and skill loadout guidance",
+            "wiki": "synthesized durable knowledge and lessons",
+            "memory": "fragmented checkpoints, decisions, and eval evidence"
+        },
+    });
+
+    if params.format.as_deref() == Some("json") {
+        serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))
+    } else {
+        Ok(format_feature_briefing_markdown(&response))
+    }
+}
+
+fn feature_briefing_query(params: &TachiTaskParams) -> String {
+    params
+        .task
+        .as_deref()
+        .or(params.issue_ref.as_deref())
+        .or(params.pr_ref.as_deref())
+        .or(params.flow_id.as_deref())
+        .unwrap_or("current feature handoff")
+        .to_string()
+}
+
+fn canonical_doc_refs(params: &TachiTaskParams) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for path in params
+        .spec_paths
+        .iter()
+        .map(|path| ("spec", path))
+        .chain(params.doc_paths.iter().map(|path| ("doc", path)))
+    {
+        push_doc_ref(&mut out, &mut seen, path.0, path.1, params.cwd.as_deref());
+    }
+    if let Some(task) = params.task.as_deref() {
+        for path in extract_markdown_paths(task) {
+            push_doc_ref(
+                &mut out,
+                &mut seen,
+                "mentioned_doc",
+                &path,
+                params.cwd.as_deref(),
+            );
+        }
+    }
+    out
+}
+
+fn push_doc_ref(
+    out: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+    kind: &str,
+    raw_path: &str,
+    cwd: Option<&str>,
+) {
+    let raw_path = raw_path.trim();
+    if raw_path.is_empty() || !seen.insert(raw_path.to_string()) {
+        return;
+    }
+    let resolved = resolve_workspace_path(raw_path, cwd);
+    out.push(json!({
+        "kind": kind,
+        "path": raw_path,
+        "exists": resolved.as_ref().is_some_and(|path| path.exists()),
+        "resolved_path": resolved.map(|path| path.to_string_lossy().to_string()),
+    }));
+}
+
+fn extract_markdown_paths(text: &str) -> Vec<String> {
+    text.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ')' | '(' | '[' | ']'))
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, '`' | '\'' | '"' | ':' | ';')))
+        .filter(|token| {
+            token.ends_with(".md") && (token.starts_with("docs/") || token.contains("/docs/"))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+fn resolve_workspace_path(raw_path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    if let Some(cwd) = cwd {
+        let cwd = Path::new(cwd);
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor.join(raw_path);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+        return Some(cwd.join(raw_path));
+    }
+    let cwd = std::env::current_dir().ok()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor.join(raw_path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    Some(cwd.join(raw_path))
+}
+
+fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
+    let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id)?;
+    let mut out = vec![json!({
+        "kind": "run_dir",
+        "path": run_dir.to_string_lossy(),
+        "exists": run_dir.exists(),
+    })];
+    for name in [
+        "instruction.md",
+        "plan.md",
+        "result.md",
+        "validation.md",
+        "status.json",
+        "events.jsonl",
+        "progress.jsonl",
+        "trajectory.jsonl",
+    ] {
+        let path = run_dir.join(name);
+        out.push(json!({
+            "kind": "run_artifact",
+            "path": path.to_string_lossy(),
+            "exists": path.exists(),
+        }));
+    }
+    Ok(out)
+}
+
+async fn feature_board(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    top_k: usize,
+) -> serde_json::Value {
+    let raw = crate::dispatch_ops::handle_tachi_board(
+        server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(top_k.max(10)),
+            project: params.project.clone(),
+        },
+    )
+    .await;
+    let Ok(raw) = raw else {
+        return json!({"available": false});
+    };
+    let mut board: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    let Some(tasks) = board.get("tasks").and_then(Value::as_array).cloned() else {
+        return board;
+    };
+    let needles = feature_needles(params);
+    if needles.is_empty() {
+        board["tasks"] = Value::Array(tasks.into_iter().take(top_k).collect());
+        board["count"] = json!(board["tasks"].as_array().map(Vec::len).unwrap_or(0));
+        return board;
+    }
+    let filtered = tasks
+        .into_iter()
+        .filter(|task| value_contains_any(task, &needles))
+        .take(top_k)
+        .collect::<Vec<_>>();
+    board["tasks"] = Value::Array(filtered);
+    board["count"] = json!(board["tasks"].as_array().map(Vec::len).unwrap_or(0));
+    board
+}
+
+fn feature_needles(params: &TachiTaskParams) -> Vec<String> {
+    [
+        params.flow_id.as_deref(),
+        params.issue_ref.as_deref(),
+        params.pr_ref.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_ascii_lowercase)
+    .collect()
+}
+
+fn value_contains_any(value: &Value, needles: &[String]) -> bool {
+    if needles.is_empty() {
+        return true;
+    }
+    [
+        "dispatch_id",
+        "summary",
+        "run_dir",
+        "eval_id",
+        "agent",
+        "state",
+        "source",
+    ]
+    .into_iter()
+    .filter_map(|field| value.get(field))
+    .any(|field_value| field_value_contains_any(field_value, needles))
+}
+
+fn field_value_contains_any(value: &Value, needles: &[String]) -> bool {
+    match value {
+        Value::String(text) => {
+            let text = text.to_ascii_lowercase();
+            needles.iter().any(|needle| text.contains(needle))
+        }
+        Value::Array(values) => values
+            .iter()
+            .any(|value| field_value_contains_any(value, needles)),
+        Value::Object(map) => map
+            .values()
+            .any(|value| field_value_contains_any(value, needles)),
+        _ => false,
+    }
+}
+
+fn infer_feature_stage(run_artifacts: &[Value], board: &Value) -> String {
+    if let Some(task) = board
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| tasks.first())
+    {
+        if let Some(state) = task.get("state").and_then(Value::as_str) {
+            return state.to_string();
+        }
+    }
+    let has_result = run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("result.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    });
+    if has_result {
+        "result_available".to_string()
+    } else if !run_artifacts.is_empty() {
+        "flow_started".to_string()
+    } else {
+        "intake".to_string()
+    }
+}
+
+fn feature_next_action(
+    canonical_docs: &[Value],
+    run_artifacts: &[Value],
+    board: &Value,
+    memory_rows: &[Value],
+) -> String {
+    if canonical_docs.is_empty() {
+        return "Attach or create a canonical docs/spec reference before treating memory as feature truth.".to_string();
+    }
+    if board
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| task.get("state").and_then(Value::as_str) == Some("TASK_STATE_WORKING"))
+        })
+    {
+        return "Poll tachi_task(action='board') and collect the active worker result before dispatching more work.".to_string();
+    }
+    if run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("instruction.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    }) && !run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("result.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    }) {
+        return "Use the flow instruction packet as the worker handoff source and dispatch a bounded slice.".to_string();
+    }
+    if memory_rows.is_empty() {
+        return "Start with tachi_task(action='plan') or save a checkpoint after the next concrete decision.".to_string();
+    }
+    "Run tachi_task(action='recommend') for the next worker profile, then dispatch or review with explicit verification.".to_string()
+}
+
+fn format_feature_briefing_markdown(value: &Value) -> String {
+    let mut out = Vec::new();
+    out.push("# Feature Briefing".to_string());
+    out.push(format!(
+        "\n## Objective\n{}",
+        value
+            .get("objective")
+            .and_then(Value::as_str)
+            .unwrap_or("(unspecified)")
+    ));
+    out.push(format!(
+        "\n## Current Stage\n{}",
+        value
+            .get("current_stage")
+            .and_then(Value::as_str)
+            .unwrap_or("intake")
+    ));
+    out.push(markdown_section(
+        "Canonical Docs / Specs",
+        value.get("canonical_docs").and_then(Value::as_array),
+        "No canonical docs/specs attached.",
+    ));
+    out.push(markdown_section(
+        "Run Artifacts",
+        value.get("run_artifacts").and_then(Value::as_array),
+        "No flow run artifacts attached.",
+    ));
+    out.push(markdown_section(
+        "Board State",
+        value
+            .get("board_state")
+            .and_then(|board| board.get("tasks"))
+            .and_then(Value::as_array),
+        "No matching board tasks.",
+    ));
+    out.push(markdown_section(
+        "Guide / SOP",
+        value
+            .get("guide_sop")
+            .and_then(|guide| guide.get("selected_sops"))
+            .and_then(Value::as_array),
+        "No SOP selected.",
+    ));
+    out.push(markdown_section(
+        "Wiki Decisions / Lessons",
+        value.get("wiki_hits").and_then(Value::as_array),
+        "No wiki hits.",
+    ));
+    out.push(markdown_section(
+        "Memory Fragments / Checkpoints",
+        value.get("memory_fragments").and_then(Value::as_array),
+        "No project-scoped memory fragments.",
+    ));
+    out.push(markdown_section(
+        "Eval Evidence",
+        value.get("eval_evidence").and_then(Value::as_array),
+        "No matching eval evidence.",
+    ));
+    out.push(format!(
+        "\n## Next Action\n{}",
+        value
+            .get("next_action")
+            .and_then(Value::as_str)
+            .unwrap_or("Continue from the canonical docs/specs.")
+    ));
+    out.join("\n")
+}
+
+fn markdown_section(title: &str, rows: Option<&Vec<Value>>, empty: &str) -> String {
+    let mut out = vec![format!("\n## {title}")];
+    let Some(rows) = rows.filter(|rows| !rows.is_empty()) else {
+        out.push(format!("- {empty}"));
+        return out.join("\n");
+    };
+    for row in rows.iter().take(8) {
+        out.push(format!("- {}", compact_value_line(row)));
+    }
+    out.join("\n")
+}
+
+fn compact_value_line(value: &Value) -> String {
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        let summary = value
+            .get("summary")
+            .or_else(|| value.get("kind"))
+            .or_else(|| value.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if summary.is_empty() {
+            return format!("`{path}`");
+        }
+        return format!("`{path}` - {summary}");
+    }
+    if let Some(summary) = value.get("summary").and_then(Value::as_str) {
+        return summary.to_string();
+    }
+    if let Some(id) = value.get("dispatch_id").and_then(Value::as_str) {
+        let state = value
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
+        return format!("`{id}` [{state}] {summary}");
+    }
+    value.to_string()
 }
 
 pub(crate) struct TaskBriefRouting {
@@ -1381,6 +1905,32 @@ mod tests {
             "review_request"
         );
         assert_eq!(classify_task_intent("看一下 PRs"), "review_request");
+    }
+
+    #[test]
+    fn feature_board_filter_matches_stable_fields_only() {
+        let needles = vec!["flow_20260608t000000z_feature".to_string()];
+
+        assert!(value_contains_any(
+            &json!({
+                "dispatch_id": "dispatch-1",
+                "summary": "work for flow_20260608T000000Z_feature",
+                "metadata": {
+                    "debug_note": "unrelated"
+                }
+            }),
+            &needles
+        ));
+        assert!(!value_contains_any(
+            &json!({
+                "dispatch_id": "dispatch-2",
+                "summary": "unrelated work",
+                "metadata": {
+                    "debug_note": "flow_20260608T000000Z_feature"
+                }
+            }),
+            &needles
+        ));
     }
 
     #[test]

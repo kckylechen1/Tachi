@@ -70,6 +70,7 @@ fn tachi_task_action_schema(
     string_enum_schema(
         &[
             "plan",
+            "briefing",
             "recommend",
             "dispatch",
             "profiles",
@@ -78,7 +79,7 @@ fn tachi_task_action_schema(
             "board",
             "merge",
         ],
-        "Required Tachi task facade action. action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.",
         generator,
     )
 }
@@ -1075,7 +1076,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "profiles", "profile", "card", "board", or "merge".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') for GitHub PR gates or PR merges.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
@@ -1096,6 +1097,24 @@ pub(crate) struct TachiTaskParams {
     pub path_prefix: Option<String>,
     #[serde(default)]
     pub top_k: Option<usize>,
+    // feature briefing fields
+    #[serde(default)]
+    #[schemars(
+        description = "Canonical docs to prioritize in action='briefing', e.g. docs/engineering/architecture/subagent-eval-system.md."
+    )]
+    pub doc_paths: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Canonical spec docs to prioritize in action='briefing'. Kept separate from memory/wiki fragments."
+    )]
+    pub spec_paths: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "When true, action='briefing' may include broader global memory fragments. Default false keeps briefing feature/project scoped."
+    )]
+    pub include_global: bool,
+    #[serde(default)]
+    pub compact: Option<bool>,
     // dispatch fields
     #[serde(default)]
     pub agent: Option<String>,

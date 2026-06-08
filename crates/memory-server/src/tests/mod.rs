@@ -109,15 +109,22 @@ fn shell_params(action: &str) -> TachiShellParams {
 }
 
 fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHomeGuard) {
-    let (server, temp_home) = make_server_with_temp_home();
+    ensure_test_env();
+    let temp_home = TempHomeGuard::new();
     let wiki_dir = temp_home.temp_home.join(".tachi/projects/wiki");
     std::fs::create_dir_all(&wiki_dir).expect("create wiki project dir");
     let wiki_db = wiki_dir.join("memory.db");
-    let mut store =
-        MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db")).expect("open wiki project db");
-    for entry in entries {
-        store.upsert(&entry).expect("seed wiki project entry");
+    {
+        let mut store = MemoryStore::open(wiki_db.to_str().expect("utf8 wiki db"))
+            .expect("open wiki project db");
+        for entry in entries {
+            store.upsert(&entry).expect("seed wiki project entry");
+        }
     }
+    let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
+    std::fs::create_dir_all(global_db.parent().expect("global db parent"))
+        .expect("create global db dir");
+    let server = MemoryServer::new(global_db, None).expect("failed to create test server");
     (server, temp_home)
 }
 
