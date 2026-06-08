@@ -3,7 +3,8 @@
 //! from `profiles::ToolProfile`, which only gates MCP tool visibility.
 
 use crate::agent_eval::{
-    aggregate_subagent_scores, load_live_eval_rows, CompletionStatus, EvalRow,
+    aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,
+    AgentPerformanceMatrixRow, CompletionStatus, EvalRow,
 };
 use crate::agent_registry::{fallback_chain, resolve_dispatch_agent};
 use crate::skill_policy::{
@@ -249,6 +250,11 @@ struct ProfileCandidate {
     live_samples: u32,
     useful_rate: Option<f64>,
     failure_count: u32,
+    performance_samples: u32,
+    human_override_rate: Option<f64>,
+    avg_retry_count: Option<f64>,
+    avg_latency_ms: Option<f64>,
+    avg_cost_usd: Option<f64>,
 }
 
 pub(crate) fn handle_dispatch_recommendation(
@@ -260,10 +266,13 @@ pub(crate) fn handle_dispatch_recommendation(
     let risk = classify_dispatch_risk(task, risk_override);
     let rows = load_live_eval_rows(server, limit.max(1))?;
     let subagent_scores = aggregate_subagent_scores(&rows);
+    let performance_matrix = aggregate_performance_matrix(&rows);
 
     let mut candidates = DISPATCH_PROFILES
         .iter()
-        .map(|profile| score_profile_candidate(profile, &risk, &rows, &subagent_scores))
+        .map(|profile| {
+            score_profile_candidate(profile, &risk, &rows, &subagent_scores, &performance_matrix)
+        })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
         b.score
@@ -279,6 +288,10 @@ pub(crate) fn handle_dispatch_recommendation(
         .ok_or_else(|| format!("internal missing profile {}", best.profile))?;
     let fallback = build_profile_fallback_chain(best_profile, &candidates);
     let live_matched_samples = candidates.iter().map(|c| c.live_samples).sum::<u32>();
+    let performance_matrix_hits = candidates
+        .iter()
+        .map(|c| c.performance_samples)
+        .sum::<u32>();
     let evidence_note = if live_matched_samples == 0 {
         "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
     } else {
@@ -306,6 +319,7 @@ pub(crate) fn handle_dispatch_recommendation(
         "live_eval": {
             "row_count": rows.len(),
             "matched_samples": live_matched_samples,
+            "performance_matrix_hits": performance_matrix_hits,
         },
         "mbit_card": profile_json(best_profile).get("mbit_card").cloned().unwrap_or(Value::Null),
         "candidates": candidates,
@@ -615,6 +629,7 @@ fn score_profile_candidate(
     risk: &DispatchRisk,
     rows: &[EvalRow],
     subagent_scores: &[crate::agent_eval::SubagentTaskScore],
+    performance_matrix: &[AgentPerformanceMatrixRow],
 ) -> ProfileCandidate {
     let mut score = 0.0;
     let mut reasons = Vec::new();
@@ -667,6 +682,13 @@ fn score_profile_candidate(
     let mut useful_sum = 0.0;
     let mut useful_count = 0u32;
     let mut failure_count = 0u32;
+    let mut performance_samples = 0u32;
+    let mut human_override_sum = 0.0;
+    let mut retry_sum = 0.0;
+    let mut latency_sum = 0.0;
+    let mut latency_count = 0u32;
+    let mut cost_sum = 0.0;
+    let mut cost_count = 0u32;
     for row in rows {
         if row.profile.as_deref() == Some(profile.name) {
             live_samples += 1;
@@ -702,6 +724,72 @@ fn score_profile_candidate(
             ));
         }
     }
+
+    for perf in performance_matrix {
+        let profile_match = perf.profile.as_deref() == Some(profile.name);
+        let task_match = perf.task_type == risk.task_type;
+        if !profile_match || !task_match {
+            continue;
+        }
+        let role_match = perf.scope == "leader"
+            || perf.role.as_deref().is_some_and(|role| {
+                role == profile.role
+                    || (profile.role.contains("review") && role.contains("review"))
+                    || (profile.role == "architect" && role == "critic")
+                    || (profile.role == "executor" && role == "implementer")
+            });
+        if !role_match {
+            continue;
+        }
+
+        performance_samples += perf.samples;
+        let weight = (perf.samples as f64).min(20.0) / 20.0;
+
+        if perf.failure_count > 0 {
+            failure_count += perf.failure_count;
+            let penalty = (perf.failure_count as f64 * 4.0).min(16.0) * weight;
+            score -= penalty;
+            reasons.push(format!(
+                "perf_failure_count:{}:{} failures={}",
+                perf.scope, perf.task_type, perf.failure_count
+            ));
+        }
+        if perf.human_override_rate > 0.0 {
+            human_override_sum += perf.human_override_rate * perf.samples as f64;
+            let penalty = perf.human_override_rate * 18.0 * weight;
+            score -= penalty;
+            reasons.push(format!(
+                "perf_human_override_rate={:.2}",
+                perf.human_override_rate
+            ));
+        }
+        if perf.avg_retry_count > 0.0 {
+            retry_sum += perf.avg_retry_count * perf.samples as f64;
+            let penalty = (perf.avg_retry_count * 3.0).min(15.0) * weight;
+            score -= penalty;
+            reasons.push(format!("perf_avg_retry_count={:.2}", perf.avg_retry_count));
+        }
+        if let Some(latency) = perf.avg_latency_ms {
+            latency_sum += latency * perf.samples as f64;
+            latency_count += perf.samples;
+            if latency > 600_000.0 {
+                score -= 4.0 * weight;
+                reasons.push(format!("perf_slow_avg_latency_ms={latency:.0}"));
+            }
+        }
+        if let Some(cost) = perf.avg_cost_usd {
+            cost_sum += cost * perf.samples as f64;
+            cost_count += perf.samples;
+            if cost > 1.0 {
+                score -= 4.0 * weight;
+                reasons.push(format!("perf_high_avg_cost_usd={cost:.4}"));
+            } else if perf.avg_quality_score.unwrap_or(0.0) >= 0.8 && cost <= 0.10 {
+                score += 3.0 * weight;
+                reasons.push(format!("perf_cost_efficient_usd={cost:.4}"));
+            }
+        }
+    }
+
     let useful_rate = (useful_count > 0).then(|| useful_sum / useful_count as f64);
     if let Some(rate) = useful_rate {
         reasons.push(format!("live_useful_rate={rate:.2}"));
@@ -719,6 +807,12 @@ fn score_profile_candidate(
         live_samples,
         useful_rate,
         failure_count,
+        performance_samples,
+        human_override_rate: (performance_samples > 0)
+            .then(|| human_override_sum / performance_samples as f64),
+        avg_retry_count: (performance_samples > 0).then(|| retry_sum / performance_samples as f64),
+        avg_latency_ms: (latency_count > 0).then(|| latency_sum / latency_count as f64),
+        avg_cost_usd: (cost_count > 0).then(|| cost_sum / cost_count as f64),
     }
 }
 
