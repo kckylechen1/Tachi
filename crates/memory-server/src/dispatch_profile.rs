@@ -419,7 +419,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "recommended_agent": best.agent,
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
-        "evidence_required": best_profile.evidence_required,
+        "evidence_required": profile_evidence_required_for_server(server, best_profile)?,
+        "evidence_contract": profile_evidence_contract_json_for_server(server, best_profile)?,
         "resolved_skills": profile_required_skill_ids_for_server(server, best_profile)?,
         "resolved_skill_loadout": profile_skill_loadout_json_for_server(server, best_profile)?,
         "fallback_chain": fallback,
@@ -697,7 +698,9 @@ pub(crate) fn handle_route_policy_apply(
                     .unwrap_or_default();
                 if !matches!(
                     operation,
-                    "promote_observed_skill_to_signature" | "add_evidence_backed_passive_trait"
+                    "promote_observed_skill_to_signature"
+                        | "add_evidence_backed_passive_trait"
+                        | "add_evidence_contract_required"
                 ) {
                     return Err(format!(
                         "unsupported loadout_evolution operation for {proposal_id}: {operation}"
@@ -724,8 +727,11 @@ pub(crate) fn handle_route_policy_apply(
                     profile_projected_signature_skills_from_overlay(profile, Some(&overlay));
                 let mut overlay_traits =
                     profile_projected_passive_traits_from_overlay(profile, Some(&overlay));
+                let mut overlay_evidence_required =
+                    profile_projected_evidence_required_from_overlay(profile, Some(&overlay));
                 let mut added_signature_skills = Vec::new();
                 let mut added_passive_traits = Vec::new();
+                let mut added_evidence_required = Vec::new();
                 let already_projected = match operation {
                     "promote_observed_skill_to_signature" => {
                         let skill_id = value
@@ -798,10 +804,49 @@ pub(crate) fn handle_route_policy_apply(
                         added_passive_traits.push(trait_id);
                         already_projected
                     }
+                    "add_evidence_contract_required" => {
+                        let evidence_id = value
+                            .get("evidence_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|evidence_id| !evidence_id.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                value
+                                    .get("proposed_patch")
+                                    .and_then(|patch| patch.get("add_evidence_required"))
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::trim)
+                                    .find(|evidence_id| !evidence_id.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "loadout_evolution proposal {proposal_id} missing evidence_id"
+                                )
+                            })?;
+                        if profile.evidence_required.iter().any(|item| *item == evidence_id) {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets existing baseline evidence requirement {evidence_id}"
+                            ));
+                        }
+                        let already_projected = overlay_evidence_required
+                            .iter()
+                            .any(|item| item == &evidence_id);
+                        if !already_projected {
+                            overlay_evidence_required.push(evidence_id.clone());
+                        }
+                        added_evidence_required.push(evidence_id);
+                        already_projected
+                    }
                     _ => unreachable!("unsupported operation checked above"),
                 };
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_traits);
+                crate::skill_policy::dedupe_preserve_order(&mut overlay_evidence_required);
 
                 let mut source_proposals = overlay
                     .get("source_proposal_ids")
@@ -818,6 +863,7 @@ pub(crate) fn handle_route_policy_apply(
                 overlay["kind"] = json!("profile_card_loadout_overlay");
                 overlay["add_signature_skills"] = json!(overlay_skills);
                 overlay["add_passive_traits"] = json!(overlay_traits);
+                overlay["add_evidence_required"] = json!(overlay_evidence_required);
                 overlay["source_proposal_ids"] = json!(source_proposals);
                 overlay["updated_at"] = json!(applied_at);
                 overlay["last_applied_proposal_id"] = json!(proposal_id);
@@ -836,6 +882,7 @@ pub(crate) fn handle_route_policy_apply(
                     "already_projected": already_projected,
                     "added_signature_skills": added_signature_skills,
                     "added_passive_traits": added_passive_traits,
+                    "added_evidence_required": added_evidence_required,
                     "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
                 });
                 let next = serde_json::to_string(&value)
@@ -1212,9 +1259,11 @@ fn resolve_and_apply_dispatch_profile_inner(
             ),
         })
         .clone();
-    let evidence_required = profile
-        .map(|p| p.evidence_required.iter().map(|s| s.to_string()).collect())
-        .unwrap_or_else(Vec::new);
+    let evidence_required = match (server, profile) {
+        (Some(server), Some(profile)) => profile_evidence_required_for_server(server, profile)?,
+        (_, Some(profile)) => profile_evidence_required(profile),
+        _ => Vec::new(),
+    };
     let fallback_chain = fallback_chain(&agent_norm)
         .iter()
         .map(|s| s.to_string())
@@ -1248,20 +1297,29 @@ fn resolve_and_apply_dispatch_profile_inner(
 }
 
 pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
-    profile_json_with_loadout(profile, profile_skill_loadout_json(profile))
+    profile_json_with_loadout_and_evidence_contract(
+        profile,
+        profile_skill_loadout_json(profile),
+        profile_evidence_contract_json(profile),
+    )
 }
 
 pub(crate) fn profile_json_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
 ) -> Result<Value, String> {
-    Ok(profile_json_with_loadout(
+    Ok(profile_json_with_loadout_and_evidence_contract(
         profile,
         profile_skill_loadout_json_for_server(server, profile)?,
+        profile_evidence_contract_json_for_server(server, profile)?,
     ))
 }
 
-fn profile_json_with_loadout(profile: &DispatchProfileDef, skill_loadout: Value) -> Value {
+fn profile_json_with_loadout_and_evidence_contract(
+    profile: &DispatchProfileDef,
+    skill_loadout: Value,
+    evidence_contract: Value,
+) -> Value {
     json!({
         "name": profile.name,
         "display_name": profile.display_name,
@@ -1280,9 +1338,7 @@ fn profile_json_with_loadout(profile: &DispatchProfileDef, skill_loadout: Value)
         },
         "credential_profiles": profile.credential_profiles,
         "skill_loadout": skill_loadout,
-        "evidence_contract": {
-            "required": profile.evidence_required,
-        },
+        "evidence_contract": evidence_contract,
         "mbit_card": {
             "display_name": profile.display_name,
             "type": [profile.role],
@@ -1290,8 +1346,71 @@ fn profile_json_with_loadout(profile: &DispatchProfileDef, skill_loadout: Value)
             "weak_against": profile.weak_against,
             "auto_capability_bundle": profile.auto_capability_bundle,
             "skill_loadout": skill_loadout,
+            "evidence_contract": evidence_contract,
         }
     })
+}
+
+pub(crate) fn profile_evidence_required(profile: &DispatchProfileDef) -> Vec<String> {
+    let mut evidence = profile
+        .evidence_required
+        .iter()
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut evidence);
+    evidence
+}
+
+pub(crate) fn profile_evidence_required_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    let mut evidence = profile_evidence_required(profile);
+    evidence.extend(profile_projected_evidence_required_from_overlay(
+        profile,
+        overlay.as_ref(),
+    ));
+    crate::skill_policy::dedupe_preserve_order(&mut evidence);
+    Ok(evidence)
+}
+
+pub(crate) fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
+    json!({
+        "required": profile_evidence_required(profile),
+        "projected_required": [],
+        "projection": {
+            "status": "baseline",
+        },
+    })
+}
+
+pub(crate) fn profile_evidence_contract_json_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Value, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    let projected_required =
+        profile_projected_evidence_required_from_overlay(profile, overlay.as_ref());
+    let mut required = profile_evidence_required(profile);
+    required.extend(projected_required.iter().cloned());
+    crate::skill_policy::dedupe_preserve_order(&mut required);
+    let source_proposal_ids = overlay
+        .as_ref()
+        .and_then(|overlay| overlay.get("source_proposal_ids"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "required": required,
+        "projected_required": projected_required,
+        "projection": {
+            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
+            "namespace": PROFILE_CARD_OVERLAY_NS,
+            "key": profile.name,
+            "source_proposal_ids": source_proposal_ids,
+        },
+    }))
 }
 
 pub(crate) fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
@@ -1434,6 +1553,29 @@ fn profile_projected_passive_traits_from_overlay(
         .collect::<Vec<_>>();
     crate::skill_policy::dedupe_preserve_order(&mut traits);
     traits
+}
+
+fn profile_projected_evidence_required_from_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let Some(overlay) = overlay else {
+        return Vec::new();
+    };
+    let baseline = profile.evidence_required.iter().collect::<HashSet<_>>();
+    let mut evidence = overlay
+        .get("add_evidence_required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|evidence_id| !evidence_id.is_empty())
+        .filter(|evidence_id| !baseline.contains(evidence_id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut evidence);
+    evidence
 }
 
 fn load_profile_overlay(server: &MemoryServer, profile: &str) -> Result<Option<Value>, String> {
@@ -2194,6 +2336,9 @@ fn build_loadout_evolution_proposals(
                 .map(str::to_string)
                 .collect::<HashSet<_>>()
         };
+        let existing_evidence_required = profile_evidence_required_for_server(server, profile)?
+            .into_iter()
+            .collect::<HashSet<_>>();
         let mut buckets: HashMap<String, LoadoutSkillEvidence> = HashMap::new();
         for entry in &entries {
             let Some(meta) = entry.metadata.as_object() else {
@@ -2257,6 +2402,16 @@ fn build_loadout_evolution_proposals(
             &profile_rows,
             profile_samples,
             &existing_passive_traits,
+            limit,
+            min_skill_hits,
+        ) {
+            out.push(proposal);
+        }
+        for proposal in build_evidence_contract_evolution_proposals(
+            profile,
+            &profile_rows,
+            profile_samples,
+            &existing_evidence_required,
             limit,
             min_skill_hits,
         ) {
@@ -2404,6 +2559,88 @@ fn build_passive_trait_evolution_proposals(
     out
 }
 
+fn build_evidence_contract_evolution_proposals(
+    profile: &DispatchProfileDef,
+    profile_rows: &[AgentPerformanceMatrixRow],
+    profile_samples: u32,
+    existing_evidence_required: &HashSet<String>,
+    limit: usize,
+    min_task_hits: u32,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut proposed_evidence = HashSet::new();
+    for row in profile_rows {
+        if row.samples < min_task_hits {
+            continue;
+        }
+        if row.failure_count > 0
+            || row.verification_rate < 0.50
+            || row.human_override_rate >= 0.10
+            || row.avg_retry_count >= 1.0
+            || row.success_rate.or(row.useful_rate).unwrap_or(0.0) < 0.80
+        {
+            continue;
+        }
+        let Some((evidence_id, evidence_label)) =
+            evidence_contract_target_for_task_type(&row.task_type)
+        else {
+            continue;
+        };
+        if existing_evidence_required.contains(evidence_id) {
+            continue;
+        }
+        if !proposed_evidence.insert(evidence_id.to_string()) {
+            continue;
+        }
+        let id = format!(
+            "loadout_evolution:{}:add_evidence_required:{}",
+            sanitize_policy_key(profile.name),
+            sanitize_policy_key(evidence_id)
+        );
+        out.push(json!({
+            "proposal_id": id,
+            "kind": "loadout_evolution",
+            "status": "pending",
+            "requires_human_approval": true,
+            "created_or_refreshed_at": Utc::now().to_rfc3339(),
+            "profile": profile.name,
+            "operation": "add_evidence_contract_required",
+            "evidence_id": evidence_id,
+            "evidence_label": evidence_label,
+            "current_evidence_contract": profile_evidence_contract_json(profile),
+            "proposed_patch": {
+                "add_evidence_required": [evidence_id],
+                "preserve_baseline_required": profile.evidence_required,
+            },
+            "evidence": {
+                "source": "live_memory_eval",
+                "limit": limit,
+                "profile_samples": profile_samples,
+                "min_samples_for_evolution": MIN_LOADOUT_EVOLUTION_SAMPLES,
+                "min_task_hits": min_task_hits,
+                "task_type": row.task_type,
+                "task_samples": row.samples,
+                "verification_rate": round2(row.verification_rate),
+                "success_rate": row.success_rate.map(round2),
+                "useful_rate": row.useful_rate.map(round2),
+                "avg_retry_count": round2(row.avg_retry_count),
+                "human_override_rate": round2(row.human_override_rate),
+                "profile_summary": summarize_matrix_rows(profile_rows),
+                "loadout_call": "tachi_skill(action='loadout', profile=..., limit=...)",
+            },
+            "rationale": format!(
+                "{} has {} clean verified {} samples; require evidence artifact {}",
+                profile.name, row.samples, row.task_type, evidence_id
+            ),
+            "projection": {
+                "status": "pending_profile_card_projection",
+                "note": "Human approval records the proposal; apply_proposals projects approved evidence requirements into the profile/card overlay."
+            }
+        }));
+    }
+    out
+}
+
 fn passive_trait_for_task_type(task_type: &str) -> Option<(&'static str, &'static str)> {
     match task_type {
         "plan_request" => Some((
@@ -2421,6 +2658,28 @@ fn passive_trait_for_task_type(task_type: &str) -> Option<(&'static str, &'stati
         "test_request" => Some((
             "evidence_backed_verification",
             "Repeated verified test work; keep verification-first behavior prominent.",
+        )),
+        _ => None,
+    }
+}
+
+fn evidence_contract_target_for_task_type(task_type: &str) -> Option<(&'static str, &'static str)> {
+    match task_type {
+        "plan_request" => Some((
+            "acceptance_criteria",
+            "Repeated verified planning success; require explicit acceptance criteria in handoffs.",
+        )),
+        "review_request" => Some((
+            "severity_rationale",
+            "Repeated verified review success; require severity rationale with findings.",
+        )),
+        "fix_request" | "refactor_request" | "migration_request" => Some((
+            "regression_tests",
+            "Repeated verified change work; require regression-test evidence with diffs.",
+        )),
+        "test_request" => Some((
+            "test_evidence",
+            "Repeated verified test work; require concrete test evidence and gaps.",
         )),
         _ => None,
     }

@@ -890,6 +890,38 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         .as_str()
         .expect("passive proposal id")
         .to_string();
+    let evidence_proposal = proposals["proposals"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
+                    && proposal["evidence_id"] == json!("acceptance_criteria")
+            })
+        })
+        .expect("evidence contract evolution proposal");
+    assert_eq!(
+        proposal_items
+            .iter()
+            .filter(|proposal| {
+                proposal["kind"] == json!("loadout_evolution")
+                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["operation"] == json!("add_evidence_contract_required")
+                    && proposal["evidence_id"] == json!("acceptance_criteria")
+            })
+            .count(),
+        1,
+        "duplicate agent/model matrix rows should not emit duplicate evidence contract proposals: {proposal_items:?}"
+    );
+    assert_eq!(
+        evidence_proposal["proposed_patch"]["add_evidence_required"][0],
+        json!("acceptance_criteria")
+    );
+    let evidence_proposal_id = evidence_proposal["proposal_id"]
+        .as_str()
+        .expect("evidence proposal id")
+        .to_string();
 
     let mut review = task_params("review_proposal");
     review.proposal_id = Some(proposal_id.clone());
@@ -961,6 +993,35 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
         json!("evidence_backed_planning")
     );
 
+    let mut evidence_review = task_params("review_proposal");
+    evidence_review.proposal_id = Some(evidence_proposal_id.clone());
+    evidence_review.review_status = Some("approved".to_string());
+    evidence_review.notes = Some("Human approved evidence contract projection.".to_string());
+    let evidence_reviewed_raw = server
+        .tachi_task(Parameters(evidence_review))
+        .await
+        .expect("evidence review should succeed");
+    let evidence_reviewed: serde_json::Value =
+        serde_json::from_str(&evidence_reviewed_raw).expect("evidence review JSON");
+    assert_eq!(
+        evidence_reviewed["proposal"]["operation"],
+        json!("add_evidence_contract_required")
+    );
+
+    let mut evidence_apply = task_params("apply_proposals");
+    evidence_apply.proposal_id = Some(evidence_proposal_id);
+    evidence_apply.confirm = true;
+    let evidence_applied_raw = server
+        .tachi_task(Parameters(evidence_apply))
+        .await
+        .expect("approved evidence contract should project");
+    let evidence_applied: serde_json::Value =
+        serde_json::from_str(&evidence_applied_raw).expect("evidence apply JSON");
+    assert_eq!(
+        evidence_applied["proposal"]["projection"]["added_evidence_required"][0],
+        json!("acceptance_criteria")
+    );
+
     let loadout_raw = server
         .tachi_skill(Parameters(TachiSkillParams {
             action: "loadout".to_string(),
@@ -1006,6 +1067,20 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .expect("mbit projected passive traits")
             .contains(&json!("evidence_backed_planning"))
     );
+    assert!(loadout["evidence_required"]
+        .as_array()
+        .expect("loadout evidence required")
+        .contains(&json!("acceptance_criteria")));
+    assert!(loadout["evidence_contract"]["projected_required"]
+        .as_array()
+        .expect("loadout projected evidence")
+        .contains(&json!("acceptance_criteria")));
+    assert!(
+        loadout["mbit_card"]["evidence_contract"]["projected_required"]
+            .as_array()
+            .expect("mbit projected evidence")
+            .contains(&json!("acceptance_criteria"))
+    );
 
     let profiles_raw = server
         .tachi_task(Parameters(task_params("profiles")))
@@ -1027,6 +1102,16 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .as_array()
             .expect("profile mbit projected passive traits")
             .contains(&json!("evidence_backed_planning"))
+    );
+    assert!(claude_profile["evidence_contract"]["projected_required"]
+        .as_array()
+        .expect("profile projected evidence")
+        .contains(&json!("acceptance_criteria")));
+    assert!(
+        claude_profile["mbit_card"]["evidence_contract"]["projected_required"]
+            .as_array()
+            .expect("profile mbit projected evidence")
+            .contains(&json!("acceptance_criteria"))
     );
 
     let mut recommend_params = task_params("recommend");
@@ -1054,6 +1139,20 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .expect("recommend mbit projected passive traits")
             .contains(&json!("evidence_backed_planning"))
     );
+    assert!(recommend["evidence_required"]
+        .as_array()
+        .expect("recommend evidence required")
+        .contains(&json!("acceptance_criteria")));
+    assert!(recommend["evidence_contract"]["projected_required"]
+        .as_array()
+        .expect("recommend projected evidence")
+        .contains(&json!("acceptance_criteria")));
+    assert!(
+        recommend["mbit_card"]["evidence_contract"]["projected_required"]
+            .as_array()
+            .expect("recommend mbit projected evidence")
+            .contains(&json!("acceptance_criteria"))
+    );
 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
@@ -1079,6 +1178,12 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
             .as_array()
             .expect("agent projected passive traits")
             .contains(&json!("evidence_backed_planning"))
+    );
+    assert!(
+        agent_claude_profile["evidence_contract"]["projected_required"]
+            .as_array()
+            .expect("agent projected evidence")
+            .contains(&json!("acceptance_criteria"))
     );
 }
 
@@ -3083,6 +3188,7 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
                         "profile": "claude_plan",
                         "add_signature_skills": ["skill:planning-ux-review"],
                         "add_passive_traits": ["evidence_backed_planning"],
+                        "add_evidence_required": ["acceptance_criteria"],
                         "source_proposal_ids": ["proposal-fixture"],
                     })
                     .to_string(),
@@ -3143,6 +3249,19 @@ async fn dispatch_prompt_includes_profile_overlay_and_capability_bundle() {
     );
     assert!(
         prompt.contains("passive_traits: plan_before_execute"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("- evidence_contract:"), "{prompt}");
+    assert!(
+        prompt.contains("required: plan, risks, validation_plan, acceptance_criteria"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("projected_required: acceptance_criteria"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("evidence_projection_status: applied_overlay"),
         "{prompt}"
     );
     assert!(prompt.contains("## Capability Bundle"), "{prompt}");
