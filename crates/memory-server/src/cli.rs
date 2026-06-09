@@ -859,7 +859,17 @@ pub(crate) enum HubAction {
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum VaultAction {
     /// Initialize the vault with a master password.
-    Init,
+    Init {
+        /// Read password from stdin instead of prompting.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+    },
     /// Unlock the vault for this session.
     Unlock {
         /// Read password from stdin instead of prompting.

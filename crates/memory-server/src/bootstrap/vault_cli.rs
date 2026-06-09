@@ -191,26 +191,29 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
-        VaultAction::Init => {
-            let store = open_cli_store_read_only(global_db_path)?;
-            if store
-                .vault_get_config()
-                .map_err(|e| format!("vault_get_config: {e}"))?
-                .is_some()
-            {
+        VaultAction::Init {
+            stdin_password,
+            keychain,
+            password_file,
+        } => {
+            if vault_config_exists_cli(global_db_path)? {
                 println!("Vault already initialized.");
                 return Ok(());
             }
-            drop(store);
 
-            let password = rpassword::prompt_password("New vault password: ")?;
-            if password.is_empty() {
-                return Err("Password cannot be empty".into());
-            }
-            let confirm = rpassword::prompt_password("Confirm password: ")?;
-            if password != confirm {
-                return Err("Passwords do not match".into());
-            }
+            let password = if stdin_password || keychain || password_file.is_some() {
+                read_vault_password(stdin_password, keychain, password_file.as_deref())?
+            } else {
+                let password = rpassword::prompt_password("New vault password: ")?;
+                if password.is_empty() {
+                    return Err("Password cannot be empty".into());
+                }
+                let confirm = rpassword::prompt_password("Confirm password: ")?;
+                if password != confirm {
+                    return Err("Passwords do not match".into());
+                }
+                password
+            };
 
             let salt = crate::vault_crypto::generate_salt();
             let key = crate::vault_crypto::derive_key(&password, &salt)?;
@@ -676,6 +679,17 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
     }
+}
+
+fn vault_config_exists_cli(global_db_path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !global_db_path.exists() {
+        return Ok(false);
+    }
+    let store = open_cli_store_read_only(&global_db_path.to_path_buf())?;
+    Ok(store
+        .vault_get_config()
+        .map_err(|e| format!("vault_get_config: {e}"))?
+        .is_some())
 }
 
 fn decrypt_profile_secret_values(
