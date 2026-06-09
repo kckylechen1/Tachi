@@ -634,6 +634,33 @@ fn render_dispatch_profile_overlay(server: &MemoryServer, params: &TachiDispatch
                     lines.push(format!("  - evidence_contract_error: {err}"));
                 }
             }
+            match crate::dispatch_profile::profile_json_for_server(server, profile_def) {
+                Ok(profile_json) => {
+                    if let Some(card) = profile_json.get("mbit_card") {
+                        let card_fields = ["projected_weak_against", "demotion_targets"];
+                        let mut emitted = false;
+                        for label in card_fields {
+                            let items = card
+                                .get(label)
+                                .and_then(|value| value.as_array())
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|value| value.as_str())
+                                .collect::<Vec<_>>();
+                            if !items.is_empty() {
+                                if !emitted {
+                                    lines.push("- mbit_card_evolution:".to_string());
+                                    emitted = true;
+                                }
+                                lines.push(format!("  - {label}: {}", items.join(", ")));
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    lines.push(format!("  - mbit_card_error: {err}"));
+                }
+            }
         }
     }
     if let Some(agent) = params.agent.as_deref().filter(|s| !s.trim().is_empty()) {

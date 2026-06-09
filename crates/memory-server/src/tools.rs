@@ -1726,7 +1726,7 @@ impl MemoryServer {
                     "evidence_required": crate::dispatch_profile::profile_evidence_required_for_server(self, profile)?,
                     "evidence_contract": crate::dispatch_profile::profile_evidence_contract_json_for_server(self, profile)?,
                     "strong_against": profile.strong_against,
-                    "weak_against": profile.weak_against,
+                    "weak_against": crate::dispatch_profile::profile_weak_against_for_server(self, profile)?,
                     "auto_capability_bundle": profile.auto_capability_bundle,
                     "capability_bundle": bundle_value.get("bundle").cloned().unwrap_or(Value::Null),
                     "eval_feedback": crate::dispatch_profile::profile_eval_feedback_json(self, profile, params.limit.unwrap_or(500))?,
