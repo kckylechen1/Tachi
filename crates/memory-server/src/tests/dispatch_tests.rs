@@ -2720,9 +2720,7 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, _temp_home) = make_server_with_temp_home();
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let flow_id = "flow_20260608T000008Z_dispatch_card_test";
     let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
@@ -2801,9 +2799,7 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000002Z_complete_link_test";
     let dispatch_id = "20260609T000002Z-custom-complete-link";
 
@@ -2897,9 +2893,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000004Z_complete_defaults_test";
     let dispatch_id = "20260609T000004Z-custom-defaults";
 
@@ -4796,14 +4790,12 @@ async fn board_surfaces_dispatch_run_ledger() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "99991231T235959Z-test-run-ledger-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create run ledger fixture");
     std::fs::write(
         run_dir.join("status.json"),
@@ -4860,14 +4852,12 @@ async fn board_marks_abandoned_working_run_as_failed() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "20260608T000000Z-stale-run-ledger-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create stale run fixture");
     let stale_updated_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
     std::fs::write(
@@ -4941,14 +4931,12 @@ async fn board_caps_corrupt_huge_timeout_before_duration_math() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
-    let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "20260608T000001Z-huge-timeout-run-ledger-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let run_dir = temp_home.path().join("runs").join(&dispatch_id);
+    let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create huge-timeout run fixture");
     let stale_updated_at = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
     std::fs::write(

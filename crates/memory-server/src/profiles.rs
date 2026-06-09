@@ -392,6 +392,7 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vault_set",
     "vault_set_api_key_pool",
     "vault_lease_api_key",
+    "vault_record_key_result",
     "vault_setup_rotation",
     "vc_bind",
     "vc_list",

@@ -19,6 +19,20 @@ fn tachi_home() -> PathBuf {
     }
 }
 
+fn runs_dir_for_server(server: &crate::MemoryServer) -> PathBuf {
+    let global_db = server.global_db_path_buf();
+    if global_db.file_name().and_then(|name| name.to_str()) == Some("memory.db") {
+        if let Some(global_dir) = global_db.parent() {
+            if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
+                if let Some(app_home) = global_dir.parent() {
+                    return app_home.join("runs");
+                }
+            }
+        }
+    }
+    tachi_home().join("runs")
+}
+
 fn map_filter_state(state_filter: &str) -> &str {
     match state_filter {
         "working" => "TASK_STATE_WORKING",
@@ -156,8 +170,11 @@ fn probe_harness_server_status(url: Option<&str>) -> serde_json::Value {
     }
 }
 
-fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value> {
-    let runs_dir = tachi_home().join("runs");
+fn collect_run_tasks_from_dir(
+    runs_dir: PathBuf,
+    state_filter: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
     let Ok(read_dir) = std::fs::read_dir(&runs_dir) else {
         return Vec::new();
     };
@@ -258,8 +275,8 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
     runs
 }
 
-fn collect_run_task_by_id(dispatch_id: &str) -> Option<serde_json::Value> {
-    let run_dir = tachi_home().join("runs").join(dispatch_id);
+fn collect_run_task_by_id(runs_dir: &Path, dispatch_id: &str) -> Option<serde_json::Value> {
+    let run_dir = runs_dir.join(dispatch_id);
     if !run_dir.is_dir() {
         return None;
     }
@@ -454,6 +471,7 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
     }
+    let runs_dir = runs_dir_for_server(server);
     let mut flow_run_count = 0usize;
     if let Some(flow_id) = flow_filter.as_deref() {
         let flow_ids = flow_dispatch_ids(flow_id)?;
@@ -465,7 +483,7 @@ pub(crate) async fn handle_tachi_board(
         });
         for dispatch_id in &flow_ids {
             if seen.contains(dispatch_id) {
-                if let Some(run_task) = collect_run_task_by_id(dispatch_id) {
+                if let Some(run_task) = collect_run_task_by_id(&runs_dir, dispatch_id) {
                     flow_run_count += 1;
                     if let Some(existing) = tasks.iter_mut().find(|candidate| {
                         candidate.get("dispatch_id").and_then(|v| v.as_str())
@@ -476,7 +494,7 @@ pub(crate) async fn handle_tachi_board(
                 }
                 continue;
             }
-            if let Some(task) = collect_run_task_by_id(dispatch_id) {
+            if let Some(task) = collect_run_task_by_id(&runs_dir, dispatch_id) {
                 flow_run_count += 1;
                 seen.insert(dispatch_id.clone());
                 tasks.push(task);
@@ -487,9 +505,11 @@ pub(crate) async fn handle_tachi_board(
     let run_tasks = if flow_filter.is_some() {
         Vec::new()
     } else {
-        tokio::task::spawn_blocking(move || collect_run_tasks("all", run_scan_limit))
-            .await
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || {
+            collect_run_tasks_from_dir(runs_dir, "all", run_scan_limit)
+        })
+        .await
+        .unwrap_or_default()
     };
     let run_count = if flow_filter.is_some() {
         flow_run_count
