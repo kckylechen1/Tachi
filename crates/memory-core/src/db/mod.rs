@@ -55,9 +55,10 @@ pub use state::{
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_delete_rotation, vault_entry_exists,
-    vault_get_config, vault_get_entry, vault_get_rotation, vault_insert_audit, vault_list_entries,
-    vault_list_entries_by_type, vault_list_rotations, vault_set_config, vault_set_rotation,
-    vault_touch_entry, vault_upsert_entry,
+    vault_get_config, vault_get_entry, vault_get_key_health, vault_get_rotation,
+    vault_insert_audit, vault_list_entries, vault_list_entries_by_type, vault_list_key_health,
+    vault_list_rotations, vault_set_config, vault_set_rotation, vault_touch_entry,
+    vault_upsert_entry, vault_upsert_key_health,
 };
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 

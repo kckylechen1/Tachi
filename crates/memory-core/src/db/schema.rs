@@ -354,6 +354,28 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             updated_at          TEXT NOT NULL DEFAULT ''
         );
 
+        -- Vault provider key runtime health and selection metadata.
+        -- key_id is a concrete key entry name for non-rotations,
+        -- or a rotation member name for rotation pools (e.g., VOYAGE_API_KEY_1).
+        CREATE TABLE IF NOT EXISTS vault_key_health (
+            logical_name    TEXT NOT NULL,
+            key_id          TEXT NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'ok',
+            cooldown_until  TEXT,
+            last_success    TEXT,
+            last_attempt    TEXT,
+            last_error      TEXT,
+            error_count     INTEGER NOT NULL DEFAULT 0,
+            auth_failed     INTEGER NOT NULL DEFAULT 0,
+            disabled        INTEGER NOT NULL DEFAULT 0,
+            metadata        TEXT NOT NULL DEFAULT '{}',
+            updated_at      TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (logical_name, key_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_key_health_status ON vault_key_health(status);
+        CREATE INDEX IF NOT EXISTS idx_vault_key_health_logical ON vault_key_health(logical_name);
+        CREATE INDEX IF NOT EXISTS idx_vault_key_health_cooldown ON vault_key_health(logical_name, cooldown_until);
+
         -- Foundry job persistence (survives process restarts)
         CREATE TABLE IF NOT EXISTS foundry_jobs (
             id            TEXT PRIMARY KEY,

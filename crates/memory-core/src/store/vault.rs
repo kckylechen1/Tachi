@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::error::MemoryError;
-use crate::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
+use crate::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use crate::MemoryStore;
 
 impl MemoryStore {
@@ -105,5 +105,29 @@ impl MemoryStore {
     /// Delete rotation configuration for a prefix.
     pub fn vault_delete_rotation(&self, prefix: &str) -> Result<bool, MemoryError> {
         db::vault_delete_rotation(&self.conn, prefix)
+    }
+
+    // ─── Key Health Ledger ────────────────────────────────────────────────────
+
+    /// Insert or update one key-health row in the runtime ledger.
+    pub fn vault_upsert_key_health(&self, health: &VaultKeyHealth) -> Result<(), MemoryError> {
+        db::vault_upsert_key_health(&self.conn, health)
+    }
+
+    /// Read one key-health row.
+    pub fn vault_get_key_health(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Result<Option<VaultKeyHealth>, MemoryError> {
+        db::vault_get_key_health(&self.conn, logical_name, key_id)
+    }
+
+    /// List key-health rows, optionally scoped by logical key name.
+    pub fn vault_list_key_health(
+        &self,
+        logical_name: Option<&str>,
+    ) -> Result<Vec<VaultKeyHealth>, MemoryError> {
+        db::vault_list_key_health(&self.conn, logical_name)
     }
 }

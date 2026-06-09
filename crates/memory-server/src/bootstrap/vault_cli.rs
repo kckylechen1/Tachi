@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 use std::path::Path;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
@@ -355,6 +356,154 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::SetPool {
+            prefix,
+            strategy,
+            description,
+            stdin_password,
+            keychain,
+            password_file,
+            values_stdin,
+        } => {
+            if !values_stdin {
+                return Err("Use --values-stdin and provide one API key per line.".into());
+            }
+            crate::vault_crypto::validate_secret_name(&prefix)?;
+            if !is_shell_env_name(&prefix) {
+                return Err(format!(
+                    "API key pool prefix '{prefix}' must be a shell env name such as OPENAI_API_KEY"
+                )
+                .into());
+            }
+
+            let mut raw_values = String::new();
+            std::io::stdin().read_to_string(&mut raw_values)?;
+            let values = raw_values
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                return Err("No API key values received on stdin.".into());
+            }
+
+            let store_ro = open_cli_store_read_only(global_db_path)?;
+            let config = store_ro
+                .vault_get_config()
+                .map_err(|e| format!("vault_get_config: {e}"))?
+                .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+            drop(store_ro);
+
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let salt = B64
+                .decode(&config.salt)
+                .map_err(|e| format!("Invalid vault salt: {e}"))?;
+            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+                return Err("Wrong password".into());
+            }
+
+            let now = chrono::Utc::now().to_rfc3339();
+            let store = open_cli_store(global_db_path)?;
+            for (idx, value) in values.iter().enumerate() {
+                let name = format!("{}_{}", prefix, idx + 1);
+                let is_new = !store
+                    .vault_entry_exists(&name)
+                    .map_err(|e| format!("vault_entry_exists: {e}"))?;
+                let (encrypted_value, nonce) =
+                    crate::vault_crypto::encrypt(&key, value.as_bytes())?;
+                store
+                    .vault_upsert_entry(&memory_core::vault::VaultEntry {
+                        name,
+                        encrypted_value,
+                        nonce,
+                        secret_type: "api_key".to_string(),
+                        description: description.clone().unwrap_or_default(),
+                        allowed_agents: None,
+                        created_at: if is_new { now.clone() } else { String::new() },
+                        updated_at: now.clone(),
+                        accessed_at: String::new(),
+                        access_count: 0,
+                    })
+                    .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+            }
+
+            let strategy = normalize_rotation_strategy_cli(&strategy);
+            store
+                .vault_set_rotation(&memory_core::vault::VaultKeyRotation {
+                    prefix: prefix.clone(),
+                    current_index: 1,
+                    total_keys: values.len() as i64,
+                    rotation_strategy: strategy.clone(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                })
+                .map_err(|e| format!("vault_set_rotation: {e}"))?;
+
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "stored": true,
+                    "logical_name": prefix,
+                    "total_keys": values.len(),
+                    "strategy": strategy,
+                }))?
+            );
+            Ok(())
+        }
+
+        VaultAction::Lease {
+            name,
+            env_name,
+            stdin_password,
+            keychain,
+            password_file,
+            json,
+        } => {
+            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+                let mut args = serde_json::Map::new();
+                args.insert("name".to_string(), serde_json::json!(name));
+                if let Some(env_name) = env_name {
+                    args.insert("env_name".to_string(), serde_json::json!(env_name));
+                }
+                let out =
+                    crate::cli_client::call_daemon_tool(&info, "vault_lease_api_key", args).await?;
+                print_lease_output(&out, json)?;
+                return Ok(());
+            }
+
+            let env_name = env_name.unwrap_or_else(|| name.clone());
+            if !is_shell_env_name(&env_name) {
+                return Err(format!("env name '{env_name}' is not a valid shell env name").into());
+            }
+            let store = open_cli_store(global_db_path)?;
+            let config = store
+                .vault_get_config()
+                .map_err(|e| format!("vault_get_config: {e}"))?
+                .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let salt = B64
+                .decode(&config.salt)
+                .map_err(|e| format!("Invalid vault salt: {e}"))?;
+            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+                return Err("Wrong password".into());
+            }
+
+            let (key_id, value) = lease_api_key_from_store(&store, &key, &name)?;
+            let body = serde_json::json!({
+                "leased": true,
+                "logical_name": name,
+                "key_id": key_id,
+                "env_name": env_name,
+                "env": { env_name: value },
+            });
+            let out = serde_json::to_string(&body)?;
+            print_lease_output(&out, json)?;
+            Ok(())
+        }
+
         VaultAction::Get {
             name,
             stdin_password,
@@ -541,6 +690,161 @@ fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> 
         .and_then(|v| v.as_u64())
         .unwrap_or(secrets.len() as u64);
     println!("\n{count} secret(s) total.");
+    Ok(())
+}
+
+fn is_shell_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn normalize_rotation_strategy_cli(value: &str) -> String {
+    match value.to_ascii_lowercase().as_str() {
+        "round_robin" | "round-robin" => "round_robin".to_string(),
+        "random" => "random".to_string(),
+        "least_recently_used" | "least-recently-used" | "lru" => "least_recently_used".to_string(),
+        _ => "round_robin".to_string(),
+    }
+}
+
+fn key_health_blocks_cli(health: &memory_core::vault::VaultKeyHealth) -> bool {
+    if health.disabled || health.auth_failed {
+        return true;
+    }
+    match health.status.as_str() {
+        "exhausted" => true,
+        "rate_limited" | "cooldown" => health
+            .cooldown_until
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|until| until.with_timezone(&chrono::Utc) > chrono::Utc::now()),
+        _ => false,
+    }
+}
+
+fn rotation_member_name(prefix: &str, idx: i64) -> String {
+    format!("{prefix}_{idx}")
+}
+
+pub(super) fn lease_api_key_from_store(
+    store: &memory_core::MemoryStore,
+    key: &[u8; 32],
+    logical_name: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let entries = store
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    let rotation = store
+        .vault_get_rotation(logical_name)
+        .map_err(|e| format!("vault_get_rotation: {e}"))?;
+
+    let candidate_names = if let Some(rotation) = rotation.as_ref() {
+        let total = rotation.total_keys.max(0);
+        if total == 0 {
+            Vec::new()
+        } else {
+            let start = if rotation.current_index <= 0 {
+                1
+            } else {
+                rotation.current_index
+            };
+            (0..total)
+                .map(|offset| {
+                    let idx = ((start - 1 + offset) % total) + 1;
+                    rotation_member_name(logical_name, idx)
+                })
+                .collect::<Vec<_>>()
+        }
+    } else {
+        vec![logical_name.to_string()]
+    };
+
+    for candidate in candidate_names {
+        let Some(entry) = entries.iter().find(|entry| entry.name == candidate) else {
+            continue;
+        };
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+        if let Some(health) = store
+            .vault_get_key_health(logical_name, &candidate)
+            .map_err(|e| format!("vault_get_key_health: {e}"))?
+        {
+            if key_health_blocks_cli(&health) {
+                continue;
+            }
+        }
+
+        let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        if value.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(rotation) = rotation.as_ref() {
+            if let Some((prefix, idx)) =
+                crate::provider_config::parse_rotation_member_name(&entry.name)
+            {
+                if prefix == logical_name && rotation.total_keys > 0 {
+                    store
+                        .vault_set_rotation(&memory_core::vault::VaultKeyRotation {
+                            current_index: (idx as i64 % rotation.total_keys) + 1,
+                            updated_at: chrono::Utc::now().to_rfc3339(),
+                            ..rotation.clone()
+                        })
+                        .map_err(|e| format!("vault_set_rotation: {e}"))?;
+                }
+            }
+        }
+        let _ = store.vault_touch_entry(&entry.name);
+        return Ok((entry.name.clone(), value));
+    }
+
+    Err(format!(
+        "No usable API key available for '{logical_name}' (missing, restricted, disabled, auth-failed, exhausted, or rate-limited)."
+    )
+    .into())
+}
+
+fn print_lease_output(out: &str, json_output: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let value: serde_json::Value = serde_json::from_str(out)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    let env_name = value
+        .get("env_name")
+        .and_then(|value| value.as_str())
+        .ok_or("lease response missing env_name")?;
+    let secret = value
+        .get("env")
+        .and_then(|env| env.get(env_name))
+        .and_then(|value| value.as_str())
+        .ok_or("lease response missing env value")?;
+    let escaped = secret.replace('\'', "'\\''");
+    println!("export {env_name}='{escaped}'");
+    eprintln!(
+        "# tachi vault lease: {} -> {}",
+        value
+            .get("logical_name")
+            .and_then(|value| value.as_str())
+            .unwrap_or(env_name),
+        value
+            .get("key_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown")
+    );
     Ok(())
 }
 

@@ -282,6 +282,98 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
 }
 
 #[tokio::test]
+async fn vault_api_key_pool_sets_and_leases_rotated_env() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "pool-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    let stored = server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "ROUTER_API_KEY".to_string(),
+            values: vec!["router-key-1".to_string(), "router-key-2".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "router pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("vault_set_api_key_pool should succeed");
+    let stored_json: serde_json::Value = serde_json::from_str(&stored).expect("stored JSON");
+    assert_eq!(stored_json["logical_name"], json!("ROUTER_API_KEY"));
+    assert_eq!(stored_json["total_keys"], json!(2));
+
+    let first = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "ROUTER_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("first lease should succeed");
+    let first_json: serde_json::Value = serde_json::from_str(&first).expect("first lease JSON");
+    assert_eq!(first_json["key_id"], json!("ROUTER_API_KEY_1"));
+    assert_eq!(first_json["env"]["ROUTER_API_KEY"], json!("router-key-1"));
+
+    let second = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "ROUTER_API_KEY".to_string(),
+            env_name: Some("OPENAI_API_KEY".to_string()),
+            agent_id: None,
+        }))
+        .await
+        .expect("second lease should succeed");
+    let second_json: serde_json::Value = serde_json::from_str(&second).expect("second lease JSON");
+    assert_eq!(second_json["key_id"], json!("ROUTER_API_KEY_2"));
+    assert_eq!(second_json["env_name"], json!("OPENAI_API_KEY"));
+    assert_eq!(second_json["env"]["OPENAI_API_KEY"], json!("router-key-2"));
+}
+
+#[tokio::test]
+async fn vault_api_key_lease_skips_unusable_health_members() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "pool-health-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "TRANSIT_API_KEY".to_string(),
+            values: vec!["transit-key-1".to_string(), "transit-key-2".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "transit pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("vault_set_api_key_pool should succeed");
+
+    server
+        .llm
+        .mark_provider_key_rate_limited_for_tests("TRANSIT_API_KEY_1", Some(60));
+
+    let leased = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "TRANSIT_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("lease should skip rate-limited first key");
+    let leased_json: serde_json::Value = serde_json::from_str(&leased).expect("lease JSON");
+    assert_eq!(leased_json["key_id"], json!("TRANSIT_API_KEY_2"));
+    assert_eq!(
+        leased_json["env"]["TRANSIT_API_KEY"],
+        json!("transit-key-2")
+    );
+}
+
+#[tokio::test]
 async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
     let server = make_server();
 

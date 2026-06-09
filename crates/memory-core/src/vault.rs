@@ -73,6 +73,42 @@ pub struct VaultKeyRotation {
     pub updated_at: String,
 }
 
+/// Runtime health metadata for a concrete provider key entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VaultKeyHealth {
+    pub logical_name: String,
+    pub key_id: String,
+    pub status: String,
+    pub cooldown_until: Option<String>,
+    pub last_success: Option<String>,
+    pub last_attempt: Option<String>,
+    pub last_error: Option<String>,
+    pub error_count: i64,
+    pub auth_failed: bool,
+    pub disabled: bool,
+    pub metadata: String,
+    pub updated_at: String,
+}
+
+impl Default for VaultKeyHealth {
+    fn default() -> Self {
+        Self {
+            logical_name: String::new(),
+            key_id: String::new(),
+            status: "ok".to_string(),
+            cooldown_until: None,
+            last_success: None,
+            last_attempt: None,
+            last_error: None,
+            error_count: 0,
+            auth_failed: false,
+            disabled: false,
+            metadata: "{}".to_string(),
+            updated_at: String::new(),
+        }
+    }
+}
+
 impl Default for VaultConfig {
     fn default() -> Self {
         Self {

@@ -413,26 +413,77 @@ pub(crate) enum Commands {
     /// Replaces project .env files — pipe into shell with: eval "$(tachi env --keychain)"
     /// or on non-macOS hosts: eval "$(tachi env --password-file ~/.config/tachi/vault-password)".
     Env {
+        #[command(subcommand)]
+        action: Option<EnvAction>,
         /// Optional glob-style filter on secret names (e.g. "OPENAI*" or "*API_KEY").
         /// Without this flag, all unrestricted secrets are emitted.
-        #[arg(long)]
+        #[arg(long, global = true)]
         filter: Option<String>,
         /// Only emit secrets whose names match a prefix commonly used as env vars
         /// (all-uppercase with underscores, e.g. OPENAI_API_KEY).
-        #[arg(long)]
+        #[arg(long, global = true)]
         env_only: bool,
         /// Read master password from stdin instead of prompting interactively.
         /// Useful for scripts: echo "$PASS" | tachi env --stdin-password
-        #[arg(long)]
+        #[arg(long, global = true)]
         stdin_password: bool,
         /// Read master password from macOS Keychain instead of prompting.
         /// Uses service name "tachi-vault", account "default".
-        #[arg(long)]
+        #[arg(long, global = true)]
         keychain: bool,
         /// Read master password from a local file (first line only).
         /// Useful on Linux/Windows with OS/container secret mounts.
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", global = true)]
         password_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum EnvAction {
+    /// Inspect project .tachi/vault.env bindings without decrypting values.
+    Plan {
+        /// Project directory to inspect. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Export project-bound Vault secrets as shell exports.
+    Export {
+        /// Project directory to inspect. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Emit JSON instead of shell export syntax.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write generated shell exports to .tachi/env.generated for direnv-style sourcing.
+    Sync {
+        /// Project directory to inspect. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Output file. Defaults to <project>/.tachi/env.generated.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Preview the target path and bindings without writing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Overwrite an existing output file.
+        #[arg(long)]
+        force: bool,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a command with project-bound Vault secrets injected into its environment.
+    Run {
+        /// Project directory to inspect and use as command cwd. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Command and arguments to execute. Use `--` before the command.
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
     },
 }
 
@@ -845,6 +896,51 @@ pub(crate) enum VaultAction {
         /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
         #[arg(long)]
         value_stdin: bool,
+    },
+    /// Store multiple API keys as one logical rotation pool.
+    /// Values are read from stdin, one key per line.
+    #[command(alias = "pool-set")]
+    SetPool {
+        /// Logical provider env name (e.g. OPENAI_API_KEY, ROUTER_API_KEY).
+        prefix: String,
+        /// Rotation strategy.
+        #[arg(long, default_value = "round_robin")]
+        strategy: String,
+        /// Optional description applied to each concrete key.
+        #[arg(long)]
+        description: Option<String>,
+        /// Read vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Read API key values from stdin, one per line.
+        #[arg(long)]
+        values_stdin: bool,
+    },
+    /// Lease one usable API key from a Vault pool and print shell export syntax.
+    Lease {
+        /// Logical provider env name or standalone API key name.
+        name: String,
+        /// Override output env var name. Defaults to name.
+        #[arg(long)]
+        env_name: Option<String>,
+        /// Read password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Emit JSON instead of shell export syntax.
+        #[arg(long)]
+        json: bool,
     },
     /// Get a secret value from the vault.
     Get {

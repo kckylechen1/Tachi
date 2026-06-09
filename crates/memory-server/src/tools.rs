@@ -9,6 +9,7 @@ use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::{
@@ -71,10 +72,11 @@ use crate::sandbox_ops::{
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::vault_ops::{
-    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
-    handle_vault_set, handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
-    VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams,
+    handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
+    handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
+    handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock, VaultGetParams,
+    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
+    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
@@ -1227,6 +1229,26 @@ impl MemoryServer {
         handle_vault_setup_rotation(self, params).await
     }
 
+    #[tool(
+        description = "Store multiple provider API keys as one logical Vault pool. Values are encrypted as PREFIX_1, PREFIX_2, ... and rotation is configured under PREFIX."
+    )]
+    pub(crate) async fn vault_set_api_key_pool(
+        &self,
+        Parameters(params): Parameters<VaultSetApiKeyPoolParams>,
+    ) -> Result<String, String> {
+        handle_vault_set_api_key_pool(self, params).await
+    }
+
+    #[tool(
+        description = "Lease one usable provider API key from Vault and return an env injection map. Skips disabled/auth-failed/exhausted/rate-limited keys."
+    )]
+    pub(crate) async fn vault_lease_api_key(
+        &self,
+        Parameters(params): Parameters<VaultLeaseApiKeyParams>,
+    ) -> Result<String, String> {
+        handle_vault_lease_api_key(self, params).await
+    }
+
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
@@ -1806,14 +1828,38 @@ impl MemoryServer {
                 crate::dispatch_ops::handle_tachi_dispatch(self, dispatch_params).await
             }
             "complete" => {
+                let dispatch_defaults = params
+                    .dispatch_id
+                    .as_deref()
+                    .filter(|dispatch_id| !dispatch_id.trim().is_empty())
+                    .and_then(|dispatch_id| {
+                        read_dispatch_defaults_for_complete_with_flow(
+                            params.flow_id.as_deref(),
+                            dispatch_id,
+                        )
+                    });
                 let task = params
                     .task
                     .clone()
-                    .ok_or_else(|| "task is required when action='complete'".to_string())?;
+                    .or_else(|| {
+                        dispatch_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.task.clone())
+                    })
+                    .ok_or_else(|| {
+                        "task is required when action='complete' (or provide a dispatch_id with a readable run status/card)".to_string()
+                    })?;
                 let agent = params
                     .agent
                     .clone()
-                    .ok_or_else(|| "agent is required when action='complete'".to_string())?;
+                    .or_else(|| {
+                        dispatch_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.agent.clone())
+                    })
+                    .ok_or_else(|| {
+                        "agent is required when action='complete' (or provide a dispatch_id with a readable run status/card)".to_string()
+                    })?;
                 let outcome = params
                     .outcome
                     .clone()
@@ -1824,7 +1870,11 @@ impl MemoryServer {
                     agent,
                     outcome,
                     task_type: params.task_type.clone(),
-                    profile: params.profile.clone(),
+                    profile: params.profile.clone().or_else(|| {
+                        dispatch_defaults
+                            .as_ref()
+                            .and_then(|defaults| defaults.profile.clone())
+                    }),
                     risk: params.risk.clone(),
                     duration_ms: params.duration_ms,
                     skills_used: params.skills_used.clone(),
@@ -1853,6 +1903,7 @@ impl MemoryServer {
                     state_filter: params.state_filter.clone(),
                     limit: params.limit,
                     project: params.project.clone(),
+                    flow_id: params.flow_id.clone(),
                 };
                 crate::dispatch_ops::handle_tachi_board(self, board_params).await
             }
@@ -2004,7 +2055,7 @@ impl MemoryServer {
     // ─── Tachi Arena: tracked worker mission document ledger ────────────────
 
     #[tool(
-        description = "Tracked worker mission ledger. action='open' creates .tachi/arena/<arena_id>/; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt for a harness; action='board' lists arenas or missions; action='collect' reads worker result.md; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
+        description = "Tracked worker mission ledger. action='open' creates .tachi/arena/<arena_id>/; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt, or launch=true bridges supported harnesses through tachi_task dispatch; action='board' lists arenas/missions plus linked dispatch state; action='collect' reads worker result.md or linked dispatch result.md and returns a completion draft; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
     )]
     pub(crate) async fn tachi_arena(
         &self,
@@ -2107,8 +2158,15 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
     append_known_field(&mut lines, &value, "mission_id");
     append_known_field(&mut lines, &value, "flow_id");
     append_known_field(&mut lines, &value, "dispatch_id");
+    append_known_field(&mut lines, &value, "task_id");
+    append_known_field(&mut lines, &value, "overall");
+    append_known_field(&mut lines, &value, "next_action");
     append_known_field(&mut lines, &value, "stage");
     append_known_field(&mut lines, &value, "state");
+    append_known_field(&mut lines, &value, "outcome");
+    append_known_field(&mut lines, &value, "path");
+    append_known_field(&mut lines, &value, "eval_path");
+    append_known_field(&mut lines, &value, "eval_memory_id");
     append_known_field(&mut lines, &value, "run_dir");
     append_known_field(&mut lines, &value, "arena_dir");
     append_known_field(&mut lines, &value, "mission_dir");
@@ -2118,6 +2176,58 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
     append_known_field(&mut lines, &value, "context_file");
     append_known_field(&mut lines, &value, "message");
     append_known_field(&mut lines, &value, "dispatch_error");
+
+    if let Some(eval_entry) = value.get("eval_entry") {
+        append_known_field(&mut lines, eval_entry, "id");
+        append_known_field(&mut lines, eval_entry, "path");
+        append_known_field(&mut lines, eval_entry, "status");
+    }
+    if let Some(pipeline) = value.get("pipeline") {
+        append_known_field(&mut lines, pipeline, "post_complete_hooks");
+        if let Some(link) = pipeline.get("dispatch_completion_link") {
+            append_known_field(&mut lines, link, "recorded");
+            append_known_field(&mut lines, link, "eval_memory_id");
+            append_known_field(&mut lines, link, "eval_path");
+        }
+    }
+
+    if let Some(matrix) = value.get("matrix").and_then(Value::as_array) {
+        let passed = matrix
+            .iter()
+            .filter(|step| step.get("status").and_then(Value::as_str) == Some("passed"))
+            .count();
+        let pending = matrix
+            .iter()
+            .filter(|step| step.get("status").and_then(Value::as_str) == Some("pending"))
+            .count();
+        let ready = matrix
+            .iter()
+            .filter(|step| step.get("status").and_then(Value::as_str) == Some("ready"))
+            .count();
+        let blocked = matrix
+            .iter()
+            .filter(|step| step.get("status").and_then(Value::as_str) == Some("blocked"))
+            .count();
+        lines.push(format!(
+            "matrix: passed={passed} ready={ready} pending={pending} blocked={blocked}"
+        ));
+        for step in matrix.iter().take(12) {
+            let id = step.get("id").and_then(Value::as_str).unwrap_or("(step)");
+            let status = step
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let gap = step
+                .get("gaps")
+                .and_then(Value::as_array)
+                .and_then(|gaps| gaps.first())
+                .and_then(Value::as_str)
+                .filter(|gap| !gap.is_empty())
+                .map(|gap| format!(" gap={gap}"))
+                .unwrap_or_default();
+            lines.push(format!("- `{id}` {status}{gap}"));
+        }
+    }
 
     if let Some(tasks) = value.get("tasks").and_then(Value::as_array) {
         lines.push(format!("tasks: {}", tasks.len()));
@@ -2172,6 +2282,91 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
         lines.push(format!("```json\n{}\n```", value));
     }
     lines.join("\n")
+}
+
+#[derive(Debug, Default)]
+struct DispatchCompleteDefaults {
+    agent: Option<String>,
+    profile: Option<String>,
+    task: Option<String>,
+}
+
+fn read_dispatch_defaults_for_complete(dispatch_id: &str) -> Option<DispatchCompleteDefaults> {
+    let mut defaults = DispatchCompleteDefaults::default();
+    merge_dispatch_defaults_from_path(
+        &mut defaults,
+        &tachi_home_for_tools()
+            .join("runs")
+            .join(dispatch_id)
+            .join("status.json"),
+    );
+    if defaults.agent.is_some() && defaults.task.is_some() && defaults.profile.is_some() {
+        return Some(defaults);
+    }
+    Some(defaults).filter(|defaults| {
+        defaults.agent.is_some() || defaults.task.is_some() || defaults.profile.is_some()
+    })
+}
+
+fn read_dispatch_defaults_for_complete_with_flow(
+    flow_id: Option<&str>,
+    dispatch_id: &str,
+) -> Option<DispatchCompleteDefaults> {
+    let mut defaults = read_dispatch_defaults_for_complete(dispatch_id).unwrap_or_default();
+    if let Some(flow_id) = flow_id {
+        if let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) {
+            merge_dispatch_defaults_from_path(
+                &mut defaults,
+                &run_dir
+                    .join("artifacts")
+                    .join(format!("dispatch-{dispatch_id}.json")),
+            );
+        }
+    }
+    Some(defaults).filter(|defaults| {
+        defaults.agent.is_some() || defaults.task.is_some() || defaults.profile.is_some()
+    })
+}
+
+fn merge_dispatch_defaults_from_path(defaults: &mut DispatchCompleteDefaults, path: &Path) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return;
+    };
+    if defaults.agent.is_none() {
+        defaults.agent = value
+            .get("agent")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    if defaults.profile.is_none() {
+        defaults.profile = value
+            .get("profile")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+    if defaults.task.is_none() {
+        defaults.task = value
+            .get("task")
+            .and_then(Value::as_str)
+            .or_else(|| value.get("summary").and_then(Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
+}
+
+fn tachi_home_for_tools() -> PathBuf {
+    if let Ok(home) = std::env::var("TACHI_HOME") {
+        PathBuf::from(home)
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".tachi")
+    } else {
+        std::env::temp_dir().join("tachi")
+    }
 }
 
 fn append_known_field(lines: &mut Vec<String>, value: &Value, field: &str) {
