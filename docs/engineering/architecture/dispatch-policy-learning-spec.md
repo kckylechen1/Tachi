@@ -235,6 +235,9 @@ As of 2026-06-09, the baseline includes:
   verification, and observed skill usage pass the evidence thresholds, then
   projects approved signature-skill, passive-trait, and evidence-contract
   changes into durable profile/card overlays;
+- MBIT cards include stats plus reviewed card-risk projections for learned
+  weakness markers and skill demotion targets, and merged weak-against signals
+  affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
 - feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
   `ux_matrix`, `build_references`, and `close_loop`;
@@ -250,10 +253,10 @@ As of 2026-06-09, the baseline includes:
 The next policy-learning slices should focus on replay and richer card
 projection hardening:
 
-- expand approved MBIT/card evolution beyond skill/passive-trait overlays into
-  richer card stats, weakness, and demotion targets;
-- add regression tests for high-risk review routing, low-risk fast-check routing,
-  human override weighting, retry weighting, and MBIT card parsing.
+- harden route-policy replay and regression coverage across larger live eval
+  fixtures;
+- continue expanding card parsing and projection tests as new MBIT fields are
+  added.
 
 Implemented route-policy loader:
 

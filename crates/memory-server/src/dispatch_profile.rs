@@ -25,6 +25,7 @@ const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
 const PROFILE_CARD_OVERLAY_NS: &str = "dispatch_profile_card_overlays";
 const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 const MIN_LOADOUT_EVOLUTION_SAMPLES: u32 = 10;
+const MIN_CARD_RISK_EVOLUTION_SAMPLES: u32 = 3;
 const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
 
 #[derive(Debug, Clone, Copy)]
@@ -378,9 +379,16 @@ pub(crate) fn handle_dispatch_recommendation(
     let mut candidates = DISPATCH_PROFILES
         .iter()
         .map(|profile| {
-            score_profile_candidate(profile, &risk, &rows, &subagent_scores, &performance_matrix)
+            score_profile_candidate(
+                server,
+                profile,
+                &risk,
+                &rows,
+                &subagent_scores,
+                &performance_matrix,
+            )
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     apply_route_policy_rules_to_candidates(&mut candidates, &route_policy_rules, &risk);
     candidates.sort_by(|a, b| {
         b.score
@@ -701,6 +709,8 @@ pub(crate) fn handle_route_policy_apply(
                     "promote_observed_skill_to_signature"
                         | "add_evidence_backed_passive_trait"
                         | "add_evidence_contract_required"
+                        | "add_card_weakness"
+                        | "mark_skill_demotion_target"
                 ) {
                     return Err(format!(
                         "unsupported loadout_evolution operation for {proposal_id}: {operation}"
@@ -729,9 +739,15 @@ pub(crate) fn handle_route_policy_apply(
                     profile_projected_passive_traits_from_overlay(profile, Some(&overlay));
                 let mut overlay_evidence_required =
                     profile_projected_evidence_required_from_overlay(profile, Some(&overlay));
+                let mut overlay_weak_against =
+                    profile_projected_weak_against_from_overlay(profile, Some(&overlay));
+                let mut overlay_demotion_targets =
+                    profile_demotion_targets_from_overlay(profile, Some(&overlay));
                 let mut added_signature_skills = Vec::new();
                 let mut added_passive_traits = Vec::new();
                 let mut added_evidence_required = Vec::new();
+                let mut added_weak_against = Vec::new();
+                let mut added_demotion_targets = Vec::new();
                 let already_projected = match operation {
                     "promote_observed_skill_to_signature" => {
                         let skill_id = value
@@ -842,11 +858,92 @@ pub(crate) fn handle_route_policy_apply(
                         added_evidence_required.push(evidence_id);
                         already_projected
                     }
+                    "add_card_weakness" => {
+                        let weakness_id = value
+                            .get("weakness_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|weakness_id| !weakness_id.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                value
+                                    .get("proposed_patch")
+                                    .and_then(|patch| patch.get("add_weak_against"))
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::trim)
+                                    .find(|weakness_id| !weakness_id.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "loadout_evolution proposal {proposal_id} missing weakness_id"
+                                )
+                            })?;
+                        if profile.weak_against.iter().any(|item| *item == weakness_id) {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets existing baseline weakness {weakness_id}"
+                            ));
+                        }
+                        let already_projected =
+                            overlay_weak_against.iter().any(|item| item == &weakness_id);
+                        if !already_projected {
+                            overlay_weak_against.push(weakness_id.clone());
+                        }
+                        added_weak_against.push(weakness_id);
+                        already_projected
+                    }
+                    "mark_skill_demotion_target" => {
+                        let skill_id = value
+                            .get("skill_id")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|skill_id| !skill_id.is_empty())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                value
+                                    .get("proposed_patch")
+                                    .and_then(|patch| patch.get("demotion_targets"))
+                                    .and_then(Value::as_array)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(Value::as_str)
+                                    .map(str::trim)
+                                    .find(|skill_id| !skill_id.is_empty())
+                                    .map(str::to_string)
+                            })
+                            .ok_or_else(|| {
+                                format!(
+                                    "loadout_evolution proposal {proposal_id} missing skill_id"
+                                )
+                            })?;
+                        let known_skill = profile_required_skill_ids(profile)
+                            .into_iter()
+                            .any(|skill| skill == skill_id)
+                            || overlay_skills.iter().any(|skill| skill == &skill_id);
+                        if !known_skill {
+                            return Err(format!(
+                                "loadout_evolution proposal {proposal_id} targets unknown loadout skill {skill_id}"
+                            ));
+                        }
+                        let already_projected = overlay_demotion_targets
+                            .iter()
+                            .any(|item| item == &skill_id);
+                        if !already_projected {
+                            overlay_demotion_targets.push(skill_id.clone());
+                        }
+                        added_demotion_targets.push(skill_id);
+                        already_projected
+                    }
                     _ => unreachable!("unsupported operation checked above"),
                 };
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_skills);
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_traits);
                 crate::skill_policy::dedupe_preserve_order(&mut overlay_evidence_required);
+                crate::skill_policy::dedupe_preserve_order(&mut overlay_weak_against);
+                crate::skill_policy::dedupe_preserve_order(&mut overlay_demotion_targets);
 
                 let mut source_proposals = overlay
                     .get("source_proposal_ids")
@@ -864,6 +961,8 @@ pub(crate) fn handle_route_policy_apply(
                 overlay["add_signature_skills"] = json!(overlay_skills);
                 overlay["add_passive_traits"] = json!(overlay_traits);
                 overlay["add_evidence_required"] = json!(overlay_evidence_required);
+                overlay["add_weak_against"] = json!(overlay_weak_against);
+                overlay["demotion_targets"] = json!(overlay_demotion_targets);
                 overlay["source_proposal_ids"] = json!(source_proposals);
                 overlay["updated_at"] = json!(applied_at);
                 overlay["last_applied_proposal_id"] = json!(proposal_id);
@@ -883,6 +982,8 @@ pub(crate) fn handle_route_policy_apply(
                     "added_signature_skills": added_signature_skills,
                     "added_passive_traits": added_passive_traits,
                     "added_evidence_required": added_evidence_required,
+                    "added_weak_against": added_weak_against,
+                    "added_demotion_targets": added_demotion_targets,
                     "note": "Reviewed loadout evolution is projected as a durable profile/card overlay; built-in static definitions remain the baseline."
                 });
                 let next = serde_json::to_string(&value)
@@ -1301,6 +1402,9 @@ pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
         profile,
         profile_skill_loadout_json(profile),
         profile_evidence_contract_json(profile),
+        profile_weak_against(profile),
+        Vec::new(),
+        Vec::new(),
     )
 }
 
@@ -1312,6 +1416,9 @@ pub(crate) fn profile_json_for_server(
         profile,
         profile_skill_loadout_json_for_server(server, profile)?,
         profile_evidence_contract_json_for_server(server, profile)?,
+        profile_weak_against_for_server(server, profile)?,
+        profile_projected_weak_against(server, profile)?,
+        profile_demotion_targets(server, profile)?,
     ))
 }
 
@@ -1319,7 +1426,19 @@ fn profile_json_with_loadout_and_evidence_contract(
     profile: &DispatchProfileDef,
     skill_loadout: Value,
     evidence_contract: Value,
+    weak_against: Vec<String>,
+    projected_weak_against: Vec<String>,
+    demotion_targets: Vec<String>,
 ) -> Value {
+    let card_projection = json!({
+        "status": if projected_weak_against.is_empty() && demotion_targets.is_empty() {
+            "baseline"
+        } else {
+            "applied_overlay"
+        },
+        "namespace": PROFILE_CARD_OVERLAY_NS,
+        "key": profile.name,
+    });
     json!({
         "name": profile.name,
         "display_name": profile.display_name,
@@ -1339,15 +1458,42 @@ fn profile_json_with_loadout_and_evidence_contract(
         "credential_profiles": profile.credential_profiles,
         "skill_loadout": skill_loadout,
         "evidence_contract": evidence_contract,
+        "weak_against": weak_against,
         "mbit_card": {
             "display_name": profile.display_name,
             "type": [profile.role],
+            "stats": profile_mbit_stats(profile),
             "strong_against": profile.strong_against,
-            "weak_against": profile.weak_against,
+            "weak_against": weak_against,
+            "projected_weak_against": projected_weak_against,
+            "demotion_targets": demotion_targets,
             "auto_capability_bundle": profile.auto_capability_bundle,
             "skill_loadout": skill_loadout,
             "evidence_contract": evidence_contract,
+            "evolution": {
+                "projection": card_projection,
+            },
         }
+    })
+}
+
+fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
+    let (precision, speed, cost, creativity, risk_control) = match profile.name {
+        "claude_plan" => (86, 58, 65, 82, 88),
+        "glm_51_impl" => (78, 76, 52, 70, 72),
+        "opencode_builder" => (74, 82, 48, 68, 70),
+        "codex_55_review" => (95, 55, 72, 60, 95),
+        "codex_53_fast" => (72, 92, 35, 52, 58),
+        "kimi_arch" => (88, 64, 58, 86, 84),
+        "deepseek_explore" => (76, 88, 30, 72, 62),
+        _ => (70, 70, 70, 70, 70),
+    };
+    json!({
+        "precision": precision,
+        "speed": speed,
+        "cost": cost,
+        "creativity": creativity,
+        "risk_control": risk_control,
     })
 }
 
@@ -1373,6 +1519,52 @@ pub(crate) fn profile_evidence_required_for_server(
     ));
     crate::skill_policy::dedupe_preserve_order(&mut evidence);
     Ok(evidence)
+}
+
+pub(crate) fn profile_weak_against(profile: &DispatchProfileDef) -> Vec<String> {
+    let mut weak = profile
+        .weak_against
+        .iter()
+        .map(|item| item.to_string())
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut weak);
+    weak
+}
+
+pub(crate) fn profile_weak_against_for_server(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    let mut weak = profile_weak_against(profile);
+    weak.extend(profile_projected_weak_against_from_overlay(
+        profile,
+        overlay.as_ref(),
+    ));
+    crate::skill_policy::dedupe_preserve_order(&mut weak);
+    Ok(weak)
+}
+
+fn profile_projected_weak_against(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    Ok(profile_projected_weak_against_from_overlay(
+        profile,
+        overlay.as_ref(),
+    ))
+}
+
+fn profile_demotion_targets(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<Vec<String>, String> {
+    let overlay = load_profile_overlay(server, profile.name)?;
+    Ok(profile_demotion_targets_from_overlay(
+        profile,
+        overlay.as_ref(),
+    ))
 }
 
 pub(crate) fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
@@ -1576,6 +1768,54 @@ fn profile_projected_evidence_required_from_overlay(
         .collect::<Vec<_>>();
     crate::skill_policy::dedupe_preserve_order(&mut evidence);
     evidence
+}
+
+fn profile_projected_weak_against_from_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let Some(overlay) = overlay else {
+        return Vec::new();
+    };
+    let baseline = profile.weak_against.iter().collect::<HashSet<_>>();
+    let mut weak = overlay
+        .get("add_weak_against")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|weakness_id| !weakness_id.is_empty())
+        .filter(|weakness_id| !baseline.contains(weakness_id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut weak);
+    weak
+}
+
+fn profile_demotion_targets_from_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let Some(overlay) = overlay else {
+        return Vec::new();
+    };
+    let known_skills = profile_required_skill_ids(profile)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut targets = overlay
+        .get("demotion_targets")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|skill_id| !skill_id.is_empty())
+        .filter(|skill_id| known_skills.contains(*skill_id))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut targets);
+    targets
 }
 
 fn load_profile_overlay(server: &MemoryServer, profile: &str) -> Result<Option<Value>, String> {
@@ -1916,12 +2156,13 @@ fn indicates_prior_failure(lower: &str) -> bool {
 }
 
 fn score_profile_candidate(
+    server: &MemoryServer,
     profile: &DispatchProfileDef,
     risk: &DispatchRisk,
     rows: &[EvalRow],
     subagent_scores: &[crate::agent_eval::SubagentTaskScore],
     performance_matrix: &[AgentPerformanceMatrixRow],
-) -> ProfileCandidate {
+) -> Result<ProfileCandidate, String> {
     let mut score = 0.0;
     let mut reasons = Vec::new();
 
@@ -1962,6 +2203,18 @@ fn score_profile_candidate(
         {
             score += 15.0;
             reasons.push(format!("strong_against_signal:{signal}"));
+        }
+    }
+    let weak_against = profile_weak_against_for_server(server, profile)?;
+    for weakness in &weak_against {
+        if weakness == &risk.task_type
+            || risk
+                .reasons
+                .iter()
+                .any(|signal| signal.contains(weakness) || weakness.contains(signal))
+        {
+            score -= 12.0;
+            reasons.push(format!("weak_against_signal:{weakness}"));
         }
     }
     if matches!(risk.risk.as_str(), "high" | "critical") && profile.role == "fast_checker" {
@@ -2089,7 +2342,7 @@ fn score_profile_candidate(
         reasons.push("baseline_mbit_fit".to_string());
     }
 
-    ProfileCandidate {
+    Ok(ProfileCandidate {
         profile: profile.name.to_string(),
         agent: profile.backend.to_string(),
         role: profile.role.to_string(),
@@ -2104,7 +2357,7 @@ fn score_profile_candidate(
         avg_retry_count: (performance_samples > 0).then(|| retry_sum / performance_samples as f64),
         avg_latency_ms: (latency_count > 0).then(|| latency_sum / latency_count as f64),
         avg_cost_usd: (cost_count > 0).then(|| cost_sum / cost_count as f64),
-    }
+    })
 }
 
 fn build_profile_fallback_chain(
@@ -2296,6 +2549,20 @@ fn build_loadout_evolution_proposals(
             .collect::<Vec<_>>();
         let profile_samples = sum_matrix_samples(&profile_rows);
         if profile_samples < MIN_LOADOUT_EVOLUTION_SAMPLES {
+            out.extend(build_card_risk_evolution_proposals(
+                profile,
+                &profile_rows,
+                &entries,
+                profile_samples,
+                &profile_weak_against_for_server(server, profile)?
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                &profile_demotion_targets(server, profile)?
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                &profile_required_skill_ids_for_server(server, profile)?,
+                limit,
+            ));
             continue;
         }
         let failure_count = sum_matrix_failures(&profile_rows);
@@ -2307,6 +2574,24 @@ fn build_loadout_evolution_proposals(
             weighted_matrix_rate(&profile_rows, |row| row.success_rate).unwrap_or(0.0);
         let useful_rate = weighted_matrix_rate(&profile_rows, |row| row.useful_rate).unwrap_or(0.0);
         let positive_rate = success_rate.max(useful_rate);
+
+        let existing_weak_against = profile_weak_against_for_server(server, profile)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let existing_demotion_targets = profile_demotion_targets(server, profile)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let profile_required_skills = profile_required_skill_ids_for_server(server, profile)?;
+        out.extend(build_card_risk_evolution_proposals(
+            profile,
+            &profile_rows,
+            &entries,
+            profile_samples,
+            &existing_weak_against,
+            &existing_demotion_targets,
+            &profile_required_skills,
+            limit,
+        ));
 
         if failure_count > 0
             || human_override_rate >= 0.10
@@ -2638,6 +2923,174 @@ fn build_evidence_contract_evolution_proposals(
             }
         }));
     }
+    out
+}
+
+fn build_card_risk_evolution_proposals(
+    profile: &DispatchProfileDef,
+    profile_rows: &[AgentPerformanceMatrixRow],
+    entries: &[memory_core::MemoryEntry],
+    profile_samples: u32,
+    existing_weak_against: &HashSet<String>,
+    existing_demotion_targets: &HashSet<String>,
+    profile_required_skills: &[String],
+    limit: usize,
+) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut proposed_weaknesses = HashSet::new();
+    let mut bad_task_types = HashSet::new();
+    for row in profile_rows {
+        if row.samples < MIN_CARD_RISK_EVOLUTION_SAMPLES {
+            continue;
+        }
+        let risk_signal =
+            row.failure_count >= 2 || row.human_override_rate >= 0.25 || row.avg_retry_count >= 1.5;
+        if !risk_signal {
+            continue;
+        }
+        bad_task_types.insert(row.task_type.clone());
+        let weakness_id = row.task_type.clone();
+        if !existing_weak_against.contains(&weakness_id)
+            && proposed_weaknesses.insert(weakness_id.clone())
+        {
+            let id = format!(
+                "loadout_evolution:{}:add_card_weakness:{}",
+                sanitize_policy_key(profile.name),
+                sanitize_policy_key(&weakness_id)
+            );
+            out.push(json!({
+                "proposal_id": id,
+                "kind": "loadout_evolution",
+                "status": "pending",
+                "requires_human_approval": true,
+                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "profile": profile.name,
+                "operation": "add_card_weakness",
+                "weakness_id": weakness_id,
+                "weakness_label": format!("Repeated friction on {}", row.task_type),
+                "current_card": profile_json(profile).get("mbit_card").cloned().unwrap_or(Value::Null),
+                "proposed_patch": {
+                    "add_weak_against": [row.task_type],
+                    "preserve_baseline_weak_against": profile.weak_against,
+                },
+                "evidence": {
+                    "source": "live_memory_eval",
+                    "limit": limit,
+                    "profile_samples": profile_samples,
+                    "min_samples_for_card_risk_evolution": MIN_CARD_RISK_EVOLUTION_SAMPLES,
+                    "task_type": row.task_type,
+                    "task_samples": row.samples,
+                    "failure_count": row.failure_count,
+                    "human_override_rate": round2(row.human_override_rate),
+                    "avg_retry_count": round2(row.avg_retry_count),
+                    "profile_summary": summarize_matrix_rows(profile_rows),
+                },
+                "rationale": format!(
+                    "{} has repeated friction on {}; add it to weak_against so recommendation can explain/deprioritize the match",
+                    profile.name, row.task_type
+                ),
+                "projection": {
+                    "status": "pending_profile_card_projection",
+                    "note": "Human approval records the proposal; apply_proposals projects approved weakness markers into the MBIT/profile card overlay."
+                }
+            }));
+        }
+    }
+
+    if bad_task_types.is_empty() {
+        return out;
+    }
+
+    let current_skills = profile_required_skills.iter().collect::<HashSet<_>>();
+    let mut skill_hits: HashMap<String, u32> = HashMap::new();
+    for entry in entries {
+        let Some(meta) = entry.metadata.as_object() else {
+            continue;
+        };
+        if meta.get("profile").and_then(Value::as_str) != Some(profile.name) {
+            continue;
+        }
+        let task_type = meta
+            .get("task_type")
+            .and_then(Value::as_str)
+            .unwrap_or("other");
+        if !bad_task_types.contains(task_type) {
+            continue;
+        }
+        let outcome = meta
+            .get("outcome")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let risky = matches!(outcome.as_str(), "failure" | "failed" | "partial")
+            || meta
+                .get("human_override")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            || meta.get("retry_count").and_then(Value::as_u64).unwrap_or(0) >= 2;
+        if !risky {
+            continue;
+        }
+        let skills = meta
+            .get("skills_used")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|skill| !skill.is_empty())
+            .filter(|skill| current_skills.contains(&skill.to_string()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        for skill in skills {
+            *skill_hits.entry(skill).or_insert(0) += 1;
+        }
+    }
+
+    let min_skill_hits = MIN_CARD_RISK_EVOLUTION_SAMPLES;
+    for (skill, hits) in skill_hits {
+        if hits < min_skill_hits || existing_demotion_targets.contains(&skill) {
+            continue;
+        }
+        let id = format!(
+            "loadout_evolution:{}:demote_skill:{}",
+            sanitize_policy_key(profile.name),
+            sanitize_policy_key(&skill)
+        );
+        out.push(json!({
+            "proposal_id": id,
+            "kind": "loadout_evolution",
+            "status": "pending",
+            "requires_human_approval": true,
+            "created_or_refreshed_at": Utc::now().to_rfc3339(),
+            "profile": profile.name,
+            "operation": "mark_skill_demotion_target",
+            "skill_id": skill,
+            "current_loadout": profile_skill_loadout_json(profile),
+            "proposed_patch": {
+                "demotion_targets": [skill],
+                "preserve_signature_skills": profile.signature_skills,
+            },
+            "evidence": {
+                "source": "live_memory_eval",
+                "limit": limit,
+                "profile_samples": profile_samples,
+                "min_samples_for_card_risk_evolution": MIN_CARD_RISK_EVOLUTION_SAMPLES,
+                "skill_hits": hits,
+                "bad_task_types": bad_task_types,
+                "profile_summary": summarize_matrix_rows(profile_rows),
+            },
+            "rationale": format!(
+                "{} repeatedly appeared in failed/overridden/retried {} runs; mark as a demotion target for human review",
+                skill, profile.name
+            ),
+            "projection": {
+                "status": "pending_profile_card_projection",
+                "note": "Human approval records the proposal; apply_proposals projects approved demotion targets into the MBIT/profile card overlay without mutating baseline skills."
+            }
+        }));
+    }
+
     out
 }
 
