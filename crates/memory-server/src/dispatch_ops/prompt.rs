@@ -604,6 +604,36 @@ fn render_dispatch_profile_overlay(server: &MemoryServer, params: &TachiDispatch
                     lines.push(format!("  - loadout_error: {err}"));
                 }
             }
+            match crate::dispatch_profile::profile_evidence_contract_json_for_server(
+                server,
+                profile_def,
+            ) {
+                Ok(contract) => {
+                    lines.push("- evidence_contract:".to_string());
+                    for label in ["required", "projected_required"] {
+                        let items = contract
+                            .get(label)
+                            .and_then(|value| value.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|value| value.as_str())
+                            .collect::<Vec<_>>();
+                        if !items.is_empty() {
+                            lines.push(format!("  - {label}: {}", items.join(", ")));
+                        }
+                    }
+                    if let Some(status) = contract
+                        .get("projection")
+                        .and_then(|projection| projection.get("status"))
+                        .and_then(|status| status.as_str())
+                    {
+                        lines.push(format!("  - evidence_projection_status: {status}"));
+                    }
+                }
+                Err(err) => {
+                    lines.push(format!("  - evidence_contract_error: {err}"));
+                }
+            }
         }
     }
     if let Some(agent) = params.agent.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -639,6 +669,6 @@ fn render_dispatch_profile_overlay(server: &MemoryServer, params: &TachiDispatch
             params.allowed_mcp_servers.join(", ")
         ));
     }
-    lines.push("- evidence: report files changed, tests run, blockers, and any unavailable MCP/GitHub context explicitly.".to_string());
+    lines.push("- completion_report: report files changed, tests run, blockers, and any unavailable MCP/GitHub context explicitly.".to_string());
     lines.join("\n")
 }

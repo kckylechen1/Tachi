@@ -233,8 +233,8 @@ As of 2026-06-09, the baseline includes:
 - `tachi_task(action="proposals"|"review_proposal"|"apply_proposals")` includes
   human-reviewed `loadout_evolution` proposals once profile samples,
   verification, and observed skill usage pass the evidence thresholds, then
-  projects approved signature-skill and passive-trait changes into durable
-  profile/card loadout overlays;
+  projects approved signature-skill, passive-trait, and evidence-contract
+  changes into durable profile/card overlays;
 - credentialed `opencode_builder` profile;
 - feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
   `ux_matrix`, `build_references`, and `close_loop`;
@@ -251,7 +251,7 @@ The next policy-learning slices should focus on replay and richer card
 projection hardening:
 
 - expand approved MBIT/card evolution beyond skill/passive-trait overlays into
-  richer card stats, weakness, demotion, and evidence-contract targets;
+  richer card stats, weakness, and demotion targets;
 - add regression tests for high-risk review routing, low-risk fast-check routing,
   human override weighting, retry weighting, and MBIT card parsing.
 
