@@ -177,12 +177,13 @@ async fn render_one(
             ""
         };
         println!(
-            "  [OK] {label:<20} pending={pending:<4} running={running:<3} completed={completed:<5} failed={failed:<3} gc_eligible={gc:<4}{orphan}{stuck}",
+            "  [OK] {label:<20} active={active:<4} pending={pending:<4} running={running:<3} failed={failed:<3} history={terminal:<5} gc_eligible={gc:<4}{orphan}{stuck}",
             label = crate::status_ops::truncate(&db.label, 20),
+            active = db.active_jobs,
             pending = db.pending,
             running = db.running,
-            completed = db.completed,
             failed = db.failed,
+            terminal = db.terminal_jobs,
             gc = db.gc_eligible,
             orphan = orphan_marker,
             stuck = stuck_marker,
@@ -205,6 +206,11 @@ async fn render_one(
             } else {
                 String::new()
             };
+            let pending_enrichment = if db.pending_enrichment > 0 {
+                format!(" pending_enrichment={}", db.pending_enrichment)
+            } else {
+                String::new()
+            };
             let orphans = if db.vector_orphans > 0 {
                 format!(" orphans={}", db.vector_orphans)
             } else {
@@ -215,17 +221,33 @@ async fn render_one(
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             println!(
-                "       {marker} vectors={}/{} missing={} coverage={pct:.1}% dim={}{}{}",
-                db.vector_count, db.memory_total, db.vector_missing, dim, failures, orphans
+                "       {marker} vectors={}/{} missing={} coverage={pct:.1}% dim={}{}{}{}",
+                db.vector_count,
+                db.memory_total,
+                db.vector_missing,
+                dim,
+                pending_enrichment,
+                failures,
+                orphans
             );
         }
-        if let Some(job) = &db.latest_job {
+        if let Some(job) = &db.latest_active_job {
             println!(
-                "       [i] latest_job kind={} status={} at={}",
+                "       [i] latest_active kind={} status={} at={}",
                 job.kind,
                 job.status,
                 job.updated_at.as_deref().unwrap_or("unknown")
             );
+        }
+        if db.active_jobs == 0 {
+            if let Some(job) = &db.latest_terminal_job {
+                println!(
+                    "       [i] last_terminal kind={} status={} at={}",
+                    job.kind,
+                    job.status,
+                    job.updated_at.as_deref().unwrap_or("unknown")
+                );
+            }
         }
         if let Some(job) = &db.latest_failed_job {
             let inferred = job
@@ -248,7 +270,7 @@ async fn render_one(
     }
     println!();
 
-    println!("Dispatches (recent)");
+    println!("Dispatch Ledger (recent, not background worker queue)");
     if snapshot.dispatches.is_empty() {
         println!("  (none)");
     } else {
