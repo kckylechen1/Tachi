@@ -126,6 +126,36 @@ fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
     None
 }
 
+fn probe_harness_server_status(url: Option<&str>) -> serde_json::Value {
+    let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
+        return serde_json::Value::Null;
+    };
+    if !url.starts_with("http://127.0.0.1:") && !url.starts_with("http://localhost:") {
+        return json!({
+            "reachable": null,
+            "reason": "probe only supports local http server URLs",
+        });
+    }
+    let Some(port) = url
+        .split(':')
+        .nth(2)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|raw| raw.parse::<u16>().ok())
+    else {
+        return json!({"reachable": false, "reason": "could not parse local port"});
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)) {
+        Ok(_) => json!({"reachable": true, "probe": "tcp", "port": port}),
+        Err(err) => json!({
+            "reachable": false,
+            "probe": "tcp",
+            "port": port,
+            "error": err.to_string(),
+        }),
+    }
+}
+
 fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value> {
     let runs_dir = tachi_home().join("runs");
     let Ok(read_dir) = std::fs::read_dir(&runs_dir) else {
@@ -214,6 +244,9 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
             "stale": abandoned,
             "stale_reason": stale_reason,
             "state_source": if abandoned { "run_stale_timeout" } else { "run" },
+            "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
+            "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
+            "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
         }));
     }
 
@@ -288,6 +321,9 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         "stale": abandoned,
         "stale_reason": stale_reason,
         "state_source": if abandoned { "run_stale_timeout" } else { "run" },
+        "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
+        "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
+        "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
     }))
 }
 
@@ -320,6 +356,9 @@ fn merge_run_task(
             "stale",
             "stale_reason",
             "state_source",
+            "harness_transport",
+            "harness_server_url",
+            "harness_server_status",
         ] {
             if obj.get(key).is_none() {
                 obj.insert(
@@ -514,5 +553,11 @@ mod tests {
             Some("20260607T045032Z".to_string())
         );
         assert_eq!(dispatch_timestamp_key(OsStr::new("mcp-smoke-test")), None);
+    }
+
+    #[test]
+    fn harness_probe_rejects_non_local_urls() {
+        let status = probe_harness_server_status(Some("https://example.com:4321"));
+        assert_eq!(status["reachable"], serde_json::Value::Null);
     }
 }

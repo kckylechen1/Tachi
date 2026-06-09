@@ -824,6 +824,58 @@ impl LlmClient {
         self.mark_secret_auth_failed(&selected, Some("forced auth failure"));
     }
 
+    pub(crate) fn record_provider_key_result(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        status_code: Option<u16>,
+        outcome: Option<&str>,
+        retry_after: Option<u64>,
+        reason: Option<&str>,
+    ) -> VaultKeyHealth {
+        let selected = SelectedProviderSecret {
+            logical_name: logical_name.to_string(),
+            key_id: key_id.to_string(),
+            value: String::new(),
+        };
+        let outcome = outcome.map(|value| value.to_ascii_lowercase());
+        if status_code == Some(429)
+            || matches!(outcome.as_deref(), Some("rate_limited" | "cooldown"))
+        {
+            self.mark_secret_rate_limited(&selected, retry_after);
+        } else if matches!(status_code, Some(401 | 403))
+            || matches!(outcome.as_deref(), Some("auth_failed"))
+        {
+            self.mark_secret_auth_failed(&selected, reason.or(Some("auth failure")));
+        } else if matches!(outcome.as_deref(), Some("exhausted")) {
+            self.with_key_health(logical_name, key_id, |health| {
+                health.status = "exhausted".to_string();
+                health.last_error = reason
+                    .map(str::to_string)
+                    .or_else(|| Some("key exhausted".to_string()));
+                health.error_count += 1;
+            });
+        } else if status_code.is_some_and(|code| (200..300).contains(&code))
+            || matches!(outcome.as_deref(), Some("success" | "ok"))
+        {
+            self.mark_secret_success(&selected);
+        } else {
+            self.with_key_health(logical_name, key_id, |health| {
+                health.status = "error".to_string();
+                health.last_error = reason
+                    .map(str::to_string)
+                    .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}")));
+                health.error_count += 1;
+            });
+        }
+        self.read_key_health_entry(logical_name, key_id)
+            .unwrap_or_else(|| VaultKeyHealth {
+                logical_name: logical_name.to_string(),
+                key_id: key_id.to_string(),
+                ..VaultKeyHealth::default()
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
         self.first_secret(keys)

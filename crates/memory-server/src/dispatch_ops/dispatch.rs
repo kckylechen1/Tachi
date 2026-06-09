@@ -502,6 +502,15 @@ pub(crate) async fn handle_tachi_dispatch(
             .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
     }
 
+    let harness_transport = params.harness_transport.clone().unwrap_or_else(|| {
+        if agent_norm == "custom" && params.command.first().is_some_and(|cmd| cmd == "omo") {
+            "opencode_serve".to_string()
+        } else {
+            "cli".to_string()
+        }
+    });
+    let harness_server_url = params.harness_server_url.clone();
+
     // Seed status.json so external pollers see something immediately.
     write_status_json(
         &workspace_dir,
@@ -521,6 +530,8 @@ pub(crate) async fn handle_tachi_dispatch(
             "updated_at": Utc::now().to_rfc3339(),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
+            "harness_transport": harness_transport.clone(),
+            "harness_server_url": harness_server_url.clone(),
             "capability_bundle": capability_bundle_card.clone(),
             "timeout_secs": timeout_secs_for_status,
         })),
@@ -806,6 +817,8 @@ pub(crate) async fn handle_tachi_dispatch(
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": workspace_dir.to_string_lossy(),
                     "result_written": false,
+                    "harness_transport": harness_transport.clone(),
+                    "harness_server_url": harness_server_url.clone(),
                     "capability_bundle": capability_bundle_card.clone(),
                     "timeout_secs": timeout_secs_for_status,
                     "error": err.clone(),
@@ -853,6 +866,8 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_duration_ms_for_spawn = plan_duration_ms;
     let timeout_secs_for_spawn = timeout_secs_for_status;
     let capability_bundle_card_for_spawn = capability_bundle_card.clone();
+    let harness_transport_for_spawn = harness_transport.clone();
+    let harness_server_url_for_spawn = harness_server_url.clone();
 
     // Scope guard for MCP config cleanup (moved into spawned task)
     struct McpCleanup(Option<PathBuf>);
@@ -878,6 +893,8 @@ pub(crate) async fn handle_tachi_dispatch(
                 "agent": agent_for_watchdog,
                 "stage": stage_for_traj,
                 "v2": v2_for_spawn,
+                "harness_transport": harness_transport_for_spawn.clone(),
+                "harness_server_url": harness_server_url_for_spawn.clone(),
                 "timestamp": execute_started_at.to_rfc3339(),
             }),
         );
@@ -1103,6 +1120,8 @@ pub(crate) async fn handle_tachi_dispatch(
                     "updated_at": Utc::now().to_rfc3339(),
                     "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                     "result_written": true,
+                    "harness_transport": harness_transport_for_spawn.clone(),
+                    "harness_server_url": harness_server_url_for_spawn.clone(),
                     "capability_bundle": capability_bundle_card_for_spawn,
                     "timeout_secs": timeout_secs_for_spawn,
                 })),
@@ -1155,6 +1174,8 @@ pub(crate) async fn handle_tachi_dispatch(
         "auto_capability_bundle": resolved_profile.auto_capability_bundle,
         "capability_bundle": capability_bundle_card,
         "capability_bundle_file": capability_bundle_file,
+        "harness_transport": harness_transport,
+        "harness_server_url": harness_server_url,
         "v2": v2,
         "plan_review_status": if v2 { "approved" } else { "n/a" },
         "duration_ms_plan": plan_duration_ms,

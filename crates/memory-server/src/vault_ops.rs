@@ -96,6 +96,26 @@ pub(super) struct VaultLeaseApiKeyParams {
     pub agent_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VaultRecordKeyResultParams {
+    /// Logical provider/env name, e.g. DEEPSEEK_API_KEY.
+    pub logical_name: String,
+    /// Concrete leased key id, e.g. DEEPSEEK_API_KEY_2.
+    pub key_id: String,
+    /// HTTP status code observed by the consumer, if available.
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    /// Outcome override: success | rate_limited | auth_failed | exhausted | error.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Retry-After seconds for 429/cooldown responses.
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    /// Short non-secret reason or provider error class.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
 fn default_rotation_strategy() -> String {
     "round_robin".to_string()
 }
@@ -1291,6 +1311,49 @@ pub(crate) async fn handle_vault_lease_api_key(
         Some(&requested_name),
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
+    );
+    result
+}
+
+pub(crate) async fn handle_vault_record_key_result(
+    server: &MemoryServer,
+    params: VaultRecordKeyResultParams,
+) -> Result<String, String> {
+    let logical_name = params.logical_name.trim().to_string();
+    let key_id = params.key_id.trim().to_string();
+    if logical_name.is_empty() || key_id.is_empty() {
+        return Err("logical_name and key_id are required".to_string());
+    }
+    let health = server.llm.record_provider_key_result(
+        &logical_name,
+        &key_id,
+        params.status_code,
+        params.outcome.as_deref(),
+        params.retry_after_secs,
+        params.reason.as_deref(),
+    );
+    let skipped_by_lease = health.disabled
+        || health.auth_failed
+        || matches!(
+            health.status.as_str(),
+            "exhausted" | "rate_limited" | "cooldown"
+        );
+    let body = json!({
+        "recorded": true,
+        "logical_name": logical_name,
+        "key_id": key_id,
+        "status_code": params.status_code,
+        "outcome": params.outcome,
+        "skipped_by_lease": skipped_by_lease,
+        "health": health,
+    });
+    let result = serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
+    record_vault_audit(
+        server,
+        "vault_record_key_result",
+        Some(&params.logical_name),
+        result.is_ok(),
+        params.reason.as_deref(),
     );
     result
 }

@@ -17,6 +17,8 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
         inject_tachi_mcp: None,
         inject_hub_mcps: None,
         command: Vec::new(),
+        harness_transport: None,
+        harness_server_url: None,
         project: None,
         stage: None,
         credential_profiles: Vec::new(),
@@ -73,6 +75,8 @@ fn task_params(action: &str) -> TachiTaskParams {
         inject_tachi_mcp: None,
         inject_hub_mcps: None,
         command: Vec::new(),
+        harness_transport: None,
+        harness_server_url: None,
         project: None,
         stage: None,
         profile: None,
@@ -600,6 +604,12 @@ async fn tachi_task_recommend_falls_back_to_builtin_profiles_without_eval_rows()
     let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
 
     assert!(rec["recommended_profile"].as_str().is_some());
+    assert!(
+        rec.as_object()
+            .is_some_and(|obj| obj.contains_key("recommended_model")),
+        "recommend should surface model choice: {rec:#}"
+    );
+    assert!(rec["recommended_transport"].as_str().is_some());
     assert_eq!(rec["live_eval"]["row_count"], serde_json::json!(0));
     assert!(
         rec["evidence_note"]
@@ -3568,6 +3578,8 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: Some("execute:runtime".to_string()),
             credential_profiles: Vec::new(),
@@ -3623,6 +3635,8 @@ async fn dispatch_prompt_invokes_native_subagent_factory_for_dispatch_stage() {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: Some("dispatch".to_string()),
             credential_profiles: Vec::new(),
@@ -4011,6 +4025,8 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: None,
             credential_profiles: Vec::new(),

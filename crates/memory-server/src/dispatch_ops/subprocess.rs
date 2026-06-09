@@ -174,7 +174,7 @@ pub(super) fn build_custom_command(
     let binary = &params.command[0];
     if !crate::utils::is_trusted_command(binary) {
         return Err(format!(
-            "Command '{}' is not in the trusted allowlist. Allowed: npx, node, bun, deno, python3, python, uv, cargo, rustup, docker, podman, tachi, opencode, or paths under /opt/homebrew/, /usr/local/bin/, ~/.cargo/bin/, ~/.local/bin/",
+            "Command '{}' is not in the trusted allowlist. Allowed: npx, node, bun, deno, python3, python, uv, cargo, rustup, docker, podman, tachi, opencode, omo, or paths under /opt/homebrew/, /usr/local/bin/, ~/.cargo/bin/, ~/.local/bin/",
             binary
         ));
     }
@@ -266,6 +266,8 @@ mod tests {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: None,
             credential_profiles: Vec::new(),

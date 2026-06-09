@@ -682,6 +682,18 @@ pub(crate) struct TachiDispatchParams {
     #[serde(default)]
     pub command: Vec<String>,
 
+    #[serde(default)]
+    #[schemars(
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via omo run --attach."
+    )]
+    pub harness_transport: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Harness server URL for attach transports, e.g. http://127.0.0.1:4321 for OpenCode serve."
+    )]
+    pub harness_server_url: Option<String>,
+
     /// Optional named project DB for context search
     #[serde(default)]
     pub project: Option<String>,
@@ -1254,6 +1266,16 @@ pub(crate) struct TachiTaskParams {
     pub inject_hub_mcps: Option<bool>,
     #[serde(default)]
     pub command: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via omo run --attach."
+    )]
+    pub harness_transport: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Harness server URL for attach transports, e.g. http://127.0.0.1:4321 for OpenCode serve."
+    )]
+    pub harness_server_url: Option<String>,
     #[serde(default)]
     pub project: Option<String>,
     #[serde(default)]

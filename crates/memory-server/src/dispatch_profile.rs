@@ -325,6 +325,7 @@ struct ProfileCandidate {
     profile: String,
     agent: String,
     role: String,
+    model: Option<String>,
     score: f64,
     reasons: Vec<String>,
     live_samples: u32,
@@ -463,6 +464,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "blocked_profiles": risk.blocked_profiles,
         "recommended_profile": best.profile,
         "recommended_agent": best.agent,
+        "recommended_model": best_profile.model,
+        "recommended_transport": if best_profile.backend == "custom" { "opencode_cli_or_serve" } else { "native_cli" },
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
         "evidence_required": profile_evidence_required_for_server(server, best_profile)?,
@@ -1280,17 +1283,58 @@ fn resolve_and_apply_dispatch_profile_inner(
         }
         if profile.backend == "custom" && params.command.is_empty() {
             if let Some(model) = profile.model {
-                params.command = vec![
-                    "opencode".to_string(),
-                    "--pure".to_string(),
-                    "run".to_string(),
-                    "--model".to_string(),
-                    model.to_string(),
-                ];
-                route_explanation.push(format!(
-                    "profile selected opencode custom command for model '{}'",
-                    model
-                ));
+                let transport = params
+                    .harness_transport
+                    .clone()
+                    .or_else(|| std::env::var("TACHI_OPENCODE_TRANSPORT").ok())
+                    .unwrap_or_else(|| "cli".to_string())
+                    .to_ascii_lowercase();
+                if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
+                    let server_url = params
+                        .harness_server_url
+                        .clone()
+                        .or_else(|| std::env::var("TACHI_OPENCODE_SERVER_URL").ok())
+                        .unwrap_or_else(|| "http://127.0.0.1:4321".to_string());
+                    let directory = params
+                        .cwd
+                        .clone()
+                        .or_else(|| {
+                            std::env::current_dir()
+                                .ok()
+                                .map(|path| path.to_string_lossy().to_string())
+                        })
+                        .unwrap_or_else(|| ".".to_string());
+                    params.harness_transport = Some("opencode_serve".to_string());
+                    params.harness_server_url = Some(server_url.clone());
+                    params.command = vec![
+                        "omo".to_string(),
+                        "run".to_string(),
+                        "--attach".to_string(),
+                        server_url,
+                        "--directory".to_string(),
+                        directory,
+                        "--agent".to_string(),
+                        profile.role.to_string(),
+                        "--model".to_string(),
+                        model.to_string(),
+                    ];
+                    route_explanation.push(format!(
+                        "profile selected opencode serve transport for model '{}'",
+                        model
+                    ));
+                } else {
+                    params.command = vec![
+                        "opencode".to_string(),
+                        "--pure".to_string(),
+                        "run".to_string(),
+                        "--model".to_string(),
+                        model.to_string(),
+                    ];
+                    route_explanation.push(format!(
+                        "profile selected opencode custom command for model '{}'",
+                        model
+                    ));
+                }
             }
         }
         if params.tool_profile.is_none() {
@@ -2401,6 +2445,7 @@ fn score_profile_candidate(
         profile: profile.name.to_string(),
         agent: profile.backend.to_string(),
         role: profile.role.to_string(),
+        model: profile.model.map(str::to_string),
         score: (score * 100.0).round() / 100.0,
         reasons,
         live_samples,
@@ -3460,6 +3505,8 @@ mod tests {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: None,
             credential_profiles: Vec::new(),
@@ -3610,6 +3657,37 @@ mod tests {
             .route_explanation
             .iter()
             .any(|line| line.contains("opencode custom command")));
+    }
+
+    #[test]
+    fn custom_profile_can_attach_to_opencode_serve() {
+        let mut params = params();
+        params.profile = Some("deepseek_explore".to_string());
+        params.cwd = Some("/tmp/tachi-opencode-project".to_string());
+        params.harness_transport = Some("opencode_serve".to_string());
+        params.harness_server_url = Some("http://127.0.0.1:4321".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+        assert_eq!(resolved.agent, "custom");
+        assert_eq!(
+            params.command,
+            vec![
+                "omo".to_string(),
+                "run".to_string(),
+                "--attach".to_string(),
+                "http://127.0.0.1:4321".to_string(),
+                "--directory".to_string(),
+                "/tmp/tachi-opencode-project".to_string(),
+                "--agent".to_string(),
+                "explore".to_string(),
+                "--model".to_string(),
+                "deepseek/deepseek-v4-flash".to_string()
+            ]
+        );
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("opencode serve transport")));
     }
 
     #[test]

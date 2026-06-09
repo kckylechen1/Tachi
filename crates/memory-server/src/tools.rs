@@ -73,10 +73,11 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
-    handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
-    handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock, VaultGetParams,
-    VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
-    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
+    handle_vault_lock, handle_vault_record_key_result, handle_vault_remove, handle_vault_set,
+    handle_vault_set_api_key_pool, handle_vault_setup_rotation, handle_vault_status,
+    handle_vault_unlock, VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
+    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
@@ -1249,6 +1250,16 @@ impl MemoryServer {
         handle_vault_lease_api_key(self, params).await
     }
 
+    #[tool(
+        description = "Record a provider API key result into Vault health. HTTP 429 enters cooldown, 401/403 marks auth_failed, success clears errors, and future leases skip unhealthy keys."
+    )]
+    pub(crate) async fn vault_record_key_result(
+        &self,
+        Parameters(params): Parameters<VaultRecordKeyResultParams>,
+    ) -> Result<String, String> {
+        handle_vault_record_key_result(self, params).await
+    }
+
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────
 
     #[tool(
@@ -1814,6 +1825,8 @@ impl MemoryServer {
                     inject_tachi_mcp: params.inject_tachi_mcp,
                     inject_hub_mcps: params.inject_hub_mcps,
                     command: params.command.clone(),
+                    harness_transport: params.harness_transport.clone(),
+                    harness_server_url: params.harness_server_url.clone(),
                     project: params.project.clone(),
                     stage: params.stage.clone(),
                     credential_profiles: params.credential_profiles.clone(),

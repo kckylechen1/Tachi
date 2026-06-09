@@ -1,8 +1,9 @@
 use super::*;
 use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
 use crate::vault_ops::{
-    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
-    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
+    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
+    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
 };
 use memory_core::{AgentProjection, Pack};
 

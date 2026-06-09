@@ -504,6 +504,47 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::RecordKeyResult {
+            logical_name,
+            key_id,
+            status_code,
+            outcome,
+            retry_after_secs,
+            reason,
+            json,
+        } => {
+            let store = open_cli_store(global_db_path)?;
+            store
+                .vault_get_config()
+                .map_err(|e| format!("vault_get_config: {e}"))?
+                .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
+            let health = build_key_health_result(
+                &store,
+                &logical_name,
+                &key_id,
+                status_code,
+                outcome.as_deref(),
+                retry_after_secs,
+                reason.as_deref(),
+            )?;
+            store
+                .vault_upsert_key_health(&health)
+                .map_err(|e| format!("vault_upsert_key_health: {e}"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&health)?);
+            } else {
+                println!(
+                    "Recorded key health: {}:{} status={} auth_failed={} cooldown={}",
+                    health.logical_name,
+                    health.key_id,
+                    health.status,
+                    health.auth_failed,
+                    health.cooldown_until.as_deref().unwrap_or("-")
+                );
+            }
+            Ok(())
+        }
+
         VaultAction::Get {
             name,
             stdin_password,
@@ -846,6 +887,71 @@ fn print_lease_output(out: &str, json_output: bool) -> Result<(), Box<dyn std::e
             .unwrap_or("unknown")
     );
     Ok(())
+}
+
+fn build_key_health_result(
+    store: &memory_core::MemoryStore,
+    logical_name: &str,
+    key_id: &str,
+    status_code: Option<u16>,
+    outcome: Option<&str>,
+    retry_after_secs: Option<u64>,
+    reason: Option<&str>,
+) -> Result<memory_core::vault::VaultKeyHealth, Box<dyn std::error::Error>> {
+    let now = chrono::Utc::now();
+    let mut health = store
+        .vault_get_key_health(logical_name, key_id)
+        .map_err(|e| format!("vault_get_key_health: {e}"))?
+        .unwrap_or_else(|| memory_core::vault::VaultKeyHealth {
+            logical_name: logical_name.to_string(),
+            key_id: key_id.to_string(),
+            ..memory_core::vault::VaultKeyHealth::default()
+        });
+    let outcome = outcome.map(|value| value.to_ascii_lowercase());
+    health.last_attempt = Some(now.to_rfc3339());
+    health.updated_at = now.to_rfc3339();
+    if status_code == Some(429) || matches!(outcome.as_deref(), Some("rate_limited" | "cooldown")) {
+        let cooldown = retry_after_secs.unwrap_or(60).clamp(1, 3600);
+        health.status = "rate_limited".to_string();
+        health.cooldown_until =
+            Some((now + chrono::Duration::seconds(cooldown as i64)).to_rfc3339());
+        health.last_error = reason
+            .map(str::to_string)
+            .or_else(|| Some(format!("rate limited; retry after {cooldown}s")));
+        health.error_count += 1;
+    } else if matches!(status_code, Some(401 | 403))
+        || matches!(outcome.as_deref(), Some("auth_failed"))
+    {
+        health.status = "auth_failed".to_string();
+        health.auth_failed = true;
+        health.cooldown_until = None;
+        health.last_error = reason
+            .map(str::to_string)
+            .or_else(|| Some("auth failure".to_string()));
+        health.error_count += 1;
+    } else if matches!(outcome.as_deref(), Some("exhausted")) {
+        health.status = "exhausted".to_string();
+        health.last_error = reason
+            .map(str::to_string)
+            .or_else(|| Some("key exhausted".to_string()));
+        health.error_count += 1;
+    } else if status_code.is_some_and(|code| (200..300).contains(&code))
+        || matches!(outcome.as_deref(), Some("success" | "ok"))
+    {
+        health.status = "ok".to_string();
+        health.auth_failed = false;
+        health.cooldown_until = None;
+        health.last_success = Some(now.to_rfc3339());
+        health.last_error = None;
+        health.error_count = 0;
+    } else {
+        health.status = "error".to_string();
+        health.last_error = reason
+            .map(str::to_string)
+            .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}")));
+        health.error_count += 1;
+    }
+    Ok(health)
 }
 
 pub(super) fn read_vault_password(

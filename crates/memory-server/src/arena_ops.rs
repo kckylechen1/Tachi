@@ -456,6 +456,8 @@ fn dispatch_params_for_mission(
         inject_tachi_mcp: None,
         inject_hub_mcps: None,
         command,
+        harness_transport: None,
+        harness_server_url: None,
         project: params.project.clone(),
         stage: params.role.clone(),
         issue_ref: params.issue_ref.clone(),

@@ -60,7 +60,7 @@ pub(super) fn is_trusted_command(cmd: &str) -> bool {
 
     const TRUSTED_BASENAMES: &[&str] = &[
         "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup", "docker",
-        "podman", "tachi", "opencode",
+        "podman", "tachi", "opencode", "omo",
     ];
 
     if TRUSTED_BASENAMES.contains(&basename) {

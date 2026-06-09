@@ -942,6 +942,28 @@ pub(crate) enum VaultAction {
         #[arg(long)]
         json: bool,
     },
+    /// Record a provider key result into the Vault health ledger.
+    RecordKeyResult {
+        /// Logical provider/env name, e.g. DEEPSEEK_API_KEY.
+        logical_name: String,
+        /// Concrete leased key id, e.g. DEEPSEEK_API_KEY_2.
+        key_id: String,
+        /// HTTP status code observed by the consumer.
+        #[arg(long)]
+        status_code: Option<u16>,
+        /// Outcome override: success | rate_limited | auth_failed | exhausted | error.
+        #[arg(long)]
+        outcome: Option<String>,
+        /// Retry-After seconds for 429/cooldown responses.
+        #[arg(long)]
+        retry_after_secs: Option<u64>,
+        /// Short non-secret reason or provider error class.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Emit JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Get a secret value from the vault.
     Get {
         /// Secret name.
