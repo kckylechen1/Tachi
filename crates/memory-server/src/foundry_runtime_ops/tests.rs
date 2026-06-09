@@ -876,6 +876,23 @@ async fn test_run_daily_sft_distillation() {
     let v3_content = std::fs::read_to_string(v3_file).unwrap();
     assert!(v3_content.contains("How to design Promotion Gates?"));
     assert!(v3_content.contains("Promotion Gates protect long-term memory"));
+    let first_v3: serde_json::Value = serde_json::from_str(
+        v3_content
+            .lines()
+            .next()
+            .expect("sft_v3 should include one JSONL row"),
+    )
+    .expect("sft_v3 first row should be JSON");
+    assert_eq!(
+        first_v3["metadata"]["artifact_class"],
+        json!("sft_candidate"),
+        "SFT exports must remain candidate artifacts until the model-training gate promotes them"
+    );
+    assert_eq!(
+        first_v3["metadata"]["promotion_status"],
+        json!("candidate_only"),
+        "SFT exports must not look like production memory/wiki/eval artifacts"
+    );
     let pending_dir = sft_dir.join("pending");
     let pending_batches = std::fs::read_dir(&pending_dir)
         .expect("pending SFT dir")
