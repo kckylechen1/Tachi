@@ -41,10 +41,16 @@ pub(crate) fn format_briefing(
                 .to_string(),
         );
     }
+    out.push(
+        "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='briefing')` for feature-scoped canonical docs/specs."
+            .to_string(),
+    );
 
     if let Some(handoffs) = cross_project.as_array() {
         if !handoffs.is_empty() {
-            out.push("\n### Cross-project (global handoffs)".to_string());
+            out.push(
+                "\n### Cross-project (global handoffs) [AUTHORITY: WORKFLOW STATE]".to_string(),
+            );
             out.push(
                 "_Pending memos from other repos/agents. Ack with `tachi_handoff(action='check')` or leave via `tachi_handoff(action='leave')`._".to_string(),
             );
@@ -66,16 +72,18 @@ pub(crate) fn format_briefing(
         }
     }
 
-    out.push("\n### Memories (this project)".to_string());
+    out.push("\n### Memories (this project) [AUTHORITY: LOW-MEDIUM]".to_string());
     out.push(format_section_rows(memories, memory_cap));
 
     if wiki.as_array().is_some_and(|rows| !rows.is_empty()) {
-        out.push("\n### Wiki".to_string());
+        out.push("\n### Wiki [AUTHORITY: MEDIUM-HIGH]".to_string());
         out.push(format_section_rows(wiki, wiki_cap));
     }
 
     if let Some(score) = health_summary.get("health_score") {
-        out.push(format!("\n### Health snapshot (score {score})"));
+        out.push(format!(
+            "\n### Health snapshot (score {score}) [AUTHORITY: OPS]"
+        ));
         if let Some(warnings) = health_summary.get("warnings").and_then(Value::as_array) {
             if warnings.is_empty() {
                 out.push("- No active warnings".to_string());
@@ -105,7 +113,7 @@ pub(crate) fn format_briefing(
 
     if let Some(rows) = verification.as_array() {
         if !rows.is_empty() {
-            out.push("\n### Verification gates".to_string());
+            out.push("\n### Verification gates [AUTHORITY: EVAL EVIDENCE]".to_string());
             for row in rows.iter().take(verification_cap) {
                 let flow_id = row.get("flow_id").and_then(Value::as_str).unwrap_or("?");
                 let overall = row
@@ -130,7 +138,7 @@ pub(crate) fn format_briefing(
 
     if let Some(tasks) = kanban.get("tasks").and_then(Value::as_array) {
         if !tasks.is_empty() {
-            out.push("\n### Kanban".to_string());
+            out.push("\n### Kanban [AUTHORITY: WORKFLOW STATE]".to_string());
             for task in tasks.iter().take(kanban_cap) {
                 let summary = task
                     .get("summary")
@@ -147,7 +155,7 @@ pub(crate) fn format_briefing(
 
     if let Some(cps) = checkpoints.as_array() {
         if !cps.is_empty() {
-            out.push("\n### Recent checkpoints".to_string());
+            out.push("\n### Recent checkpoints [AUTHORITY: MEMORY FRAGMENTS]".to_string());
             for cp in cps.iter().take(checkpoint_cap) {
                 let raw_title = cp
                     .get("title")

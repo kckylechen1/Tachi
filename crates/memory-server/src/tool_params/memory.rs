@@ -458,6 +458,11 @@ pub(crate) struct FindSimilarMemoryParams {
     #[serde(default)]
     pub include_archived: bool,
 
+    /// Include isolated SFT/training-seed memories in vector similarity results.
+    /// Defaults to false; callers may also opt in with path_prefix="/sft".
+    #[serde(default)]
+    pub include_training: bool,
+
     /// Number of candidates pulled from vector channel (default: 20)
     #[serde(default = "default_candidates")]
     pub candidates_per_channel: usize,
