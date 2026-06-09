@@ -154,14 +154,20 @@ pub(crate) struct DbStatus {
     pub(crate) vector_orphans: usize,
     pub(crate) vector_coverage: f64,
     pub(crate) vector_dimension: Option<usize>,
+    pub(crate) pending_enrichment: usize,
     pub(crate) enrichment_failed_recent: usize,
     pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,
     pub(crate) pending: usize,
     pub(crate) running: usize,
+    pub(crate) active_jobs: usize,
     pub(crate) completed: usize,
     pub(crate) failed: usize,
+    pub(crate) skipped: usize,
+    pub(crate) terminal_jobs: usize,
     pub(crate) gc_eligible: usize,
     pub(crate) stuck_in_progress: usize,
+    pub(crate) latest_active_job: Option<LatestFoundryJob>,
+    pub(crate) latest_terminal_job: Option<LatestFoundryJob>,
     pub(crate) latest_job: Option<LatestFoundryJob>,
     pub(crate) latest_failed_job: Option<LatestFailedJob>,
     pub(crate) error: Option<String>,
@@ -270,14 +276,20 @@ fn collect_snapshot_inner(
                 vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
+                pending_enrichment: 0,
                 enrichment_failed_recent: 0,
                 enrichment_failures: Vec::new(),
                 pending: 0,
                 running: 0,
+                active_jobs: 0,
                 completed: 0,
                 failed: 0,
+                skipped: 0,
+                terminal_jobs: 0,
                 gc_eligible: 0,
                 stuck_in_progress: 0,
+                latest_active_job: None,
+                latest_terminal_job: None,
                 latest_job: None,
                 latest_failed_job: None,
                 error: Some("missing on disk".to_string()),
@@ -285,7 +297,15 @@ fn collect_snapshot_inner(
             continue;
         }
         match probe_db(&path) {
-            Ok((hist, stuck, vector, latest_job, latest_failed_job)) => dbs.push(DbStatus {
+            Ok((
+                hist,
+                stuck,
+                vector,
+                latest_active_job,
+                latest_terminal_job,
+                latest_job,
+                latest_failed_job,
+            )) => dbs.push(DbStatus {
                 path: entry.path.clone(),
                 label,
                 orphan,
@@ -295,14 +315,20 @@ fn collect_snapshot_inner(
                 vector_orphans: vector.orphans,
                 vector_coverage: vector.coverage,
                 vector_dimension: vector.dimension,
+                pending_enrichment: vector.pending_enrichment,
                 enrichment_failed_recent: vector.enrichment_failed_recent,
                 enrichment_failures: vector.enrichment_failures,
                 pending: hist.queued + hist.planned,
                 running: hist.running,
+                active_jobs: hist.planned + hist.queued + hist.running,
                 completed: hist.completed,
                 failed: hist.failed,
+                skipped: hist.skipped,
+                terminal_jobs: hist.completed + hist.failed + hist.skipped,
                 gc_eligible: hist.gc_eligible,
                 stuck_in_progress: stuck,
+                latest_active_job,
+                latest_terminal_job,
                 latest_job,
                 latest_failed_job,
                 error: None,
@@ -317,14 +343,20 @@ fn collect_snapshot_inner(
                 vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
+                pending_enrichment: 0,
                 enrichment_failed_recent: 0,
                 enrichment_failures: Vec::new(),
                 pending: 0,
                 running: 0,
+                active_jobs: 0,
                 completed: 0,
                 failed: 0,
+                skipped: 0,
+                terminal_jobs: 0,
                 gc_eligible: 0,
                 stuck_in_progress: 0,
+                latest_active_job: None,
+                latest_terminal_job: None,
                 latest_job: None,
                 latest_failed_job: None,
                 error: Some(e),
@@ -461,6 +493,7 @@ struct VectorHealth {
     orphans: usize,
     coverage: f64,
     dimension: Option<usize>,
+    pending_enrichment: usize,
     enrichment_failed_recent: usize,
     enrichment_failures: Vec<EnrichmentFailureSummary>,
 }
@@ -469,6 +502,8 @@ type ProbeDbResult = (
     JobStatusHistogram,
     usize,
     VectorHealth,
+    Option<LatestFoundryJob>,
+    Option<LatestFoundryJob>,
     Option<LatestFoundryJob>,
     Option<LatestFailedJob>,
 );
@@ -482,9 +517,21 @@ fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
     let vector = vector_health(conn).unwrap_or_default();
+    let latest_active_job =
+        latest_foundry_job_with_statuses(conn, &["planned", "queued", "running"]).unwrap_or(None);
+    let latest_terminal_job =
+        latest_foundry_job_with_statuses(conn, &["completed", "failed", "skipped"]).unwrap_or(None);
     let latest_job = latest_foundry_job(conn).unwrap_or(None);
     let latest_failed_job = latest_failed_job(conn).unwrap_or(None);
-    Ok((hist, stuck, vector, latest_job, latest_failed_job))
+    Ok((
+        hist,
+        stuck,
+        vector,
+        latest_active_job,
+        latest_terminal_job,
+        latest_job,
+        latest_failed_job,
+    ))
 }
 
 fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
@@ -521,6 +568,18 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
+    let pending_enrichment: usize = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM memories m
+             LEFT JOIN memories_vec v ON v.id = m.id
+             WHERE m.source != ?1
+               AND v.id IS NULL
+               AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
+            |row| row.get::<_, i64>(0).map(|n| n as usize),
+        )
+        .unwrap_or(0);
     let enrichment_failures = enrichment_failure_summary(conn).unwrap_or_default();
     let missing = total.saturating_sub(with_vec);
     let coverage = if total == 0 {
@@ -536,6 +595,7 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
         orphans,
         coverage,
         dimension,
+        pending_enrichment,
         enrichment_failed_recent,
         enrichment_failures,
     })
@@ -590,6 +650,7 @@ pub(crate) fn database_vector_health_json(db_path: &Path) -> serde_json::Value {
                 "coverage": health.coverage,
                 "dimension": health.dimension,
                 "expected_dimension": EXPECTED_EMBEDDING_DIM,
+                "pending_enrichment": health.pending_enrichment,
                 "enrichment_failed_recent": health.enrichment_failed_recent,
                 "enrichment_failures": health.enrichment_failures,
             }),
@@ -743,6 +804,30 @@ fn latest_foundry_job(
             })
         },
     )
+    .optional()
+}
+
+fn latest_foundry_job_with_statuses(
+    conn: &rusqlite::Connection,
+    statuses: &[&str],
+) -> Result<Option<LatestFoundryJob>, rusqlite::Error> {
+    let placeholders = vec!["?"; statuses.len()].join(",");
+    let sql = format!(
+        "SELECT id, kind, status, updated_at
+         FROM foundry_jobs
+         WHERE status IN ({placeholders})
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1"
+    );
+    let params = rusqlite::params_from_iter(statuses.iter().copied());
+    conn.query_row(&sql, params, |row| {
+        Ok(LatestFoundryJob {
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            status: row.get(2)?,
+            updated_at: row.get::<_, Option<String>>(3)?,
+        })
+    })
     .optional()
 }
 
@@ -928,13 +1013,14 @@ fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
     let mut stmt = match conn.prepare(
         "SELECT id, summary, text, metadata, created_at FROM memories \
          WHERE path LIKE '/kanban/tasks/%' \
+           AND source != ?1 \
          ORDER BY created_at DESC LIMIT 10",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     let now = Utc::now();
-    let rows = match stmt.query_map([], |row| {
+    let rows = match stmt.query_map([FOUNDRY_RECALL_CACHE_SOURCE], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, String>(1)?,
@@ -1193,8 +1279,53 @@ async fn handle_tachi_status_detail(
 
     let total_dbs = snapshot.dbs.len();
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
+    let total_active: usize = snapshot.dbs.iter().map(|d| d.active_jobs).sum();
+    let total_terminal: usize = snapshot.dbs.iter().map(|d| d.terminal_jobs).sum();
     let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
+    let worker_queues: Vec<serde_json::Value> = snapshot
+        .dbs
+        .iter()
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "path": d.path,
+                "queue_state": if d.active_jobs == 0 && d.failed == 0 && d.stuck_in_progress == 0 {
+                    "idle"
+                } else if d.stuck_in_progress > 0 {
+                    "stuck"
+                } else if d.failed > 0 {
+                    "failed"
+                } else {
+                    "active"
+                },
+                "active_jobs": d.active_jobs,
+                "pending_jobs": d.pending,
+                "running_jobs": d.running,
+                "failed_jobs": d.failed,
+                "stuck_jobs": d.stuck_in_progress,
+                "terminal_jobs": d.terminal_jobs,
+                "completed_jobs": d.completed,
+                "skipped_jobs": d.skipped,
+                "gc_eligible_jobs": d.gc_eligible,
+                "latest_active_job": &d.latest_active_job,
+                "latest_terminal_job": &d.latest_terminal_job,
+                "backfill": {
+                    "needed": d.vector_missing.saturating_sub(d.pending_enrichment) > 0 || vector_dimension_mismatch(d),
+                    "pending_enrichment": d.pending_enrichment,
+                    "missing_vectors": d.vector_missing,
+                    "coverage": d.vector_coverage,
+                    "dimension": d.vector_dimension,
+                    "expected_dimension": EXPECTED_EMBEDDING_DIM,
+                    "command": if d.vector_missing.saturating_sub(d.pending_enrichment) > 0 || vector_dimension_mismatch(d) {
+                        Some(status_health::format_backfill_command(d))
+                    } else {
+                        None
+                    },
+                }
+            })
+        })
+        .collect();
     let low_coverage: Vec<serde_json::Value> = snapshot
         .dbs
         .iter()
@@ -1204,6 +1335,7 @@ async fn handle_tachi_status_detail(
                 "label": d.label,
                 "coverage": format!("{:.1}%", d.vector_coverage * 100.0),
                 "missing": d.vector_missing,
+                "pending_enrichment": d.pending_enrichment,
                 "total": d.memory_total,
                 "dimension": d.vector_dimension,
                 "backfill_command": status_health::format_backfill_command(d),
@@ -1311,9 +1443,12 @@ async fn handle_tachi_status_detail(
             "health_score": snapshot.health_score,
             "databases": {
                 "total": total_dbs,
+                "active_jobs": total_active,
                 "pending_jobs": total_pending,
+                "terminal_jobs": total_terminal,
                 "failed_jobs": total_failed,
                 "stuck_jobs": total_stuck,
+                "worker_queues": worker_queues,
                 "low_vector_coverage": low_coverage,
                 "vector_dimension_mismatches": vector_dimension_mismatches,
                 "vector_orphans": vector_orphan_dbs,
@@ -1356,9 +1491,11 @@ async fn handle_tachi_status_detail(
             "health_score": snapshot.health_score,
             "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
             "jobs": {
+                "active": total_active,
                 "failed": total_failed,
                 "pending": total_pending,
                 "stuck": total_stuck,
+                "terminal_history": total_terminal,
             },
             "distill": distill,
             "vector_coverage_issues": low_coverage.len(),
@@ -1789,6 +1926,7 @@ mod tests {
         assert_eq!(health.total, 2);
         assert_eq!(health.with_vec, 1);
         assert_eq!(health.missing, 1);
+        assert_eq!(health.pending_enrichment, 1);
     }
 
     #[test]
@@ -1846,14 +1984,20 @@ mod tests {
             vector_orphans: 0,
             vector_coverage: coverage,
             vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
+            pending_enrichment: 0,
             enrichment_failed_recent: 0,
             enrichment_failures: Vec::new(),
             pending: 0,
             running: 0,
+            active_jobs: 0,
             completed: 0,
             failed,
+            skipped: 0,
+            terminal_jobs: failed,
             gc_eligible: 0,
             stuck_in_progress: stuck,
+            latest_active_job: None,
+            latest_terminal_job: None,
             latest_job: None,
             latest_failed_job: None,
             error: None,
@@ -1899,6 +2043,60 @@ mod tests {
             normalize_dispatch_outcome(Some("TASK_STATE_COMPLETED"), &stale, now),
             "completed"
         );
+    }
+
+    #[test]
+    fn collect_dispatches_excludes_recall_cache_rows() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let db = dir.path().join("memory.db");
+        let store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
+        let now = Utc::now().to_rfc3339();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, ?2, ?3, ?4, 0.8, ?5, 'kanban', 'kanban', '[]', '[]', ?6, 'general', 0, ?5, ?5, 0, 1, ?7)",
+                rusqlite::params![
+                    "real-dispatch",
+                    "/kanban/tasks/20260609T000000Z-codex",
+                    "Kanban: real task",
+                    "Dispatch Task\nTask: real worker task",
+                    now,
+                    "manual",
+                    json!({
+                        "dispatch_id": "20260609T000000Z-codex",
+                        "agent": "codex",
+                        "task": "real worker task",
+                        "a2a_state": "TASK_STATE_COMPLETED",
+                        "reviewed": true,
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("insert real dispatch");
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, ?2, ?3, ?4, 0.8, ?5, 'kanban', 'kanban', '[]', '[]', ?6, 'general', 0, ?5, ?5, 0, 1, '{}')",
+                rusqlite::params![
+                    "foundry:recall-cache:noise",
+                    "/kanban/tasks/recall-cache/review_tachi_mcp_facade",
+                    "Recall rerank cache for query: review tachi mcp facade",
+                    "Recall rerank cache for query: review tachi mcp facade",
+                    Utc::now().to_rfc3339(),
+                    FOUNDRY_RECALL_CACHE_SOURCE,
+                ],
+            )
+            .expect("insert recall cache row");
+
+        let dispatches = collect_dispatches(&db);
+        assert_eq!(dispatches.len(), 1, "got: {dispatches:?}");
+        assert_eq!(dispatches[0].dispatch_id, "20260609T000");
+        assert_eq!(dispatches[0].agent, "codex");
+        assert_eq!(dispatches[0].task, "real worker task");
     }
 
     #[test]
