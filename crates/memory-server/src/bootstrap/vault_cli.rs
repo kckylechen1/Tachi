@@ -406,6 +406,10 @@ pub(super) async fn run_vault_command(
 
             let now = chrono::Utc::now().to_rfc3339();
             let store = open_cli_store(global_db_path)?;
+            let existing_entries = store
+                .vault_list_entries_by_type("api_key")
+                .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
+            let mut removed_members = Vec::new();
             for (idx, value) in values.iter().enumerate() {
                 let name = format!("{}_{}", prefix, idx + 1);
                 let is_new = !store
@@ -428,6 +432,18 @@ pub(super) async fn run_vault_command(
                     })
                     .map_err(|e| format!("vault_upsert_entry: {e}"))?;
             }
+            for entry in existing_entries {
+                if api_key_pool_member_index_cli(&entry.name, &prefix)
+                    .is_some_and(|idx| idx > values.len())
+                {
+                    if store
+                        .vault_delete_entry(&entry.name)
+                        .map_err(|e| format!("vault_delete_entry: {e}"))?
+                    {
+                        removed_members.push(entry.name);
+                    }
+                }
+            }
 
             let strategy = normalize_rotation_strategy_cli(&strategy);
             store
@@ -448,6 +464,7 @@ pub(super) async fn run_vault_command(
                     "logical_name": prefix,
                     "total_keys": values.len(),
                     "strategy": strategy,
+                    "removed_members": removed_members,
                 }))?
             );
             Ok(())
@@ -743,6 +760,13 @@ fn is_shell_env_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn api_key_pool_member_index_cli(name: &str, prefix: &str) -> Option<usize> {
+    name.strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('_'))
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .filter(|idx| *idx > 0)
 }
 
 fn normalize_rotation_strategy_cli(value: &str) -> String {

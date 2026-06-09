@@ -3,6 +3,7 @@ use crate::cli::EnvAction;
 use memory_core::vault::VaultEntry;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn is_shell_env_name(name: &str) -> bool {
@@ -525,16 +526,48 @@ fn sync_project_env(
         content.push_str(&shell_export_line(name, value));
         content.push('\n');
     }
-    std::fs::write(&resolved_output_path, content)?;
+    write_secret_file(&resolved_output_path, content.as_bytes())?;
+    Ok(report)
+}
+
+fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("env.generated"),
+        uuid::Uuid::new_v4().as_simple()
+    ));
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp_path)?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)?;
+    if let Err(err) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(Box::new(err));
+    }
+    drop(file);
+    if let Err(err) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(Box::new(err));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            &resolved_output_path,
-            std::fs::Permissions::from_mode(0o600),
-        )?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(report)
+    Ok(())
 }
 
 fn run_with_project_env(

@@ -361,6 +361,13 @@ fn is_shell_env_name(name: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
+    name.strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('_'))
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .filter(|idx| *idx > 0)
+}
+
 fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
@@ -1153,8 +1160,12 @@ pub(crate) async fn handle_vault_set_api_key_pool(
         let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
         let now = Utc::now().to_rfc3339();
         let strategy = normalize_rotation_strategy(&params.strategy);
-        server
+        let removed_members = server
             .with_global_store(|store| {
+                let existing_entries = store
+                    .vault_list_entries_by_type("api_key")
+                    .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
+                let mut removed_members = Vec::new();
                 for (idx, value) in values.iter().enumerate() {
                     let name = format!("{}_{}", params.prefix, idx + 1);
                     let is_new = !store
@@ -1177,6 +1188,18 @@ pub(crate) async fn handle_vault_set_api_key_pool(
                         .vault_upsert_entry(&entry)
                         .map_err(|e| format!("vault_upsert_entry: {e}"))?;
                 }
+                for entry in existing_entries {
+                    if api_key_pool_member_index(&entry.name, &params.prefix)
+                        .is_some_and(|idx| idx > values.len())
+                    {
+                        if store
+                            .vault_delete_entry(&entry.name)
+                            .map_err(|e| format!("vault_delete_entry: {e}"))?
+                        {
+                            removed_members.push(entry.name);
+                        }
+                    }
+                }
 
                 let rotation = VaultKeyRotation {
                     prefix: params.prefix.clone(),
@@ -1189,7 +1212,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
                 store
                     .vault_set_rotation(&rotation)
                     .map_err(|e| format!("vault_set_rotation: {e}"))?;
-                Ok(())
+                Ok(removed_members)
             })
             .map_err(|e| format!("save API key pool: {e}"))?;
 
@@ -1199,6 +1222,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
             "total_keys": values.len(),
             "strategy": strategy,
             "members": (1..=values.len()).map(|idx| format!("{}_{}", logical_name, idx)).collect::<Vec<_>>(),
+            "removed_members": removed_members,
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
@@ -1324,14 +1348,25 @@ pub(crate) async fn handle_vault_record_key_result(
     if logical_name.is_empty() || key_id.is_empty() {
         return Err("logical_name and key_id are required".to_string());
     }
-    let health = server.llm.record_provider_key_result(
-        &logical_name,
-        &key_id,
-        params.status_code,
-        params.outcome.as_deref(),
-        params.retry_after_secs,
-        params.reason.as_deref(),
-    );
+    let llm = Arc::clone(&server.llm);
+    let record_logical_name = logical_name.clone();
+    let record_key_id = key_id.clone();
+    let outcome = params.outcome.clone();
+    let reason = params.reason.clone();
+    let status_code = params.status_code;
+    let retry_after_secs = params.retry_after_secs;
+    let health = tokio::task::spawn_blocking(move || {
+        llm.record_provider_key_result(
+            &record_logical_name,
+            &record_key_id,
+            status_code,
+            outcome.as_deref(),
+            retry_after_secs,
+            reason.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("record provider key result task failed: {e}"))?;
     let skipped_by_lease = health.disabled
         || health.auth_failed
         || matches!(
