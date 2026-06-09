@@ -558,7 +558,27 @@ pub(super) fn load_unlocked_env_secrets_for_child_env(
     server: &MemoryServer,
     cwd: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut secrets = load_unlocked_env_secrets(server)?;
+    let child_env_mode = std::env::var("TACHI_VAULT_CHILD_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "project".to_string());
+    let include_all_env_secrets = matches!(
+        child_env_mode.as_str(),
+        "all"
+            | "full"
+            | "legacy"
+            | "legacy_all"
+            | "override"
+            | "fill_missing"
+            | "missing_only"
+            | "preserve_env"
+    );
+
+    let mut secrets = if include_all_env_secrets {
+        load_unlocked_env_secrets(server)?
+    } else {
+        Vec::new()
+    };
     let Some(cwd) = cwd else {
         return Ok(secrets);
     };
