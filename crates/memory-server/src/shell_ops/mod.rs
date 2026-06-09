@@ -125,7 +125,10 @@ pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("Invalid flow_id: '{}'", id));
+        return Err(format!(
+            "Invalid flow_id: '{}'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke",
+            id
+        ));
     }
     Ok(())
 }
@@ -932,6 +935,7 @@ async fn handle_kanban_action(
         state_filter: params.state_filter.clone(),
         limit: params.limit,
         project: params.project.clone(),
+        flow_id: params.flow_id.clone(),
     };
     crate::dispatch_ops::handle_tachi_board(server, bp).await
 }

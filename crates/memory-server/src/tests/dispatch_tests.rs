@@ -611,6 +611,46 @@ async fn tachi_task_recommend_falls_back_to_builtin_profiles_without_eval_rows()
 }
 
 #[tokio::test]
+async fn tachi_task_recommend_surfaces_kimi_ux_for_agent_experience_tasks() {
+    let server = make_server();
+    let mut params = task_params("recommend");
+    params.task = Some(
+        "Run an agent-facing UX 大满贯 test for tachi_arena and summarize tool surface friction"
+            .to_string(),
+    );
+    params.limit = Some(20);
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("recommend should succeed");
+    let rec: serde_json::Value = serde_json::from_str(&raw).expect("recommend JSON");
+
+    let candidates = rec["candidates"].as_array().expect("candidates");
+    let kimi_ux = candidates
+        .iter()
+        .find(|candidate| candidate["profile"] == serde_json::json!("kimi_ux"))
+        .expect("kimi_ux candidate");
+    assert!(
+        kimi_ux["reasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons.iter().any(|reason| {
+                reason
+                    .as_str()
+                    .is_some_and(|s| s.contains("role_matches_agent_facing_ux"))
+            })),
+        "kimi_ux should explain UX routing fit: {kimi_ux:#}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .take(3)
+            .any(|candidate| candidate["profile"] == serde_json::json!("kimi_ux")),
+        "kimi_ux should be near the top for agent-facing UX tasks: {rec:#}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
     let server = make_server();
 
@@ -2841,6 +2881,148 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let flow_id = "flow_20260609T000004Z_complete_defaults_test";
+    let dispatch_id = "20260609T000004Z-custom-defaults";
+
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "custom",
+            "profile": "glm_51_impl",
+            "task": "implementation from card",
+        }),
+    )
+    .expect("mark dispatch");
+
+    let mut complete_params = task_params("complete");
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-link-004".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.flow_id = Some(flow_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should infer dispatch defaults");
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+    assert_eq!(bundle["recorded"], json!(true), "{bundle:#}");
+    assert_eq!(bundle["agent"], json!("custom"), "{bundle:#}");
+    assert_eq!(
+        bundle["task"],
+        json!("implementation from card"),
+        "{bundle:#}"
+    );
+    assert_eq!(bundle["dispatch_id"], json!(dispatch_id), "{bundle:#}");
+    assert_eq!(bundle["profile"], json!("glm_51_impl"), "{bundle:#}");
+    assert_eq!(
+        bundle["pipeline"]["dispatch_completion_link"]["recorded"],
+        json!(true),
+        "{bundle:#}"
+    );
+
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let status: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
+    )
+    .expect("status JSON");
+    assert_eq!(
+        status["dispatch_eval"][dispatch_id]["agent"],
+        json!("custom"),
+        "{status:#}"
+    );
+    assert_eq!(
+        status["dispatch_eval"][dispatch_id]["task"],
+        json!("implementation from card"),
+        "{status:#}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_task_board_filters_to_flow_dispatch_ids() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let flow_id = "flow_20260609T000005Z_board_flow_filter";
+    let dispatch_id = "20260609T000005Z-codex-flow";
+    let other_dispatch_id = "20260609T000006Z-codex-other";
+
+    crate::task_lifecycle::mark_task_dispatch(
+        flow_id,
+        dispatch_id,
+        json!({
+            "agent": "codex",
+            "profile": "codex_53_fast",
+            "task": "flow task",
+        }),
+    )
+    .expect("mark dispatch");
+    for (id, task) in [
+        (dispatch_id, "flow task"),
+        (other_dispatch_id, "other task"),
+    ] {
+        let run_dir = temp_home.path().join("runs").join(id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        if id == dispatch_id {
+            std::fs::write(run_dir.join("result.md"), "worker completed").expect("result");
+        }
+        std::fs::write(
+            run_dir.join("status.json"),
+            serde_json::to_string_pretty(&json!({
+                "dispatch_id": id,
+                "agent": "codex",
+                "task": task,
+                "state": "TASK_STATE_COMPLETED",
+                "exit_code": 0,
+                "updated_at": Utc::now().to_rfc3339(),
+            }))
+            .expect("status json"),
+        )
+        .expect("write status");
+    }
+
+    let mut params = task_params("board");
+    params.flow_id = Some(flow_id.to_string());
+    params.limit = Some(20);
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("board should succeed");
+    let board: Value = serde_json::from_str(&raw).expect("board JSON");
+    assert_eq!(board["flow_id"], json!(flow_id), "{board:#}");
+    assert_eq!(board["run_count"], json!(1), "{board:#}");
+    let tasks = board["tasks"].as_array().expect("tasks");
+    assert_eq!(tasks.len(), 1, "{board:#}");
+    assert_eq!(tasks[0]["dispatch_id"], json!(dispatch_id), "{board:#}");
+    assert_eq!(
+        tasks[0]["state"],
+        json!("TASK_STATE_COMPLETED"),
+        "{board:#}"
+    );
+    assert_eq!(tasks[0]["exit_code"], json!(0), "{board:#}");
+    assert_eq!(tasks[0]["result_written"], json!(true), "{board:#}");
+    assert_eq!(tasks[0]["state_source"], json!("run"), "{board:#}");
+    assert!(
+        tasks[0]["run_dir"]
+            .as_str()
+            .is_some_and(|path| path.ends_with(dispatch_id)),
+        "{board:#}"
+    );
+}
+
 #[test]
 fn tachi_task_pr_status_parses_repo_number_and_pr_ref() {
     let mut params = task_params("pr_status");
@@ -3282,6 +3464,71 @@ async fn tachi_task_ux_matrix_without_flow_is_read_only_starting_checklist() {
     assert!(parsed["matrix"].as_array().is_some_and(|matrix| matrix
         .iter()
         .any(|step| step["id"] == json!("canonical_docs") && step["status"] == json!("pending"))));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_task_ux_matrix_creates_new_flow_directory() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let server = make_server();
+    let flow_id = "flow_20260609T000007Z_ux_matrix_new_flow";
+    let mut params = task_params("ux_matrix");
+    params.flow_id = Some(flow_id.to_string());
+    params.task = Some("Start a new UX matrix before intake".to_string());
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("ux_matrix should create a new flow dir");
+    let parsed: Value = serde_json::from_str(&raw).expect("ux_matrix response JSON");
+    assert_eq!(parsed["ok"], json!(true));
+    assert_eq!(parsed["flow_id"], json!(flow_id));
+    let path = parsed["ux_matrix_path"].as_str().expect("ux matrix path");
+    assert!(path.ends_with("ux_matrix.json"), "{path}");
+    assert!(std::path::Path::new(path).exists());
+}
+
+#[tokio::test]
+async fn dispatch_prompt_does_not_require_self_complete_without_tachi_mcp() {
+    let server = make_server();
+    let mut params = dispatch_params(Some("codex"), "read-only worker");
+    params.inject_tachi_mcp = Some(false);
+    params.mcp_access = Some(DispatchMcpAccessParams {
+        inject_tachi_mcp: Some(false),
+        inject_hub_mcps: Some(false),
+        allowed_facades: vec!["tachi_memory".to_string()],
+        allowed_mcp_servers: Vec::new(),
+        github_read: Some(false),
+        write_actions: Some(false),
+        issue_refs: Vec::new(),
+        pr_refs: Vec::new(),
+        fallback: None,
+    });
+
+    let prompt = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params)
+        .await
+        .prompt;
+    assert!(
+        prompt.contains("leader will call `tachi_task(action=\"complete\")`"),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("- Call `tachi_task(action=\"complete\")` when done"),
+        "{prompt}"
+    );
+
+    params.inject_tachi_mcp = Some(true);
+    let prompt = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params)
+        .await
+        .prompt;
+    assert!(
+        prompt.contains("- Call `tachi_task(action=\"complete\")` when done"),
+        "{prompt}"
+    );
 }
 
 #[tokio::test]
@@ -4563,6 +4810,7 @@ async fn board_surfaces_dispatch_run_ledger() {
             state_filter: Some("all".to_string()),
             limit: Some(20),
             project: None,
+            flow_id: None,
         },
     )
     .await
@@ -4628,6 +4876,7 @@ async fn board_marks_abandoned_working_run_as_failed() {
             state_filter: Some("failed".to_string()),
             limit: Some(20),
             project: None,
+            flow_id: None,
         },
     )
     .await
@@ -4651,6 +4900,7 @@ async fn board_marks_abandoned_working_run_as_failed() {
             state_filter: Some("working".to_string()),
             limit: Some(20),
             project: None,
+            flow_id: None,
         },
     )
     .await
@@ -4707,6 +4957,7 @@ async fn board_caps_corrupt_huge_timeout_before_duration_math() {
             state_filter: Some("failed".to_string()),
             limit: Some(20),
             project: None,
+            flow_id: None,
         },
     )
     .await

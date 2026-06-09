@@ -298,6 +298,8 @@ const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_arena",
     // Background verification evidence ledger for runners and safe_merge.
     "tachi_verify",
+    // Live eval/performance matrix for routing-policy feedback.
+    "tachi_agent_eval",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
@@ -388,6 +390,8 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vault_list",
     "vault_remove",
     "vault_set",
+    "vault_set_api_key_pool",
+    "vault_lease_api_key",
     "vault_setup_rotation",
     "vc_bind",
     "vc_list",

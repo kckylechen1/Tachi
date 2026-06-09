@@ -238,6 +238,44 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         strong_against: &["repo_mapping", "symbol_search"],
         weak_against: &["implementation", "final_verification"],
     },
+    DispatchProfileDef {
+        name: "kimi_ux",
+        display_name: "Kimi UX Experience Reviewer",
+        backend: "kimi",
+        role: "ux_researcher",
+        stage: Some("review_light"),
+        model: None,
+        tool_profile: "observe",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: true,
+        write_actions: false,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_task", "tachi_wiki"],
+        allowed_mcp_servers: &[],
+        credential_profiles: &[],
+        common_skills: &[WAZA_CHECK, WAZA_THINK],
+        signature_skills: &[WAZA_LEARN, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
+        passive_traits: &[
+            "agent_facing_ux_audit",
+            "report_failure_chain",
+            "recommend_workflow_changes",
+        ],
+        forbidden_skills: &["write_actions", "direct_implementation"],
+        evidence_required: &[
+            "ux_findings",
+            "failure_chain",
+            "workflow_recommendations",
+            "repro_steps",
+        ],
+        strong_against: &[
+            "agent_experience",
+            "workflow_ux",
+            "tool_surface_friction",
+            "ux_matrix",
+        ],
+        weak_against: &["implementation", "merge", "schema_migration"],
+    },
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -1486,6 +1524,7 @@ fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
         "codex_53_fast" => (72, 92, 35, 52, 58),
         "kimi_arch" => (88, 64, 58, 86, 84),
         "deepseek_explore" => (76, 88, 30, 72, 62),
+        "kimi_ux" => (84, 70, 58, 88, 78),
         _ => (70, 70, 70, 70, 70),
     };
     json!({
@@ -2076,6 +2115,12 @@ fn dispatch_risk_needles() -> &'static [(&'static str, &'static str)] {
         ("aggregate_live", "touched_area:eval_ledger_changes"),
         ("performance_matrix", "touched_area:eval_ledger_changes"),
         ("eval", "touches eval/routing evidence"),
+        ("ux_matrix", "touches workflow_ux"),
+        ("agent-facing ux", "touches agent_experience"),
+        ("agent facing ux", "touches agent_experience"),
+        ("user experience", "touches agent_experience"),
+        ("tool surface", "touches tool_surface_friction"),
+        ("体验", "touches agent_experience"),
         ("safe_merge", "touches GitHub merge gate"),
         ("gh_safe_merge.rs", "touches GitHub merge gate"),
         ("merge", "touches merge/release gate"),
@@ -2204,6 +2249,16 @@ fn score_profile_candidate(
             score += 15.0;
             reasons.push(format!("strong_against_signal:{signal}"));
         }
+    }
+    if profile.role == "ux_researcher"
+        && risk.reasons.iter().any(|reason| {
+            reason.contains("agent_experience")
+                || reason.contains("workflow_ux")
+                || reason.contains("tool_surface_friction")
+        })
+    {
+        score += 30.0;
+        reasons.push("role_matches_agent_facing_ux".to_string());
     }
     let weak_against = profile_weak_against_for_server(server, profile)?;
     for weakness in &weak_against {
@@ -3555,6 +3610,22 @@ mod tests {
             .route_explanation
             .iter()
             .any(|line| line.contains("opencode custom command")));
+    }
+
+    #[test]
+    fn kimi_ux_profile_is_registered_as_read_only_experience_reviewer() {
+        let profile = resolve_dispatch_profile("kimi_ux").expect("kimi_ux profile");
+        assert_eq!(profile.backend, "kimi");
+        assert_eq!(profile.role, "ux_researcher");
+        assert!(!profile.write_actions);
+        assert!(profile
+            .evidence_required
+            .iter()
+            .any(|item| item == &"ux_findings"));
+        assert!(profile
+            .strong_against
+            .iter()
+            .any(|item| item == &"tool_surface_friction"));
     }
 
     #[test]

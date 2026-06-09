@@ -1092,19 +1092,26 @@ async fn feature_board(
     params: &TachiTaskParams,
     top_k: usize,
 ) -> serde_json::Value {
-    let raw = crate::dispatch_ops::handle_tachi_board(
-        server,
-        TachiBoardParams {
-            state_filter: Some("all".to_string()),
-            limit: Some(top_k.max(10)),
-            project: params.project.clone(),
-        },
-    )
-    .await;
-    let Ok(raw) = raw else {
-        return json!({"available": false});
+    let raw = feature_board_raw(server, params, params.flow_id.clone(), top_k).await;
+    let mut used_fallback = false;
+    let mut board: Value = match raw {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
+        Err(_) => return json!({"available": false}),
     };
-    let mut board: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    if params
+        .flow_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        && board
+            .get("tasks")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        if let Ok(raw) = feature_board_raw(server, params, None, top_k).await {
+            board = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+            used_fallback = true;
+        }
+    }
     let Some(tasks) = board.get("tasks").and_then(Value::as_array).cloned() else {
         return board;
     };
@@ -1121,7 +1128,29 @@ async fn feature_board(
         .collect::<Vec<_>>();
     board["tasks"] = Value::Array(filtered);
     board["count"] = json!(board["tasks"].as_array().map(Vec::len).unwrap_or(0));
+    if used_fallback {
+        board["flow_id"] = json!(params.flow_id);
+        board["flow_filter_fallback"] = json!("needle_scan");
+    }
     board
+}
+
+async fn feature_board_raw(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    flow_id: Option<String>,
+    top_k: usize,
+) -> Result<String, String> {
+    crate::dispatch_ops::handle_tachi_board(
+        server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(top_k.max(10)),
+            project: params.project.clone(),
+            flow_id,
+        },
+    )
+    .await
 }
 
 fn feature_needles(params: &TachiTaskParams) -> Vec<String> {

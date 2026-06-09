@@ -1260,7 +1260,7 @@ pub(crate) struct TachiTaskParams {
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
-        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
+        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, deepseek_explore, or kimi_ux. Distinct from the server ToolProfile."
     )]
     pub profile: Option<String>,
     #[serde(default)]
@@ -1437,6 +1437,55 @@ pub(crate) struct TachiArenaParams {
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
     pub timeout_secs: Option<u64>,
+
+    /// When true, spawn creates the tracked mission documents and also launches
+    /// the supported worker harness through the existing dispatch runtime.
+    #[serde(default)]
+    pub launch: bool,
+
+    /// Optional dispatch profile used when launch=true.
+    #[serde(default, alias = "dispatch_profile")]
+    pub profile: Option<String>,
+
+    /// Optional model override used when launch=true.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Optional named project DB for dispatch context.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Tachi flow id for feature-scoped dispatch/eval linkage.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// GitHub issue reference bound to the launched dispatch.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference bound to the launched dispatch.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Dispatch permission profile passed through when launch=true.
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+
+    /// Codex sandbox mode passed through when launch=true.
+    #[serde(default)]
+    pub sandbox: Option<String>,
+
+    /// Credential profile ids to materialize before launching the worker.
+    #[serde(default)]
+    pub credential_profiles: Vec<String>,
+
+    /// Expected child-agent tool surface when launch=true.
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+
+    /// Include a capability bundle in the launched dispatch prompt when supported.
+    #[serde(default, alias = "include_capability_bundle")]
+    pub auto_capability_bundle: Option<bool>,
 
     /// Reason for abort/reap.
     #[serde(default)]
@@ -1731,4 +1780,8 @@ pub(crate) struct TachiBoardParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Optional Tachi flow id; when set, return only dispatches linked to that flow.
+    #[serde(default)]
+    pub flow_id: Option<String>,
 }

@@ -225,11 +225,143 @@ fn collect_run_tasks(state_filter: &str, limit: usize) -> Vec<serde_json::Value>
     runs
 }
 
+fn collect_run_task_by_id(dispatch_id: &str) -> Option<serde_json::Value> {
+    let run_dir = tachi_home().join("runs").join(dispatch_id);
+    if !run_dir.is_dir() {
+        return None;
+    }
+    collect_run_task_from_dir(&run_dir)
+}
+
+fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
+    let status_path = run_dir.join("status.json");
+    let status_raw = std::fs::read_to_string(&status_path).ok()?;
+    let status = serde_json::from_str::<serde_json::Value>(&status_raw).ok()?;
+    let dispatch_id = status
+        .get("dispatch_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            run_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })?;
+    let result_written = run_dir.join("result.md").exists();
+    let updated_at_dt = parse_status_updated_at(&status, &status_path);
+    let now = Utc::now();
+    let abandoned = is_abandoned_working_run(&status, result_written, updated_at_dt, now);
+    let state = if abandoned {
+        "TASK_STATE_FAILED"
+    } else {
+        status_state(&status, result_written)
+    };
+    let updated_at = status
+        .get("updated_at")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            std::fs::metadata(&status_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(chrono::DateTime::<Utc>::from)
+                .map(|dt| dt.to_rfc3339())
+        });
+    let stale_reason = if abandoned {
+        Some(format!(
+            "run ledger stayed WORKING for more than {}s without result.md or exit_code",
+            stale_after_secs(&status)
+        ))
+    } else {
+        None
+    };
+    Some(json!({
+        "dispatch_id": dispatch_id,
+        "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
+        "state": state,
+        "exit_code": status.get("exit_code").cloned().unwrap_or(serde_json::Value::Null),
+        "summary": status.get("task").cloned().unwrap_or(serde_json::Value::Null),
+        "updated_at": updated_at,
+        "run_dir": run_dir.to_string_lossy(),
+        "result_written": result_written,
+        "source": "run",
+        "stale": abandoned,
+        "stale_reason": stale_reason,
+        "state_source": if abandoned { "run_stale_timeout" } else { "run" },
+    }))
+}
+
+fn flow_dispatch_ids(flow_id: &str) -> Result<Vec<String>, String> {
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id)?;
+    let status_path = run_dir.join("status.json");
+    let Some(status) = crate::task_lifecycle::read_json_file(&status_path)? else {
+        return Ok(Vec::new());
+    };
+    Ok(status
+        .get("dispatch_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect())
+}
+
+fn merge_run_task(
+    existing: &mut serde_json::Value,
+    run_task: &serde_json::Value,
+    authoritative_state: bool,
+) {
+    if let Some(obj) = existing.as_object_mut() {
+        for key in [
+            "run_dir",
+            "result_written",
+            "exit_code",
+            "stale",
+            "stale_reason",
+            "state_source",
+        ] {
+            if obj.get(key).is_none() {
+                obj.insert(
+                    key.to_string(),
+                    run_task
+                        .get(key)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+        }
+        if authoritative_state || run_task.get("stale").and_then(|v| v.as_bool()) == Some(true) {
+            obj.insert(
+                "state".to_string(),
+                run_task
+                    .get("state")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            obj.insert(
+                "updated_at".to_string(),
+                run_task
+                    .get("updated_at")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        obj.insert("source".to_string(), json!("kanban+run"));
+    }
+}
+
 pub(crate) async fn handle_tachi_board(
     server: &MemoryServer,
     params: TachiBoardParams,
 ) -> Result<String, String> {
     let limit = params.limit.unwrap_or(20);
+    let flow_filter = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
 
     let rows = crate::memory_search_ops::search_memory_rows(
         server,
@@ -283,11 +415,48 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
     }
+    let mut flow_run_count = 0usize;
+    if let Some(flow_id) = flow_filter.as_deref() {
+        let flow_ids = flow_dispatch_ids(flow_id)?;
+        let flow_id_set: std::collections::HashSet<String> = flow_ids.iter().cloned().collect();
+        tasks.retain(|task| {
+            task.get("dispatch_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| flow_id_set.contains(id))
+        });
+        for dispatch_id in &flow_ids {
+            if seen.contains(dispatch_id) {
+                if let Some(run_task) = collect_run_task_by_id(dispatch_id) {
+                    flow_run_count += 1;
+                    if let Some(existing) = tasks.iter_mut().find(|candidate| {
+                        candidate.get("dispatch_id").and_then(|v| v.as_str())
+                            == Some(dispatch_id.as_str())
+                    }) {
+                        merge_run_task(existing, &run_task, true);
+                    }
+                }
+                continue;
+            }
+            if let Some(task) = collect_run_task_by_id(dispatch_id) {
+                flow_run_count += 1;
+                seen.insert(dispatch_id.clone());
+                tasks.push(task);
+            }
+        }
+    }
     let run_scan_limit = limit.saturating_mul(5).max(50);
-    let run_tasks = tokio::task::spawn_blocking(move || collect_run_tasks("all", run_scan_limit))
-        .await
-        .unwrap_or_default();
-    let run_count = run_tasks.len();
+    let run_tasks = if flow_filter.is_some() {
+        Vec::new()
+    } else {
+        tokio::task::spawn_blocking(move || collect_run_tasks("all", run_scan_limit))
+            .await
+            .unwrap_or_default()
+    };
+    let run_count = if flow_filter.is_some() {
+        flow_run_count
+    } else {
+        run_tasks.len()
+    };
     for task in run_tasks {
         let dispatch_id = task
             .get("dispatch_id")
@@ -298,38 +467,7 @@ pub(crate) async fn handle_tachi_board(
                 if let Some(existing) = tasks.iter_mut().find(|candidate| {
                     candidate.get("dispatch_id").and_then(|v| v.as_str()) == Some(id)
                 }) {
-                    if let Some(obj) = existing.as_object_mut() {
-                        for key in [
-                            "run_dir",
-                            "result_written",
-                            "exit_code",
-                            "stale",
-                            "stale_reason",
-                            "state_source",
-                        ] {
-                            if obj.get(key).is_none() {
-                                obj.insert(
-                                    key.to_string(),
-                                    task.get(key).cloned().unwrap_or(serde_json::Value::Null),
-                                );
-                            }
-                        }
-                        if task.get("stale").and_then(|v| v.as_bool()) == Some(true) {
-                            obj.insert(
-                                "state".to_string(),
-                                task.get("state")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null),
-                            );
-                            obj.insert(
-                                "updated_at".to_string(),
-                                task.get("updated_at")
-                                    .cloned()
-                                    .unwrap_or(serde_json::Value::Null),
-                            );
-                        }
-                        obj.insert("source".to_string(), json!("kanban+run"));
-                    }
+                    merge_run_task(existing, &task, false);
                 }
                 continue;
             }
@@ -350,6 +488,7 @@ pub(crate) async fn handle_tachi_board(
 
     serde_json::to_string(&json!({
         "board": "kanban",
+        "flow_id": flow_filter,
         "filter": state_filter,
         "count": tasks.len(),
         "kanban_count": kanban_count,
