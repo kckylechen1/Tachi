@@ -1,3 +1,4 @@
+use super::auto_link::is_training_seed;
 use super::*;
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
@@ -18,6 +19,14 @@ fn is_eval_entry(entry: &memory_core::MemoryEntry) -> bool {
 }
 
 fn training_recall_opted_in(params: &SearchMemoryParams) -> bool {
+    params.include_training
+        || params
+            .path_prefix
+            .as_deref()
+            .is_some_and(|prefix| is_training_path(prefix.trim_end_matches('/')))
+}
+
+fn find_similar_training_opted_in(params: &FindSimilarMemoryParams) -> bool {
     params.include_training
         || params
             .path_prefix
@@ -247,7 +256,7 @@ pub(crate) async fn search_memory_rows(
     }
 
     if !training_recall_opted_in(&params) {
-        combined_results.retain(|(result, _)| !is_training_path(&result.entry.path));
+        combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
     }
     if !eval_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
@@ -479,6 +488,10 @@ pub(crate) async fn handle_find_similar_memory(
             .partial_cmp(&a.0.score.vector)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    if !find_similar_training_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
+    }
 
     let mut seen_ids = HashSet::new();
     let mut output: Vec<serde_json::Value> = Vec::new();

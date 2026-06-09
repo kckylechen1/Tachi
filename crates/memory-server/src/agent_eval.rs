@@ -618,7 +618,17 @@ pub(crate) fn load_live_eval_rows(
     }
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     entries.truncate(limit);
-    Ok(entries.iter().filter_map(eval_row_from_memory).collect())
+    Ok(entries
+        .iter()
+        .filter(|entry| {
+            !entry
+                .metadata
+                .get("auto_synthesized")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(eval_row_from_memory)
+        .collect())
 }
 
 pub(crate) async fn handle_agent_eval(

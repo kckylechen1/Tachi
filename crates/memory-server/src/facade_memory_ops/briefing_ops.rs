@@ -183,6 +183,14 @@ pub(crate) async fn handle_memory_briefing(
             "verification": verification,
             "kanban": board,
             "recent_checkpoints": checkpoints,
+            "layer_authority": {
+                "docs_specs": "highest; use tachi_task(action='briefing') for feature-scoped canonical docs/specs",
+                "guide_sop": "high; procedural workflow guidance",
+                "wiki": "medium-high; synthesized durable knowledge",
+                "memory": "low-medium; fragmented decisions/checkpoints/evidence",
+                "eval_verification": "evidence; supports routing/review but does not override docs/specs",
+                "kanban": "workflow state; current task board and dispatch ledger"
+            },
             "compact": compact,
             "limits": {
                 "memories": memory_cap,
