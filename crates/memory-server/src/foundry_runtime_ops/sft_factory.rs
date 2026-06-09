@@ -9,6 +9,10 @@
 //!     sft_data_chat.jsonl    — same, incremental appends
 //!     sft_data_hf.jsonl      — HuggingFace conversations format
 //!
+//! These exports are candidate training artifacts only. They are not production
+//! memory/wiki/eval rows and must pass the model-training eval gate before any
+//! route-policy/profile-card change can be promoted.
+//!
 //! Called once per daily pipeline run after truth maintenance completes.
 
 use std::path::Path;
@@ -226,6 +230,8 @@ fn build_chat_jsonl(user: &str, assistant: &str, pair_type: &str, system: &str) 
         "metadata": {
             "type": pair_type,
             "source": "tachi_sft_factory",
+            "artifact_class": "sft_candidate",
+            "promotion_status": "candidate_only",
             "generated_at": Utc::now().to_rfc3339()
         }
     })
@@ -241,6 +247,8 @@ fn build_hf_jsonl(user: &str, assistant: &str, pair_type: &str, system: &str) ->
         "metadata": {
             "type": pair_type,
             "source": "tachi_sft_factory",
+            "artifact_class": "sft_candidate",
+            "promotion_status": "candidate_only",
             "generated_at": Utc::now().to_rfc3339()
         }
     })

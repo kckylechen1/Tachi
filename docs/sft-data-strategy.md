@@ -1,9 +1,34 @@
 # SFT 数据战略：从 1,654 条高质量样本到 Tachi 全系统提升
 
-**Status:** Research Complete → Implementation Ready  
-**Date:** 2026-06-03  
-**Source:** `/Volumes/Storage/agent_logs/sft/redistilled_v4_all_engineering.jsonl` (1,654 entries)  
+**Status:** Historical research plan; superseded for production gating by
+[`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md)
+**Date:** 2026-06-03
+**Boundary update:** 2026-06-09
+**Source:** `/Volumes/Storage/agent_logs/sft/redistilled_v4_all_engineering.jsonl` (1,654 entries)
 **Scope:** Tachi 全系统 — Agent Router · Dispatch · Shell · Wiki · Memory · Briefing · Foundry
+
+## 0. 2026-06-09 Production Boundary
+
+This document is the original research map for using the 1,654 engineering SFT
+samples. It is no longer the production implementation contract for model
+training or route-policy mutation.
+
+Current production rule:
+
+- SFT rows remain isolated from ordinary recall.
+- Dispatch can use SFT examples only as style-only exemplars.
+- `tachi_agent_eval(action="aggregate_live")`, DispatchProfile, MBIT cards, and
+  reviewed route-policy/profile-card overlays are the production routing layer.
+- Qwen/LoRA/fine-tune work is deferred until the eval target and artifact
+  promotion gate in
+  [`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md)
+  is satisfied.
+- Model-training artifacts stay under run-scoped `foundry-runs` paths and never
+  become production memory/wiki/docs by default.
+
+The unchecked LoRA/vector-DB tasks below should be read as research options,
+not instructions to import SFT into normal Tachi recall or to replace the
+dispatch policy layer.
 
 ---
 
@@ -64,6 +89,10 @@ Phase 1 dispatch fleet is **four agents** only — see [`agent-fleet.md`](agent-
 
 **数据价值：** 1,654 条样本天然带有用户意图标签，可以直接训练 classifier。
 
+**2026-06-09 boundary:** classifier training is candidate work only. It must
+beat the current DispatchProfile / MBIT / live `/eval` policy baseline on an
+isolated fixture before it can affect production routing.
+
 **训练目标：**
 ```json
 {
@@ -82,6 +111,10 @@ Phase 1 dispatch fleet is **four agents** only — see [`agent-fleet.md`](agent-
 - 输入：user prompt 前 100 字
 - 输出：`{"intent", "agent", "stage", "skills"}` JSON
 - 预期准确率：>85%（基于 7 类意图）
+- production gate: see
+  [`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md);
+  no trained classifier may directly replace route recommendation without a
+  reviewed promotion proposal.
 
 ---
 
@@ -170,7 +203,7 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 **实现方式：**
 - 不替换静态 SKILL.md，而是作为 **dynamic context** 注入
 - `tachi_shell` 进入 stage 时，从 SFT 数据中检索同类型的 2-3 条样本作为 few-shot
-- 未来可以用向量检索（把 SFT 数据向量化存入 Tachi DB）
+- 未来可以用隔离的 SFT scope 或 run-scoped fixture 检索；不要把 SFT 数据导入生产普通 recall vector DB
 
 ---
 
@@ -276,19 +309,20 @@ huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 
 ## 4. 实施 Checklist
 
-### Phase 1: Infrastructure（本周）
+### Phase 1: Infrastructure（historical; gated before production）
 
-- [ ] 将 SFT 数据加载到 Tachi vector DB（用于检索）
+- [ ] 将 SFT 数据加载到隔离的 `/sft` scope 或 run-scoped fixture（用于显式检索；不得进入普通 recall）
 - [ ] 定义 `[结论]/[根因]/[方案]/[反方案]/[验证]` 的解析规则（regex）
 - [ ] 更新 `wiki-references-spec.md` 加入结构化输出章节
 - [ ] 创建 `crates/memory-server/src/dispatch_ops/prompt_examples/` 目录，按 intent 分类存放样本
 
-### Phase 2: Agent Router Classifier（下周）
+### Phase 2: Agent Router Classifier（historical; deferred to #262）
 
 - [ ] 从 SFT 数据生成训练集（input: prompt, output: intent+agent+stage JSON）
 - [ ] LoRA 训练 Qwen 2.5 32B（或 SiliconFlow API fine-tune）
 - [ ] 评估准确率（目标 >85%）
-- [ ] 集成到 `crates/memory-server/src/dispatch_ops/dispatch.rs`：替换硬编码路由
+- [ ] 在隔离 fixture 上对比当前 DispatchProfile / MBIT / live `/eval` baseline
+- [ ] 只通过 reviewed route-policy/profile-card proposal 影响生产；不得直接替换硬编码安全边界
 
 ### Phase 3: Wiki / Memory Format（下周）
 

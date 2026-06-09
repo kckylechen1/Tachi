@@ -1,7 +1,7 @@
 # SFT Memory and Eval Playbook
 
 Status: active operating guide
-Updated: 2026-06-05
+Updated: 2026-06-09
 
 This guide defines how Tachi should use distilled SFT artifacts without pretending
 the base model learned new weights. SFT is an external behavior library: it can
@@ -10,6 +10,9 @@ live project truth by default.
 
 For the standalone subagent operating and evaluation contract, see
 `docs/engineering/architecture/subagent-eval-system.md`.
+For future LoRA/fine-tune or local classifier work, see
+`docs/engineering/architecture/model-training-eval-gate.md`; model-training
+artifacts are candidate evidence only until that gate is passed.
 
 ## Operating Model
 
@@ -21,6 +24,7 @@ Use SFT in four lanes:
 | Memory card | One reusable rule, failure mode, command, or model behavior | `/agent/...` or `/scratch/...` after human distillation | Normal recall only after conversion |
 | Wiki draft | Stable runbook or architecture rule | `/wiki/drafts/...` pending review | Human promotion required |
 | Eval fixture | Score model-role routing quality | JSONL fixture or `/eval/...` production ledger | Do not mix fixture rows with live eval rows |
+| Model-training artifact | Candidate dataset, checkpoint, or report | `~/.tachi/foundry-runs/model-training/<run_id>/...` | Never normal recall; promotion requires #262 gate |
 
 Do not use raw SFT Q/A as ordinary memory. Convert it first unless the caller
 explicitly asks for `scope="sft"`.
@@ -56,6 +60,12 @@ Promote SFT content only after compression:
 
 Do not promote SFT seeds automatically through graph links, REM wiki evolution,
 or Foundry distillation. SFT-derived wiki entries must start as pending drafts.
+
+Model-training datasets, checkpoints, and benchmark reports follow the same
+boundary. They may reference SFT-derived examples and reviewed eval rows, but
+they do not become production memory/wiki/docs and they do not change routing
+policy without a reviewed proposal. The promotion gate is defined in
+`model-training-eval-gate.md`.
 
 ## Eval Ledger
 
@@ -140,6 +150,11 @@ Leader workflow:
 Use fixture JSONL for benchmark replay. Keep fixture source explicit; never
 aggregate fixture rows with live `/eval/YYYY-MM-DD/...` records unless the
 report says it is a mixed benchmark.
+
+For model-training benchmarks, compare the candidate against the current
+DispatchProfile / MBIT / live-eval policy baseline on the same fixture rows.
+The candidate may propose task type, risk, profile, blocked profiles, and
+evidence requirements, but it must not directly mutate route policy.
 
 Minimum role dimensions:
 
