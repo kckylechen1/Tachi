@@ -503,7 +503,10 @@ pub(crate) async fn handle_tachi_dispatch(
     }
 
     let harness_transport = params.harness_transport.clone().unwrap_or_else(|| {
-        if agent_norm == "custom" && params.command.first().is_some_and(|cmd| cmd == "omo") {
+        if agent_norm == "custom"
+            && params.command.first().is_some_and(|cmd| cmd == "opencode")
+            && params.command.iter().any(|arg| arg == "--attach")
+        {
             "opencode_serve".to_string()
         } else {
             "cli".to_string()

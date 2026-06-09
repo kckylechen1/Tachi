@@ -1307,11 +1307,11 @@ fn resolve_and_apply_dispatch_profile_inner(
                     params.harness_transport = Some("opencode_serve".to_string());
                     params.harness_server_url = Some(server_url.clone());
                     params.command = vec![
-                        "omo".to_string(),
+                        "opencode".to_string(),
                         "run".to_string(),
                         "--attach".to_string(),
                         server_url,
-                        "--directory".to_string(),
+                        "--dir".to_string(),
                         directory,
                         "--agent".to_string(),
                         profile.role.to_string(),
@@ -3672,11 +3672,11 @@ mod tests {
         assert_eq!(
             params.command,
             vec![
-                "omo".to_string(),
+                "opencode".to_string(),
                 "run".to_string(),
                 "--attach".to_string(),
                 "http://127.0.0.1:4321".to_string(),
-                "--directory".to_string(),
+                "--dir".to_string(),
                 "/tmp/tachi-opencode-project".to_string(),
                 "--agent".to_string(),
                 "explore".to_string(),

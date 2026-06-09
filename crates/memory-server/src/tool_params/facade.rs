@@ -684,7 +684,7 @@ pub(crate) struct TachiDispatchParams {
 
     #[serde(default)]
     #[schemars(
-        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via omo run --attach."
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via opencode run --attach."
     )]
     pub harness_transport: Option<String>,
 
@@ -1268,7 +1268,7 @@ pub(crate) struct TachiTaskParams {
     pub command: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via omo run --attach."
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via opencode run --attach."
     )]
     pub harness_transport: Option<String>,
     #[serde(default)]
