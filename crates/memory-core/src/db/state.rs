@@ -94,16 +94,53 @@ pub fn save_derived(
     metadata: &serde_json::Value,
 ) -> Result<String, MemoryError> {
     let id = Uuid::new_v4().to_string();
+    save_derived_with_id(
+        conn, &id, text, path, summary, importance, source, scope, metadata,
+    )?;
+    Ok(id)
+}
+
+/// Save a derived item under a caller-provided stable id.
+#[allow(clippy::too_many_arguments)]
+pub fn save_derived_with_id(
+    conn: &Connection,
+    id: &str,
+    text: &str,
+    path: &str,
+    summary: &str,
+    importance: f64,
+    source: &str,
+    scope: &str,
+    metadata: &serde_json::Value,
+) -> Result<(), MemoryError> {
     let now = now_utc_iso();
     let metadata_json = serde_json::to_string(metadata)?;
 
     conn.execute(
         r#"INSERT INTO derived_items (id, text, path, summary, importance, source, scope, metadata, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
-        params![id, text, path, summary, importance, source, scope, metadata_json, now],
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+           ON CONFLICT(id) DO UPDATE SET
+             text = excluded.text,
+             path = excluded.path,
+             summary = excluded.summary,
+             importance = excluded.importance,
+             source = excluded.source,
+             scope = excluded.scope,
+             metadata = excluded.metadata,
+             created_at = COALESCE(NULLIF(derived_items.created_at, ''), excluded.created_at)"#,
+        params![
+            id,
+            text,
+            path,
+            summary,
+            importance,
+            source,
+            scope,
+            metadata_json,
+            now
+        ],
     )?;
-
-    Ok(id)
+    Ok(())
 }
 
 /// Count derived items by source and path prefix.

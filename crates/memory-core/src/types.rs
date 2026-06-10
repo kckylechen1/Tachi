@@ -325,13 +325,13 @@ impl std::fmt::Display for MemoryScope {
 /// untouched / NULL → durable).
 ///
 /// Rules:
-///   - path starts with `/handoff` or `/kanban` → `ephemeral`
+///   - path starts with `/handoff` or `/kanban` → `pinned`
 ///   - path starts with `/wiki`                 → `permanent`
 ///   - source == `foundry_distill`              → `permanent`
 ///   - everything else                          → None
 pub fn default_retention_for(path: &str, source: &str) -> Option<&'static str> {
     if path.starts_with("/handoff") || path.starts_with("/kanban") {
-        Some("ephemeral")
+        Some(RetentionPolicy::Pinned.as_str())
     } else if path.starts_with("/wiki") || path.starts_with("/guide") || source == "foundry_distill"
     {
         Some("permanent")
@@ -1086,16 +1086,10 @@ mod tests {
     fn test_default_retention_matrix() {
         assert_eq!(
             default_retention_for("/handoff/foo", "manual"),
-            Some("ephemeral")
+            Some("pinned")
         );
-        assert_eq!(
-            default_retention_for("/handoff", "manual"),
-            Some("ephemeral")
-        );
-        assert_eq!(
-            default_retention_for("/kanban/x", "manual"),
-            Some("ephemeral")
-        );
+        assert_eq!(default_retention_for("/handoff", "manual"), Some("pinned"));
+        assert_eq!(default_retention_for("/kanban/x", "manual"), Some("pinned"));
         assert_eq!(
             default_retention_for("/wiki/lessons", "manual"),
             Some("permanent")

@@ -69,7 +69,7 @@ struct ProjectEnvSyncReport {
 
 struct UnlockedVaultStore {
     store: memory_core::MemoryStore,
-    key: [u8; 32],
+    key: crate::vault_crypto::DerivedVaultKey,
 }
 
 // ─── `tachi env` handler ────────────────────────────────────────────────────
@@ -198,8 +198,8 @@ fn unlock_cli_vault(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
     }
 
@@ -455,10 +455,13 @@ fn resolve_bound_secret_value(
     secret_name: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if let Some(entry) = entries.get(secret_name).copied() {
-        return decrypt_entry_value(entry, &unlocked.key);
+        return decrypt_entry_value(entry, unlocked.key.bytes());
     }
-    let (_, value) =
-        super::vault_cli::lease_api_key_from_store(&unlocked.store, &unlocked.key, secret_name)?;
+    let (_, value) = super::vault_cli::lease_api_key_from_store(
+        &unlocked.store,
+        unlocked.key.bytes(),
+        secret_name,
+    )?;
     Ok(value)
 }
 
@@ -621,9 +624,9 @@ async fn run_legacy_env_export(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
     }
 
@@ -666,7 +669,7 @@ async fn run_legacy_env_export(
             }
         }
 
-        let value = match decrypt_entry_value(&entry, &key) {
+        let value = match decrypt_entry_value(&entry, key.bytes()) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, e);
@@ -763,8 +766,9 @@ BROKEN
     fn project_env_plan_marks_secret_pool_and_missing() {
         let store = temp_store();
         let key =
-            crate::vault_crypto::derive_key("test-password", b"1234567890123456").expect("key");
-        put_secret(&store, &key, "direct.secret", "direct-value");
+            crate::vault_crypto::DerivedVaultKey::derive("test-password", b"1234567890123456")
+                .expect("key");
+        put_secret(&store, key.bytes(), "direct.secret", "direct-value");
         store
             .vault_set_rotation(&memory_core::vault::VaultKeyRotation {
                 prefix: "POOL_API_KEY".to_string(),
@@ -803,9 +807,10 @@ BAD-NAME=vault:direct.secret
     fn project_env_sync_writes_generated_exports() {
         let store = temp_store();
         let key =
-            crate::vault_crypto::derive_key("test-password", b"1234567890123456").expect("key");
-        put_secret(&store, &key, "direct.secret", "direct-value");
-        put_secret(&store, &key, "POOL_API_KEY_1", "pool-value-1");
+            crate::vault_crypto::DerivedVaultKey::derive("test-password", b"1234567890123456")
+                .expect("key");
+        put_secret(&store, key.bytes(), "direct.secret", "direct-value");
+        put_secret(&store, key.bytes(), "POOL_API_KEY_1", "pool-value-1");
         store
             .vault_set_rotation(&memory_core::vault::VaultKeyRotation {
                 prefix: "POOL_API_KEY".to_string(),

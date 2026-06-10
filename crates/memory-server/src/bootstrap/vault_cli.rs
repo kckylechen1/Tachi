@@ -1,6 +1,6 @@
 use super::*;
 use memory_core::vault::api_key_pool_member_index;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::Path;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
@@ -196,29 +196,23 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            confirm_password_file,
         } => {
             if vault_config_exists_cli(global_db_path)? {
                 println!("Vault already initialized.");
                 return Ok(());
             }
 
-            let password = if stdin_password || keychain || password_file.is_some() {
-                read_vault_password(stdin_password, keychain, password_file.as_deref())?
-            } else {
-                let password = rpassword::prompt_password("New vault password: ")?;
-                if password.is_empty() {
-                    return Err("Password cannot be empty".into());
-                }
-                let confirm = rpassword::prompt_password("Confirm password: ")?;
-                if password != confirm {
-                    return Err("Passwords do not match".into());
-                }
-                password
-            };
+            let password = read_vault_init_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                confirm_password_file.as_deref(),
+            )?;
 
             let salt = crate::vault_crypto::generate_salt();
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
-            let verifier = crate::vault_crypto::create_verifier(&key)?;
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+            let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
             let salt_b64 = B64.encode(salt);
             let now = chrono::Utc::now().to_rfc3339();
 
@@ -282,9 +276,9 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
             println!("Vault password verified. No running daemon was detected; this CLI verification is stateless.");
@@ -313,9 +307,9 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
 
@@ -331,7 +325,7 @@ pub(super) async fn run_vault_command(
             }
 
             let (encrypted_value, nonce) =
-                crate::vault_crypto::encrypt(&key, secret_value.as_bytes())?;
+                crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes())?;
 
             let is_new = !open_cli_store_read_only(global_db_path)?
                 .vault_entry_exists(&name)
@@ -403,8 +397,8 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
 
@@ -420,7 +414,7 @@ pub(super) async fn run_vault_command(
                     .vault_entry_exists(&name)
                     .map_err(|e| format!("vault_entry_exists: {e}"))?;
                 let (encrypted_value, nonce) =
-                    crate::vault_crypto::encrypt(&key, value.as_bytes())?;
+                    crate::vault_crypto::encrypt(key.bytes(), value.as_bytes())?;
                 store
                     .vault_upsert_entry(&memory_core::vault::VaultEntry {
                         name,
@@ -507,12 +501,12 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
 
-            let (key_id, value) = lease_api_key_from_store(&store, &key, &name)?;
+            let (key_id, value) = lease_api_key_from_store(&store, key.bytes(), &name)?;
             let body = serde_json::json!({
                 "leased": true,
                 "logical_name": name,
@@ -582,9 +576,9 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
 
@@ -594,7 +588,7 @@ pub(super) async fn run_vault_command(
                 .ok_or(format!("Secret '{name}' not found"))?;
 
             let decrypted =
-                crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+                crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
             let value = String::from_utf8(decrypted)
                 .map_err(|e| format!("Secret is not valid UTF-8: {e}"))?;
 
@@ -621,9 +615,9 @@ pub(super) async fn run_vault_command(
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("Wrong password".into());
             }
 
@@ -711,8 +705,8 @@ fn decrypt_profile_secret_values(
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
     }
 
@@ -722,7 +716,8 @@ fn decrypt_profile_secret_values(
             .vault_get_entry(&name)
             .map_err(|e| format!("vault_get_entry: {e}"))?
             .ok_or_else(|| format!("Vault secret '{name}' is missing"))?;
-        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
         let value = String::from_utf8(decrypted)
             .map_err(|e| format!("Vault secret '{name}' is not valid UTF-8: {e}"))?;
         values.insert(name, value);
@@ -1032,6 +1027,57 @@ pub(super) fn read_vault_password(
     Ok(password)
 }
 
+pub(super) fn read_vault_init_password(
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&Path>,
+    confirm_password_file: Option<&Path>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let (password, confirm) = if stdin_password {
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        read_vault_init_password_stdin_lines(&mut stdin, confirm_password_file)?
+    } else if keychain || password_file.is_some() {
+        let password = read_vault_password(false, keychain, password_file)?;
+        let Some(path) = confirm_password_file else {
+            return Err(
+                "Non-interactive vault init requires --confirm-password-file. Use interactive `tachi vault init` or provide a separate confirmation file."
+                    .into(),
+            );
+        };
+        (password, read_password_file(path)?)
+    } else {
+        let password = rpassword::prompt_password("New vault password: ")?;
+        let confirm = rpassword::prompt_password("Confirm password: ")?;
+        (password, confirm)
+    };
+
+    if password.is_empty() {
+        return Err("Password cannot be empty".into());
+    }
+    if password != confirm {
+        return Err("Passwords do not match".into());
+    }
+    Ok(password)
+}
+
+fn read_vault_init_password_stdin_lines(
+    reader: &mut impl BufRead,
+    confirm_password_file: Option<&Path>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut password = String::new();
+    reader.read_line(&mut password)?;
+    let password = password.trim().to_string();
+    let confirm = if let Some(path) = confirm_password_file {
+        read_password_file(path)?
+    } else {
+        let mut confirm = String::new();
+        reader.read_line(&mut confirm)?;
+        confirm.trim().to_string()
+    };
+    Ok((password, confirm))
+}
+
 fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
@@ -1053,4 +1099,56 @@ fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
     }
 
     Ok(password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
+        let mut input =
+            Cursor::new("correct horse battery staple\ncorrect horse battery staple\nextra\n");
+        let (password, confirm) =
+            read_vault_init_password_stdin_lines(&mut input, None).expect("stdin lines");
+
+        assert_eq!(password, "correct horse battery staple");
+        assert_eq!(confirm, "correct horse battery staple");
+        let mut remaining = String::new();
+        input
+            .read_to_string(&mut remaining)
+            .expect("read remaining stdin");
+        assert_eq!(remaining, "extra\n");
+    }
+
+    #[test]
+    fn noninteractive_init_password_file_requires_confirmation_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+
+        let err = read_vault_init_password(false, false, Some(&password_file), None)
+            .expect_err("missing confirmation file should fail");
+        assert!(err.to_string().contains("--confirm-password-file"), "{err}");
+    }
+
+    #[test]
+    fn noninteractive_init_password_file_must_match_confirmation_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let password_file = dir.path().join("password.txt");
+        let confirm_file = dir.path().join("confirm.txt");
+        std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+        std::fs::write(&confirm_file, "wrong horse battery staple\n").expect("confirm file");
+
+        let err = read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file))
+            .expect_err("mismatched confirmation should fail");
+        assert!(err.to_string().contains("Passwords do not match"), "{err}");
+
+        std::fs::write(&confirm_file, "correct horse battery staple\n").expect("confirm file");
+        let password =
+            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file))
+                .expect("matching confirmation should succeed");
+        assert_eq!(password, "correct horse battery staple");
+    }
 }

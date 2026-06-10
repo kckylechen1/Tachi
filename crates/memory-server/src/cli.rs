@@ -869,6 +869,11 @@ pub(crate) enum VaultAction {
         /// Read password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Read password confirmation from a local file (first line only).
+        /// Required for non-interactive init modes except --stdin-password,
+        /// where the second stdin line is used when this flag is omitted.
+        #[arg(long, value_name = "PATH")]
+        confirm_password_file: Option<PathBuf>,
     },
     /// Unlock the vault for this session.
     Unlock {

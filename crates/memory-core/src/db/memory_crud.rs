@@ -241,7 +241,7 @@ pub fn upsert(
                          WHERE id = ?5",
                         params![merge_kws, merge_ents, importance, &write_time_utc, cand_id],
                     )?;
-                    if let Ok((cand_path, cand_summary, cand_text)) = tx.query_row(
+                    let (cand_path, cand_summary, cand_text) = tx.query_row(
                         "SELECT path, summary, text FROM memories WHERE id = ?1",
                         params![cand_id],
                         |r| {
@@ -251,23 +251,22 @@ pub fn upsert(
                                 r.get::<_, String>(2)?,
                             ))
                         },
-                    ) {
-                        let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
-                            .unwrap_or_default()
-                            .join(" ");
-                        let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
-                            .unwrap_or_default()
-                            .join(" ");
-                        let _ = sync_memories_fts(
-                            &tx,
-                            &cand_id,
-                            &cand_path,
-                            &cand_summary,
-                            &cand_text,
-                            &kws_joined,
-                            &ents_joined,
-                        );
-                    }
+                    )?;
+                    let kws_joined: String = serde_json::from_str::<Vec<String>>(&merge_kws)
+                        .unwrap_or_default()
+                        .join(" ");
+                    let ents_joined: String = serde_json::from_str::<Vec<String>>(&merge_ents)
+                        .unwrap_or_default()
+                        .join(" ");
+                    sync_memories_fts(
+                        &tx,
+                        &cand_id,
+                        &cand_path,
+                        &cand_summary,
+                        &cand_text,
+                        &kws_joined,
+                        &ents_joined,
+                    )?;
                     // Write this entry as superseded by the candidate
                     tx.execute(
                         r#"INSERT INTO memories

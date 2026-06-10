@@ -506,7 +506,7 @@ pub(crate) async fn handle_post_card(
         revision: 1,
         vector: None,
         metadata: metadata.clone(),
-        retention_policy: Some("ephemeral".to_string()),
+        retention_policy: Some(memory_core::RetentionPolicy::Pinned.as_str().to_string()),
         domain: None,
         recall_count: 0,
         query_diversity: 0,

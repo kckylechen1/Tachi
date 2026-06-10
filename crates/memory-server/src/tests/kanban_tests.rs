@@ -28,6 +28,18 @@ async fn post_card_check_inbox_and_update_roundtrip() {
         .expect("post_card should return card_id")
         .to_string();
 
+    let card_memory = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: card_id.clone(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("kanban card should be persisted as memory");
+    let card_memory_json: serde_json::Value =
+        serde_json::from_str(&card_memory).expect("kanban memory should be JSON");
+    assert_eq!(card_memory_json["retention_policy"], json!("pinned"));
+
     let inbox = server
         .check_inbox(Parameters(CheckInboxParams {
             agent_id: "iris".to_string(),

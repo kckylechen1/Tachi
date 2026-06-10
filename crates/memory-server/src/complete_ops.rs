@@ -184,6 +184,12 @@ pub(crate) async fn handle_tachi_complete(
         }
         metadata_map.insert("subagents".into(), serde_json::json!(&params.subagents));
     }
+    if !params.feedback_rules_applied.is_empty() {
+        metadata_map.insert(
+            "feedback_rules_applied".into(),
+            serde_json::json!(params.feedback_rules_applied.clone()),
+        );
+    }
     if let Some(did) = &params.dispatch_id {
         metadata_map.insert("dispatch_id".into(), serde_json::json!(did));
     }
@@ -353,6 +359,7 @@ pub(crate) async fn handle_tachi_complete(
                 "evidence_refs": params.evidence_refs.clone(),
                 "tests_run": params.tests_run.clone(),
                 "subagent_count": params.subagents.len(),
+                "feedback_rules_applied": params.feedback_rules_applied.clone(),
                 "skills_used": params.skills_used.clone(),
                 "issue_ref": params.issue_ref.clone(),
                 "pr_ref": params.pr_ref.clone(),

@@ -493,7 +493,14 @@ pub(crate) async fn handle_tachi_dispatch(
         .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
 
     let capability_bundle_path = workspace_dir.join("capability_bundle.json");
-    let capability_bundle_trace = prompt_assembly.capability_bundle.clone();
+    let mut capability_bundle_trace = prompt_assembly.capability_bundle.clone();
+    if let Some(obj) = capability_bundle_trace.as_object_mut() {
+        obj.insert(
+            "feedback_rules".to_string(),
+            prompt_assembly.feedback_rules.clone(),
+        );
+    }
+    let feedback_rules_trace = prompt_assembly.feedback_rules.clone();
     let capability_bundle_artifact = serde_json::to_string_pretty(&capability_bundle_trace)
         .map_err(|e| format!("Failed to serialize capability bundle artifact: {e}"))?;
     tokio::fs::write(&capability_bundle_path, capability_bundle_artifact)
@@ -573,6 +580,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "flow_id": params.flow_id,
             "auto_capability_bundle": params.auto_capability_bundle,
             "capability_bundle": capability_bundle_card.clone(),
+            "feedback_rules": feedback_rules_trace.clone(),
             "v2": v2,
             "timestamp": Utc::now().to_rfc3339(),
         });
@@ -621,6 +629,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
             "capability_bundle": capability_bundle_card.clone(),
+            "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
         })),
     );
@@ -761,6 +770,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 "auto_capability_bundle": resolved_profile.auto_capability_bundle,
                 "capability_bundle": capability_bundle_card,
                 "capability_bundle_file": capability_bundle_file,
+                "feedback_rules": feedback_rules_trace.clone(),
                 "v2": true,
                 "plan_review_status": "pending_review",
                 "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
@@ -956,6 +966,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_duration_ms_for_spawn = plan_duration_ms;
     let timeout_secs_for_spawn = timeout_secs_for_status;
     let capability_bundle_card_for_spawn = capability_bundle_card.clone();
+    let feedback_rules_trace_for_spawn = feedback_rules_trace.clone();
     let harness_transport_for_spawn = harness_transport.clone();
     let harness_server_url_for_spawn = harness_server_url.clone();
     let flow_dispatch_slot_for_spawn = flow_dispatch_slot.clone();
@@ -1213,6 +1224,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
                 "capability_bundle": capability_bundle_card_for_spawn,
+                "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
             })),
         );
@@ -1273,6 +1285,7 @@ pub(crate) async fn handle_tachi_dispatch(
         "auto_capability_bundle": resolved_profile.auto_capability_bundle,
         "capability_bundle": capability_bundle_card,
         "capability_bundle_file": capability_bundle_file,
+        "feedback_rules": feedback_rules_trace,
         "harness_transport": harness_transport,
         "harness_server_url": harness_server_url,
         "v2": v2,

@@ -614,6 +614,24 @@ impl MemoryStore {
         )
     }
 
+    /// Save or update a derived item with a stable caller-provided id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn save_derived_with_id(
+        &self,
+        id: &str,
+        text: &str,
+        path: &str,
+        summary: &str,
+        importance: f64,
+        source: &str,
+        scope: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<(), MemoryError> {
+        db::save_derived_with_id(
+            &self.conn, id, text, path, summary, importance, source, scope, metadata,
+        )
+    }
+
     /// Count derived items by source and path prefix.
     pub fn count_derived_by_source(
         &self,
@@ -770,5 +788,45 @@ mod tests {
             .expect("read-only search");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entry.id, "readonly-search");
+    }
+
+    #[test]
+    fn save_derived_with_id_upserts_existing_row() {
+        let store = MemoryStore::open_in_memory().expect("open in-memory store");
+        let metadata = serde_json::json!({"version": 1});
+
+        store
+            .save_derived_with_id(
+                "stable-derived",
+                "first",
+                "/derived/stable",
+                "first summary",
+                0.4,
+                "test_source",
+                "project",
+                &metadata,
+            )
+            .expect("initial derived save");
+        store
+            .save_derived_with_id(
+                "stable-derived",
+                "second",
+                "/derived/stable",
+                "second summary",
+                0.9,
+                "test_source",
+                "project",
+                &serde_json::json!({"version": 2}),
+            )
+            .expect("upsert derived save");
+
+        let rows = store
+            .list_derived_by_source("test_source", "/derived", 10)
+            .expect("list derived");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0]["id"], "stable-derived");
+        assert_eq!(rows[0]["text"], "second");
+        assert_eq!(rows[0]["summary"], "second summary");
+        assert_eq!(rows[0]["importance"], 0.9);
     }
 }

@@ -58,6 +58,7 @@ mod enrichment;
 mod facade_memory_ops;
 mod facade_save_ops;
 mod facade_search_ops;
+mod feedback_rule_ops;
 mod foundry_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
@@ -186,8 +187,28 @@ impl DbScope {
 
 // ─── Subsystems ────────────────────────────────────────────────────────────────
 
+struct CachedVaultKey {
+    bytes: [u8; 32],
+}
+
+impl CachedVaultKey {
+    fn copy_from(source: &[u8; 32]) -> Self {
+        Self { bytes: *source }
+    }
+
+    fn bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+}
+
+impl Drop for CachedVaultKey {
+    fn drop(&mut self) {
+        crate::vault_crypto::zero_key(&mut self.bytes);
+    }
+}
+
 struct VaultState {
-    key: Option<[u8; 32]>,
+    key: Option<CachedVaultKey>,
     unlock_time: Option<Instant>,
     failed_attempts: (u32, Option<Instant>),
     auto_lock_after_secs: u64,

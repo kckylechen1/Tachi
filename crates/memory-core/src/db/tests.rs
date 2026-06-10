@@ -85,6 +85,34 @@ fn upsert_and_fts() {
 }
 
 #[test]
+fn jaccard_dedup_refreshes_candidate_fts() {
+    let mut conn = make_conn();
+    let text = "Rust memory systems need atomic full text search updates";
+    let mut canonical = make_entry("canonical", text);
+    canonical.keywords = vec!["oldtag".to_string()];
+    upsert(&mut conn, &canonical, false).unwrap();
+
+    let mut duplicate = make_entry("duplicate", text);
+    duplicate.keywords = vec!["mergedtag".to_string()];
+    upsert(&mut conn, &duplicate, false).unwrap();
+
+    let superseded_by: Option<String> = conn
+        .query_row(
+            "SELECT superseded_by FROM memories WHERE id='duplicate'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(superseded_by.as_deref(), Some("canonical"));
+
+    let results = search_fts(&conn, "mergedtag", 5, false, false, None, None).unwrap();
+    assert!(
+        results.contains_key("canonical"),
+        "merged keyword should be searchable through the canonical row"
+    );
+}
+
+#[test]
 fn upsert_idempotent() {
     let mut conn = make_conn();
     let mut e = make_entry("dup", "first text");

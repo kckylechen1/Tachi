@@ -23,6 +23,7 @@ const HEALTH_RATE_LIMITED: &str = "rate_limited";
 const HEALTH_AUTH_FAILED: &str = "auth_failed";
 const HEALTH_DISABLED: &str = "disabled";
 const HEALTH_EXHAUSTED: &str = "exhausted";
+const CLAUDE_CLI_FAILURE_COOLDOWN: Duration = Duration::from_secs(600);
 
 #[cfg(test)]
 fn provider_key_health_persist_disabled_for_tests() -> bool {
@@ -99,6 +100,44 @@ enum KeyRetryStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone)]
+struct ClaudeCliFailure {
+    kind: ClaudeCliFailureKind,
+    failed_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeCliFailureKind {
+    SpawnFailed,
+    Timeout,
+}
+
+impl ClaudeCliFailureKind {
+    fn from_error(error: &str) -> Option<Self> {
+        let error = error.trim_start();
+        if error.starts_with("claude cli spawn failed:") {
+            Some(Self::SpawnFailed)
+        } else if error.starts_with("claude cli timeout after ") {
+            Some(Self::Timeout)
+        } else {
+            None
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnFailed => "spawn_failed",
+            Self::Timeout => "timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClaudeCliSkip {
+    kind: ClaudeCliFailureKind,
+    remaining: Duration,
+}
+
 fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
     documents
         .iter()
@@ -122,6 +161,7 @@ pub struct LlmClient {
     provider_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
     provider_indices: Arc<RwLock<HashMap<String, usize>>>,
     provider_health: Arc<RwLock<HashMap<String, HashMap<String, VaultKeyHealth>>>>,
+    claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
 }
 
 impl LlmClient {
@@ -260,6 +300,7 @@ impl LlmClient {
             provider_cooldowns: Arc::new(RwLock::new(HashMap::new())),
             provider_indices: Arc::new(RwLock::new(HashMap::new())),
             provider_health: Arc::new(RwLock::new(provider_health)),
+            claude_cli_failure: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1430,6 +1471,49 @@ impl LlmClient {
         .await
     }
 
+    fn claude_cli_skip_at(&self, now: Instant) -> Option<ClaudeCliSkip> {
+        let failure = self
+            .claude_cli_failure
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let failure = failure?;
+        let elapsed = now.saturating_duration_since(failure.failed_at);
+        if elapsed >= CLAUDE_CLI_FAILURE_COOLDOWN {
+            return None;
+        }
+        Some(ClaudeCliSkip {
+            kind: failure.kind,
+            remaining: CLAUDE_CLI_FAILURE_COOLDOWN.saturating_sub(elapsed),
+        })
+    }
+
+    fn claude_cli_skip(&self) -> Option<ClaudeCliSkip> {
+        self.claude_cli_skip_at(Instant::now())
+    }
+
+    fn record_claude_cli_success(&self) {
+        self.claude_cli_failure
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+    }
+
+    fn record_claude_cli_failure_at(&self, error: &str, failed_at: Instant) {
+        let Some(kind) = ClaudeCliFailureKind::from_error(error) else {
+            return;
+        };
+        *self
+            .claude_cli_failure
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(ClaudeCliFailure { kind, failed_at });
+    }
+
+    fn record_claude_cli_failure(&self, error: &str) {
+        self.record_claude_cli_failure_at(error, Instant::now());
+    }
+
     pub async fn call_reasoning_llm(
         &self,
         system: &str,
@@ -1438,17 +1522,27 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        // Try Claude Code CLI first for higher-quality reasoning
-        match Self::call_claude_cli(system, user).await {
-            Ok(response) => {
-                tracing::info!(
-                    "reasoning via claude-cli succeeded ({} chars)",
-                    response.len()
-                );
-                return Ok(response);
-            }
-            Err(e) => {
-                tracing::warn!("claude-cli reasoning failed, falling back to lane LLM: {e}");
+        if let Some(skip) = self.claude_cli_skip() {
+            tracing::debug!(
+                "skipping claude-cli reasoning after recent {} failure; retry in {}s",
+                skip.kind.as_str(),
+                skip.remaining.as_secs().max(1),
+            );
+        } else {
+            // Try Claude Code CLI first for higher-quality reasoning.
+            match Self::call_claude_cli(system, user).await {
+                Ok(response) => {
+                    self.record_claude_cli_success();
+                    tracing::info!(
+                        "reasoning via claude-cli succeeded ({} chars)",
+                        response.len()
+                    );
+                    return Ok(response);
+                }
+                Err(e) => {
+                    self.record_claude_cli_failure(&e);
+                    tracing::warn!("claude-cli reasoning failed, falling back to lane LLM: {e}");
+                }
             }
         }
         self.call_lane_llm(
@@ -1931,6 +2025,80 @@ mod tests {
             .required_secret(&[KEY])
             .expect_err("missing keys should fail at call time")
             .contains("Missing API key"));
+    }
+
+    #[test]
+    fn claude_cli_failure_cache_skips_expensive_discovery_failures() {
+        let client = LlmClient::new().expect("client should initialize");
+        let failed_at = Instant::now();
+
+        assert!(client.claude_cli_skip_at(failed_at).is_none());
+
+        client.record_claude_cli_failure_at("claude cli spawn failed: not found", failed_at);
+        let skip = client
+            .claude_cli_skip_at(failed_at + Duration::from_secs(1))
+            .expect("spawn failure should suppress immediate retries");
+        assert_eq!(skip.kind, ClaudeCliFailureKind::SpawnFailed);
+        assert!(skip.remaining <= CLAUDE_CLI_FAILURE_COOLDOWN);
+
+        assert!(
+            client
+                .claude_cli_skip_at(
+                    failed_at + CLAUDE_CLI_FAILURE_COOLDOWN + Duration::from_secs(1)
+                )
+                .is_none(),
+            "failure cache should expire so Claude CLI can recover"
+        );
+
+        client.record_claude_cli_failure_at(
+            "claude cli timeout after 5 minutes",
+            failed_at + Duration::from_secs(5),
+        );
+        assert_eq!(
+            client
+                .claude_cli_skip_at(failed_at + Duration::from_secs(6))
+                .expect("timeout should suppress immediate retries")
+                .kind,
+            ClaudeCliFailureKind::Timeout
+        );
+
+        client.record_claude_cli_success();
+        assert!(client
+            .claude_cli_skip_at(failed_at + Duration::from_secs(7))
+            .is_none());
+    }
+
+    #[test]
+    fn claude_cli_failure_cache_ignores_prompt_level_errors() {
+        let client = LlmClient::new().expect("client should initialize");
+        let now = Instant::now();
+
+        client.record_claude_cli_failure_at("claude cli exited 1: bad prompt", now);
+        assert!(
+            client
+                .claude_cli_skip_at(now + Duration::from_secs(1))
+                .is_none(),
+            "non-availability errors should not disable future CLI attempts"
+        );
+
+        client.record_claude_cli_failure_at(
+            "claude cli exited 1: model output mentioned timeout",
+            now,
+        );
+        assert!(
+            client
+                .claude_cli_skip_at(now + Duration::from_secs(1))
+                .is_none(),
+            "stderr content should not look like a process timeout"
+        );
+
+        client.record_claude_cli_failure_at("claude cli exited 1: prompt said spawn failed", now);
+        assert!(
+            client
+                .claude_cli_skip_at(now + Duration::from_secs(1))
+                .is_none(),
+            "stderr content should not look like a spawn failure"
+        );
     }
 
     #[test]

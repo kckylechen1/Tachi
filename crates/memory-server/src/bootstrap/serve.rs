@@ -725,14 +725,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             }
 
             let salt = B64.decode(&config.salt)?;
-            let key = crate::vault_crypto::derive_key(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
                 return Err("keychain password doesn't match vault".into());
             }
 
             {
                 let mut v = server.vault_write();
-                v.key = Some(key);
+                v.key = Some(crate::CachedVaultKey::copy_from(key.bytes()));
                 v.unlock_time = Some(std::time::Instant::now());
             }
             let loaded = server.refresh_llm_provider_secrets_from_vault()?;
