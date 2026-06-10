@@ -10,6 +10,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::time::{Duration as StdDuration, Instant};
 
 use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::{
@@ -81,6 +82,7 @@ use crate::vault_ops::{
 };
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
+    collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value,
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read, handle_wiki_search,
 };
 use crate::{AgentProfile, MemoryServer};
@@ -1284,7 +1286,7 @@ impl MemoryServer {
             .map(|name| format!("{name} current task recent decisions blockers next steps"));
         let params = TachiMemoryParams {
             action: "briefing".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query,
             scope: None,
             top_k: 6,
@@ -1530,6 +1532,7 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiWikiParams>,
     ) -> Result<String, String> {
         let action = params.action.to_ascii_lowercase();
+        let format = params.format.clone();
         match action.as_str() {
             "search" => {
                 let query = params
@@ -1549,7 +1552,13 @@ impl MemoryServer {
                     error_context: None,
                     weights: None,
                 };
-                handle_tachi_wiki_search(self, wiki_params).await
+                if wants_json_format(format.as_deref()) {
+                    let value = collect_wiki_search_value(self, wiki_params).await?;
+                    serde_json::to_string(&value)
+                        .map_err(|e| format!("serialize tachi_wiki search JSON: {e}"))
+                } else {
+                    handle_tachi_wiki_search(self, wiki_params).await
+                }
             }
             "browse" => {
                 let browse_params = WikiBrowseParams {
@@ -1557,7 +1566,13 @@ impl MemoryServer {
                     limit: params.limit.unwrap_or(50),
                     project: params.project.clone().unwrap_or_else(|| "wiki".to_string()),
                 };
-                handle_wiki_browse(self, browse_params)
+                if wants_json_format(format.as_deref()) {
+                    let value = collect_wiki_browse_value(self, browse_params)?;
+                    serde_json::to_string(&value)
+                        .map_err(|e| format!("serialize tachi_wiki browse JSON: {e}"))
+                } else {
+                    handle_wiki_browse(self, browse_params)
+                }
             }
             "read" => {
                 let path = params
@@ -1565,44 +1580,56 @@ impl MemoryServer {
                     .clone()
                     .ok_or_else(|| "path is required when action='read'".to_string())?;
                 let project = params.project.clone().unwrap_or_else(|| "wiki".to_string());
-                handle_wiki_read(self, &path, &project)
+                if wants_json_format(format.as_deref()) {
+                    let value = collect_wiki_read_value(self, &path, &project)?;
+                    serde_json::to_string(&value)
+                        .map_err(|e| format!("serialize tachi_wiki read JSON: {e}"))
+                } else {
+                    handle_wiki_read(self, &path, &project)
+                }
             }
             "write" => {
-                if let Some(body) =
+                let raw = if let Some(body) =
                     crate::cli_client::maybe_forward_server_write(self, "tachi_wiki", &params).await
                 {
-                    return Ok(body);
-                }
-
-                let title = params
-                    .title
-                    .clone()
-                    .ok_or_else(|| "title is required when action='write'".to_string())?;
-                let text = params
-                    .text
-                    .clone()
-                    .ok_or_else(|| "text is required when action='write'".to_string())?;
-                let wiki_params = WikiWriteParams {
-                    title,
-                    text,
-                    path: params.path.clone(),
-                    topic: params.topic.clone(),
-                    summary: params.summary.clone(),
-                    category: params
-                        .category
+                    body
+                } else {
+                    let title = params
+                        .title
                         .clone()
-                        .unwrap_or_else(|| "experience".to_string()),
-                    keywords: params.keywords.clone(),
-                    entities: params.entities.clone(),
-                    importance: params.importance.unwrap_or(0.85),
-                    scope: params.scope.clone().unwrap_or_else(|| "global".to_string()),
-                    retention_policy: "permanent".to_string(),
-                    domain: params.domain.clone(),
-                    project: params.project.clone(),
-                    force: params.force,
-                    references: params.references.clone(),
+                        .ok_or_else(|| "title is required when action='write'".to_string())?;
+                    let text = params
+                        .text
+                        .clone()
+                        .ok_or_else(|| "text is required when action='write'".to_string())?;
+                    let wiki_params = WikiWriteParams {
+                        title,
+                        text,
+                        path: params.path.clone(),
+                        topic: params.topic.clone(),
+                        summary: params.summary.clone(),
+                        category: params
+                            .category
+                            .clone()
+                            .unwrap_or_else(|| "experience".to_string()),
+                        keywords: params.keywords.clone(),
+                        entities: params.entities.clone(),
+                        importance: params.importance.unwrap_or(0.85),
+                        scope: params.scope.clone().unwrap_or_else(|| "global".to_string()),
+                        retention_policy: "permanent".to_string(),
+                        domain: params.domain.clone(),
+                        project: params.project.clone(),
+                        force: params.force,
+                        references: params.references.clone(),
+                    };
+                    handle_tachi_wiki_write(self, wiki_params).await?
                 };
-                handle_tachi_wiki_write(self, wiki_params).await
+                Ok(format_facade_response(
+                    "Tachi wiki write",
+                    "write",
+                    &raw,
+                    format.as_deref(),
+                ))
             }
             _ => Err(format!(
                 "Invalid action '{}'. Use 'search', 'browse', 'read', or 'write'.",
@@ -1777,7 +1804,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a GitHub PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='wait': block on a dispatch_id until terminal state or timeout; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → wait/board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1920,6 +1947,7 @@ impl MemoryServer {
                 };
                 crate::dispatch_ops::handle_tachi_board(self, board_params).await
             }
+            "wait" => handle_tachi_task_wait(self, &params).await,
             "profiles" | "profile" | "card" => serde_json::to_string(
                 &crate::dispatch_profile::dispatch_profiles_json_for_server(self)?,
             )
@@ -2041,7 +2069,7 @@ impl MemoryServer {
                 Ok(result)
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'complete', 'board', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'plan', 'dispatch', 'complete', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;
@@ -2118,10 +2146,71 @@ impl MemoryServer {
     }
 }
 
+async fn handle_tachi_task_wait(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Result<String, String> {
+    let dispatch_id = params
+        .dispatch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "dispatch_id is required when action='wait'".to_string())?
+        .to_string();
+    let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(600).min(86_400));
+    let deadline = Instant::now() + timeout;
+    let mut last_task = None;
+
+    loop {
+        let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id);
+        if let Some(task) = task {
+            let state = task
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let terminal = is_terminal_task_state(state);
+            if terminal {
+                return serde_json::to_string(&json!({
+                    "status": "completed",
+                    "dispatch_id": dispatch_id,
+                    "terminal": true,
+                    "state": state,
+                    "task": task,
+                }))
+                .map_err(|e| format!("serialize wait response: {e}"));
+            }
+            last_task = Some(task);
+        }
+
+        if Instant::now() >= deadline {
+            let state = last_task
+                .as_ref()
+                .and_then(|task| task.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or("not_found");
+            return serde_json::to_string(&json!({
+                "status": "timeout",
+                "dispatch_id": dispatch_id,
+                "terminal": false,
+                "state": state,
+                "task": last_task,
+            }))
+            .map_err(|e| format!("serialize wait timeout response: {e}"));
+        }
+
+        tokio::time::sleep(StdDuration::from_millis(250)).await;
+    }
+}
+
+fn is_terminal_task_state(state: &str) -> bool {
+    matches!(
+        state,
+        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+    )
+}
+
 fn wants_json_format(format: Option<&str>) -> bool {
-    format
-        .map(|format| format.eq_ignore_ascii_case("json"))
-        .unwrap_or(false)
+    crate::facade_memory_ops::wants_json(format)
 }
 
 pub(crate) fn resolve_task_pr_status_target(
@@ -2678,15 +2767,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn facade_response_defaults_to_markdown_and_preserves_json_opt_in() {
+    fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
         let raw = r#"{"flow_id":"flow_1","stage":"plan","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
-        let markdown = format_facade_response("Tachi shell plan", "plan", raw, None);
+        let json = format_facade_response("Tachi shell plan", "plan", raw, None);
+        assert_eq!(json, raw);
+
+        let markdown = format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"));
         assert!(markdown.starts_with("## Tachi shell plan"));
         assert!(markdown.contains("flow_id: `flow_1`"));
         assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
-
-        let json = format_facade_response("Tachi shell plan", "plan", raw, Some("json"));
-        assert_eq!(json, raw);
     }
 
     #[test]

@@ -816,7 +816,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         },
     });
 
-    if params.format.as_deref() == Some("json") {
+    if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
         serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))
     } else {
         Ok(format_feature_briefing_markdown(&response))

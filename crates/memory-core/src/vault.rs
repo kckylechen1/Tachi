@@ -153,3 +153,12 @@ impl VaultEntry {
         None
     }
 }
+
+/// Extract the 1-based member index from an API key pool entry name.
+/// Returns `Some(n)` if `name` matches the pattern `prefix_n` where n > 0.
+pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
+    name.strip_prefix(prefix)
+        .and_then(|suffix| suffix.strip_prefix('_'))
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+        .filter(|idx| *idx > 0)
+}

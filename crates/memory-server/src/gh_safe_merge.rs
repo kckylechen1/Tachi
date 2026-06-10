@@ -447,14 +447,6 @@ mod mock {
                 .insert((repo.to_string(), pr.number), pr);
             self
         }
-        #[allow(dead_code)] // exercised by issue-link action in follow-up PR
-        pub fn with_issue(self, repo: &str, issue: IssueState) -> Self {
-            self.issues
-                .lock()
-                .unwrap()
-                .insert((repo.to_string(), issue.number), issue);
-            self
-        }
         pub fn with_checks(self, repo: &str, pr_number: u64, runs: Vec<CheckRun>) -> Self {
             self.checks
                 .lock()

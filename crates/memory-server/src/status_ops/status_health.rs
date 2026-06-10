@@ -804,7 +804,7 @@ fn collect_api_key_status_inner(
     for row in key_health_rows {
         key_health
             .entry(row.logical_name.clone())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(row.key_id.clone(), row);
     }
     let rotations = rotation_rows

@@ -361,6 +361,7 @@ async fn tachi_wiki_search_defaults_to_named_wiki_project() {
     let response = server
         .tachi_wiki(Parameters(TachiWikiParams {
             action: "search".to_string(),
+            format: None,
             query: Some("DefaultFacadeWikiNeedle".to_string()),
             category: None,
             top_k: Some(5),
@@ -382,10 +383,167 @@ async fn tachi_wiki_search_defaults_to_named_wiki_project() {
         .await
         .expect("tachi_wiki search should succeed");
 
+    let parsed: Value = serde_json::from_str(&response).expect("default tachi_wiki search JSON");
+    assert_eq!(parsed["status"], json!("completed"));
     assert!(
-        response.contains("DefaultFacadeWikiNeedle") || response.contains("default-search"),
+        parsed.to_string().contains("DefaultFacadeWikiNeedle")
+            || parsed.to_string().contains("default-search"),
         "expected default tachi_wiki search to include project:wiki hits, got: {response}"
     );
+}
+
+#[tokio::test]
+async fn tachi_wiki_search_supports_explicit_markdown_format() {
+    let mut entry = make_entry("wiki-facade-markdown-search");
+    entry.path = "/wiki/agent/tachi/markdown-search".to_string();
+    entry.summary = "Markdown facade wiki search".to_string();
+    entry.text = "MarkdownFacadeWikiNeedle should render as markdown.".to_string();
+    entry.entities = vec!["MarkdownFacadeWikiNeedle".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let response = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "search".to_string(),
+            format: Some("markdown".to_string()),
+            query: Some("MarkdownFacadeWikiNeedle".to_string()),
+            category: None,
+            top_k: Some(5),
+            limit: None,
+            title: None,
+            text: None,
+            path: None,
+            topic: None,
+            summary: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: None,
+            force: false,
+        }))
+        .await
+        .expect("tachi_wiki markdown search should succeed");
+
+    assert!(response.starts_with("## Wiki search:"), "{response}");
+    assert!(
+        response.contains("MarkdownFacadeWikiNeedle") || response.contains("markdown-search"),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_wiki_write_supports_explicit_markdown_format() {
+    let server = make_server();
+
+    let response = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "write".to_string(),
+            format: Some("markdown".to_string()),
+            query: None,
+            category: Some("experience".to_string()),
+            top_k: None,
+            limit: None,
+            title: Some("Facade wiki markdown write".to_string()),
+            text: Some("Facade wiki write should still support human-readable output.".to_string()),
+            path: Some("/wiki/agent/tachi/facade-markdown-write".to_string()),
+            topic: Some("facade-markdown-write".to_string()),
+            summary: Some("Facade wiki markdown write".to_string()),
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: Some("engineering".to_string()),
+            force: true,
+        }))
+        .await
+        .expect("tachi_wiki markdown write should succeed");
+
+    assert!(response.starts_with("## Tachi wiki write"), "{response}");
+    assert!(response.contains("path:"), "{response}");
+    assert!(
+        response.contains("/wiki/agent/tachi/facade-markdown-write"),
+        "{response}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_wiki_read_and_browse_default_to_json() {
+    let mut entry = make_entry("wiki-facade-json-read");
+    entry.path = "/wiki/engineering/json-read".to_string();
+    entry.summary = "JSON wiki read summary".to_string();
+    entry.text = "JsonReadFacadeNeedle should be structured.".to_string();
+    entry.keywords = vec!["json-read".to_string()];
+
+    let (server, _home) = seed_wiki_project_entries(vec![entry]);
+
+    let read = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "read".to_string(),
+            format: None,
+            query: None,
+            category: None,
+            top_k: None,
+            limit: None,
+            title: None,
+            text: None,
+            path: Some("/wiki/engineering/json-read".to_string()),
+            topic: None,
+            summary: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: None,
+            force: false,
+        }))
+        .await
+        .expect("tachi_wiki read should succeed");
+    let read_json: Value = serde_json::from_str(&read).expect("read JSON");
+    assert_eq!(read_json["status"], json!("found"));
+    assert_eq!(
+        read_json["entry"]["text"],
+        json!("JsonReadFacadeNeedle should be structured.")
+    );
+
+    let browse = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "browse".to_string(),
+            format: None,
+            query: None,
+            category: Some("engineering".to_string()),
+            top_k: None,
+            limit: Some(10),
+            title: None,
+            text: None,
+            path: None,
+            topic: None,
+            summary: None,
+            keywords: Vec::new(),
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: None,
+            project: None,
+            domain: None,
+            force: false,
+        }))
+        .await
+        .expect("tachi_wiki browse should succeed");
+    let browse_json: Value = serde_json::from_str(&browse).expect("browse JSON");
+    assert_eq!(browse_json["status"], json!("completed"));
+    assert_eq!(browse_json["kind"], json!("category"));
+    assert!(browse_json["entries"].as_array().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry["path"] == json!("/wiki/engineering/json-read"))
+    }));
 }
 
 #[tokio::test]

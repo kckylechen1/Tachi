@@ -2,12 +2,16 @@ use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use memory_core::scorer::local_pagerank;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Duration as StdDuration;
+use tokio::net::lookup_host;
 
 const WIKI_LOG_MAX_BYTES: usize = 256 * 1024;
 const WIKI_LOG_MAX_ENTRIES: usize = 200;
 const WIKI_LOG_ENTRY_MAX_BYTES: usize = 4096;
+const WIKI_INGEST_HTTP_MAX_BYTES: usize = 2 * 1024 * 1024;
 
 fn default_checks() -> Vec<String> {
     vec![
@@ -183,7 +187,15 @@ fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
 
 async fn source_for_path(source: &str) -> Result<String, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        let response = reqwest::get(source)
+        let url = validate_wiki_ingest_http_url(source).await?;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(StdDuration::from_secs(30))
+            .build()
+            .map_err(|e| format!("build source URL client: {e}"))?;
+        let response = client
+            .get(url)
+            .send()
             .await
             .map_err(|e| format!("fetch source URL: {e}"))?;
         if !response.status().is_success() {
@@ -192,10 +204,7 @@ async fn source_for_path(source: &str) -> Result<String, String> {
                 response.status()
             ));
         }
-        response
-            .text()
-            .await
-            .map_err(|e| format!("read source response: {e}"))
+        read_limited_wiki_http_response(response).await
     } else {
         let path = Path::new(source);
         if !wiki_ingest_local_file_allowed(path) {
@@ -208,6 +217,103 @@ async fn source_for_path(source: &str) -> Result<String, String> {
             .await
             .map_err(|e| format!("read source file: {e}"))
     }
+}
+
+async fn validate_wiki_ingest_http_url(source: &str) -> Result<reqwest::Url, String> {
+    let url = reqwest::Url::parse(source).map_err(|e| format!("parse source URL: {e}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("wiki ingest only supports http:// and https:// source URLs".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("wiki ingest source URLs must not include credentials".to_string());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "wiki ingest source URL must include a host".to_string())?;
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return Err("wiki ingest source URL host is not allowed".to_string());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        reject_blocked_wiki_ingest_ip(ip)?;
+        return Ok(url);
+    }
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "wiki ingest source URL has no usable port".to_string())?;
+    let mut resolved_any = false;
+    for addr in lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolve source URL host: {e}"))?
+    {
+        resolved_any = true;
+        reject_blocked_wiki_ingest_ip(addr.ip())?;
+    }
+    if !resolved_any {
+        return Err("wiki ingest source URL host resolved to no addresses".to_string());
+    }
+
+    Ok(url)
+}
+
+fn reject_blocked_wiki_ingest_ip(ip: IpAddr) -> Result<(), String> {
+    if wiki_ingest_ip_is_blocked(ip) {
+        Err("wiki ingest source URL resolves to a private or local address".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn wiki_ingest_ip_is_blocked(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+    }
+}
+
+async fn read_limited_wiki_http_response(
+    mut response: reqwest::Response,
+) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > WIKI_INGEST_HTTP_MAX_BYTES as u64)
+    {
+        return Err(format!(
+            "source response exceeds {} byte limit",
+            WIKI_INGEST_HTTP_MAX_BYTES
+        ));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("read source response: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > WIKI_INGEST_HTTP_MAX_BYTES {
+            return Err(format!(
+                "source response exceeds {} byte limit",
+                WIKI_INGEST_HTTP_MAX_BYTES
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|e| format!("read source response as UTF-8: {e}"))
 }
 
 fn compact_entry(entry: &MemoryEntry) -> Value {
@@ -1316,10 +1422,37 @@ pub(crate) async fn handle_wiki_search(
     server: &MemoryServer,
     params: WikiSearchParams,
 ) -> Result<String, String> {
-    if params.query.trim().is_empty() {
+    let value = collect_wiki_search_value(server, params).await?;
+    if value
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "skipped")
+    {
         return Ok("## Wiki search\n\n_Skipped: empty query._".to_string());
     }
+    let empty_results = Value::Array(Vec::new());
+    Ok(crate::agent_markdown::format_wiki_search(
+        value.get("query").and_then(Value::as_str).unwrap_or(""),
+        value.get("count").and_then(Value::as_u64).unwrap_or(0) as usize,
+        value.get("results").unwrap_or(&empty_results),
+    ))
+}
 
+pub(crate) async fn collect_wiki_search_value(
+    server: &MemoryServer,
+    params: WikiSearchParams,
+) -> Result<Value, String> {
+    if params.query.trim().is_empty() {
+        return Ok(json!({
+            "status": "skipped",
+            "query": params.query,
+            "reason": "empty_query",
+            "count": 0,
+            "results": [],
+        }));
+    }
+
+    let query = params.query.clone();
     let path_prefix = params
         .category
         .as_deref()
@@ -1329,10 +1462,10 @@ pub(crate) async fn handle_wiki_search(
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
-            query: params.query.clone(),
+            query: query.clone(),
             query_vec: None,
             top_k: params.top_k.max(1).min(50),
-            path_prefix,
+            path_prefix: path_prefix.clone(),
             include_training: false,
             include_archived: params.include_archived,
             candidates_per_channel: params.top_k.max(20),
@@ -1347,8 +1480,8 @@ pub(crate) async fn handle_wiki_search(
                 use_rrf: true,
             })),
             agent_role: params.agent_role,
-            project: params.project,
-            domain: params.domain,
+            project: params.project.clone(),
+            domain: params.domain.clone(),
             file_context: params.file_context,
             error_context: params.error_context,
             enable_rerank: false,
@@ -1359,24 +1492,86 @@ pub(crate) async fn handle_wiki_search(
     )
     .await?;
     filter_user_facing_wiki_rows(&mut rows);
+    let unfiltered_count = rows.len();
+    rows.retain(wiki_row_has_direct_match_signal);
 
     append_wiki_log(
         server,
         "search",
-        &format!("{} | {} result(s)", params.query, rows.len()),
+        &format!("{} | {} result(s)", query, rows.len()),
     );
 
-    Ok(crate::agent_markdown::format_wiki_search(
-        &params.query,
-        rows.len(),
-        &serde_json::Value::Array(rows),
-    ))
+    Ok(json!({
+        "status": "completed",
+        "query": query,
+        "path_prefix": path_prefix,
+        "project": params.project,
+        "domain": params.domain,
+        "unfiltered_count": unfiltered_count,
+        "count": rows.len(),
+        "results": rows,
+    }))
+}
+
+fn wiki_row_has_direct_match_signal(row: &Value) -> bool {
+    let score = row.get("score").and_then(Value::as_object);
+    let fts = score
+        .and_then(|score| score.get("fts"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let symbolic = score
+        .and_then(|score| score.get("symbolic"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    fts > 0.0 || symbolic > 0.0
 }
 
 pub(crate) fn handle_wiki_browse(
     server: &MemoryServer,
     params: WikiBrowseParams,
 ) -> Result<String, String> {
+    let value = collect_wiki_browse_value(server, params)?;
+
+    if value
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "category")
+    {
+        let path = value.get("path").and_then(Value::as_str).unwrap_or("/wiki");
+        let entries = value
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        return Ok(crate::agent_markdown::format_wiki_browse_category(
+            path, entries,
+        ));
+    }
+
+    let categories = value
+        .get("categories")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some((
+                        row.get("path")?.as_str()?.to_string(),
+                        row.get("count")?.as_u64()? as usize,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(crate::agent_markdown::format_wiki_browse_stats(
+        value.get("total").and_then(Value::as_u64).unwrap_or(0) as usize,
+        &categories,
+    ))
+}
+
+pub(crate) fn collect_wiki_browse_value(
+    server: &MemoryServer,
+    params: WikiBrowseParams,
+) -> Result<Value, String> {
     let project_name = params.project;
 
     match params.category.as_deref() {
@@ -1393,7 +1588,10 @@ pub(crate) fn handle_wiki_browse(
                     .filter(|entry| entry.path == cat_path || entry.path.starts_with(&cat_prefix))
                     .count();
                 if count > 0 {
-                    categories.push((cat_path.to_string(), count));
+                    categories.push(json!({
+                        "path": cat_path,
+                        "count": count,
+                    }));
                     total += count;
                 }
             }
@@ -1404,10 +1602,13 @@ pub(crate) fn handle_wiki_browse(
                 &format!("stats | {} categor(ies), {} total", categories.len(), total),
             );
 
-            Ok(crate::agent_markdown::format_wiki_browse_stats(
-                total,
-                &categories,
-            ))
+            Ok(json!({
+                "status": "completed",
+                "kind": "stats",
+                "project": project_name,
+                "total": total,
+                "categories": categories,
+            }))
         }
         Some(category) => {
             let resolved_path = resolve_wiki_category(category);
@@ -1436,10 +1637,14 @@ pub(crate) fn handle_wiki_browse(
                 &format!("{} | {} entry(s)", resolved_path, slim_entries.len()),
             );
 
-            Ok(crate::agent_markdown::format_wiki_browse_category(
-                &resolved_path,
-                &slim_entries,
-            ))
+            Ok(json!({
+                "status": "completed",
+                "kind": "category",
+                "project": project_name,
+                "path": resolved_path,
+                "count": slim_entries.len(),
+                "entries": slim_entries,
+            }))
         }
     }
 }
@@ -1451,6 +1656,28 @@ pub(crate) fn handle_wiki_read(
     path: &str,
     project: &str,
 ) -> Result<String, String> {
+    let value = collect_wiki_read_value(server, path, project)?;
+    if value
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "found")
+    {
+        return Ok(crate::agent_markdown::format_wiki_read(&value["entry"]));
+    }
+    let resolved = value
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| path.trim());
+    Ok(format!(
+        "## Wiki read\n\n_No entry found at `{resolved}`._\n\nUse `tachi_wiki(action=\"search\")` or `tachi_wiki(action=\"browse\")` to find entries."
+    ))
+}
+
+pub(crate) fn collect_wiki_read_value(
+    server: &MemoryServer,
+    path: &str,
+    project: &str,
+) -> Result<Value, String> {
     let resolved = if path.trim().starts_with('/') {
         let trimmed = path.trim().trim_end_matches('/');
         if trimmed.is_empty() {
@@ -1473,20 +1700,29 @@ pub(crate) fn handle_wiki_read(
     match entry {
         Some(entry) => {
             append_wiki_log(server, "read", &resolved);
-            Ok(crate::agent_markdown::format_wiki_read(&json!({
-                "path": entry.path,
-                "text": entry.text,
-                "summary": entry.summary,
-                "importance": entry.importance,
-                "keywords": entry.keywords,
-                "entities": entry.entities,
-                "topic": entry.topic,
-                "timestamp": entry.timestamp,
-            })))
+            Ok(json!({
+                "status": "found",
+                "project": project,
+                "path": resolved,
+                "entry": {
+                    "path": entry.path,
+                    "text": entry.text,
+                    "summary": entry.summary,
+                    "importance": entry.importance,
+                    "keywords": entry.keywords,
+                    "entities": entry.entities,
+                    "topic": entry.topic,
+                    "timestamp": entry.timestamp,
+                }
+            }))
         }
-        None => Ok(format!(
-            "## Wiki read\n\n_No entry found at `{resolved}`._\n\nUse `tachi_wiki(action=\"search\")` or `tachi_wiki(action=\"browse\")` to find entries."
-        )),
+        None => Ok(json!({
+            "status": "not_found",
+            "project": project,
+            "path": resolved,
+            "entry": null,
+            "next_action": "Use tachi_wiki(action=\"search\") or tachi_wiki(action=\"browse\") to find entries.",
+        })),
     }
 }
 
@@ -1704,7 +1940,7 @@ pub(crate) async fn handle_wiki_lint(
 
 #[cfg(test)]
 mod reference_validation_tests {
-    use super::{validate_reference_format, validate_references};
+    use super::{validate_reference_format, validate_references, validate_wiki_ingest_http_url};
 
     #[test]
     fn valid_reference_formats() {
@@ -1742,5 +1978,51 @@ mod reference_validation_tests {
     fn batch_validation_reports_index() {
         let err = validate_references(&["#1".to_string(), "nope".to_string()]).unwrap_err();
         assert!(err.contains("references[1]"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_loopback_ip() {
+        let err = validate_wiki_ingest_http_url("http://127.0.0.1:8080/source.md")
+            .await
+            .unwrap_err();
+        assert!(err.contains("private or local"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_localhost_name() {
+        let err = validate_wiki_ingest_http_url("https://localhost/source.md")
+            .await
+            .unwrap_err();
+        assert!(err.contains("host is not allowed"), "err: {err}");
+    }
+}
+
+#[cfg(test)]
+mod wiki_search_filter_tests {
+    use super::wiki_row_has_direct_match_signal;
+    use serde_json::json;
+
+    #[test]
+    fn wiki_search_filter_rejects_vector_only_drift() {
+        let vector_only = json!({
+            "path": "/wiki/engineering/unrelated",
+            "score": {"vector": 0.42, "fts": 0.0, "symbolic": 0.0, "final": 1.0},
+            "relevance": 1.0,
+        });
+        assert!(!wiki_row_has_direct_match_signal(&vector_only));
+    }
+
+    #[test]
+    fn wiki_search_filter_keeps_lexical_or_symbolic_hits() {
+        let fts_hit = json!({
+            "path": "/wiki/engineering/mcp",
+            "score": {"vector": 0.1, "fts": 0.2, "symbolic": 0.0, "final": 1.0},
+        });
+        let symbolic_hit = json!({
+            "path": "/wiki/engineering/mcp",
+            "score": {"vector": 0.1, "fts": 0.0, "symbolic": 0.2, "final": 1.0},
+        });
+        assert!(wiki_row_has_direct_match_signal(&fts_hit));
+        assert!(wiki_row_has_direct_match_signal(&symbolic_hit));
     }
 }

@@ -275,6 +275,13 @@ fn collect_run_tasks_from_dir(
     runs
 }
 
+pub(crate) fn collect_run_task_for_server(
+    server: &crate::MemoryServer,
+    dispatch_id: &str,
+) -> Option<serde_json::Value> {
+    collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id)
+}
+
 fn collect_run_task_by_id(runs_dir: &Path, dispatch_id: &str) -> Option<serde_json::Value> {
     let run_dir = runs_dir.join(dispatch_id);
     if !run_dir.is_dir() {

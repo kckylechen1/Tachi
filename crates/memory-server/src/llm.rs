@@ -24,6 +24,21 @@ const HEALTH_AUTH_FAILED: &str = "auth_failed";
 const HEALTH_DISABLED: &str = "disabled";
 const HEALTH_EXHAUSTED: &str = "exhausted";
 
+#[cfg(test)]
+fn provider_key_health_persist_disabled_for_tests() -> bool {
+    matches!(
+        std::env::var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST")
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes")
+    )
+}
+
+#[cfg(not(test))]
+fn provider_key_health_persist_disabled_for_tests() -> bool {
+    false
+}
+
 #[derive(Clone)]
 struct ChatLaneConfig {
     base_url: String,
@@ -261,10 +276,6 @@ impl LlmClient {
         }))
     }
 
-    fn vault_db_path_str(&self) -> Option<&str> {
-        self.vault_db_path.as_ref().and_then(|path| path.to_str())
-    }
-
     fn now_utc() -> DateTime<Utc> {
         Utc::now()
     }
@@ -335,14 +346,62 @@ impl LlmClient {
     }
 
     fn persist_key_health(&self, health: &VaultKeyHealth) {
-        let Some(db_path) = self.vault_db_path_str() else {
+        if provider_key_health_persist_disabled_for_tests() {
+            return;
+        }
+        let Some(db_path) = self.vault_db_path.clone() else {
             return;
         };
         let mut health = health.clone();
         health.updated_at = Self::format_now_utc();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let logical_name = health.logical_name.clone();
+            let key_id = health.key_id.clone();
+            handle.spawn_blocking(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Self::persist_key_health_blocking(db_path, health);
+                }))
+                .is_err()
+                {
+                    tracing::warn!(
+                        "[provider] key health persistence task panicked for {}:{}",
+                        logical_name,
+                        key_id
+                    );
+                }
+            });
+        } else {
+            Self::persist_key_health_blocking(db_path, health);
+        }
+    }
+
+    fn persist_key_health_now(&self, health: &VaultKeyHealth) {
+        let Some(db_path) = self.vault_db_path.clone() else {
+            return;
+        };
+        let mut health = health.clone();
+        health.updated_at = Self::format_now_utc();
+        Self::persist_key_health_blocking(db_path, health);
+    }
+
+    fn persist_key_health_blocking(db_path: PathBuf, health: VaultKeyHealth) {
+        let Some(db_path) = db_path.to_str() else {
+            tracing::warn!(
+                "[provider] failed to persist vault key health for {}:{}: invalid db path",
+                health.logical_name,
+                health.key_id
+            );
+            return;
+        };
         match memory_core::MemoryStore::open(db_path) {
             Ok(store) => {
-                let _ = store.vault_upsert_key_health(&health);
+                if let Err(err) = store.vault_upsert_key_health(&health) {
+                    tracing::warn!(
+                        "[provider] failed to persist vault key health for {}:{}: {err}",
+                        health.logical_name,
+                        health.key_id
+                    );
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -371,7 +430,7 @@ impl LlmClient {
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             all.entry(health.logical_name.clone())
-                .or_insert_with(HashMap::new)
+                .or_default()
                 .insert(health.key_id.clone(), health.clone());
         }
         self.persist_key_health(&health);
@@ -687,7 +746,7 @@ impl LlmClient {
                             }
 
                             let (availability, remaining_seconds) =
-                                self.key_health_blocked_at(*key, &entries[idx].key_id, now_utc);
+                                self.key_health_blocked_at(key, &entries[idx].key_id, now_utc);
                             let unusable = match availability {
                                 KeyAvailability::AuthFailed
                                 | KeyAvailability::Disabled
@@ -723,7 +782,7 @@ impl LlmClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             keys.iter().find_map(|key| {
                 let (availability, remaining_seconds) =
-                    self.key_health_blocked_at(*key, *key, now_utc);
+                    self.key_health_blocked_at(key, key, now_utc);
                 let unusable = match availability {
                     KeyAvailability::AuthFailed
                     | KeyAvailability::Disabled
@@ -812,6 +871,9 @@ impl LlmClient {
             value: String::new(),
         };
         self.mark_secret_rate_limited(&selected, retry_after);
+        if let Some(health) = self.read_key_health_entry(&selected.logical_name, &selected.key_id) {
+            self.persist_key_health_now(&health);
+        }
     }
 
     #[cfg(test)]
@@ -822,6 +884,9 @@ impl LlmClient {
             value: String::new(),
         };
         self.mark_secret_auth_failed(&selected, Some("forced auth failure"));
+        if let Some(health) = self.read_key_health_entry(logical_name, key_id) {
+            self.persist_key_health_now(&health);
+        }
     }
 
     pub(crate) fn record_provider_key_result(
@@ -874,6 +939,27 @@ impl LlmClient {
                 key_id: key_id.to_string(),
                 ..VaultKeyHealth::default()
             })
+    }
+
+    pub(crate) fn record_provider_key_result_blocking(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        status_code: Option<u16>,
+        outcome: Option<&str>,
+        retry_after: Option<u64>,
+        reason: Option<&str>,
+    ) -> VaultKeyHealth {
+        let health = self.record_provider_key_result(
+            logical_name,
+            key_id,
+            status_code,
+            outcome,
+            retry_after,
+            reason,
+        );
+        self.persist_key_health_now(&health);
+        health
     }
 
     #[cfg(test)]
@@ -1143,28 +1229,6 @@ impl LlmClient {
             out.push((orig_index, relevance));
         }
         Ok(out)
-    }
-
-    /// Backward-compatible generic chat call.
-    /// Defaults to the reasoning lane unless a caller uses a lane-specific helper.
-    #[allow(dead_code)]
-    pub async fn call_llm(
-        &self,
-        system: &str,
-        user: &str,
-        model: Option<&str>,
-        temperature: f32,
-        max_tokens: u32,
-    ) -> Result<String, String> {
-        self.call_lane_llm(
-            ChatLane::Reasoning,
-            system,
-            user,
-            model,
-            temperature,
-            max_tokens,
-        )
-        .await
     }
 
     pub async fn call_extract_llm(
@@ -1790,6 +1854,49 @@ mod tests {
             client.provider_key_id_for_tests(&[KEY]),
             None,
             "pool selection should not return blocked auth-failed members"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_key_health_persists_off_async_runtime_thread() {
+        let temp = tempfile::tempdir().expect("temp vault db");
+        let db_path = temp.path().join("vault.db");
+        let client =
+            LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+
+        let health = client.record_provider_key_result(
+            "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST",
+            "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST_1",
+            Some(429),
+            None,
+            Some(30),
+            Some("provider throttled"),
+        );
+        assert_eq!(health.status, HEALTH_RATE_LIMITED);
+
+        let mut persisted = None;
+        for _ in 0..50 {
+            if db_path.exists() {
+                let store = memory_core::MemoryStore::open_read_only(db_path.to_str().unwrap())
+                    .expect("open persisted vault db");
+                persisted = store
+                    .vault_get_key_health(
+                        "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST",
+                        "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST_1",
+                    )
+                    .expect("read persisted key health");
+                if persisted.is_some() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let persisted = persisted.expect("background key-health persist should finish");
+        assert_eq!(persisted.status, HEALTH_RATE_LIMITED);
+        assert_eq!(
+            persisted.last_error.as_deref(),
+            Some("rate limited; retry after 30s")
         );
     }
 

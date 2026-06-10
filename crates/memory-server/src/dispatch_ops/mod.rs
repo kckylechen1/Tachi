@@ -21,7 +21,7 @@ mod subprocess;
 // Re-exports preserving the legacy public surface so external callers
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep
 // resolving symbols via `crate::dispatch_ops::<name>`.
-pub(crate) use board::handle_tachi_board;
+pub(crate) use board::{collect_run_task_for_server, handle_tachi_board};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::handle_tachi_dispatch;

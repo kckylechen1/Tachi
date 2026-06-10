@@ -82,6 +82,7 @@ fn tachi_task_action_schema(
             "review_proposal",
             "apply_proposals",
             "board",
+            "wait",
             "merge",
             "intake",
             "link_pr",
@@ -91,7 +92,7 @@ fn tachi_task_action_schema(
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -358,7 +359,7 @@ pub(crate) struct TachiMemoryParams {
     pub action: String,
     #[serde(default, alias = "output_format")]
     #[schemars(
-        description = "Response shape: \"markdown\" (default, agent-readable) or \"json\" (minified, for automation)."
+        description = "Response shape: default JSON for agent automation; pass \"markdown\" for human-readable text."
     )]
     pub format: Option<String>,
 
@@ -985,6 +986,9 @@ pub(crate) struct TachiWikiParams {
     /// Action: "search", "browse", "read", or "write"
     #[schemars(schema_with = "tachi_wiki_action_schema")]
     pub action: String,
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
+    #[serde(default)]
+    pub format: Option<String>,
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
@@ -1118,7 +1122,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "wait", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
@@ -1136,7 +1140,7 @@ pub(crate) struct TachiTaskParams {
     /// proposing routing changes.
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: String,
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
     // plan fields
@@ -1405,7 +1409,7 @@ pub(crate) struct TachiArenaParams {
     #[schemars(schema_with = "tachi_arena_action_schema")]
     pub action: String,
 
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
 
@@ -1637,7 +1641,7 @@ pub(crate) struct TachiShellParams {
     #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
 
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
 

@@ -4,7 +4,9 @@ use super::*;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
+use memory_core::vault::{
+    api_key_pool_member_index, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -361,13 +363,6 @@ fn is_shell_env_name(name: &str) -> bool {
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
-    name.strip_prefix(prefix)
-        .and_then(|suffix| suffix.strip_prefix('_'))
-        .and_then(|suffix| suffix.parse::<usize>().ok())
-        .filter(|idx| *idx > 0)
-}
-
 fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
@@ -422,7 +417,7 @@ pub(super) fn load_unlocked_api_key_secret_pools(
     for row in key_health_rows {
         key_health_by_logical
             .entry(row.logical_name.clone())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(row.key_id.clone(), row);
     }
 
@@ -554,6 +549,23 @@ pub(super) fn load_unlocked_env_secrets(
     Ok(secrets)
 }
 
+fn load_unlocked_provider_env_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    let provider_keys = crate::provider_config::provider_env_keys();
+    let pools = load_unlocked_api_key_secret_pools(server)?;
+    let mut secrets = Vec::new();
+    for (logical_name, entries) in pools {
+        if !provider_keys.contains(&logical_name) || !is_shell_env_name(&logical_name) {
+            continue;
+        }
+        if let Some(entry) = entries.first() {
+            upsert_env_secret(&mut secrets, logical_name, entry.value.clone());
+        }
+    }
+    Ok(secrets)
+}
+
 pub(super) fn load_unlocked_env_secrets_for_child_env(
     server: &MemoryServer,
     cwd: Option<&Path>,
@@ -577,7 +589,7 @@ pub(super) fn load_unlocked_env_secrets_for_child_env(
     let mut secrets = if include_all_env_secrets {
         load_unlocked_env_secrets(server)?
     } else {
-        Vec::new()
+        load_unlocked_provider_env_secrets(server)?
     };
     let Some(cwd) = cwd else {
         return Ok(secrets);
@@ -1376,7 +1388,7 @@ pub(crate) async fn handle_vault_record_key_result(
     let status_code = params.status_code;
     let retry_after_secs = params.retry_after_secs;
     let health = tokio::task::spawn_blocking(move || {
-        llm.record_provider_key_result(
+        llm.record_provider_key_result_blocking(
             &record_logical_name,
             &record_key_id,
             status_code,

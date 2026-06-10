@@ -282,10 +282,12 @@ pub(crate) fn parse_project_vault_env_bindings_detailed(
     (bindings, ignored)
 }
 
-fn load_project_env_bindings(
-    cwd: &Path,
-) -> Result<(PathBuf, Vec<ProjectEnvBinding>, Vec<ProjectEnvIgnoredLine>), Box<dyn std::error::Error>>
-{
+type ProjectEnvBindingLoad = Result<
+    (PathBuf, Vec<ProjectEnvBinding>, Vec<ProjectEnvIgnoredLine>),
+    Box<dyn std::error::Error>,
+>;
+
+fn load_project_env_bindings(cwd: &Path) -> ProjectEnvBindingLoad {
     let bindings_path = find_project_vault_env_file(cwd).ok_or_else(|| {
         format!(
             "No project Vault env binding file found from {}. Create .tachi/vault.env with lines like OPENAI_API_KEY=vault:OPENAI_API_KEY.",

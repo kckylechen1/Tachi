@@ -117,6 +117,69 @@ fn task_params(action: &str) -> TachiTaskParams {
     }
 }
 
+#[tokio::test]
+async fn tachi_task_facade_defaults_to_json_and_keeps_markdown_escape_hatch() {
+    let server = make_server();
+
+    let mut json_params = task_params("profiles");
+    json_params.format = None;
+    let json_body = server
+        .tachi_task(Parameters(json_params))
+        .await
+        .expect("default profiles should succeed");
+    let parsed: Value = serde_json::from_str(&json_body).expect("default profiles JSON");
+    assert!(parsed["dispatch_profiles"].as_array().is_some());
+
+    let mut markdown_params = task_params("profiles");
+    markdown_params.format = Some("markdown".to_string());
+    let markdown = server
+        .tachi_task(Parameters(markdown_params))
+        .await
+        .expect("markdown profiles should succeed");
+    assert!(markdown.starts_with("## Tachi task profiles"), "{markdown}");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn tachi_task_wait_returns_terminal_dispatch_status() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let server = make_server();
+    let dispatch_id = "dispatch-wait-complete";
+    let run_dir = temp_home.path().join("runs").join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    std::fs::write(
+        run_dir.join("status.json"),
+        serde_json::to_string_pretty(&json!({
+            "dispatch_id": dispatch_id,
+            "agent": "codex",
+            "task": "wait for completed dispatch",
+            "state": "TASK_STATE_COMPLETED",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        }))
+        .expect("status json"),
+    )
+    .expect("write status");
+    std::fs::write(run_dir.join("result.md"), "done").expect("result");
+
+    let mut params = task_params("wait");
+    params.dispatch_id = Some(dispatch_id.to_string());
+    params.timeout_secs = Some(0);
+    let response = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("wait should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("wait JSON");
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["terminal"], json!(true));
+    assert_eq!(parsed["state"], json!("TASK_STATE_COMPLETED"));
+    assert_eq!(parsed["task"]["result_written"], json!(true));
+}
+
 struct EnvVarGuard {
     key: &'static str,
     original: Option<std::ffi::OsString>,
@@ -2253,7 +2316,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn tachi_task_briefing_defaults_to_markdown_layered_sections() {
+async fn tachi_task_briefing_supports_markdown_layered_sections() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -2264,7 +2327,7 @@ async fn tachi_task_briefing_defaults_to_markdown_layered_sections() {
     let server = make_server();
 
     let mut params = task_params("briefing");
-    params.format = None;
+    params.format = Some("markdown".to_string());
     params.task = Some("Prepare feature handoff".to_string());
     params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
 

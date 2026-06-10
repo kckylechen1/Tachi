@@ -1,4 +1,5 @@
 use super::*;
+use memory_core::vault::api_key_pool_member_index;
 use std::io::Read;
 use std::path::Path;
 
@@ -436,7 +437,7 @@ pub(super) async fn run_vault_command(
                     .map_err(|e| format!("vault_upsert_entry: {e}"))?;
             }
             for entry in existing_entries {
-                if api_key_pool_member_index_cli(&entry.name, &prefix)
+                if api_key_pool_member_index(&entry.name, &prefix)
                     .is_some_and(|idx| idx > values.len())
                 {
                     if store
@@ -774,13 +775,6 @@ fn is_shell_env_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
-fn api_key_pool_member_index_cli(name: &str, prefix: &str) -> Option<usize> {
-    name.strip_prefix(prefix)
-        .and_then(|suffix| suffix.strip_prefix('_'))
-        .and_then(|suffix| suffix.parse::<usize>().ok())
-        .filter(|idx| *idx > 0)
 }
 
 fn normalize_rotation_strategy_cli(value: &str) -> String {

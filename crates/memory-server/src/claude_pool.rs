@@ -22,7 +22,7 @@
 //! degradation path. Each caller is expected to handle its own LLM-fallback
 //! policy when `call()` returns Err.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -69,7 +69,7 @@ impl ClaudePool {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
 
-        let binary = std::env::var("CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
+        let binary = resolve_claude_binary();
 
         Self {
             sem: Arc::new(Semaphore::new(max_concurrent.max(1))),
@@ -408,6 +408,46 @@ fn cleanup_runs_dir_recursive(root: &Path, now: SystemTime, depth: usize) -> (us
     (removed, scanned)
 }
 
+fn resolve_claude_binary() -> String {
+    std::env::var("CLAUDE_BIN")
+        .ok()
+        .and_then(|raw| validate_claude_binary_override(&raw).ok())
+        .unwrap_or_else(|| "claude".to_string())
+}
+
+fn validate_claude_binary_override(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err("CLAUDE_BIN is empty".to_string());
+    }
+    if value.chars().any(char::is_whitespace) {
+        return Err("CLAUDE_BIN must be a single executable path without arguments".to_string());
+    }
+    if value == "claude" {
+        return Ok(value.to_string());
+    }
+
+    let path = Path::new(value);
+    if !path.is_absolute() {
+        return Err("CLAUDE_BIN must be 'claude' or an absolute path".to_string());
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err("CLAUDE_BIN must not contain parent directory components".to_string());
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "CLAUDE_BIN must include a valid executable name".to_string())?;
+    if file_name == "claude" || file_name.starts_with("claude-") {
+        Ok(value.to_string())
+    } else {
+        Err("CLAUDE_BIN executable name must be 'claude' or start with 'claude-'".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +462,32 @@ mod tests {
         // Long labels capped at 48 chars.
         let long = "x".repeat(80);
         assert_eq!(sanitize_label(&long).len(), 48);
+    }
+
+    #[test]
+    fn claude_binary_override_accepts_only_claude_executables() {
+        assert_eq!(validate_claude_binary_override("claude").unwrap(), "claude");
+        assert_eq!(
+            validate_claude_binary_override("/opt/homebrew/bin/claude").unwrap(),
+            "/opt/homebrew/bin/claude"
+        );
+        assert_eq!(
+            validate_claude_binary_override("/usr/local/bin/claude-beta").unwrap(),
+            "/usr/local/bin/claude-beta"
+        );
+
+        for bad in [
+            "",
+            "claude --dangerously-skip-permissions",
+            "./claude",
+            "/tmp/not-claude",
+            "/tmp/../tmp/claude",
+        ] {
+            assert!(
+                validate_claude_binary_override(bad).is_err(),
+                "expected invalid override: {bad}"
+            );
+        }
     }
 
     #[test]
