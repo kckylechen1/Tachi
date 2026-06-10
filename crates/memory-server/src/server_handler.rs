@@ -283,7 +283,6 @@ impl ServerHandler for MemoryServer {
                 if !is_dlq_exempt {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
-                    let should_auto_retry = false;
 
                     let dl = DeadLetter {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -293,66 +292,16 @@ impl ServerHandler for MemoryServer {
                         error_category: category.clone(),
                         timestamp: Utc::now().to_rfc3339(),
                         retry_count: 0,
-                        max_retries: if should_auto_retry { 1 } else { 3 },
+                        max_retries: 3,
                         status: "pending".to_string(),
                     };
 
-                    let dl_id = dl.id.clone();
                     {
                         let mut dlq = self.dead_letters_lock();
                         dlq.push_back(dl);
                         // Enforce ring buffer max
                         while dlq.len() > DLQ_MAX_ENTRIES {
                             dlq.pop_front();
-                        }
-                    }
-
-                    // Auto-retry once for timeout/internal errors
-                    if should_auto_retry {
-                        // Brief delay before retry
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-
-                        // Retry via shared dispatch helper
-                        let retry_result = self
-                            .retry_dispatch(&tool_name_owned, tool_args_for_dlq)
-                            .await;
-
-                        {
-                            let mut dlq = self.dead_letters_lock();
-                            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == dl_id) {
-                                dl.retry_count = 1;
-                                if retry_result.is_ok() {
-                                    dl.status = "resolved".to_string();
-                                } else {
-                                    dl.status = "abandoned".to_string();
-                                    if let Err(ref e) = retry_result {
-                                        dl.error = format!("{e}");
-                                    }
-                                }
-                            }
-                        }
-
-                        if retry_result.is_ok() {
-                            // Cache the retry result if applicable
-                            if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
-                                if tool_result_can_be_cached(res) {
-                                    let mut cache = self.tool_cache_lock();
-                                    cache.insert(
-                                        key.clone(),
-                                        CachedResult {
-                                            result: res.clone(),
-                                            created_at: Instant::now(),
-                                        },
-                                    );
-                                }
-                            }
-                            return match (retry_result, stuck_warning.clone()) {
-                                (Ok(mut tool_result), Some(warn)) => {
-                                    tool_result.content.push(rmcp::model::Content::text(warn));
-                                    Ok(tool_result)
-                                }
-                                (other, _) => other,
-                            };
                         }
                     }
                 }

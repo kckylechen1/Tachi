@@ -220,3 +220,24 @@ async fn retry_dispatch_blocks_direct_proxy_tool_when_gateway_mode() {
         "unexpected error: {err}"
     );
 }
+
+#[tokio::test]
+async fn retry_dispatch_rejects_native_write_tools() {
+    let server = make_server();
+
+    let err = server
+        .retry_dispatch(
+            "save_memory",
+            Some(serde_json::Map::from_iter([(
+                "text".to_string(),
+                json!("do not replay writes from dlq"),
+            )])),
+        )
+        .await
+        .expect_err("native write tools must be retried by explicit MCP calls only");
+
+    assert!(
+        err.to_string().contains("cannot be retried via DLQ"),
+        "unexpected error: {err}"
+    );
+}
