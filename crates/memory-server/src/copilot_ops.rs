@@ -537,16 +537,17 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
-            top_k: params.top_k.max(1),
+            top_k,
             path_prefix: Some(path_prefix.clone()),
             include_training: false,
             include_archived: params.include_archived,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: top_k.max(20),
             mmr_threshold: None,
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -588,7 +589,7 @@ pub(crate) async fn handle_tachi_task_brief(
     server: &MemoryServer,
     params: TaskBriefParams,
 ) -> Result<String, String> {
-    let top_k = params.top_k.max(1);
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let mut wiki_rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -682,7 +683,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let top_k = if params.compact.unwrap_or(false) {
         params.top_k.unwrap_or(4).clamp(1, 4)
     } else {
-        params.top_k.unwrap_or(6).max(1)
+        crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
     };
     let query = feature_briefing_query(params);
     let board = feature_board(server, params, top_k).await;
@@ -1755,16 +1756,17 @@ pub(crate) async fn handle_tachi_progress_check(
         params.latest_error.clone().unwrap_or_default(),
         params.attempts.join(" ")
     );
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let wiki_rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: params.top_k.max(1),
+            top_k,
             path_prefix: Some("/wiki".to_string()),
             include_training: false,
             include_archived: false,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: top_k.max(20),
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -1815,7 +1817,7 @@ pub(crate) async fn handle_tachi_progress_check(
             "No strong stuck signal yet; keep validating the next narrow hypothesis."
         },
         "suggested_reframe": "Trace where the invariant first fails. For MCP parameter bugs, check schema -> client serialization -> server deserialization -> handler -> transport before changing transport code.",
-        "wiki_hits": compact_rows(wiki_rows, params.top_k.max(1)),
+        "wiki_hits": compact_rows(wiki_rows, top_k),
         "debug_checklist": debug_checklist,
         "should_ask_codex": stuck,
         "ask_codex_prompt": ask_codex_prompt,

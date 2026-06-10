@@ -1057,7 +1057,10 @@ impl LlmClient {
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.parse::<u64>().ok());
-                let text = response.text().await.unwrap_or_default();
+                let text = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Voyage batch response body read failed: {e}"))?;
                 if status.as_u16() == 429 {
                     self.mark_secret_rate_limited(&selected, retry_after);
                     last_err = format!("Voyage batch API error: {} - {}", status, text);
@@ -1176,7 +1179,10 @@ impl LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            let text = response.text().await.unwrap_or_default();
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("Voyage rerank response body read failed: {e}"))?;
             if status.as_u16() == 429 {
                 self.mark_secret_rate_limited(&selected, retry_after);
                 last_err = format!("Voyage rerank API error: {} - {}", status, text);
@@ -1304,25 +1310,38 @@ impl LlmClient {
     }
 
     async fn call_claude_cli(system: &str, user: &str) -> Result<String, String> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
         use tokio::process::Command;
 
         let prompt = format!("<system>\n{system}\n</system>\n\n{user}");
+        let mut child = Command::new("claude")
+            .arg("-p")
+            .arg("--output-format")
+            .arg("text")
+            .arg("--max-turns")
+            .arg("1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| format!("claude cli stdin write failed: {e}"))?;
+        } else {
+            return Err("claude cli stdin unavailable".to_string());
+        }
 
         // Add timeout protection (5 minutes) to prevent indefinite blocking
-        let output = tokio::time::timeout(
-            Duration::from_secs(300),
-            Command::new("claude")
-                .arg("-p")
-                .arg("--output-format")
-                .arg("text")
-                .arg("--max-turns")
-                .arg("1")
-                .arg(&prompt)
-                .output(),
-        )
-        .await
-        .map_err(|_| "claude cli timeout after 5 minutes".to_string())?
-        .map_err(|e| format!("claude cli spawn failed: {e}"))?;
+        let output = tokio::time::timeout(Duration::from_secs(300), child.wait_with_output())
+            .await
+            .map_err(|_| "claude cli timeout after 5 minutes".to_string())?
+            .map_err(|e| format!("claude cli failed: {e}"))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

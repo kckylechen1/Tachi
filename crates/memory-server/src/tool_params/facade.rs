@@ -10,6 +10,12 @@ fn default_facade_top_k() -> usize {
     6
 }
 
+pub(crate) const MAX_FACADE_TOP_K: usize = 100;
+
+pub(crate) fn clamp_facade_top_k(top_k: usize) -> usize {
+    top_k.clamp(1, MAX_FACADE_TOP_K)
+}
+
 fn string_enum_schema(
     values: &[&str],
     description: &str,
@@ -373,7 +379,7 @@ pub(crate) struct TachiMemoryParams {
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
-    #[schemars(description = "Maximum results to return (default: 6).")]
+    #[schemars(description = "Maximum results to return (default: 6, max: 100).")]
     pub top_k: usize,
     #[serde(default)]
     #[schemars(description = "Optional path prefix filter, e.g. /scratch/sigil/.")]
@@ -1810,4 +1816,16 @@ pub(crate) struct TachiBoardParams {
     /// Optional Tachi flow id; when set, return only dispatches linked to that flow.
     #[serde(default)]
     pub flow_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facade_top_k_is_capped() {
+        assert_eq!(clamp_facade_top_k(0), 1);
+        assert_eq!(clamp_facade_top_k(6), 6);
+        assert_eq!(clamp_facade_top_k(10_000), MAX_FACADE_TOP_K);
+    }
 }

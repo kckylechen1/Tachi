@@ -755,7 +755,7 @@ pub(crate) fn mark_task_dispatch(
     if !status.is_object() {
         status = json!({});
     }
-    let obj = status.as_object_mut().expect("status object");
+    let obj = status.as_object_mut().expect("fresh status object");
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));
@@ -911,7 +911,10 @@ pub(crate) fn mark_task_dispatch_completion(
     write_json_atomic(&card_path, &card)?;
     let card_path_string = card_path.to_string_lossy().to_string();
 
-    let obj = status.as_object_mut().expect("status object");
+    if !status.is_object() {
+        status = json!({});
+    }
+    let obj = status.as_object_mut().expect("fresh status object");
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));

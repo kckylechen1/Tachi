@@ -1543,7 +1543,7 @@ impl MemoryServer {
                     query,
                     path_prefix: None,
                     category: params.category.clone(),
-                    top_k: params.top_k.unwrap_or(10),
+                    top_k: crate::clamp_facade_top_k(params.top_k.unwrap_or(10)),
                     include_archived: false,
                     agent_role: None,
                     project: params.project.clone(),
@@ -1823,7 +1823,9 @@ impl MemoryServer {
                     project: params.project.clone(),
                     path_prefix: params.path_prefix.clone(),
                     domain: params.domain.clone(),
-                    top_k: params.top_k.unwrap_or(6),
+                    top_k: crate::clamp_facade_top_k(
+                        params.top_k.unwrap_or(6),
+                    ),
                 };
                 return handle_tachi_task_brief(self, brief_params).await;
             }

@@ -13,6 +13,10 @@ fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     ))])
 }
 
+fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
+    !result.is_error.unwrap_or(false)
+}
+
 fn annotate_tool(tool: &mut rmcp::model::Tool) {
     use rmcp::model::ToolAnnotations;
 
@@ -279,7 +283,7 @@ impl ServerHandler for MemoryServer {
                 if !is_dlq_exempt {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
-                    let should_auto_retry = category == "timeout" || category == "internal";
+                    let should_auto_retry = false;
 
                     let dl = DeadLetter {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -331,14 +335,16 @@ impl ServerHandler for MemoryServer {
                         if retry_result.is_ok() {
                             // Cache the retry result if applicable
                             if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
-                                let mut cache = self.tool_cache_lock();
-                                cache.insert(
-                                    key.clone(),
-                                    CachedResult {
-                                        result: res.clone(),
-                                        created_at: Instant::now(),
-                                    },
-                                );
+                                if tool_result_can_be_cached(res) {
+                                    let mut cache = self.tool_cache_lock();
+                                    cache.insert(
+                                        key.clone(),
+                                        CachedResult {
+                                            result: res.clone(),
+                                            created_at: Instant::now(),
+                                        },
+                                    );
+                                }
                             }
                             return match (retry_result, stuck_warning.clone()) {
                                 (Ok(mut tool_result), Some(warn)) => {
@@ -354,33 +360,35 @@ impl ServerHandler for MemoryServer {
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
-                let mut cache = self.tool_cache_lock();
-                // Evict expired entries when cache exceeds cap
-                if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
-                    cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
-                    // If still over cap after TTL eviction, remove oldest entries
+                if tool_result_can_be_cached(res) {
+                    let mut cache = self.tool_cache_lock();
+                    // Evict expired entries when cache exceeds cap
                     if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
-                        let mut oldest_key = None;
-                        let mut oldest_age = Duration::ZERO;
-                        for (k, v) in cache.iter() {
-                            let age = v.created_at.elapsed();
-                            if age > oldest_age {
-                                oldest_age = age;
-                                oldest_key = Some(k.clone());
+                        cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
+                        // If still over cap after TTL eviction, remove oldest entries
+                        if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                            let mut oldest_key = None;
+                            let mut oldest_age = Duration::ZERO;
+                            for (k, v) in cache.iter() {
+                                let age = v.created_at.elapsed();
+                                if age > oldest_age {
+                                    oldest_age = age;
+                                    oldest_key = Some(k.clone());
+                                }
+                            }
+                            if let Some(k) = oldest_key {
+                                cache.remove(&k);
                             }
                         }
-                        if let Some(k) = oldest_key {
-                            cache.remove(&k);
-                        }
                     }
+                    cache.insert(
+                        key.clone(),
+                        CachedResult {
+                            result: res.clone(),
+                            created_at: Instant::now(),
+                        },
+                    );
                 }
-                cache.insert(
-                    key.clone(),
-                    CachedResult {
-                        result: res.clone(),
-                        created_at: Instant::now(),
-                    },
-                );
             }
 
             // ─── Stuck detection: append soft warning block ──────────────
@@ -398,5 +406,23 @@ impl ServerHandler for MemoryServer {
 
             result
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_error_results_are_not_cacheable() {
+        let error = rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text("boom")]);
+        assert!(!tool_result_can_be_cached(&error));
+
+        let ok: rmcp::model::CallToolResult = serde_json::from_value(json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "isError": false
+        }))
+        .expect("tool result");
+        assert!(tool_result_can_be_cached(&ok));
     }
 }

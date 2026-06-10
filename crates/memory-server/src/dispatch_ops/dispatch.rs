@@ -25,7 +25,7 @@ use crate::credential_profile::{
 use crate::dispatch_profile::resolve_and_apply_dispatch_profile_for_server;
 use crate::vault_ops::read_unlocked_vault_secret;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
@@ -68,6 +68,91 @@ pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String
     let sanitized = agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!("{}-{}-{}", timestamp, sanitized, suffix)
+}
+
+fn dispatch_runs_root() -> PathBuf {
+    if let Ok(home) = std::env::var("TACHI_HOME") {
+        PathBuf::from(home).join("runs")
+    } else if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".tachi").join("runs")
+    } else {
+        std::env::temp_dir().join("tachi").join("runs")
+    }
+}
+
+fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
+    let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
+    let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) else {
+        return false;
+    };
+    let state = status
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    matches!(
+        state,
+        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+    ) || status.get("exit_code").is_some()
+}
+
+fn reserve_flow_dispatch_slot(
+    flow_id: Option<&str>,
+    task: &str,
+    dispatch_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) else {
+        return Ok(None);
+    };
+    let lock_dir = run_dir.join(".dispatch-dedupe");
+    std::fs::create_dir_all(&lock_dir).map_err(|e| format!("create dispatch dedupe dir: {e}"))?;
+    let task_hash = crate::utils::stable_hash(task);
+    let lock_path = lock_dir.join(format!("{task_hash}.json"));
+    let payload = json!({
+        "flow_id": flow_id,
+        "task_hash": task_hash,
+        "dispatch_id": dispatch_id,
+        "task": task,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let payload =
+        serde_json::to_vec_pretty(&payload).map_err(|e| format!("serialize dedupe lock: {e}"))?;
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(&payload)
+                .map_err(|e| format!("write dispatch dedupe lock: {e}"))?;
+            Ok(Some(lock_path))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = crate::task_lifecycle::read_json_file(&lock_path)?.unwrap_or(json!({}));
+            let existing_dispatch_id = existing
+                .get("dispatch_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            if dispatch_status_is_terminal(existing_dispatch_id) {
+                let _ = std::fs::remove_file(&lock_path);
+                return reserve_flow_dispatch_slot(Some(flow_id), task, dispatch_id);
+            }
+            Err(format!(
+                "duplicate dispatch blocked for flow_id '{flow_id}' and same task; active dispatch_id: {existing_dispatch_id}"
+            ))
+        }
+        Err(err) => Err(format!("create dispatch dedupe lock: {err}")),
+    }
+}
+
+fn release_flow_dispatch_slot(lock_path: Option<PathBuf>) {
+    if let Some(path) = lock_path {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 fn credential_search_dirs(cwd: Option<&Path>) -> Vec<PathBuf> {
@@ -855,6 +940,8 @@ pub(crate) async fn handle_tachi_dispatch(
         .iter()
         .map(credential_materialize_report_json)
         .collect::<Vec<_>>();
+    let flow_dispatch_slot =
+        reserve_flow_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
 
     // 6. Spawn background task with Watchdog
     let server_clone = server.clone();
@@ -871,6 +958,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let capability_bundle_card_for_spawn = capability_bundle_card.clone();
     let harness_transport_for_spawn = harness_transport.clone();
     let harness_server_url_for_spawn = harness_server_url.clone();
+    let flow_dispatch_slot_for_spawn = flow_dispatch_slot.clone();
 
     // Scope guard for MCP config cleanup (moved into spawned task)
     struct McpCleanup(Option<PathBuf>);
@@ -1101,35 +1189,33 @@ pub(crate) async fn handle_tachi_dispatch(
             }),
         );
 
-        if !should_cleanup {
-            write_status_json(
-                &workspace_dir_for_spawn,
-                &d_id,
-                v2_for_spawn,
-                plan_generated_at_for_spawn.as_deref(),
-                Some(&execute_started_at.to_rfc3339()),
-                if v2_for_spawn { "approved" } else { "n/a" },
-                final_exit_code,
-                plan_duration_ms_for_spawn,
-                Some(execute_duration_ms),
-                Some(total_duration_ms),
-                Some(json!({
-                    "agent": agent_for_watchdog.clone(),
-                    "state": match final_exit_code {
-                        Some(0) => "TASK_STATE_COMPLETED",
-                        Some(_) => "TASK_STATE_FAILED",
-                        None => "TASK_STATE_FAILED",
-                    },
-                    "updated_at": Utc::now().to_rfc3339(),
-                    "run_dir": workspace_dir_for_spawn.to_string_lossy(),
-                    "result_written": true,
-                    "harness_transport": harness_transport_for_spawn.clone(),
-                    "harness_server_url": harness_server_url_for_spawn.clone(),
-                    "capability_bundle": capability_bundle_card_for_spawn,
-                    "timeout_secs": timeout_secs_for_spawn,
-                })),
-            );
-        }
+        write_status_json(
+            &workspace_dir_for_spawn,
+            &d_id,
+            v2_for_spawn,
+            plan_generated_at_for_spawn.as_deref(),
+            Some(&execute_started_at.to_rfc3339()),
+            if v2_for_spawn { "approved" } else { "n/a" },
+            final_exit_code,
+            plan_duration_ms_for_spawn,
+            Some(execute_duration_ms),
+            Some(total_duration_ms),
+            Some(json!({
+                "agent": agent_for_watchdog.clone(),
+                "state": match final_exit_code {
+                    Some(0) => "TASK_STATE_COMPLETED",
+                    Some(_) => "TASK_STATE_FAILED",
+                    None => "TASK_STATE_FAILED",
+                },
+                "updated_at": Utc::now().to_rfc3339(),
+                "run_dir": workspace_dir_for_spawn.to_string_lossy(),
+                "result_written": true,
+                "harness_transport": harness_transport_for_spawn.clone(),
+                "harness_server_url": harness_server_url_for_spawn.clone(),
+                "capability_bundle": capability_bundle_card_for_spawn,
+                "timeout_secs": timeout_secs_for_spawn,
+            })),
+        );
 
         if should_cleanup {
             let credential_cleanup = server_clone.with_global_store(|store| {
@@ -1152,8 +1238,18 @@ pub(crate) async fn handle_tachi_dispatch(
                     "timestamp": Utc::now().to_rfc3339(),
                 }),
             );
-            let _ = std::fs::remove_dir_all(workspace_dir);
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "workspace_retained",
+                    "dispatch_id": d_id,
+                    "reason": "run_dir is retained so board/status links remain valid",
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
         }
+        release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
     });
 
     // 7. Immediately return — main agent is unblocked!
@@ -1192,4 +1288,57 @@ pub(crate) async fn handle_tachi_dispatch(
     });
 
     serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flow_dispatch_slot_blocks_duplicate_active_task() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("TACHI_HOME");
+
+        let flow_id = format!(
+            "flow_20260610T000000Z_duplicate_slot_{}",
+            uuid::Uuid::new_v4().as_simple()
+        );
+        let run_dir = crate::shell_ops::run_dir_for_flow_id(&flow_id).expect("flow run dir");
+        std::fs::create_dir_all(&run_dir).expect("create flow dir");
+
+        let first = reserve_flow_dispatch_slot(Some(&flow_id), "same task", "dispatch-one")
+            .expect("first reserve")
+            .expect("slot path");
+        let duplicate = reserve_flow_dispatch_slot(Some(&flow_id), "same task", "dispatch-two")
+            .expect_err("duplicate active task should be blocked");
+        assert!(
+            duplicate.contains("duplicate dispatch blocked"),
+            "unexpected error: {duplicate}"
+        );
+
+        release_flow_dispatch_slot(Some(first));
+        assert!(
+            reserve_flow_dispatch_slot(Some(&flow_id), "same task", "dispatch-three")
+                .expect("reserve after release")
+                .is_some(),
+            "slot should be reusable after release"
+        );
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = original_tachi_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
 }
