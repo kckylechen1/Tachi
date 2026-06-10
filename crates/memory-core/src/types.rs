@@ -331,7 +331,7 @@ impl std::fmt::Display for MemoryScope {
 ///   - everything else                          → None
 pub fn default_retention_for(path: &str, source: &str) -> Option<&'static str> {
     if path.starts_with("/handoff") || path.starts_with("/kanban") {
-        Some("pinned")
+        Some(RetentionPolicy::Pinned.as_str())
     } else if path.starts_with("/wiki") || path.starts_with("/guide") || source == "foundry_distill"
     {
         Some("permanent")
