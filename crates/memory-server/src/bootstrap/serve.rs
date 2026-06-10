@@ -638,6 +638,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Env {
+        action,
         filter,
         env_only,
         stdin_password,
@@ -647,6 +648,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     {
         return super::env_cmd::run_env_command(
             &global_db_path,
+            action.clone(),
             filter.as_deref(),
             *env_only,
             *stdin_password,

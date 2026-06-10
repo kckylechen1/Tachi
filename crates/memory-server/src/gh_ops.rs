@@ -1282,7 +1282,11 @@ impl<'a> GhClient for CliGhClient<'a> {
             .rsplit('/')
             .next()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+            .ok_or_else(|| {
+                GhError::Sanitized(format!(
+                    "gh issue create returned an unparseable issue URL: {url}"
+                ))
+            })?;
         Ok(crate::gh_safe_merge::IssueState {
             number,
             title: title.to_string(),

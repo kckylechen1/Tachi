@@ -2,7 +2,7 @@
 
 use super::common::now_utc_iso;
 use crate::error::MemoryError;
-use crate::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
+use crate::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use rusqlite::{params, Connection};
 
 fn parse_allowed_agents(raw: Option<String>) -> Result<Option<Vec<String>>, MemoryError> {
@@ -312,6 +312,115 @@ pub fn vault_delete_rotation(conn: &Connection, prefix: &str) -> Result<bool, Me
         params![prefix],
     )?;
     Ok(rows > 0)
+}
+
+pub fn vault_upsert_key_health(
+    conn: &Connection,
+    health: &VaultKeyHealth,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "INSERT INTO vault_key_health (
+            logical_name,
+            key_id,
+            status,
+            cooldown_until,
+            last_success,
+            last_attempt,
+            last_error,
+            error_count,
+            auth_failed,
+            disabled,
+            metadata,
+            updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(logical_name, key_id) DO UPDATE SET
+            status = excluded.status,
+            cooldown_until = excluded.cooldown_until,
+            last_success = excluded.last_success,
+            last_attempt = excluded.last_attempt,
+            last_error = excluded.last_error,
+            error_count = excluded.error_count,
+            auth_failed = excluded.auth_failed,
+            disabled = excluded.disabled,
+            metadata = excluded.metadata,
+            updated_at = excluded.updated_at",
+        params![
+            health.logical_name,
+            health.key_id,
+            health.status,
+            health.cooldown_until,
+            health.last_success,
+            health.last_attempt,
+            health.last_error,
+            health.error_count,
+            if health.auth_failed { 1 } else { 0 },
+            if health.disabled { 1 } else { 0 },
+            health.metadata,
+            health.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn vault_get_key_health(
+    conn: &Connection,
+    logical_name: &str,
+    key_id: &str,
+) -> Result<Option<VaultKeyHealth>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT logical_name, key_id, status, cooldown_until, last_success, last_attempt, last_error, error_count, auth_failed, disabled, metadata, updated_at
+         FROM vault_key_health WHERE logical_name = ?1 AND key_id = ?2",
+    )?;
+
+    let health = stmt.query_row(params![logical_name, key_id], vault_key_health_from_row);
+
+    match health {
+        Ok(h) => Ok(Some(h)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn vault_key_health_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VaultKeyHealth> {
+    let auth_failed: i64 = row.get(8)?;
+    let disabled: i64 = row.get(9)?;
+    Ok(VaultKeyHealth {
+        logical_name: row.get(0)?,
+        key_id: row.get(1)?,
+        status: row.get(2)?,
+        cooldown_until: row.get(3)?,
+        last_success: row.get(4)?,
+        last_attempt: row.get(5)?,
+        last_error: row.get(6)?,
+        error_count: row.get(7)?,
+        auth_failed: auth_failed != 0,
+        disabled: disabled != 0,
+        metadata: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+pub fn vault_list_key_health(
+    conn: &Connection,
+    logical_name: Option<&str>,
+) -> Result<Vec<VaultKeyHealth>, MemoryError> {
+    let mut stmt = conn.prepare(if logical_name.is_some() {
+        "SELECT logical_name, key_id, status, cooldown_until, last_success, last_attempt, last_error, error_count, auth_failed, disabled, metadata, updated_at
+         FROM vault_key_health WHERE logical_name = ?1 ORDER BY logical_name, key_id"
+    } else {
+        "SELECT logical_name, key_id, status, cooldown_until, last_success, last_attempt, last_error, error_count, auth_failed, disabled, metadata, updated_at
+         FROM vault_key_health ORDER BY logical_name, key_id"
+    })?;
+
+    let rows = if let Some(logical_name) = logical_name {
+        stmt.query_map(params![logical_name], vault_key_health_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        stmt.query_map([], vault_key_health_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    Ok(rows)
 }
 
 pub fn vault_entry_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {

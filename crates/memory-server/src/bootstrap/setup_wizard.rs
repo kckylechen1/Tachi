@@ -294,15 +294,17 @@ fn init_vault_inline(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-    let store = open_cli_store_read_only(global_db_path)?;
-    if store
-        .vault_get_config()
-        .map_err(|e| format!("vault_get_config: {e}"))?
-        .is_some()
-    {
-        return Err("vault already initialized".into());
+    if global_db_path.exists() {
+        let store = open_cli_store_read_only(global_db_path)?;
+        if store
+            .vault_get_config()
+            .map_err(|e| format!("vault_get_config: {e}"))?
+            .is_some()
+        {
+            return Err("vault already initialized".into());
+        }
+        drop(store);
     }
-    drop(store);
 
     let password = Password::with_theme(theme)
         .with_prompt("    New vault password")

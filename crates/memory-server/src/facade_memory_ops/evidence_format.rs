@@ -4,13 +4,17 @@ use crate::utils::compact_text_line;
 use serde_json::{json, Value};
 
 pub(crate) fn wants_json(format: Option<&str>) -> bool {
-    matches!(
-        format
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("json" | "application/json" | "structured")
-    )
+    match format
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("markdown" | "md" | "text" | "plain" | "human") => false,
+        Some("json" | "application/json" | "structured" | "machine") => true,
+        Some(_) => false,
+        None => true,
+    }
 }
 
 pub(crate) fn json_string(value: &Value) -> Result<String, String> {

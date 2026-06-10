@@ -311,6 +311,10 @@ pub(crate) fn handle_task_ux_matrix(params: &TachiTaskParams) -> Result<String, 
         .map(str::trim)
         .filter(|id| !id.is_empty());
     let run_dir = flow_id.map(run_dir_for_flow_id).transpose()?;
+    if let Some(run_dir) = run_dir.as_ref() {
+        std::fs::create_dir_all(run_dir)
+            .map_err(|e| format!("create flow run dir for ux_matrix: {e}"))?;
+    }
     let status = match run_dir.as_ref() {
         Some(run_dir) => read_json_file(&run_dir.join("status.json"))?.unwrap_or_else(|| json!({})),
         None => json!({}),
@@ -751,7 +755,7 @@ pub(crate) fn mark_task_dispatch(
     if !status.is_object() {
         status = json!({});
     }
-    let obj = status.as_object_mut().expect("status object");
+    let obj = status.as_object_mut().expect("fresh status object");
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));
@@ -907,7 +911,10 @@ pub(crate) fn mark_task_dispatch_completion(
     write_json_atomic(&card_path, &card)?;
     let card_path_string = card_path.to_string_lossy().to_string();
 
-    let obj = status.as_object_mut().expect("status object");
+    if !status.is_object() {
+        status = json!({});
+    }
+    let obj = status.as_object_mut().expect("fresh status object");
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));
@@ -1848,7 +1855,7 @@ fn merge_flow_status(run_dir: &Path, patch: Value) -> Result<Value, String> {
     Ok(status)
 }
 
-fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
+pub(crate) fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<Value>(&raw)
             .map(Some)

@@ -4,7 +4,9 @@ use super::*;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
+use memory_core::vault::{
+    api_key_pool_member_index, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -68,6 +70,52 @@ pub(super) struct VaultSetupRotationParams {
     pub total_keys: i64,
     #[serde(default = "default_rotation_strategy")]
     pub strategy: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VaultSetApiKeyPoolParams {
+    /// Logical provider env name, e.g. OPENAI_API_KEY or ROUTER_API_KEY.
+    pub prefix: String,
+    /// Concrete key values. Stored as PREFIX_1, PREFIX_2, ...
+    pub values: Vec<String>,
+    #[serde(default = "default_rotation_strategy")]
+    pub strategy: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub allowed_agents: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VaultLeaseApiKeyParams {
+    /// Logical provider env name or standalone API key name.
+    pub name: String,
+    /// Optional child env var name. Defaults to `name`.
+    #[serde(default)]
+    pub env_name: Option<String>,
+    /// Optional agent id for future restricted-secret checks.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VaultRecordKeyResultParams {
+    /// Logical provider/env name, e.g. DEEPSEEK_API_KEY.
+    pub logical_name: String,
+    /// Concrete leased key id, e.g. DEEPSEEK_API_KEY_2.
+    pub key_id: String,
+    /// HTTP status code observed by the consumer, if available.
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    /// Outcome override: success | rate_limited | auth_failed | exhausted | error.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Retry-After seconds for 429/cooldown responses.
+    #[serde(default)]
+    pub retry_after_secs: Option<u64>,
+    /// Short non-secret reason or provider error class.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 fn default_rotation_strategy() -> String {
@@ -352,16 +400,50 @@ pub(super) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
     let key = get_vault_key(server)?;
-    let (entries, rotations) = server
+    let (entries, rotations, key_health_rows) = server
         .with_global_store(|store| {
             let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
             let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
-            Ok::<_, String>((entries, rotations))
+            let key_health = store
+                .vault_list_key_health(None)
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>((entries, rotations, key_health))
         })
         .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
 
+    let now = Utc::now();
+    let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
+        HashMap::new();
+    for row in key_health_rows {
+        key_health_by_logical
+            .entry(row.logical_name.clone())
+            .or_default()
+            .insert(row.key_id.clone(), row);
+    }
+
     let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
     let mut rotation_members: HashSet<String> = HashSet::new();
+
+    let is_unusable = |logical_name: &str, key_id: &str, now: &chrono::DateTime<chrono::Utc>| {
+        let Some(logical_health) = key_health_by_logical.get(logical_name) else {
+            return false;
+        };
+        let Some(health) = logical_health.get(key_id) else {
+            return false;
+        };
+        if health.disabled || health.auth_failed {
+            return true;
+        }
+        match health.status.as_str() {
+            "exhausted" => true,
+            "rate_limited" | "cooldown" => health
+                .cooldown_until
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .is_some_and(|until| until.with_timezone(&Utc) > *now),
+            _ => false,
+        }
+    };
 
     for rotation in rotations {
         let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
@@ -396,6 +478,7 @@ pub(super) fn load_unlocked_api_key_secret_pools(
                     .allowed_agents
                     .as_ref()
                     .is_some_and(|agents| !agents.is_empty())
+                || is_unusable(&rotation.prefix, &entry.name, &now)
             {
                 continue;
             }
@@ -424,6 +507,7 @@ pub(super) fn load_unlocked_api_key_secret_pools(
                 .allowed_agents
                 .as_ref()
                 .is_some_and(|agents| !agents.is_empty())
+            || is_unusable(&entry.name, &entry.name, &now)
         {
             continue;
         }
@@ -465,11 +549,48 @@ pub(super) fn load_unlocked_env_secrets(
     Ok(secrets)
 }
 
+fn load_unlocked_provider_env_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    let provider_keys = crate::provider_config::provider_env_keys();
+    let pools = load_unlocked_api_key_secret_pools(server)?;
+    let mut secrets = Vec::new();
+    for (logical_name, entries) in pools {
+        if !provider_keys.contains(&logical_name) || !is_shell_env_name(&logical_name) {
+            continue;
+        }
+        if let Some(entry) = entries.first() {
+            upsert_env_secret(&mut secrets, logical_name, entry.value.clone());
+        }
+    }
+    Ok(secrets)
+}
+
 pub(super) fn load_unlocked_env_secrets_for_child_env(
     server: &MemoryServer,
     cwd: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
-    let mut secrets = load_unlocked_env_secrets(server)?;
+    let child_env_mode = std::env::var("TACHI_VAULT_CHILD_ENV")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "project".to_string());
+    let include_all_env_secrets = matches!(
+        child_env_mode.as_str(),
+        "all"
+            | "full"
+            | "legacy"
+            | "legacy_all"
+            | "override"
+            | "fill_missing"
+            | "missing_only"
+            | "preserve_env"
+    );
+
+    let mut secrets = if include_all_env_secrets {
+        load_unlocked_env_secrets(server)?
+    } else {
+        load_unlocked_provider_env_secrets(server)?
+    };
     let Some(cwd) = cwd else {
         return Ok(secrets);
     };
@@ -1042,4 +1163,264 @@ pub(crate) async fn handle_vault_setup_rotation(
     });
     let body = serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))?;
     attach_provider_refresh_warning(server, body)
+}
+
+pub(crate) async fn handle_vault_set_api_key_pool(
+    server: &MemoryServer,
+    params: VaultSetApiKeyPoolParams,
+) -> Result<String, String> {
+    let logical_name = params.prefix.clone();
+    let result = (|| {
+        crypto::validate_secret_name(&params.prefix)?;
+        if !is_shell_env_name(&params.prefix) {
+            return Err(format!(
+                "API key pool prefix '{}' must be a shell env name such as OPENAI_API_KEY",
+                params.prefix
+            ));
+        }
+        let values = params
+            .values
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            return Err("API key pool requires at least one non-empty value".to_string());
+        }
+
+        let key = get_vault_key(server)?;
+        let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
+        let now = Utc::now().to_rfc3339();
+        let strategy = normalize_rotation_strategy(&params.strategy);
+        let removed_members = server
+            .with_global_store(|store| {
+                let existing_entries = store
+                    .vault_list_entries_by_type("api_key")
+                    .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
+                let mut removed_members = Vec::new();
+                for (idx, value) in values.iter().enumerate() {
+                    let name = format!("{}_{}", params.prefix, idx + 1);
+                    let is_new = !store
+                        .vault_entry_exists(&name)
+                        .map_err(|e| format!("vault_entry_exists: {e}"))?;
+                    let (encrypted_value, nonce) = crypto::encrypt(&key, value.as_bytes())?;
+                    let entry = VaultEntry {
+                        name,
+                        encrypted_value,
+                        nonce,
+                        secret_type: "api_key".to_string(),
+                        description: params.description.clone(),
+                        allowed_agents: allowed_agents.clone(),
+                        created_at: if is_new { now.clone() } else { String::new() },
+                        updated_at: now.clone(),
+                        accessed_at: String::new(),
+                        access_count: 0,
+                    };
+                    store
+                        .vault_upsert_entry(&entry)
+                        .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+                }
+                for entry in existing_entries {
+                    if api_key_pool_member_index(&entry.name, &params.prefix)
+                        .is_some_and(|idx| idx > values.len())
+                    {
+                        if store
+                            .vault_delete_entry(&entry.name)
+                            .map_err(|e| format!("vault_delete_entry: {e}"))?
+                        {
+                            removed_members.push(entry.name);
+                        }
+                    }
+                }
+
+                let rotation = VaultKeyRotation {
+                    prefix: params.prefix.clone(),
+                    current_index: 1,
+                    total_keys: values.len() as i64,
+                    rotation_strategy: strategy.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                };
+                store
+                    .vault_set_rotation(&rotation)
+                    .map_err(|e| format!("vault_set_rotation: {e}"))?;
+                Ok(removed_members)
+            })
+            .map_err(|e| format!("save API key pool: {e}"))?;
+
+        serde_json::to_string(&json!({
+            "stored": true,
+            "logical_name": params.prefix,
+            "total_keys": values.len(),
+            "strategy": strategy,
+            "members": (1..=values.len()).map(|idx| format!("{}_{}", logical_name, idx)).collect::<Vec<_>>(),
+            "removed_members": removed_members,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
+    record_vault_audit(
+        server,
+        "vault_set_api_key_pool",
+        Some(&logical_name),
+        result.is_ok(),
+        match &result {
+            Ok(_) => Some("stored"),
+            Err(err) => Some(err.as_str()),
+        },
+    );
+    result
+}
+
+fn advance_rotation_after_key(
+    server: &MemoryServer,
+    logical_name: &str,
+    key_id: &str,
+) -> Result<(), String> {
+    let Some((prefix, idx)) = crate::provider_config::parse_rotation_member_name(key_id) else {
+        return Ok(());
+    };
+    if prefix != logical_name {
+        return Ok(());
+    }
+
+    server
+        .with_global_store(|store| {
+            let Some(rotation) = store
+                .vault_get_rotation(logical_name)
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(());
+            };
+            if rotation.total_keys <= 0 {
+                return Ok(());
+            }
+            let next = (idx as i64 % rotation.total_keys) + 1;
+            let updated = VaultKeyRotation {
+                current_index: next,
+                updated_at: Utc::now().to_rfc3339(),
+                ..rotation
+            };
+            store
+                .vault_set_rotation(&updated)
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .map_err(|e| format!("advance rotation: {e}"))
+}
+
+pub(crate) async fn handle_vault_lease_api_key(
+    server: &MemoryServer,
+    params: VaultLeaseApiKeyParams,
+) -> Result<String, String> {
+    let requested_name = params.name.clone();
+    let result = (|| {
+        let env_name = params
+            .env_name
+            .clone()
+            .unwrap_or_else(|| params.name.clone());
+        if !is_shell_env_name(&env_name) {
+            return Err(format!(
+                "env_name '{}' must be a valid shell env name",
+                env_name
+            ));
+        }
+
+        let pools = load_unlocked_api_key_secret_pools(server)?;
+        let selected = pools
+            .get(&params.name)
+            .and_then(|entries| entries.first())
+            .ok_or_else(|| {
+                format!(
+                    "No usable API key available for '{}'. Vault may be locked, missing, or all keys are disabled/auth-failed/rate-limited.",
+                    params.name
+                )
+            })?;
+
+        advance_rotation_after_key(server, &params.name, &selected.key_id)?;
+        let access_count = server
+            .with_global_store(|store| {
+                store
+                    .vault_touch_entry(&selected.key_id)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap_or(0);
+
+        serde_json::to_string(&json!({
+            "leased": true,
+            "logical_name": params.name,
+            "key_id": selected.key_id,
+            "env_name": env_name,
+            "agent_id": params.agent_id,
+            "env": {
+                env_name: selected.value
+            },
+            "access_count": access_count,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_lease_api_key",
+        Some(&requested_name),
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+    result
+}
+
+pub(crate) async fn handle_vault_record_key_result(
+    server: &MemoryServer,
+    params: VaultRecordKeyResultParams,
+) -> Result<String, String> {
+    let logical_name = params.logical_name.trim().to_string();
+    let key_id = params.key_id.trim().to_string();
+    if logical_name.is_empty() || key_id.is_empty() {
+        return Err("logical_name and key_id are required".to_string());
+    }
+    let llm = Arc::clone(&server.llm);
+    let record_logical_name = logical_name.clone();
+    let record_key_id = key_id.clone();
+    let outcome = params.outcome.clone();
+    let reason = params.reason.clone();
+    let status_code = params.status_code;
+    let retry_after_secs = params.retry_after_secs;
+    let health = tokio::task::spawn_blocking(move || {
+        llm.record_provider_key_result_blocking(
+            &record_logical_name,
+            &record_key_id,
+            status_code,
+            outcome.as_deref(),
+            retry_after_secs,
+            reason.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("record provider key result task failed: {e}"))?;
+    let skipped_by_lease = health.disabled
+        || health.auth_failed
+        || matches!(
+            health.status.as_str(),
+            "exhausted" | "rate_limited" | "cooldown"
+        );
+    let body = json!({
+        "recorded": true,
+        "logical_name": logical_name,
+        "key_id": key_id,
+        "status_code": params.status_code,
+        "outcome": params.outcome,
+        "skipped_by_lease": skipped_by_lease,
+        "health": health,
+    });
+    let result = serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
+    record_vault_audit(
+        server,
+        "vault_record_key_result",
+        Some(&params.logical_name),
+        result.is_ok(),
+        params.reason.as_deref(),
+    );
+    result
 }

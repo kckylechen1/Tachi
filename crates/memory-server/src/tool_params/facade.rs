@@ -10,6 +10,12 @@ fn default_facade_top_k() -> usize {
     6
 }
 
+pub(crate) const MAX_FACADE_TOP_K: usize = 100;
+
+pub(crate) fn clamp_facade_top_k(top_k: usize) -> usize {
+    top_k.clamp(1, MAX_FACADE_TOP_K)
+}
+
 fn string_enum_schema(
     values: &[&str],
     description: &str,
@@ -82,6 +88,7 @@ fn tachi_task_action_schema(
             "review_proposal",
             "apply_proposals",
             "board",
+            "wait",
             "merge",
             "intake",
             "link_pr",
@@ -91,7 +98,7 @@ fn tachi_task_action_schema(
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -358,7 +365,7 @@ pub(crate) struct TachiMemoryParams {
     pub action: String,
     #[serde(default, alias = "output_format")]
     #[schemars(
-        description = "Response shape: \"markdown\" (default, agent-readable) or \"json\" (minified, for automation)."
+        description = "Response shape: default JSON for agent automation; pass \"markdown\" for human-readable text."
     )]
     pub format: Option<String>,
 
@@ -372,7 +379,7 @@ pub(crate) struct TachiMemoryParams {
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
-    #[schemars(description = "Maximum results to return (default: 6).")]
+    #[schemars(description = "Maximum results to return (default: 6, max: 100).")]
     pub top_k: usize,
     #[serde(default)]
     #[schemars(description = "Optional path prefix filter, e.g. /scratch/sigil/.")]
@@ -682,6 +689,18 @@ pub(crate) struct TachiDispatchParams {
     #[serde(default)]
     pub command: Vec<String>,
 
+    #[serde(default)]
+    #[schemars(
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via opencode run --attach."
+    )]
+    pub harness_transport: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Harness server URL for attach transports, e.g. http://127.0.0.1:4321 for OpenCode serve."
+    )]
+    pub harness_server_url: Option<String>,
+
     /// Optional named project DB for context search
     #[serde(default)]
     pub project: Option<String>,
@@ -973,6 +992,9 @@ pub(crate) struct TachiWikiParams {
     /// Action: "search", "browse", "read", or "write"
     #[schemars(schema_with = "tachi_wiki_action_schema")]
     pub action: String,
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
+    #[serde(default)]
+    pub format: Option<String>,
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
@@ -1106,7 +1128,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "wait", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
@@ -1124,7 +1146,7 @@ pub(crate) struct TachiTaskParams {
     /// proposing routing changes.
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: String,
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
     // plan fields
@@ -1255,12 +1277,22 @@ pub(crate) struct TachiTaskParams {
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Harness transport override, e.g. opencode_serve to dispatch through an existing local OpenCode server via opencode run --attach."
+    )]
+    pub harness_transport: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Harness server URL for attach transports, e.g. http://127.0.0.1:4321 for OpenCode serve."
+    )]
+    pub harness_server_url: Option<String>,
+    #[serde(default)]
     pub project: Option<String>,
     #[serde(default)]
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
-        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, or deepseek_explore. Distinct from the server ToolProfile."
+        description = "Dispatch profile id, e.g. claude_plan, glm_51_impl, opencode_builder, codex_55_review, codex_53_fast, kimi_arch, deepseek_explore, or kimi_ux. Distinct from the server ToolProfile."
     )]
     pub profile: Option<String>,
     #[serde(default)]
@@ -1383,7 +1415,7 @@ pub(crate) struct TachiArenaParams {
     #[schemars(schema_with = "tachi_arena_action_schema")]
     pub action: String,
 
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
 
@@ -1437,6 +1469,55 @@ pub(crate) struct TachiArenaParams {
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
     pub timeout_secs: Option<u64>,
+
+    /// When true, spawn creates the tracked mission documents and also launches
+    /// the supported worker harness through the existing dispatch runtime.
+    #[serde(default)]
+    pub launch: bool,
+
+    /// Optional dispatch profile used when launch=true.
+    #[serde(default, alias = "dispatch_profile")]
+    pub profile: Option<String>,
+
+    /// Optional model override used when launch=true.
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Optional named project DB for dispatch context.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Tachi flow id for feature-scoped dispatch/eval linkage.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+
+    /// GitHub issue reference bound to the launched dispatch.
+    #[serde(default)]
+    pub issue_ref: Option<String>,
+
+    /// GitHub PR reference bound to the launched dispatch.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
+
+    /// Dispatch permission profile passed through when launch=true.
+    #[serde(default)]
+    pub permission_profile: Option<String>,
+
+    /// Codex sandbox mode passed through when launch=true.
+    #[serde(default)]
+    pub sandbox: Option<String>,
+
+    /// Credential profile ids to materialize before launching the worker.
+    #[serde(default)]
+    pub credential_profiles: Vec<String>,
+
+    /// Expected child-agent tool surface when launch=true.
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+
+    /// Include a capability bundle in the launched dispatch prompt when supported.
+    #[serde(default, alias = "include_capability_bundle")]
+    pub auto_capability_bundle: Option<bool>,
 
     /// Reason for abort/reap.
     #[serde(default)]
@@ -1566,7 +1647,7 @@ pub(crate) struct TachiShellParams {
     #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
 
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: default JSON for agent automation; pass "markdown" for human-readable text.
     #[serde(default)]
     pub format: Option<String>,
 
@@ -1731,4 +1812,20 @@ pub(crate) struct TachiBoardParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Optional Tachi flow id; when set, return only dispatches linked to that flow.
+    #[serde(default)]
+    pub flow_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn facade_top_k_is_capped() {
+        assert_eq!(clamp_facade_top_k(0), 1);
+        assert_eq!(clamp_facade_top_k(6), 6);
+        assert_eq!(clamp_facade_top_k(10_000), MAX_FACADE_TOP_K);
+    }
 }

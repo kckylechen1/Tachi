@@ -27,7 +27,6 @@ pub fn is_vault_alias(value: &str) -> bool {
 }
 
 /// Recommended config.env line for a provider key stored in Vault.
-#[allow(dead_code)]
 pub fn vault_alias_line(env_key: &str) -> String {
     format!("{env_key}={VAULT_ALIAS_PREFIX}{env_key}")
 }
@@ -40,7 +39,7 @@ pub struct MaterializeReport {
     pub stripped_env_placeholders: usize,
 }
 
-fn provider_env_keys() -> HashSet<String> {
+pub(crate) fn provider_env_keys() -> HashSet<String> {
     let mut keys = HashSet::new();
     for def in API_KEY_DEFS {
         keys.insert(def.key.to_string());

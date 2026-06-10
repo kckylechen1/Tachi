@@ -364,7 +364,7 @@ fn collect_snapshot_inner(
         }
     }
 
-    let dispatches = collect_dispatches(global_db_path);
+    let dispatches = collect_dispatches(global_db_path, project_db_path);
     let recent_evals = collect_recent_evals(global_db_path, project_db_path);
     let last_daily_report = find_last_daily_report(app_home);
     let distill_marker = read_distill_marker(app_home);
@@ -1000,97 +1000,110 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-fn collect_dispatches(global_db_path: &Path) -> Vec<DispatchStatus> {
-    let path_str = match global_db_path.to_str() {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let store = match MemoryStore::open_read_only(path_str) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let conn = store.connection();
-    let mut stmt = match conn.prepare(
-        "SELECT id, summary, text, metadata, created_at FROM memories \
-         WHERE path LIKE '/kanban/tasks/%' \
-           AND source != ?1 \
-         ORDER BY created_at DESC LIMIT 10",
-    ) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
+fn collect_dispatches(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> Vec<DispatchStatus> {
     let now = Utc::now();
-    let rows = match stmt.query_map([FOUNDRY_RECALL_CACHE_SOURCE], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    }) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for row in rows {
-        let (id, summary, text, meta_str, created_at) = match row {
+    let mut out: Vec<(String, DispatchStatus)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for db_path in std::iter::once(global_db_path).chain(project_db_path) {
+        let path_str = match db_path.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        let store = match MemoryStore::open_read_only(path_str) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let conn = store.connection();
+        let mut stmt = match conn.prepare(
+            "SELECT id, summary, text, metadata, created_at FROM memories \
+             WHERE path LIKE '/kanban/tasks/%' \
+               AND source != ?1 \
+             ORDER BY created_at DESC LIMIT 10",
+        ) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rows = match stmt.query_map([FOUNDRY_RECALL_CACHE_SOURCE], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        }) {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
-        let agent = meta
-            .get("agent")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let outcome = normalize_dispatch_outcome(
-            meta.get("a2a_state").and_then(|v| v.as_str()),
-            &created_at,
-            now,
-        );
-        let reviewed = meta
-            .get("reviewed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let elapsed = created_at
-            .parse::<DateTime<Utc>>()
-            .ok()
-            .map(|dt| status_health::format_elapsed(now - dt))
-            .unwrap_or_default();
-        let dispatch_id = meta
-            .get("dispatch_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or(&id)
-            .chars()
-            .take(12)
-            .collect();
-        let task = meta
-            .get("task")
-            .and_then(|v| v.as_str())
-            .map(|s| s.chars().take(60).collect::<String>())
-            .or_else(|| {
-                text.lines()
-                    .find(|l| l.starts_with("Task: "))
-                    .map(|l| l.trim_start_matches("Task: ").chars().take(60).collect())
-            })
-            .unwrap_or_else(|| {
-                summary
-                    .trim_start_matches(|c: char| !c.is_alphanumeric())
-                    .chars()
-                    .take(60)
-                    .collect()
-            });
-        out.push(DispatchStatus {
-            dispatch_id,
-            agent,
-            task,
-            outcome,
-            elapsed,
-            reviewed,
-        });
+        for row in rows {
+            let (id, summary, text, meta_str, created_at) = match row {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
+            let dispatch_id_full = meta
+                .get("dispatch_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&id)
+                .to_string();
+            if !seen.insert(dispatch_id_full.clone()) {
+                continue;
+            }
+            let agent = meta
+                .get("agent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let outcome = normalize_dispatch_outcome(
+                meta.get("a2a_state").and_then(|v| v.as_str()),
+                &created_at,
+                now,
+            );
+            let reviewed = meta
+                .get("reviewed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let elapsed = created_at
+                .parse::<DateTime<Utc>>()
+                .ok()
+                .map(|dt| status_health::format_elapsed(now - dt))
+                .unwrap_or_default();
+            let dispatch_id = dispatch_id_full.chars().take(12).collect();
+            let task = meta
+                .get("task")
+                .and_then(|v| v.as_str())
+                .map(|s| s.chars().take(60).collect::<String>())
+                .or_else(|| {
+                    text.lines()
+                        .find(|l| l.starts_with("Task: "))
+                        .map(|l| l.trim_start_matches("Task: ").chars().take(60).collect())
+                })
+                .unwrap_or_else(|| {
+                    summary
+                        .trim_start_matches(|c: char| !c.is_alphanumeric())
+                        .chars()
+                        .take(60)
+                        .collect()
+                });
+            out.push((
+                created_at,
+                DispatchStatus {
+                    dispatch_id,
+                    agent,
+                    task,
+                    outcome,
+                    elapsed,
+                    reviewed,
+                },
+            ));
+        }
     }
-    out
+    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.truncate(10);
+    out.into_iter().map(|(_, status)| status).collect()
 }
 
 fn normalize_dispatch_outcome(
@@ -1138,7 +1151,7 @@ fn collect_recent_evals(global_db_path: &Path, project_db_path: Option<&Path>) -
             "SELECT id, summary, metadata, created_at FROM memories \
              WHERE path LIKE '/eval/2%' \
                AND id NOT LIKE 'foundry:%' \
-               AND category = 'experience' \
+               AND category IN ('eval', 'experience') \
              ORDER BY created_at DESC LIMIT 5",
         ) {
             Ok(s) => s,
@@ -2092,11 +2105,88 @@ mod tests {
             )
             .expect("insert recall cache row");
 
-        let dispatches = collect_dispatches(&db);
+        let dispatches = collect_dispatches(&db, None);
         assert_eq!(dispatches.len(), 1, "got: {dispatches:?}");
         assert_eq!(dispatches[0].dispatch_id, "20260609T000");
         assert_eq!(dispatches[0].agent, "codex");
         assert_eq!(dispatches[0].task, "real worker task");
+    }
+
+    #[test]
+    fn collect_dispatches_includes_project_db_rows() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let global_db = dir.path().join("global.db");
+        let project_db = dir.path().join("project.db");
+        MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
+        let project =
+            MemoryStore::open(project_db.to_str().expect("project path")).expect("open project");
+        let now = Utc::now().to_rfc3339();
+        project
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, ?2, ?3, ?4, 0.8, ?5, 'kanban', 'kanban', '[]', '[]', 'manual', 'project', 0, ?5, ?5, 0, 1, ?6)",
+                rusqlite::params![
+                    "project-dispatch",
+                    "/kanban/tasks/20260609T000001Z-codex",
+                    "Kanban: project task",
+                    "Dispatch Task\nTask: project worker task",
+                    now,
+                    json!({
+                        "dispatch_id": "20260609T000001Z-codex",
+                        "agent": "codex",
+                        "task": "project worker task",
+                        "a2a_state": "TASK_STATE_COMPLETED",
+                        "reviewed": true,
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("insert project dispatch");
+
+        let dispatches = collect_dispatches(&global_db, Some(&project_db));
+        assert_eq!(dispatches.len(), 1, "got: {dispatches:?}");
+        assert_eq!(dispatches[0].dispatch_id, "20260609T000");
+        assert_eq!(dispatches[0].task, "project worker task");
+    }
+
+    #[test]
+    fn collect_recent_evals_reads_eval_category_rows() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let global_db = dir.path().join("global.db");
+        let project_db = dir.path().join("project.db");
+        MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
+        let project =
+            MemoryStore::open(project_db.to_str().expect("project path")).expect("open project");
+        let now = Utc::now().to_rfc3339();
+        project
+            .connection()
+            .execute(
+                "INSERT INTO memories
+                 (id, path, summary, text, importance, timestamp, category, topic, keywords, entities, source, scope, archived, created_at, updated_at, access_count, revision, metadata)
+                 VALUES (?1, ?2, ?3, ?4, 0.8, ?5, 'eval', 'eval', '[]', '[]', 'manual', 'project', 0, ?5, ?5, 0, 1, ?6)",
+                rusqlite::params![
+                    "eval-row",
+                    "/eval/2026-06-09/20260609T000002Z-codex",
+                    "[✓] codex / UX smoke",
+                    "eval text",
+                    now,
+                    json!({
+                        "agent": "codex",
+                        "outcome": "success",
+                        "quality_score": 0.82,
+                    })
+                    .to_string(),
+                ],
+            )
+            .expect("insert eval");
+
+        let evals = collect_recent_evals(&global_db, Some(&project_db));
+        assert_eq!(evals.len(), 1, "got: {evals:?}");
+        assert_eq!(evals[0].agent, "codex");
+        assert_eq!(evals[0].outcome, "success");
+        assert_eq!(evals[0].quality_score, Some(0.82));
     }
 
     #[test]

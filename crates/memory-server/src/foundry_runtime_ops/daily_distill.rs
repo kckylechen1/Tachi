@@ -34,10 +34,6 @@ use crate::llm::LlmClient;
 /// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
 pub const DEFAULT_GROUPS_PER_BATCH: usize = 6;
 
-/// Legacy alias kept for external references.
-#[allow(dead_code)]
-pub const MAX_GROUPS_PER_BATCH: usize = DEFAULT_GROUPS_PER_BATCH;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistillBackend {
     ClaudeCli,

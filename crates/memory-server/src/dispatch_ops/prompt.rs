@@ -415,10 +415,17 @@ pub(crate) async fn assemble_prompt_with_trace(
     // 4. Operating instructions
     parts.push("## Operating instructions".to_string());
     parts.push("- Use Tachi MCP tools if available for additional context.".to_string());
-    parts.push(
-        "- Call `tachi_task(action=\"complete\")` when done, including dispatch_id if provided."
-            .to_string(),
-    );
+    if dispatch_can_self_complete(params) {
+        parts.push(
+            "- Call `tachi_task(action=\"complete\")` when done, including dispatch_id if provided."
+                .to_string(),
+        );
+    } else {
+        parts.push(
+            "- Tachi completion tools are not available in this worker lane; write the requested result clearly and the leader will call `tachi_task(action=\"complete\")` after verification."
+                .to_string(),
+        );
+    }
     parts.push(String::new());
 
     // 5. Extra instruction from stage (e.g. auto → "plan first")
@@ -447,6 +454,17 @@ pub(crate) async fn assemble_prompt_with_trace(
         prompt,
         capability_bundle,
     }
+}
+
+fn dispatch_can_self_complete(params: &TachiDispatchParams) -> bool {
+    params.inject_tachi_mcp == Some(true)
+        || params.mcp_access.as_ref().is_some_and(|access| {
+            access.inject_tachi_mcp == Some(true)
+                || access
+                    .allowed_facades
+                    .iter()
+                    .any(|facade| matches!(facade.as_str(), "tachi_task" | "tachi_complete"))
+        })
 }
 
 #[cfg(test)]

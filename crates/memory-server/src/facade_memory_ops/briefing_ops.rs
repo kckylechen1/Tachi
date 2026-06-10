@@ -145,6 +145,7 @@ pub(crate) async fn handle_memory_briefing(
                 state_filter: Some("all".to_string()),
                 limit: Some(top_k.min(kanban_cap)),
                 project: named_project.clone(),
+                flow_id: None,
             },
         ),
         async { crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap) },

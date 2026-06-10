@@ -238,6 +238,44 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         strong_against: &["repo_mapping", "symbol_search"],
         weak_against: &["implementation", "final_verification"],
     },
+    DispatchProfileDef {
+        name: "kimi_ux",
+        display_name: "Kimi UX Experience Reviewer",
+        backend: "kimi",
+        role: "ux_researcher",
+        stage: Some("review_light"),
+        model: None,
+        tool_profile: "observe",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: true,
+        write_actions: false,
+        auto_capability_bundle: true,
+        allowed_facades: &["tachi_briefing", "tachi_memory", "tachi_task", "tachi_wiki"],
+        allowed_mcp_servers: &[],
+        credential_profiles: &[],
+        common_skills: &[WAZA_CHECK, WAZA_THINK],
+        signature_skills: &[WAZA_LEARN, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
+        passive_traits: &[
+            "agent_facing_ux_audit",
+            "report_failure_chain",
+            "recommend_workflow_changes",
+        ],
+        forbidden_skills: &["write_actions", "direct_implementation"],
+        evidence_required: &[
+            "ux_findings",
+            "failure_chain",
+            "workflow_recommendations",
+            "repro_steps",
+        ],
+        strong_against: &[
+            "agent_experience",
+            "workflow_ux",
+            "tool_surface_friction",
+            "ux_matrix",
+        ],
+        weak_against: &["implementation", "merge", "schema_migration"],
+    },
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -287,6 +325,7 @@ struct ProfileCandidate {
     profile: String,
     agent: String,
     role: String,
+    model: Option<String>,
     score: f64,
     reasons: Vec<String>,
     live_samples: u32,
@@ -425,6 +464,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "blocked_profiles": risk.blocked_profiles,
         "recommended_profile": best.profile,
         "recommended_agent": best.agent,
+        "recommended_model": best_profile.model,
+        "recommended_transport": if best_profile.backend == "custom" { "opencode_cli_or_serve" } else { "native_cli" },
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
         "evidence_required": profile_evidence_required_for_server(server, best_profile)?,
@@ -1242,17 +1283,58 @@ fn resolve_and_apply_dispatch_profile_inner(
         }
         if profile.backend == "custom" && params.command.is_empty() {
             if let Some(model) = profile.model {
-                params.command = vec![
-                    "opencode".to_string(),
-                    "--pure".to_string(),
-                    "run".to_string(),
-                    "--model".to_string(),
-                    model.to_string(),
-                ];
-                route_explanation.push(format!(
-                    "profile selected opencode custom command for model '{}'",
-                    model
-                ));
+                let transport = params
+                    .harness_transport
+                    .clone()
+                    .or_else(|| std::env::var("TACHI_OPENCODE_TRANSPORT").ok())
+                    .unwrap_or_else(|| "cli".to_string())
+                    .to_ascii_lowercase();
+                if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
+                    let server_url = params
+                        .harness_server_url
+                        .clone()
+                        .or_else(|| std::env::var("TACHI_OPENCODE_SERVER_URL").ok())
+                        .unwrap_or_else(|| "http://127.0.0.1:4321".to_string());
+                    let directory = params
+                        .cwd
+                        .clone()
+                        .or_else(|| {
+                            std::env::current_dir()
+                                .ok()
+                                .map(|path| path.to_string_lossy().to_string())
+                        })
+                        .unwrap_or_else(|| ".".to_string());
+                    params.harness_transport = Some("opencode_serve".to_string());
+                    params.harness_server_url = Some(server_url.clone());
+                    params.command = vec![
+                        "opencode".to_string(),
+                        "run".to_string(),
+                        "--attach".to_string(),
+                        server_url,
+                        "--dir".to_string(),
+                        directory,
+                        "--agent".to_string(),
+                        profile.role.to_string(),
+                        "--model".to_string(),
+                        model.to_string(),
+                    ];
+                    route_explanation.push(format!(
+                        "profile selected opencode serve transport for model '{}'",
+                        model
+                    ));
+                } else {
+                    params.command = vec![
+                        "opencode".to_string(),
+                        "--pure".to_string(),
+                        "run".to_string(),
+                        "--model".to_string(),
+                        model.to_string(),
+                    ];
+                    route_explanation.push(format!(
+                        "profile selected opencode custom command for model '{}'",
+                        model
+                    ));
+                }
             }
         }
         if params.tool_profile.is_none() {
@@ -1486,6 +1568,7 @@ fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
         "codex_53_fast" => (72, 92, 35, 52, 58),
         "kimi_arch" => (88, 64, 58, 86, 84),
         "deepseek_explore" => (76, 88, 30, 72, 62),
+        "kimi_ux" => (84, 70, 58, 88, 78),
         _ => (70, 70, 70, 70, 70),
     };
     json!({
@@ -2076,6 +2159,12 @@ fn dispatch_risk_needles() -> &'static [(&'static str, &'static str)] {
         ("aggregate_live", "touched_area:eval_ledger_changes"),
         ("performance_matrix", "touched_area:eval_ledger_changes"),
         ("eval", "touches eval/routing evidence"),
+        ("ux_matrix", "touches workflow_ux"),
+        ("agent-facing ux", "touches agent_experience"),
+        ("agent facing ux", "touches agent_experience"),
+        ("user experience", "touches agent_experience"),
+        ("tool surface", "touches tool_surface_friction"),
+        ("体验", "touches agent_experience"),
         ("safe_merge", "touches GitHub merge gate"),
         ("gh_safe_merge.rs", "touches GitHub merge gate"),
         ("merge", "touches merge/release gate"),
@@ -2204,6 +2293,16 @@ fn score_profile_candidate(
             score += 15.0;
             reasons.push(format!("strong_against_signal:{signal}"));
         }
+    }
+    if profile.role == "ux_researcher"
+        && risk.reasons.iter().any(|reason| {
+            reason.contains("agent_experience")
+                || reason.contains("workflow_ux")
+                || reason.contains("tool_surface_friction")
+        })
+    {
+        score += 30.0;
+        reasons.push("role_matches_agent_facing_ux".to_string());
     }
     let weak_against = profile_weak_against_for_server(server, profile)?;
     for weakness in &weak_against {
@@ -2346,6 +2445,7 @@ fn score_profile_candidate(
         profile: profile.name.to_string(),
         agent: profile.backend.to_string(),
         role: profile.role.to_string(),
+        model: profile.model.map(str::to_string),
         score: (score * 100.0).round() / 100.0,
         reasons,
         live_samples,
@@ -3405,6 +3505,8 @@ mod tests {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: None,
             credential_profiles: Vec::new(),
@@ -3555,6 +3657,53 @@ mod tests {
             .route_explanation
             .iter()
             .any(|line| line.contains("opencode custom command")));
+    }
+
+    #[test]
+    fn custom_profile_can_attach_to_opencode_serve() {
+        let mut params = params();
+        params.profile = Some("deepseek_explore".to_string());
+        params.cwd = Some("/tmp/tachi-opencode-project".to_string());
+        params.harness_transport = Some("opencode_serve".to_string());
+        params.harness_server_url = Some("http://127.0.0.1:4321".to_string());
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+        assert_eq!(resolved.agent, "custom");
+        assert_eq!(
+            params.command,
+            vec![
+                "opencode".to_string(),
+                "run".to_string(),
+                "--attach".to_string(),
+                "http://127.0.0.1:4321".to_string(),
+                "--dir".to_string(),
+                "/tmp/tachi-opencode-project".to_string(),
+                "--agent".to_string(),
+                "explore".to_string(),
+                "--model".to_string(),
+                "deepseek/deepseek-v4-flash".to_string()
+            ]
+        );
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("opencode serve transport")));
+    }
+
+    #[test]
+    fn kimi_ux_profile_is_registered_as_read_only_experience_reviewer() {
+        let profile = resolve_dispatch_profile("kimi_ux").expect("kimi_ux profile");
+        assert_eq!(profile.backend, "kimi");
+        assert_eq!(profile.role, "ux_researcher");
+        assert!(!profile.write_actions);
+        assert!(profile
+            .evidence_required
+            .iter()
+            .any(|item| item == &"ux_findings"));
+        assert!(profile
+            .strong_against
+            .iter()
+            .any(|item| item == &"tool_surface_friction"));
     }
 
     #[test]

@@ -125,7 +125,10 @@ pub(crate) fn validate_flow_id(id: &str) -> Result<(), String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(format!("Invalid flow_id: '{}'", id));
+        return Err(format!(
+            "Invalid flow_id: '{}'. Expected a safe id starting with 'flow_' and containing only ASCII letters, numbers, '_' or '-'. Example: flow_20260609T014037Z_tachi_dispatch_ux_smoke",
+            id
+        ));
     }
     Ok(())
 }
@@ -567,6 +570,8 @@ async fn handle_dispatch_action(
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: params.project.clone(),
             stage: Some("execute".to_string()),
             credential_profiles: Vec::new(),
@@ -815,6 +820,8 @@ async fn handle_convoy_dispatch_action(
                 inject_tachi_mcp: None,
                 inject_hub_mcps: None,
                 command: Vec::new(),
+                harness_transport: None,
+                harness_server_url: None,
                 project: params.project.clone(),
                 stage: Some(format!("execute:{}", slice_id)),
                 credential_profiles: Vec::new(),
@@ -932,6 +939,7 @@ async fn handle_kanban_action(
         state_filter: params.state_filter.clone(),
         limit: params.limit,
         project: params.project.clone(),
+        flow_id: params.flow_id.clone(),
     };
     crate::dispatch_ops::handle_tachi_board(server, bp).await
 }

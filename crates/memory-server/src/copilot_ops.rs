@@ -537,16 +537,17 @@ pub(crate) async fn handle_tachi_wiki_search(
     params: WikiSearchParams,
 ) -> Result<String, String> {
     let path_prefix = params.path_prefix.unwrap_or_else(|| "/wiki".to_string());
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let mut rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
-            top_k: params.top_k.max(1),
+            top_k,
             path_prefix: Some(path_prefix.clone()),
             include_training: false,
             include_archived: params.include_archived,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: top_k.max(20),
             mmr_threshold: None,
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -588,7 +589,7 @@ pub(crate) async fn handle_tachi_task_brief(
     server: &MemoryServer,
     params: TaskBriefParams,
 ) -> Result<String, String> {
-    let top_k = params.top_k.max(1);
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let mut wiki_rows = search_memory_rows(
         server,
         SearchMemoryParams {
@@ -682,7 +683,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let top_k = if params.compact.unwrap_or(false) {
         params.top_k.unwrap_or(4).clamp(1, 4)
     } else {
-        params.top_k.unwrap_or(6).max(1)
+        crate::clamp_facade_top_k(params.top_k.unwrap_or(6))
     };
     let query = feature_briefing_query(params);
     let board = feature_board(server, params, top_k).await;
@@ -816,7 +817,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         },
     });
 
-    if params.format.as_deref() == Some("json") {
+    if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
         serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))
     } else {
         Ok(format_feature_briefing_markdown(&response))
@@ -1092,19 +1093,26 @@ async fn feature_board(
     params: &TachiTaskParams,
     top_k: usize,
 ) -> serde_json::Value {
-    let raw = crate::dispatch_ops::handle_tachi_board(
-        server,
-        TachiBoardParams {
-            state_filter: Some("all".to_string()),
-            limit: Some(top_k.max(10)),
-            project: params.project.clone(),
-        },
-    )
-    .await;
-    let Ok(raw) = raw else {
-        return json!({"available": false});
+    let raw = feature_board_raw(server, params, params.flow_id.clone(), top_k).await;
+    let mut used_fallback = false;
+    let mut board: Value = match raw {
+        Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| json!({})),
+        Err(_) => return json!({"available": false}),
     };
-    let mut board: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+    if params
+        .flow_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        && board
+            .get("tasks")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty)
+    {
+        if let Ok(raw) = feature_board_raw(server, params, None, top_k).await {
+            board = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+            used_fallback = true;
+        }
+    }
     let Some(tasks) = board.get("tasks").and_then(Value::as_array).cloned() else {
         return board;
     };
@@ -1121,7 +1129,29 @@ async fn feature_board(
         .collect::<Vec<_>>();
     board["tasks"] = Value::Array(filtered);
     board["count"] = json!(board["tasks"].as_array().map(Vec::len).unwrap_or(0));
+    if used_fallback {
+        board["flow_id"] = json!(params.flow_id);
+        board["flow_filter_fallback"] = json!("needle_scan");
+    }
     board
+}
+
+async fn feature_board_raw(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    flow_id: Option<String>,
+    top_k: usize,
+) -> Result<String, String> {
+    crate::dispatch_ops::handle_tachi_board(
+        server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(top_k.max(10)),
+            project: params.project.clone(),
+            flow_id,
+        },
+    )
+    .await
 }
 
 fn feature_needles(params: &TachiTaskParams) -> Vec<String> {
@@ -1726,16 +1756,17 @@ pub(crate) async fn handle_tachi_progress_check(
         params.latest_error.clone().unwrap_or_default(),
         params.attempts.join(" ")
     );
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let wiki_rows = search_memory_rows(
         server,
         SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: params.top_k.max(1),
+            top_k,
             path_prefix: Some("/wiki".to_string()),
             include_training: false,
             include_archived: false,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: top_k.max(20),
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,
@@ -1786,7 +1817,7 @@ pub(crate) async fn handle_tachi_progress_check(
             "No strong stuck signal yet; keep validating the next narrow hypothesis."
         },
         "suggested_reframe": "Trace where the invariant first fails. For MCP parameter bugs, check schema -> client serialization -> server deserialization -> handler -> transport before changing transport code.",
-        "wiki_hits": compact_rows(wiki_rows, params.top_k.max(1)),
+        "wiki_hits": compact_rows(wiki_rows, top_k),
         "debug_checklist": debug_checklist,
         "should_ask_codex": stuck,
         "ask_codex_prompt": ask_codex_prompt,

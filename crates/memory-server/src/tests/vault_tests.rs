@@ -282,6 +282,260 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
 }
 
 #[tokio::test]
+async fn vault_api_key_pool_sets_and_leases_rotated_env() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "pool-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    let stored = server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "ROUTER_API_KEY".to_string(),
+            values: vec!["router-key-1".to_string(), "router-key-2".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "router pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("vault_set_api_key_pool should succeed");
+    let stored_json: serde_json::Value = serde_json::from_str(&stored).expect("stored JSON");
+    assert_eq!(stored_json["logical_name"], json!("ROUTER_API_KEY"));
+    assert_eq!(stored_json["total_keys"], json!(2));
+
+    let first = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "ROUTER_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("first lease should succeed");
+    let first_json: serde_json::Value = serde_json::from_str(&first).expect("first lease JSON");
+    assert_eq!(first_json["key_id"], json!("ROUTER_API_KEY_1"));
+    assert_eq!(first_json["env"]["ROUTER_API_KEY"], json!("router-key-1"));
+
+    let second = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "ROUTER_API_KEY".to_string(),
+            env_name: Some("OPENAI_API_KEY".to_string()),
+            agent_id: None,
+        }))
+        .await
+        .expect("second lease should succeed");
+    let second_json: serde_json::Value = serde_json::from_str(&second).expect("second lease JSON");
+    assert_eq!(second_json["key_id"], json!("ROUTER_API_KEY_2"));
+    assert_eq!(second_json["env_name"], json!("OPENAI_API_KEY"));
+    assert_eq!(second_json["env"]["OPENAI_API_KEY"], json!("router-key-2"));
+}
+
+#[tokio::test]
+async fn vault_api_key_pool_shrink_removes_orphaned_members() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "pool-shrink-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "SHRINK_API_KEY".to_string(),
+            values: vec![
+                "shrink-key-1".to_string(),
+                "shrink-key-2".to_string(),
+                "shrink-key-3".to_string(),
+            ],
+            strategy: "round_robin".to_string(),
+            description: "shrink pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("initial pool set should succeed");
+
+    let shrunk = server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "SHRINK_API_KEY".to_string(),
+            values: vec!["shrink-key-1b".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "shrunk pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("shrinking pool should succeed");
+    let shrunk_json: serde_json::Value = serde_json::from_str(&shrunk).expect("shrunk JSON");
+    assert_eq!(shrunk_json["members"], json!(["SHRINK_API_KEY_1"]));
+    assert_eq!(
+        shrunk_json["removed_members"],
+        json!(["SHRINK_API_KEY_2", "SHRINK_API_KEY_3"])
+    );
+
+    let listed = server
+        .vault_list(Parameters(VaultListParams {
+            secret_type: Some("api_key".to_string()),
+        }))
+        .await
+        .expect("vault list should succeed");
+    let listed_json: serde_json::Value = serde_json::from_str(&listed).expect("list JSON");
+    let names = listed_json["secrets"]
+        .as_array()
+        .expect("secrets array")
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"SHRINK_API_KEY_1"), "{names:?}");
+    assert!(!names.contains(&"SHRINK_API_KEY_2"), "{names:?}");
+    assert!(!names.contains(&"SHRINK_API_KEY_3"), "{names:?}");
+
+    let leased = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "SHRINK_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("lease should use remaining key");
+    let leased_json: serde_json::Value = serde_json::from_str(&leased).expect("lease JSON");
+    assert_eq!(leased_json["key_id"], json!("SHRINK_API_KEY_1"));
+    assert_eq!(leased_json["env"]["SHRINK_API_KEY"], json!("shrink-key-1b"));
+}
+
+#[tokio::test]
+async fn vault_api_key_lease_skips_unusable_health_members() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "pool-health-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "TRANSIT_API_KEY".to_string(),
+            values: vec!["transit-key-1".to_string(), "transit-key-2".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "transit pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("vault_set_api_key_pool should succeed");
+
+    server
+        .llm
+        .mark_provider_key_rate_limited_for_tests("TRANSIT_API_KEY_1", Some(60));
+
+    let leased = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "TRANSIT_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("lease should skip rate-limited first key");
+    let leased_json: serde_json::Value = serde_json::from_str(&leased).expect("lease JSON");
+    assert_eq!(leased_json["key_id"], json!("TRANSIT_API_KEY_2"));
+    assert_eq!(
+        leased_json["env"]["TRANSIT_API_KEY"],
+        json!("transit-key-2")
+    );
+}
+
+#[tokio::test]
+async fn vault_record_key_result_updates_health_and_lease_selection() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "record-health-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    server
+        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
+            prefix: "BROKER_API_KEY".to_string(),
+            values: vec!["broker-key-1".to_string(), "broker-key-2".to_string()],
+            strategy: "round_robin".to_string(),
+            description: "broker pool".to_string(),
+            allowed_agents: None,
+        }))
+        .await
+        .expect("vault_set_api_key_pool should succeed");
+
+    let rate_limited = server
+        .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
+            logical_name: "BROKER_API_KEY".to_string(),
+            key_id: "BROKER_API_KEY_1".to_string(),
+            status_code: Some(429),
+            outcome: None,
+            retry_after_secs: Some(120),
+            reason: Some("provider 429".to_string()),
+        }))
+        .await
+        .expect("record 429 should succeed");
+    let rate_limited_json: serde_json::Value =
+        serde_json::from_str(&rate_limited).expect("record JSON");
+    assert_eq!(rate_limited_json["health"]["status"], json!("rate_limited"));
+    assert_eq!(rate_limited_json["skipped_by_lease"], json!(true));
+
+    let leased = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "BROKER_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect("lease should skip 429 key");
+    let leased_json: serde_json::Value = serde_json::from_str(&leased).expect("lease JSON");
+    assert_eq!(leased_json["key_id"], json!("BROKER_API_KEY_2"));
+
+    let auth_failed = server
+        .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
+            logical_name: "BROKER_API_KEY".to_string(),
+            key_id: "BROKER_API_KEY_2".to_string(),
+            status_code: Some(401),
+            outcome: None,
+            retry_after_secs: None,
+            reason: Some("provider auth failed".to_string()),
+        }))
+        .await
+        .expect("record 401 should succeed");
+    let auth_failed_json: serde_json::Value =
+        serde_json::from_str(&auth_failed).expect("auth record JSON");
+    assert_eq!(auth_failed_json["health"]["auth_failed"], json!(true));
+
+    let no_key = server
+        .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
+            name: "BROKER_API_KEY".to_string(),
+            env_name: None,
+            agent_id: None,
+        }))
+        .await
+        .expect_err("all unhealthy keys should fail lease");
+    assert!(no_key.contains("No usable API key"), "{no_key}");
+
+    let success = server
+        .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
+            logical_name: "BROKER_API_KEY".to_string(),
+            key_id: "BROKER_API_KEY_2".to_string(),
+            status_code: Some(200),
+            outcome: None,
+            retry_after_secs: None,
+            reason: None,
+        }))
+        .await
+        .expect("record success should succeed");
+    let success_json: serde_json::Value = serde_json::from_str(&success).expect("success JSON");
+    assert_eq!(success_json["health"]["status"], json!("ok"));
+    assert_eq!(success_json["health"]["auth_failed"], json!(false));
+}
+
+#[tokio::test]
 async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
     let server = make_server();
 
@@ -808,14 +1062,69 @@ async fn vault_lock_preserves_env_provider_fallback() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
-async fn dispatch_vault_env_injection_overrides_existing_env_by_default() {
+async fn dispatch_vault_env_injection_does_not_export_all_secrets_by_default() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    std::env::remove_var("TACHI_CHILD_ONLY_API_KEY");
+    std::env::remove_var("LONGPORT_APP_SECRET");
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+    std::env::set_var("TACHI_EXISTING_API_KEY", "env-value");
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "child-env-default-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    for (name, value) in [
+        ("TACHI_CHILD_ONLY_API_KEY", "child-vault-value"),
+        ("TACHI_EXISTING_API_KEY", "vault-overrides-env"),
+        ("LONGPORT_APP_SECRET", "longport-secret"),
+    ] {
+        server
+            .vault_set(Parameters(VaultSetParams {
+                name: name.to_string(),
+                value: value.to_string(),
+                secret_type: "api_key".to_string(),
+                description: "child env default injection test".to_string(),
+                allowed_agents: None,
+                enable_rotation: false,
+                rotation_strategy: None,
+            }))
+            .await
+            .expect("vault_set should succeed");
+    }
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(
+        "printf '%s|%s|%s|' \"$TACHI_CHILD_ONLY_API_KEY\" \"$TACHI_EXISTING_API_KEY\" \"$LONGPORT_APP_SECRET\"",
+    );
+    let injected = crate::dispatch_ops::apply_unlocked_vault_env(&mut cmd, &server, None);
+    assert_eq!(injected, 0);
+
+    let output = cmd.output().await.expect("env probe command should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("env probe output should be utf8");
+    assert_eq!(stdout, "|env-value||");
+
+    std::env::remove_var("TACHI_CHILD_ONLY_API_KEY");
+    std::env::remove_var("LONGPORT_APP_SECRET");
+    std::env::remove_var("TACHI_EXISTING_API_KEY");
+    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // serializes process-wide env across async vault setup + subprocess spawn
+async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     std::env::remove_var("TACHI_CHILD_ONLY_API_KEY");
     std::env::remove_var("LONGPORT_APP_SECRET");
     std::env::remove_var("NOT-A-SHELL-NAME");
-    std::env::remove_var("TACHI_VAULT_CHILD_ENV");
+    std::env::set_var("TACHI_VAULT_CHILD_ENV", "all");
     std::env::set_var("TACHI_EXISTING_API_KEY", "env-value");
     let server = make_server();
 

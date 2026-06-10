@@ -195,6 +195,7 @@ pub(super) async fn run_agent_subprocess(
     mut cmd: Command,
     timeout: Duration,
 ) -> Result<DispatchResult, String> {
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     // If this task is dropped (daemon shutdown, spawning task cancelled, ...),
@@ -266,6 +267,8 @@ mod tests {
             inject_tachi_mcp: None,
             inject_hub_mcps: None,
             command: Vec::new(),
+            harness_transport: None,
+            harness_server_url: None,
             project: None,
             stage: None,
             credential_profiles: Vec::new(),
@@ -294,5 +297,19 @@ mod tests {
                 .any(|pair| pair == ["--output-format", "json"]),
             "Kimi Code supports text/stream-json, not json: {args:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn run_agent_subprocess_closes_child_stdin() {
+        let mut cmd = Command::new("python3");
+        cmd.arg("-c")
+            .arg("import sys; data = sys.stdin.read(); print('stdin-eof:' + data)");
+
+        let result = run_agent_subprocess(cmd, Duration::from_secs(5))
+            .await
+            .expect("stdin reader should observe EOF and exit");
+
+        assert_eq!(result.exit_code, Some(0));
+        assert_eq!(result.output.trim(), "stdin-eof:");
     }
 }

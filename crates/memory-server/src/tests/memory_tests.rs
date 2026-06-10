@@ -205,7 +205,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
     let saved = server
         .tachi_memory(Parameters(TachiMemoryParams {
             action: "save".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: None,
             scope: None,
             top_k: 6,

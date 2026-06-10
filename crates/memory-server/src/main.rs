@@ -495,7 +495,9 @@ impl MemoryServer {
                 (None, None, None, false)
             };
 
-        let llm = Arc::new(llm::LlmClient::new()?);
+        let llm = Arc::new(llm::LlmClient::new_with_vault_db(Some(
+            global_db_path.as_path(),
+        ))?);
         let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())

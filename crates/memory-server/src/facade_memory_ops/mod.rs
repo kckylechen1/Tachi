@@ -13,8 +13,9 @@ mod readiness_ops;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
+pub(crate) use evidence_format::wants_json;
 use evidence_format::{
-    format_extract_result, format_save_result, json_string, parse_json_or_empty, wants_json,
+    format_extract_result, format_save_result, json_string, parse_json_or_empty,
 };
 use serde_json::json;
 

@@ -40,7 +40,7 @@ pub use types::{
     DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,
     RetentionPolicy, SearchResult, StatsResult,
 };
-pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
+pub use vault::{api_key_pool_member_index, SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
 
 use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;

@@ -3,7 +3,7 @@ use super::*;
 fn tachi_memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
         action: action.to_string(),
-        format: None,
+        format: Some("markdown".to_string()),
         query: None,
         scope: None,
         top_k: 6,
@@ -41,6 +41,28 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         domain: None,
         compact: false,
     }
+}
+
+#[tokio::test]
+async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() {
+    let server = make_server();
+
+    let mut json_params = tachi_memory_params("search");
+    json_params.format = None;
+    json_params.query = Some("facade default json no matches".to_string());
+    let json_body = crate::facade_memory_ops::handle_tachi_memory(&server, json_params)
+        .await
+        .expect("default search should succeed");
+    let parsed: Value = serde_json::from_str(&json_body).expect("default search JSON");
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["query"], json!("facade default json no matches"));
+
+    let mut markdown_params = tachi_memory_params("search");
+    markdown_params.query = Some("facade markdown output".to_string());
+    let markdown = crate::facade_memory_ops::handle_tachi_memory(&server, markdown_params)
+        .await
+        .expect("markdown search should succeed");
+    assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
 }
 
 // ─── cli_client: daemon detection + in-process fallback ─────────────────────
@@ -181,7 +203,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
         &server,
         TachiMemoryParams {
             action: "checkpoint".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: None,
             scope: Some("project".to_string()),
             top_k: 6,
@@ -238,7 +260,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
         &server,
         TachiMemoryParams {
             action: "save".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: None,
             scope: Some("project".to_string()),
             top_k: 6,
@@ -341,7 +363,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
         &server,
         TachiMemoryParams {
             action: "ask".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: Some("what did we implement".to_string()),
             scope: None,
             top_k: 3,
@@ -511,7 +533,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
         &server,
         TachiMemoryParams {
             action: "progress".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: None,
             scope: None,
             top_k: 6,
@@ -575,7 +597,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
         &server,
         TachiMemoryParams {
             action: "briefing".to_string(),
-            format: None,
+            format: Some("markdown".to_string()),
             query: Some("current work".to_string()),
             scope: None,
             top_k: 3,
