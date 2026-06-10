@@ -195,8 +195,8 @@ impl CachedVaultKey {
         Self { bytes: *source }
     }
 
-    fn bytes(&self) -> [u8; 32] {
-        self.bytes
+    fn bytes(&self) -> &[u8; 32] {
+        &self.bytes
     }
 }
 

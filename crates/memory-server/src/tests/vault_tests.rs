@@ -7,7 +7,7 @@ fn cached_vault_key_copies_source_buffer() {
     vault_crypto::zero_key(&mut source);
 
     assert_eq!(source, [0u8; 32]);
-    assert_eq!(cached.bytes(), [7u8; 32]);
+    assert_eq!(cached.bytes(), &[7u8; 32]);
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
 use super::*;
 use memory_core::vault::api_key_pool_member_index;
-use std::io::Read;
+use std::io::{BufRead, Read};
 use std::path::Path;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
@@ -1034,16 +1034,9 @@ pub(super) fn read_vault_init_password(
     confirm_password_file: Option<&Path>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let (password, confirm) = if stdin_password {
-        let mut raw = String::new();
-        std::io::stdin().read_to_string(&mut raw)?;
-        let mut lines = raw.lines();
-        let password = lines.next().unwrap_or_default().trim().to_string();
-        let confirm = if let Some(path) = confirm_password_file {
-            read_password_file(path)?
-        } else {
-            lines.next().unwrap_or_default().trim().to_string()
-        };
-        (password, confirm)
+        let stdin = std::io::stdin();
+        let mut stdin = stdin.lock();
+        read_vault_init_password_stdin_lines(&mut stdin, confirm_password_file)?
     } else if keychain || password_file.is_some() {
         let password = read_vault_password(false, keychain, password_file)?;
         let Some(path) = confirm_password_file else {
@@ -1066,6 +1059,23 @@ pub(super) fn read_vault_init_password(
         return Err("Passwords do not match".into());
     }
     Ok(password)
+}
+
+fn read_vault_init_password_stdin_lines(
+    reader: &mut impl BufRead,
+    confirm_password_file: Option<&Path>,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let mut password = String::new();
+    reader.read_line(&mut password)?;
+    let password = password.trim().to_string();
+    let confirm = if let Some(path) = confirm_password_file {
+        read_password_file(path)?
+    } else {
+        let mut confirm = String::new();
+        reader.read_line(&mut confirm)?;
+        confirm.trim().to_string()
+    };
+    Ok((password, confirm))
 }
 
 fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -1094,6 +1104,23 @@ fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
+        let mut input =
+            Cursor::new("correct horse battery staple\ncorrect horse battery staple\nextra\n");
+        let (password, confirm) =
+            read_vault_init_password_stdin_lines(&mut input, None).expect("stdin lines");
+
+        assert_eq!(password, "correct horse battery staple");
+        assert_eq!(confirm, "correct horse battery staple");
+        let mut remaining = String::new();
+        input
+            .read_to_string(&mut remaining)
+            .expect("read remaining stdin");
+        assert_eq!(remaining, "extra\n");
+    }
 
     #[test]
     fn noninteractive_init_password_file_requires_confirmation_file() {
