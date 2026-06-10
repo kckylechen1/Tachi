@@ -33,6 +33,9 @@ use crate::llm::LlmClient;
 
 /// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
 pub const DEFAULT_GROUPS_PER_BATCH: usize = 6;
+const DEFAULT_PROCESSED_SCAN_LIMIT: usize = 10_000;
+const DEFAULT_CANDIDATE_SCAN_LIMIT: usize = 5_000;
+const MAX_DISTILL_SCAN_LIMIT: usize = 50_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistillBackend {
@@ -116,6 +119,28 @@ pub fn resolve_batch_size() -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| (1..=20).contains(&n))
         .unwrap_or(DEFAULT_GROUPS_PER_BATCH)
+}
+
+fn resolve_scan_limit(env_key: &str, default: usize) -> usize {
+    std::env::var(env_key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| (1..=MAX_DISTILL_SCAN_LIMIT).contains(&n))
+        .unwrap_or(default)
+}
+
+fn resolve_processed_scan_limit() -> usize {
+    resolve_scan_limit(
+        "FOUNDRY_DISTILL_PROCESSED_SCAN_LIMIT",
+        DEFAULT_PROCESSED_SCAN_LIMIT,
+    )
+}
+
+fn resolve_candidate_scan_limit() -> usize {
+    resolve_scan_limit(
+        "FOUNDRY_DISTILL_CANDIDATE_SCAN_LIMIT",
+        DEFAULT_CANDIDATE_SCAN_LIMIT,
+    )
 }
 
 /// Minimum bucket size before we ask the LLM to distill — matches the
@@ -527,14 +552,24 @@ fn derive_project_label(server: &MemoryServer) -> String {
 }
 
 fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>, String> {
+    let processed_scan_limit = resolve_processed_scan_limit() as i64;
+    let candidate_scan_limit = resolve_candidate_scan_limit() as i64;
     let (processed_ids, candidate_entries) = server.with_project_store_read(|store| {
         let conn = store.connection();
         let mut processed_ids: HashSet<String> = HashSet::new();
         let mut stmt = conn
-            .prepare("SELECT metadata FROM memories WHERE archived = 0 AND source = ?1")
+            .prepare(
+                "SELECT metadata FROM memories
+                 WHERE archived = 0 AND source = ?1
+                 ORDER BY timestamp DESC
+                 LIMIT ?2",
+            )
             .map_err(|e| format!("prepare distill metadata query: {e}"))?;
         let rows = stmt
-            .query_map([FOUNDRY_DISTILL_SOURCE], |row| row.get::<_, String>(0))
+            .query_map(
+                rusqlite::params![FOUNDRY_DISTILL_SOURCE, processed_scan_limit],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|e| format!("query distill metadata rows: {e}"))?;
         for row in rows {
             let raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
@@ -554,11 +589,15 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
                 "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
                   FROM memories
                   WHERE archived = 0 AND source != ?1
-                  ORDER BY timestamp ASC",
+                  ORDER BY timestamp ASC
+                  LIMIT ?2",
             )
             .map_err(|e| format!("prepare candidate query: {e}"))?;
         let rows = stmt
-            .query_map([FOUNDRY_DISTILL_SOURCE], memory_core::row_to_entry)
+            .query_map(
+                rusqlite::params![FOUNDRY_DISTILL_SOURCE, candidate_scan_limit],
+                memory_core::row_to_entry,
+            )
             .map_err(|e| format!("query candidate rows: {e}"))?;
 
         let mut entries: Vec<MemoryEntry> = Vec::new();
@@ -984,6 +1023,90 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resolve_scan_limit_rejects_unbounded_values() {
+        with_scan_limit_env("FOUNDRY_DISTILL_CANDIDATE_SCAN_LIMIT", Some("4"), || {
+            assert_eq!(resolve_candidate_scan_limit(), 4);
+        });
+        with_scan_limit_env(
+            "FOUNDRY_DISTILL_CANDIDATE_SCAN_LIMIT",
+            Some("1000000"),
+            || {
+                assert_eq!(resolve_candidate_scan_limit(), DEFAULT_CANDIDATE_SCAN_LIMIT);
+            },
+        );
+        with_scan_limit_env("FOUNDRY_DISTILL_PROCESSED_SCAN_LIMIT", Some("0"), || {
+            assert_eq!(resolve_processed_scan_limit(), DEFAULT_PROCESSED_SCAN_LIMIT);
+        });
+    }
+
+    #[tokio::test]
+    async fn collect_candidate_groups_respects_candidate_scan_limit() {
+        with_scan_limit_env("FOUNDRY_DISTILL_CANDIDATE_SCAN_LIMIT", Some("4"), || {
+            let temp = tempfile::tempdir().expect("temp daily distill db");
+            let server = crate::MemoryServer::new(
+                temp.path().join("global.db"),
+                Some(temp.path().join("project.db")),
+            )
+            .expect("server");
+
+            server
+                .with_project_store(|store| {
+                    for idx in 0..6 {
+                        store
+                            .upsert(&candidate_entry(idx))
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })
+                .expect("seed candidate memories");
+
+            let groups = collect_candidate_groups(&server).expect("collect candidate groups");
+            assert_eq!(groups.len(), 1);
+            let ids = groups[0]
+                .entries
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                ids,
+                vec!["candidate-0", "candidate-1", "candidate-2", "candidate-3"]
+            );
+        });
+    }
+
+    fn candidate_entry(idx: usize) -> MemoryEntry {
+        MemoryEntry {
+            id: format!("candidate-{idx}"),
+            path: format!("/project/bounded/{idx}"),
+            summary: format!("bounded scan candidate {idx}"),
+            text: format!("bounded scan candidate memory {idx}"),
+            importance: 0.7,
+            timestamp: format!("2026-01-01T00:00:{idx:02}Z"),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "bounded-scan".to_string(),
+            keywords: vec!["bounded".to_string()],
+            persons: Vec::new(),
+            entities: vec!["bounded-scan".to_string()],
+            location: String::new(),
+            source: "manual".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
     fn with_backend_env<F: FnOnce()>(value: Option<&str>, f: F) {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1006,6 +1129,25 @@ mod tests {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let key = "FOUNDRY_DISTILL_BATCH_SIZE";
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match previous {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    fn with_scan_limit_env<F: FnOnce()>(key: &'static str, value: Option<&str>, f: F) {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let previous = std::env::var(key).ok();
         match value {
             Some(v) => std::env::set_var(key, v),
