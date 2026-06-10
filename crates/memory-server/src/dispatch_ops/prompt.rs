@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 pub(crate) struct PromptAssembly {
     pub prompt: String,
     pub capability_bundle: Value,
+    pub feedback_rules: Value,
 }
 
 /// Resolve effective skills list, applying stage-based defaults when the caller
@@ -108,6 +109,24 @@ pub(crate) async fn assemble_prompt_with_trace(
     {
         parts.push(render_dispatch_profile_overlay(server, params));
     }
+
+    let feedback_rules = crate::feedback_rule_ops::applicable_feedback_rules(
+        server,
+        crate::feedback_rule_ops::FeedbackRuleQuery {
+            task: params.task.clone(),
+            task_type: Some(route.intent.to_string()),
+            profile: params.profile.clone(),
+            stage: params.stage.clone(),
+            keywords: Vec::new(),
+            project: params.project.clone(),
+        },
+    )
+    .await;
+    if let Some(section) = crate::feedback_rule_ops::render_feedback_rules_section(&feedback_rules)
+    {
+        parts.push(section);
+    }
+    let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
 
     // Resolve skills with stage defaults
     let (effective_skills, extra_instruction) = resolve_effective_skills(params);
@@ -272,6 +291,15 @@ pub(crate) async fn assemble_prompt_with_trace(
         )
         .await
         {
+            let rows = rows
+                .into_iter()
+                .filter(|row| {
+                    !row.get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .starts_with("/feedback")
+                })
+                .collect::<Vec<_>>();
             if !rows.is_empty() {
                 parts.push("## Relevant context from Tachi memory/wiki".to_string());
                 for row in &rows {
@@ -453,6 +481,7 @@ pub(crate) async fn assemble_prompt_with_trace(
     PromptAssembly {
         prompt,
         capability_bundle,
+        feedback_rules: feedback_rules_trace,
     }
 }
 

@@ -1928,6 +1928,7 @@ impl MemoryServer {
                     diff: params.diff.clone(),
                     worktree: params.worktree.clone(),
                     subagents: params.subagents.clone(),
+                    feedback_rules_applied: params.feedback_rules_applied.clone(),
                     dispatch_id: params.dispatch_id.clone(),
                     flow_id: params.flow_id.clone(),
                     issue_ref: params.issue_ref.clone(),
