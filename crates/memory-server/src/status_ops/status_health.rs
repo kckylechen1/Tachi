@@ -734,8 +734,8 @@ pub(crate) fn load_keychain_vault_api_key_values(
     };
 
     let salt = B64.decode(&config.salt)?;
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(&key, &config.verifier)? {
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Ok(Vec::new());
     }
 
@@ -747,7 +747,8 @@ pub(crate) fn load_keychain_vault_api_key_values(
         if entry.secret_type != "api_key" || !is_provider_key || entry.allowed_agents.is_some() {
             continue;
         }
-        let decrypted = crate::vault_crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
         let value = String::from_utf8(decrypted)?;
         if !value.trim().is_empty() {
             out.push((entry.name, value));

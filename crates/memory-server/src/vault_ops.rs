@@ -172,7 +172,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
 
 fn clear_cached_vault_state(server: &MemoryServer) {
     let mut v = server.vault_write();
-    v.key = None;
+    let _ = v.key.take();
     v.unlock_time = None;
     server.llm.clear_provider_secrets();
 }
@@ -210,14 +210,19 @@ fn record_vault_audit(
     }
 }
 
-/// Check if vault is unlocked and return the cached key.
-fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
+/// Check if vault is unlocked and run work with a borrowed cached key.
+fn with_vault_key<T>(
+    server: &MemoryServer,
+    f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
+) -> Result<T, String> {
     let v = server.vault_read();
     if let Some(unlock_time) = v.unlock_time {
         if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
-            return v
+            let key = v
                 .key
-                .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string());
+                .as_ref()
+                .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
+            return f(key.bytes());
         }
     }
     drop(v);
@@ -227,6 +232,10 @@ fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
     }
 
     Err("Vault is locked. Call vault_unlock first.".to_string())
+}
+
+fn ensure_vault_unlocked(server: &MemoryServer) -> Result<(), String> {
+    with_vault_key(server, |_| Ok(()))
 }
 
 /// Check if vault is initialized.
@@ -367,164 +376,168 @@ fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
-    let key = get_vault_key(server)?;
-    let entries = server
-        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+    with_vault_key(server, |key| {
+        let entries = server
+            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+            .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
 
-    let mut secrets = Vec::new();
-    for entry in entries {
-        if !include_entry(&entry) {
-            continue;
-        }
-        if entry
-            .allowed_agents
-            .as_ref()
-            .is_some_and(|agents| !agents.is_empty())
-        {
-            continue;
+        let mut secrets = Vec::new();
+        for entry in entries {
+            if !include_entry(&entry) {
+                continue;
+            }
+            if entry
+                .allowed_agents
+                .as_ref()
+                .is_some_and(|agents| !agents.is_empty())
+            {
+                continue;
+            }
+
+            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+            let value = String::from_utf8(decrypted)
+                .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+            if !value.trim().is_empty() {
+                secrets.push((entry.name, value));
+            }
         }
 
-        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
-        if !value.trim().is_empty() {
-            secrets.push((entry.name, value));
-        }
-    }
-
-    Ok(secrets)
+        Ok(secrets)
+    })
 }
 
 pub(super) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
-    let key = get_vault_key(server)?;
-    let (entries, rotations, key_health_rows) = server
-        .with_global_store(|store| {
-            let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
-            let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
-            let key_health = store
-                .vault_list_key_health(None)
-                .map_err(|e| e.to_string())?;
-            Ok::<_, String>((entries, rotations, key_health))
-        })
-        .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
+    with_vault_key(server, |key| {
+        let (entries, rotations, key_health_rows) = server
+            .with_global_store(|store| {
+                let entries = store.vault_list_entries().map_err(|e| e.to_string())?;
+                let rotations = store.vault_list_rotations().map_err(|e| e.to_string())?;
+                let key_health = store
+                    .vault_list_key_health(None)
+                    .map_err(|e| e.to_string())?;
+                Ok::<_, String>((entries, rotations, key_health))
+            })
+            .map_err(|e| format!("Failed to list vault provider secrets: {e}"))?;
 
-    let now = Utc::now();
-    let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
-        HashMap::new();
-    for row in key_health_rows {
-        key_health_by_logical
-            .entry(row.logical_name.clone())
-            .or_default()
-            .insert(row.key_id.clone(), row);
-    }
-
-    let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
-    let mut rotation_members: HashSet<String> = HashSet::new();
-
-    let is_unusable = |logical_name: &str, key_id: &str, now: &chrono::DateTime<chrono::Utc>| {
-        let Some(logical_health) = key_health_by_logical.get(logical_name) else {
-            return false;
-        };
-        let Some(health) = logical_health.get(key_id) else {
-            return false;
-        };
-        if health.disabled || health.auth_failed {
-            return true;
+        let now = Utc::now();
+        let mut key_health_by_logical: HashMap<String, HashMap<String, VaultKeyHealth>> =
+            HashMap::new();
+        for row in key_health_rows {
+            key_health_by_logical
+                .entry(row.logical_name.clone())
+                .or_default()
+                .insert(row.key_id.clone(), row);
         }
-        match health.status.as_str() {
-            "exhausted" => true,
-            "rate_limited" | "cooldown" => health
-                .cooldown_until
-                .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .is_some_and(|until| until.with_timezone(&Utc) > *now),
-            _ => false,
-        }
-    };
 
-    for rotation in rotations {
-        let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
-        if matching.is_empty() {
-            continue;
-        }
-        let selected_idx = match rotation.rotation_strategy.as_str() {
-            "round_robin" => {
-                if rotation.current_index <= 0 {
-                    0
-                } else {
-                    (rotation.current_index as usize - 1) % matching.len()
+        let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
+        let mut rotation_members: HashSet<String> = HashSet::new();
+
+        let is_unusable =
+            |logical_name: &str, key_id: &str, now: &chrono::DateTime<chrono::Utc>| {
+                let Some(logical_health) = key_health_by_logical.get(logical_name) else {
+                    return false;
+                };
+                let Some(health) = logical_health.get(key_id) else {
+                    return false;
+                };
+                if health.disabled || health.auth_failed {
+                    return true;
                 }
+                match health.status.as_str() {
+                    "exhausted" => true,
+                    "rate_limited" | "cooldown" => health
+                        .cooldown_until
+                        .as_deref()
+                        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                        .is_some_and(|until| until.with_timezone(&Utc) > *now),
+                    _ => false,
+                }
+            };
+
+        for rotation in rotations {
+            let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
+            if matching.is_empty() {
+                continue;
             }
-            "random" => {
-                use rand::Rng;
-                rand::thread_rng().gen_range(0..matching.len())
+            let selected_idx = match rotation.rotation_strategy.as_str() {
+                "round_robin" => {
+                    if rotation.current_index <= 0 {
+                        0
+                    } else {
+                        (rotation.current_index as usize - 1) % matching.len()
+                    }
+                }
+                "random" => {
+                    use rand::Rng;
+                    rand::thread_rng().gen_range(0..matching.len())
+                }
+                "least_recently_used" => matching
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, entry))| (entry.access_count, entry.accessed_at.clone()))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0),
+                _ => 0,
+            };
+            matching.rotate_left(selected_idx);
+            let mut pool = Vec::new();
+            for (_, entry) in matching {
+                if entry.secret_type != "api_key"
+                    || entry
+                        .allowed_agents
+                        .as_ref()
+                        .is_some_and(|agents| !agents.is_empty())
+                    || is_unusable(&rotation.prefix, &entry.name, &now)
+                {
+                    continue;
+                }
+                let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+                let value = String::from_utf8(decrypted).map_err(|e| {
+                    format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name)
+                })?;
+                if value.trim().is_empty() {
+                    continue;
+                }
+                rotation_members.insert(entry.name.clone());
+                pool.push(crate::llm::ProviderSecret {
+                    key_id: entry.name,
+                    value,
+                });
             }
-            "least_recently_used" => matching
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, (_, entry))| (entry.access_count, entry.accessed_at.clone()))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0),
-            _ => 0,
-        };
-        matching.rotate_left(selected_idx);
-        let mut pool = Vec::new();
-        for (_, entry) in matching {
+            if !pool.is_empty() {
+                pools.insert(rotation.prefix, pool);
+            }
+        }
+
+        for entry in entries {
             if entry.secret_type != "api_key"
+                || !entry.name.ends_with("_API_KEY")
+                || rotation_members.contains(&entry.name)
                 || entry
                     .allowed_agents
                     .as_ref()
                     .is_some_and(|agents| !agents.is_empty())
-                || is_unusable(&rotation.prefix, &entry.name, &now)
+                || is_unusable(&entry.name, &entry.name, &now)
             {
                 continue;
             }
-            let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+            let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
             let value = String::from_utf8(decrypted)
                 .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
-            if value.trim().is_empty() {
-                continue;
+            if !value.trim().is_empty() {
+                pools.entry(entry.name.clone()).or_insert_with(|| {
+                    vec![crate::llm::ProviderSecret {
+                        key_id: entry.name,
+                        value,
+                    }]
+                });
             }
-            rotation_members.insert(entry.name.clone());
-            pool.push(crate::llm::ProviderSecret {
-                key_id: entry.name,
-                value,
-            });
         }
-        if !pool.is_empty() {
-            pools.insert(rotation.prefix, pool);
-        }
-    }
 
-    for entry in entries {
-        if entry.secret_type != "api_key"
-            || !entry.name.ends_with("_API_KEY")
-            || rotation_members.contains(&entry.name)
-            || entry
-                .allowed_agents
-                .as_ref()
-                .is_some_and(|agents| !agents.is_empty())
-            || is_unusable(&entry.name, &entry.name, &now)
-        {
-            continue;
-        }
-        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
-        if !value.trim().is_empty() {
-            pools.entry(entry.name.clone()).or_insert_with(|| {
-                vec![crate::llm::ProviderSecret {
-                    key_id: entry.name,
-                    value,
-                }]
-            });
-        }
-    }
-
-    Ok(pools)
+        Ok(pools)
+    })
 }
 
 pub(super) fn load_unlocked_env_secrets(
@@ -694,30 +707,31 @@ pub(crate) fn read_unlocked_vault_secret(
     agent_id: Option<&str>,
     auto_rotate: bool,
 ) -> Result<String, String> {
-    let key = get_vault_key(server)?;
-    let params = VaultGetParams {
-        name: name.to_string(),
-        agent_id: agent_id.map(str::to_string),
-        auto_rotate,
-    };
-    let (target_name, entry) =
-        server.with_global_store(|store| select_vault_entry(store, &params))?;
+    with_vault_key(server, |key| {
+        let params = VaultGetParams {
+            name: name.to_string(),
+            agent_id: agent_id.map(str::to_string),
+            auto_rotate,
+        };
+        let (target_name, entry) =
+            server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-    ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+        ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
 
-    let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
-    let value = String::from_utf8(decrypted)
-        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
 
-    server
-        .with_global_store(|store| {
-            store
-                .vault_touch_entry(&target_name)
-                .map_err(|e| e.to_string())
-        })
-        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+        server
+            .with_global_store(|store| {
+                store
+                    .vault_touch_entry(&target_name)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to update access stats: {e}"))?;
 
-    Ok(value)
+        Ok(value)
+    })
 }
 
 pub(crate) async fn handle_vault_init(
@@ -735,8 +749,8 @@ pub(crate) async fn handle_vault_init(
 
         let salt = crypto::generate_salt();
         let salt_b64 = B64.encode(salt);
-        let key = crypto::derive_key(&params.password, &salt)?;
-        let verifier = crypto::create_verifier(&key)?;
+        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
+        let verifier = crypto::create_verifier(key.bytes())?;
         let now = Utc::now().to_rfc3339();
         let config = VaultConfig {
             salt: salt_b64,
@@ -754,7 +768,7 @@ pub(crate) async fn handle_vault_init(
 
         {
             let mut v = server.vault_write();
-            v.key = Some(key);
+            v.key = Some(CachedVaultKey::copy_from(key.bytes()));
             v.unlock_time = Some(Instant::now());
             v.failed_attempts = (0, None);
         }
@@ -794,15 +808,15 @@ pub(crate) async fn handle_vault_unlock(
         let salt = B64
             .decode(&config.salt)
             .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
-        let key = crypto::derive_key(&params.password, &salt)?;
+        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
 
-        if !crypto::verify_password(&key, &config.verifier)? {
+        if !crypto::verify_password(key.bytes(), &config.verifier)? {
             return record_vault_unlock_failure(server);
         }
 
         {
             let mut v = server.vault_write();
-            v.key = Some(key);
+            v.key = Some(CachedVaultKey::copy_from(key.bytes()));
             v.unlock_time = Some(Instant::now());
             v.failed_attempts = (0, None);
         }
@@ -851,90 +865,92 @@ pub(crate) async fn handle_vault_set(
     let secret_name = params.name.clone();
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
-        let key = get_vault_key(server)?;
+        with_vault_key(server, |key| {
+            let secret_type = match params.secret_type.to_ascii_lowercase().as_str() {
+                "api_key" => "api_key",
+                "oauth_token" | "oauth" => "oauth_token",
+                "json_blob" | "json" => "json_blob",
+                "cookie" => "cookie",
+                _ => "other",
+            };
+            let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
+            let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
 
-        let secret_type = match params.secret_type.to_ascii_lowercase().as_str() {
-            "api_key" => "api_key",
-            "oauth_token" | "oauth" => "oauth_token",
-            "json_blob" | "json" => "json_blob",
-            "cookie" => "cookie",
-            _ => "other",
-        };
-        let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
-        let (encrypted_value, nonce) = crypto::encrypt(&key, params.value.as_bytes())?;
+            let is_new = !server
+                .with_global_store(|store| {
+                    store
+                        .vault_entry_exists(&params.name)
+                        .map_err(|e| e.to_string())
+                })
+                .map_err(|e| format!("Failed to check existing entry: {e}"))?;
 
-        let is_new = !server
-            .with_global_store(|store| {
-                store
-                    .vault_entry_exists(&params.name)
-                    .map_err(|e| e.to_string())
-            })
-            .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+            let now = Utc::now().to_rfc3339();
+            let entry = VaultEntry {
+                name: params.name.clone(),
+                encrypted_value,
+                nonce,
+                secret_type: secret_type.to_string(),
+                description: params.description.clone(),
+                allowed_agents,
+                created_at: if is_new { now.clone() } else { String::new() },
+                updated_at: now,
+                accessed_at: String::new(),
+                access_count: 0,
+            };
 
-        let now = Utc::now().to_rfc3339();
-        let entry = VaultEntry {
-            name: params.name.clone(),
-            encrypted_value,
-            nonce,
-            secret_type: secret_type.to_string(),
-            description: params.description.clone(),
-            allowed_agents,
-            created_at: if is_new { now.clone() } else { String::new() },
-            updated_at: now,
-            accessed_at: String::new(),
-            access_count: 0,
-        };
+            server
+                .with_global_store(|store| {
+                    store.vault_upsert_entry(&entry).map_err(|e| e.to_string())
+                })
+                .map_err(|e| format!("Failed to save secret: {e}"))?;
 
-        server
-            .with_global_store(|store| store.vault_upsert_entry(&entry).map_err(|e| e.to_string()))
-            .map_err(|e| format!("Failed to save secret: {e}"))?;
+            if params.enable_rotation {
+                if let Some(pos) = params.name.rfind('_') {
+                    let suffix = &params.name[pos + 1..];
+                    if suffix.parse::<u32>().is_ok() {
+                        let prefix = &params.name[..pos];
+                        let strategy = normalize_rotation_strategy(
+                            &params
+                                .rotation_strategy
+                                .clone()
+                                .unwrap_or_else(|| "round_robin".to_string()),
+                        );
 
-        if params.enable_rotation {
-            if let Some(pos) = params.name.rfind('_') {
-                let suffix = &params.name[pos + 1..];
-                if suffix.parse::<u32>().is_ok() {
-                    let prefix = &params.name[..pos];
-                    let strategy = normalize_rotation_strategy(
-                        &params
-                            .rotation_strategy
-                            .clone()
-                            .unwrap_or_else(|| "round_robin".to_string()),
-                    );
+                        let all_entries = server
+                            .with_global_store_read(|store| {
+                                store.vault_list_entries().map_err(|e| e.to_string())
+                            })
+                            .map_err(|e| format!("Failed to list entries: {e}"))?;
 
-                    let all_entries = server
-                        .with_global_store_read(|store| {
-                            store.vault_list_entries().map_err(|e| e.to_string())
-                        })
-                        .map_err(|e| format!("Failed to list entries: {e}"))?;
+                        let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
+                        let rotation = VaultKeyRotation {
+                            prefix: prefix.to_string(),
+                            current_index: 1,
+                            total_keys,
+                            rotation_strategy: strategy,
+                            created_at: Utc::now().to_rfc3339(),
+                            updated_at: Utc::now().to_rfc3339(),
+                        };
 
-                    let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
-                    let rotation = VaultKeyRotation {
-                        prefix: prefix.to_string(),
-                        current_index: 1,
-                        total_keys,
-                        rotation_strategy: strategy,
-                        created_at: Utc::now().to_rfc3339(),
-                        updated_at: Utc::now().to_rfc3339(),
-                    };
-
-                    server
-                        .with_global_store(|store| {
-                            store
-                                .vault_set_rotation(&rotation)
-                                .map_err(|e| e.to_string())
-                        })
-                        .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                        server
+                            .with_global_store(|store| {
+                                store
+                                    .vault_set_rotation(&rotation)
+                                    .map_err(|e| e.to_string())
+                            })
+                            .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                    }
                 }
             }
-        }
 
-        serde_json::to_string(&json!({
-            "stored": true,
-            "name": params.name,
-            "secret_type": secret_type,
-            "created": is_new
-        }))
-        .map_err(|e| format!("serialize: {e}"))
+            serde_json::to_string(&json!({
+                "stored": true,
+                "name": params.name,
+                "secret_type": secret_type,
+                "created": is_new
+            }))
+            .map_err(|e| format!("serialize: {e}"))
+        })
     })();
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
@@ -957,14 +973,13 @@ pub(crate) async fn handle_vault_get(
     params: VaultGetParams,
 ) -> Result<String, String> {
     let requested_name = params.name.clone();
-    let result = (|| {
-        let key = get_vault_key(server)?;
+    let result = with_vault_key(server, |key| {
         let (target_name, entry) =
             server.with_global_store(|store| select_vault_entry(store, &params))?;
 
         ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
 
-        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
         let value = String::from_utf8(decrypted)
             .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
 
@@ -985,7 +1000,7 @@ pub(crate) async fn handle_vault_get(
             "access_count": new_access_count,
         }))
         .map_err(|e| format!("serialize: {e}"))
-    })();
+    });
 
     record_vault_audit(
         server,
@@ -1044,7 +1059,7 @@ pub(crate) async fn handle_vault_remove(
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
     let result = (|| {
-        let _key = get_vault_key(server)?;
+        ensure_vault_unlocked(server)?;
         let removed = server
             .with_global_store(|store| {
                 store
@@ -1111,7 +1126,7 @@ pub(crate) async fn handle_vault_setup_rotation(
     server: &MemoryServer,
     params: VaultSetupRotationParams,
 ) -> Result<String, String> {
-    let _key = get_vault_key(server)?;
+    ensure_vault_unlocked(server)?;
 
     if params.total_keys < 2 {
         return Err("Rotation requires at least 2 keys".into());
@@ -1188,65 +1203,66 @@ pub(crate) async fn handle_vault_set_api_key_pool(
             return Err("API key pool requires at least one non-empty value".to_string());
         }
 
-        let key = get_vault_key(server)?;
         let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
         let now = Utc::now().to_rfc3339();
         let strategy = normalize_rotation_strategy(&params.strategy);
-        let removed_members = server
-            .with_global_store(|store| {
-                let existing_entries = store
-                    .vault_list_entries_by_type("api_key")
-                    .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
-                let mut removed_members = Vec::new();
-                for (idx, value) in values.iter().enumerate() {
-                    let name = format!("{}_{}", params.prefix, idx + 1);
-                    let is_new = !store
-                        .vault_entry_exists(&name)
-                        .map_err(|e| format!("vault_entry_exists: {e}"))?;
-                    let (encrypted_value, nonce) = crypto::encrypt(&key, value.as_bytes())?;
-                    let entry = VaultEntry {
-                        name,
-                        encrypted_value,
-                        nonce,
-                        secret_type: "api_key".to_string(),
-                        description: params.description.clone(),
-                        allowed_agents: allowed_agents.clone(),
-                        created_at: if is_new { now.clone() } else { String::new() },
-                        updated_at: now.clone(),
-                        accessed_at: String::new(),
-                        access_count: 0,
-                    };
-                    store
-                        .vault_upsert_entry(&entry)
-                        .map_err(|e| format!("vault_upsert_entry: {e}"))?;
-                }
-                for entry in existing_entries {
-                    if api_key_pool_member_index(&entry.name, &params.prefix)
-                        .is_some_and(|idx| idx > values.len())
-                    {
-                        if store
-                            .vault_delete_entry(&entry.name)
-                            .map_err(|e| format!("vault_delete_entry: {e}"))?
+        let removed_members = with_vault_key(server, |key| {
+            server
+                .with_global_store(|store| {
+                    let existing_entries = store
+                        .vault_list_entries_by_type("api_key")
+                        .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
+                    let mut removed_members = Vec::new();
+                    for (idx, value) in values.iter().enumerate() {
+                        let name = format!("{}_{}", params.prefix, idx + 1);
+                        let is_new = !store
+                            .vault_entry_exists(&name)
+                            .map_err(|e| format!("vault_entry_exists: {e}"))?;
+                        let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
+                        let entry = VaultEntry {
+                            name,
+                            encrypted_value,
+                            nonce,
+                            secret_type: "api_key".to_string(),
+                            description: params.description.clone(),
+                            allowed_agents: allowed_agents.clone(),
+                            created_at: if is_new { now.clone() } else { String::new() },
+                            updated_at: now.clone(),
+                            accessed_at: String::new(),
+                            access_count: 0,
+                        };
+                        store
+                            .vault_upsert_entry(&entry)
+                            .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+                    }
+                    for entry in existing_entries {
+                        if api_key_pool_member_index(&entry.name, &params.prefix)
+                            .is_some_and(|idx| idx > values.len())
                         {
-                            removed_members.push(entry.name);
+                            if store
+                                .vault_delete_entry(&entry.name)
+                                .map_err(|e| format!("vault_delete_entry: {e}"))?
+                            {
+                                removed_members.push(entry.name);
+                            }
                         }
                     }
-                }
 
-                let rotation = VaultKeyRotation {
-                    prefix: params.prefix.clone(),
-                    current_index: 1,
-                    total_keys: values.len() as i64,
-                    rotation_strategy: strategy.clone(),
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                };
-                store
-                    .vault_set_rotation(&rotation)
-                    .map_err(|e| format!("vault_set_rotation: {e}"))?;
-                Ok(removed_members)
-            })
-            .map_err(|e| format!("save API key pool: {e}"))?;
+                    let rotation = VaultKeyRotation {
+                        prefix: params.prefix.clone(),
+                        current_index: 1,
+                        total_keys: values.len() as i64,
+                        rotation_strategy: strategy.clone(),
+                        created_at: now.clone(),
+                        updated_at: now.clone(),
+                    };
+                    store
+                        .vault_set_rotation(&rotation)
+                        .map_err(|e| format!("vault_set_rotation: {e}"))?;
+                    Ok(removed_members)
+                })
+                .map_err(|e| format!("save API key pool: {e}"))
+        })?;
 
         serde_json::to_string(&json!({
             "stored": true,
