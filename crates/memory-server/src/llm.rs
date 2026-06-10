@@ -107,9 +107,10 @@ enum ClaudeCliFailureKind {
 
 impl ClaudeCliFailureKind {
     fn from_error(error: &str) -> Option<Self> {
-        if error.contains("spawn failed") {
+        let error = error.trim_start();
+        if error.starts_with("claude cli spawn failed:") {
             Some(Self::SpawnFailed)
-        } else if error.contains("timeout") {
+        } else if error.starts_with("claude cli timeout after ") {
             Some(Self::Timeout)
         } else {
             None
@@ -1897,6 +1898,25 @@ mod tests {
                 .claude_cli_skip_at(now + Duration::from_secs(1))
                 .is_none(),
             "non-availability errors should not disable future CLI attempts"
+        );
+
+        client.record_claude_cli_failure_at(
+            "claude cli exited 1: model output mentioned timeout",
+            now,
+        );
+        assert!(
+            client
+                .claude_cli_skip_at(now + Duration::from_secs(1))
+                .is_none(),
+            "stderr content should not look like a process timeout"
+        );
+
+        client.record_claude_cli_failure_at("claude cli exited 1: prompt said spawn failed", now);
+        assert!(
+            client
+                .claude_cli_skip_at(now + Duration::from_secs(1))
+                .is_none(),
+            "stderr content should not look like a spawn failure"
         );
     }
 
