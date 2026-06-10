@@ -172,7 +172,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
 
 fn clear_cached_vault_state(server: &MemoryServer) {
     let mut v = server.vault_write();
-    v.key = None;
+    let _ = v.key.take();
     v.unlock_time = None;
     server.llm.clear_provider_secrets();
 }
@@ -217,6 +217,8 @@ fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
         if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
             return v
                 .key
+                .as_ref()
+                .map(CachedVaultKey::bytes)
                 .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string());
         }
     }
@@ -735,8 +737,8 @@ pub(crate) async fn handle_vault_init(
 
         let salt = crypto::generate_salt();
         let salt_b64 = B64.encode(salt);
-        let key = crypto::derive_key(&params.password, &salt)?;
-        let verifier = crypto::create_verifier(&key)?;
+        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
+        let verifier = crypto::create_verifier(key.bytes())?;
         let now = Utc::now().to_rfc3339();
         let config = VaultConfig {
             salt: salt_b64,
@@ -754,7 +756,7 @@ pub(crate) async fn handle_vault_init(
 
         {
             let mut v = server.vault_write();
-            v.key = Some(key);
+            v.key = Some(CachedVaultKey::copy_from(key.bytes()));
             v.unlock_time = Some(Instant::now());
             v.failed_attempts = (0, None);
         }
@@ -794,15 +796,15 @@ pub(crate) async fn handle_vault_unlock(
         let salt = B64
             .decode(&config.salt)
             .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
-        let key = crypto::derive_key(&params.password, &salt)?;
+        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
 
-        if !crypto::verify_password(&key, &config.verifier)? {
+        if !crypto::verify_password(key.bytes(), &config.verifier)? {
             return record_vault_unlock_failure(server);
         }
 
         {
             let mut v = server.vault_write();
-            v.key = Some(key);
+            v.key = Some(CachedVaultKey::copy_from(key.bytes()));
             v.unlock_time = Some(Instant::now());
             v.failed_attempts = (0, None);
         }

@@ -11,15 +11,46 @@ use rand::RngCore;
 const VERIFIER_PLAINTEXT: &[u8] = b"tachi-vault-ok";
 
 /// Derive a 32-byte encryption key from password + salt using Argon2id.
-pub fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+pub fn derive_key_into(password: &str, salt: &[u8], key: &mut [u8; 32]) -> Result<(), String> {
     let params =
         Params::new(65536, 3, 4, Some(32)).map_err(|e| format!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = [0u8; 32];
     argon2
-        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .hash_password_into(password.as_bytes(), salt, key)
         .map_err(|e| format!("Key derivation failed: {e}"))?;
-    Ok(key)
+    Ok(())
+}
+
+pub struct DerivedVaultKey {
+    bytes: [u8; 32],
+}
+
+impl DerivedVaultKey {
+    pub fn derive(password: &str, salt: &[u8]) -> Result<Self, String> {
+        let mut bytes = [0u8; 32];
+        derive_key_into(password, salt, &mut bytes)?;
+        Ok(Self { bytes })
+    }
+
+    pub fn bytes(&self) -> &[u8; 32] {
+        &self.bytes
+    }
+}
+
+impl Drop for DerivedVaultKey {
+    fn drop(&mut self) {
+        zero_key(&mut self.bytes);
+    }
+}
+
+/// Overwrite key bytes before dropping stack buffers or cached key material.
+pub fn zero_key(key: &mut [u8; 32]) {
+    for byte in key.iter_mut() {
+        unsafe {
+            std::ptr::write_volatile(byte, 0);
+        }
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Generate a random 32-byte salt.
@@ -114,17 +145,17 @@ mod tests {
     fn test_derive_key_deterministic() {
         let password = "test_password";
         let salt = b"0123456789abcdef0123456789abcdef";
-        let key1 = derive_key(password, salt).unwrap();
-        let key2 = derive_key(password, salt).unwrap();
-        assert_eq!(key1, key2);
+        let key1 = DerivedVaultKey::derive(password, salt).unwrap();
+        let key2 = DerivedVaultKey::derive(password, salt).unwrap();
+        assert_eq!(key1.bytes(), key2.bytes());
     }
 
     #[test]
     fn test_derive_key_different_passwords() {
         let salt = b"0123456789abcdef0123456789abcdef";
-        let key1 = derive_key("password1", salt).unwrap();
-        let key2 = derive_key("password2", salt).unwrap();
-        assert_ne!(key1, key2);
+        let key1 = DerivedVaultKey::derive("password1", salt).unwrap();
+        let key2 = DerivedVaultKey::derive("password2", salt).unwrap();
+        assert_ne!(key1.bytes(), key2.bytes());
     }
 
     #[test]

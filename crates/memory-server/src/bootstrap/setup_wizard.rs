@@ -315,8 +315,8 @@ fn init_vault_inline(
     }
 
     let salt = crate::vault_crypto::generate_salt();
-    let key = crate::vault_crypto::derive_key(&password, &salt)?;
-    let verifier = crate::vault_crypto::create_verifier(&key)?;
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+    let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
     let salt_b64 = B64.encode(salt);
     let now = chrono::Utc::now().to_rfc3339();
 
