@@ -289,7 +289,7 @@ impl ServerHandler for MemoryServer {
                         tool_name: tool_name_owned.clone(),
                         arguments: tool_args_for_dlq.clone(),
                         error: error_str.clone(),
-                        error_category: category.clone(),
+                        error_category: category,
                         timestamp: Utc::now().to_rfc3339(),
                         retry_count: 0,
                         max_retries: 3,
