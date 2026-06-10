@@ -138,6 +138,7 @@ async fn handoff_leave_persists_to_memory_store() {
         .expect("get_memory for handoff should succeed");
     let mem_json: serde_json::Value = serde_json::from_str(&memory).expect("should be JSON");
     assert_eq!(mem_json["category"], json!("handoff"));
+    assert_eq!(mem_json["retention_policy"], json!("pinned"));
     assert!(
         mem_json["text"]
             .as_str()
