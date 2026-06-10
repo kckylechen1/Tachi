@@ -6,7 +6,29 @@ use super::*;
 pub(super) enum CircuitState {
     Closed,
     Open { until: Instant },
-    HalfOpen,
+    HalfOpen { probe_in_flight: bool },
+}
+
+enum CircuitProbeDecision<'a> {
+    Allowed(Option<HalfOpenProbeGuard<'a>>),
+    Open,
+    ProbeInProgress,
+}
+
+struct HalfOpenProbeGuard<'a> {
+    pool: &'a McpClientPool,
+    server_name: String,
+}
+
+impl Drop for HalfOpenProbeGuard<'_> {
+    fn drop(&mut self) {
+        let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
+        if let Some((CircuitState::HalfOpen { probe_in_flight }, _)) =
+            circuits.get_mut(&self.server_name)
+        {
+            *probe_in_flight = false;
+        }
+    }
 }
 
 pub(super) struct ChildConnection {
@@ -36,6 +58,45 @@ impl McpClientPool {
             semaphores: std::sync::Mutex::new(HashMap::new()),
             connecting_locks: std::sync::Mutex::new(HashMap::new()),
             idle_ttl: Duration::from_secs(300),
+        }
+    }
+
+    fn acquire_circuit_probe<'a>(
+        &'a self,
+        server_name: &str,
+        now: Instant,
+    ) -> CircuitProbeDecision<'a> {
+        let mut circuits = lock_or_recover(&self.circuits, "mcp_pool.circuits");
+        let Some((state, count)) = circuits.get_mut(server_name) else {
+            return CircuitProbeDecision::Allowed(None);
+        };
+
+        match state {
+            CircuitState::Open { until } => {
+                if now < *until {
+                    return CircuitProbeDecision::Open;
+                }
+                *state = CircuitState::HalfOpen {
+                    probe_in_flight: true,
+                };
+                *count = 0;
+                CircuitProbeDecision::Allowed(Some(HalfOpenProbeGuard {
+                    pool: self,
+                    server_name: server_name.to_string(),
+                }))
+            }
+            CircuitState::HalfOpen { probe_in_flight } => {
+                if *probe_in_flight {
+                    CircuitProbeDecision::ProbeInProgress
+                } else {
+                    *probe_in_flight = true;
+                    CircuitProbeDecision::Allowed(Some(HalfOpenProbeGuard {
+                        pool: self,
+                        server_name: server_name.to_string(),
+                    }))
+                }
+            }
+            CircuitState::Closed => CircuitProbeDecision::Allowed(None),
         }
     }
 }
@@ -388,39 +449,54 @@ impl MemoryServer {
             }
         }
 
-        // 2. Check circuit breaker
-        {
-            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-            if let Some((state, count)) = circuits.get_mut(server_name) {
-                match state {
-                    CircuitState::Open { until } => {
-                        if Instant::now() < *until {
-                            audit_reject("circuit_open");
-                            self.record_sandbox_exec_audit(
-                                &server_id,
-                                "preflight",
-                                "denied",
-                                Some("circuit breaker open"),
-                                0,
-                                Some(tool_name),
-                                Some("circuit_open"),
-                                &json!({
-                                    "server_name": server_name,
-                                    "requested_capability_id": requested_capability_id,
-                                }),
-                            );
-                            return Err(rmcp::ErrorData::internal_error(
-                                format!("Circuit open for '{}', retry after cooldown", server_name),
-                                None,
-                            ));
-                        }
-                        *state = CircuitState::HalfOpen;
-                        *count = 0;
-                    }
-                    CircuitState::HalfOpen | CircuitState::Closed => {}
-                }
+        // 2. Check circuit breaker. Once an open circuit cools down, allow
+        // exactly one half-open probe until it succeeds, fails, or exits early.
+        let _half_open_probe = match self.pool.acquire_circuit_probe(server_name, Instant::now()) {
+            CircuitProbeDecision::Allowed(probe) => probe,
+            CircuitProbeDecision::Open => {
+                audit_reject("circuit_open");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("circuit breaker open"),
+                    0,
+                    Some(tool_name),
+                    Some("circuit_open"),
+                    &json!({
+                        "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                    }),
+                );
+                return Err(rmcp::ErrorData::internal_error(
+                    format!("Circuit open for '{}', retry after cooldown", server_name),
+                    None,
+                ));
             }
-        }
+            CircuitProbeDecision::ProbeInProgress => {
+                audit_reject("circuit_half_open_probe_in_progress");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("circuit breaker half-open probe already in progress"),
+                    0,
+                    Some(tool_name),
+                    Some("circuit_half_open_probe_in_progress"),
+                    &json!({
+                        "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                    }),
+                );
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "Circuit half-open probe already in progress for '{}'",
+                        server_name
+                    ),
+                    None,
+                ));
+            }
+        };
 
         // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
@@ -587,7 +663,7 @@ impl MemoryServer {
                 .entry(server_name.to_string())
                 .or_insert((CircuitState::Closed, 0));
             entry.1 += 1;
-            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen) {
+            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen { .. }) {
                 entry.0 = CircuitState::Open {
                     until: Instant::now() + Duration::from_secs(30),
                 };
@@ -597,5 +673,92 @@ impl MemoryServer {
         if should_remove {
             lock_or_recover(&self.pool.connections, "mcp_pool.connections").remove(server_name);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn circuit_state(pool: &McpClientPool, server_name: &str) -> Option<CircuitState> {
+        lock_or_recover(&pool.circuits, "mcp_pool.circuits")
+            .get(server_name)
+            .map(|(state, _)| *state)
+    }
+
+    #[test]
+    fn half_open_circuit_allows_only_one_probe() {
+        let pool = McpClientPool::new();
+        let server_name = "demo";
+        lock_or_recover(&pool.circuits, "mcp_pool.circuits").insert(
+            server_name.to_string(),
+            (
+                CircuitState::Open {
+                    until: Instant::now() - Duration::from_secs(1),
+                },
+                3,
+            ),
+        );
+
+        let first = pool.acquire_circuit_probe(server_name, Instant::now());
+        let first_guard = match first {
+            CircuitProbeDecision::Allowed(Some(guard)) => guard,
+            _ => panic!("expired open circuit should allow one half-open probe"),
+        };
+        assert!(matches!(
+            circuit_state(&pool, server_name),
+            Some(CircuitState::HalfOpen {
+                probe_in_flight: true
+            })
+        ));
+
+        assert!(matches!(
+            pool.acquire_circuit_probe(server_name, Instant::now()),
+            CircuitProbeDecision::ProbeInProgress
+        ));
+
+        drop(first_guard);
+        assert!(matches!(
+            circuit_state(&pool, server_name),
+            Some(CircuitState::HalfOpen {
+                probe_in_flight: false
+            })
+        ));
+
+        let second = pool.acquire_circuit_probe(server_name, Instant::now());
+        let _second_guard = match second {
+            CircuitProbeDecision::Allowed(Some(guard)) => guard,
+            _ => panic!("released half-open circuit should allow the next probe"),
+        };
+    }
+
+    #[test]
+    fn half_open_probe_guard_preserves_terminal_circuit_state() {
+        let pool = McpClientPool::new();
+        let server_name = "demo";
+        lock_or_recover(&pool.circuits, "mcp_pool.circuits").insert(
+            server_name.to_string(),
+            (
+                CircuitState::HalfOpen {
+                    probe_in_flight: false,
+                },
+                0,
+            ),
+        );
+
+        let probe = pool.acquire_circuit_probe(server_name, Instant::now());
+        let probe_guard = match probe {
+            CircuitProbeDecision::Allowed(Some(guard)) => guard,
+            _ => panic!("half-open circuit should allow a probe when none is active"),
+        };
+        lock_or_recover(&pool.circuits, "mcp_pool.circuits")
+            .insert(server_name.to_string(), (CircuitState::Closed, 0));
+
+        drop(probe_guard);
+
+        assert_eq!(
+            circuit_state(&pool, server_name),
+            Some(CircuitState::Closed)
+        );
     }
 }
