@@ -50,7 +50,7 @@ pub use schema::{init_schema, init_schema_with_label, init_schema_with_label_mut
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, list_state, save_derived,
-    set_state, StateRow,
+    save_derived_with_id, set_state, StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 pub use vault_db::{

@@ -316,6 +316,17 @@ fn proposal_root(agent_id: &str) -> String {
     )
 }
 
+fn agent_evolution_proposal_identity(
+    params: &SynthesizeAgentEvolutionParams,
+    job: &memory_core::FoundryJobSpec,
+) -> (String, String) {
+    let job_key = sanitize_safe_path_name(&job.id);
+    (
+        format!("agent-evolution-{job_key}"),
+        format!("{}/{}", proposal_root(&params.agent_id), job_key),
+    )
+}
+
 fn review_status_or_default(raw: Option<&str>) -> String {
     match raw.unwrap_or("").trim().to_ascii_lowercase().as_str() {
         "approved" => "approved".to_string(),
@@ -389,13 +400,7 @@ fn persist_agent_evolution_proposal(
     job: &memory_core::FoundryJobSpec,
     synthesis: &memory_core::AgentEvolutionSynthesis,
 ) -> Result<(String, String, DbScope), String> {
-    let root = proposal_root(&params.agent_id);
-    let path = format!(
-        "{}/{}-{}",
-        root,
-        Utc::now().format("%Y%m%dT%H%M%S"),
-        sanitize_safe_path_name(&job.id)
-    );
+    let (proposal_id, path) = agent_evolution_proposal_identity(params, job);
     let summary = if synthesis.summary.trim().is_empty() {
         synthesis
             .no_change_reason
@@ -432,7 +437,8 @@ fn persist_agent_evolution_proposal(
     );
     let derived_id = server.with_store_for_scope(target_db, |store| {
         store
-            .save_derived(
+            .save_derived_with_id(
+                &proposal_id,
                 &text,
                 &path,
                 &summary,
@@ -441,6 +447,7 @@ fn persist_agent_evolution_proposal(
                 target_db.as_str(),
                 &metadata,
             )
+            .map(|()| proposal_id.clone())
             .map_err(|e| format!("Failed to save agent evolution proposal: {e}"))
     })?;
     Ok((derived_id, path, target_db))
@@ -1146,6 +1153,111 @@ mod tests {
         assert_eq!(parse_review_status("rejected").unwrap(), "rejected");
         assert_eq!(parse_review_status("applied").unwrap(), "applied");
         assert!(parse_review_status("queued").is_err());
+    }
+
+    #[test]
+    fn agent_evolution_proposal_identity_is_stable_per_job() {
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex executor".to_string(),
+            display_name: None,
+            documents: Vec::new(),
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: Vec::new(),
+            dry_run: false,
+        };
+        let job = memory_core::FoundryJobSpec {
+            id: "foundry-job:abc/123".to_string(),
+            kind: memory_core::FoundryJobKind::AgentEvolution,
+            lane: memory_core::FoundryModelLane::Reasoning,
+            status: memory_core::FoundryJobStatus::Queued,
+            target_agent_id: Some(params.agent_id.clone()),
+            requested_by: None,
+            created_at: "2026-06-10T00:00:00Z".to_string(),
+            evidence_count: 1,
+            goal_count: 1,
+            metadata: json!({}),
+        };
+
+        let first = agent_evolution_proposal_identity(&params, &job);
+        let second = agent_evolution_proposal_identity(&params, &job);
+
+        assert_eq!(first, second);
+        assert_eq!(first.0, "agent-evolution-foundry-job_abc_123");
+        assert_eq!(
+            first.1,
+            "/foundry/agents/codex_executor/proposals/foundry-job_abc_123"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_evolution_proposal_persist_is_idempotent_per_job() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let server = crate::MemoryServer::new(temp.path().to_path_buf(), None).expect("server");
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex".to_string(),
+            display_name: None,
+            documents: Vec::new(),
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: vec!["tighten routing".to_string()],
+            dry_run: false,
+        };
+        let job = memory_core::FoundryJobSpec {
+            id: "foundry-job:stable".to_string(),
+            kind: memory_core::FoundryJobKind::AgentEvolution,
+            lane: memory_core::FoundryModelLane::Reasoning,
+            status: memory_core::FoundryJobStatus::Queued,
+            target_agent_id: Some(params.agent_id.clone()),
+            requested_by: None,
+            created_at: "2026-06-10T00:00:00Z".to_string(),
+            evidence_count: 1,
+            goal_count: 1,
+            metadata: json!({}),
+        };
+
+        let first_synthesis = memory_core::AgentEvolutionSynthesis {
+            summary: "first".to_string(),
+            stable_signals: Vec::new(),
+            drift_signals: Vec::new(),
+            proposals: Vec::new(),
+            no_change_reason: None,
+        };
+        let second_synthesis = memory_core::AgentEvolutionSynthesis {
+            summary: "second".to_string(),
+            stable_signals: Vec::new(),
+            drift_signals: Vec::new(),
+            proposals: Vec::new(),
+            no_change_reason: None,
+        };
+
+        let (first_id, first_path, target_db) =
+            persist_agent_evolution_proposal(&server, &params, &job, &first_synthesis)
+                .expect("first persist");
+        let (second_id, second_path, second_target_db) =
+            persist_agent_evolution_proposal(&server, &params, &job, &second_synthesis)
+                .expect("second persist");
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(first_path, second_path);
+        assert_eq!(target_db, second_target_db);
+
+        let root = proposal_root(&params.agent_id);
+        let rows = server
+            .with_store_for_scope_read(target_db, |store| {
+                store
+                    .list_derived_by_source(AGENT_EVOLUTION_PROPOSAL_SOURCE, &root, 10)
+                    .map_err(|e| format!("list proposals: {e}"))
+            })
+            .expect("list proposals");
+        assert_eq!(rows.len(), 1, "{rows:#?}");
+        assert_eq!(rows[0]["id"], first_id);
+        assert_eq!(rows[0]["path"], first_path);
+        assert_eq!(rows[0]["summary"], "second");
     }
 
     #[test]
