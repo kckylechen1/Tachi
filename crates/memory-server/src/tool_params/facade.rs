@@ -948,6 +948,10 @@ pub(crate) struct TachiCompleteParams {
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
 
+    /// Feedback/prompt-quality rule ids that were applied to this task.
+    #[serde(default)]
+    pub feedback_rules_applied: Vec<String>,
+
     /// Parent dispatch ID (links back to tachi_dispatch record)
     #[serde(default)]
     pub dispatch_id: Option<String>,
@@ -1234,6 +1238,9 @@ pub(crate) struct TachiTaskParams {
     /// Structured subagent eval records for action="complete".
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
+    /// Feedback/prompt-quality rule ids that were applied to this task.
+    #[serde(default)]
+    pub feedback_rules_applied: Vec<String>,
     /// Evidence references for action="complete" verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,

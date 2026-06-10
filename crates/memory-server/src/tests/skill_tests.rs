@@ -1120,6 +1120,7 @@ async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
             diff: None,
             worktree: None,
             subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
             dispatch_id: None,
             flow_id: Some("flow-loadout-eval".to_string()),
             issue_ref: Some("kckylechen1/tachi#194".to_string()),

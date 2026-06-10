@@ -114,16 +114,27 @@ pub(crate) async fn handle_tachi_memory(
                 .kind
                 .clone()
                 .or_else(|| (!scope_is_note).then(|| "memory".to_string()));
+            let mut path = params.path.clone();
+            let mut category = params.category.clone();
+            let mut keywords = params.keywords.clone();
+            let mut metadata = params.metadata.clone();
+            crate::feedback_rule_ops::normalize_feedback_rule_save(
+                &kind,
+                &mut path,
+                &mut category,
+                &mut keywords,
+                &mut metadata,
+            );
             let save_params = TachiSaveParams {
                 text,
                 id: params.id.clone(),
                 kind,
                 title: params.title.clone(),
                 summary: params.summary.clone(),
-                path: params.path.clone(),
+                path,
                 importance: params.importance,
-                category: params.category.clone(),
-                keywords: params.keywords.clone(),
+                category,
+                keywords,
                 entities: params.entities.clone(),
                 scope: params.scope.clone(),
                 project: params.project.clone(),
@@ -135,7 +146,7 @@ pub(crate) async fn handle_tachi_memory(
                 source: params.source.clone(),
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
-                metadata: params.metadata.clone(),
+                metadata,
                 files: params.files.clone(),
             };
             let body = handle_tachi_save(server, save_params).await?;

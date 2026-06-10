@@ -59,6 +59,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         trajectory: None,
         diff: None,
         subagents: Vec::new(),
+        feedback_rules_applied: Vec::new(),
         evidence_refs: Vec::new(),
         tests_run: Vec::new(),
         diff_present: None,
@@ -115,6 +116,96 @@ fn task_params(action: &str) -> TachiTaskParams {
         wiki_domain: None,
         force: false,
     }
+}
+
+fn memory_params(action: &str) -> TachiMemoryParams {
+    TachiMemoryParams {
+        action: action.to_string(),
+        format: Some("json".to_string()),
+        query: None,
+        scope: None,
+        top_k: 6,
+        path_prefix: None,
+        file_context: None,
+        error_context: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        synthesize: false,
+        model: None,
+        text: None,
+        title: None,
+        summary: None,
+        topic: None,
+        keywords: Vec::new(),
+        entities: Vec::new(),
+        importance: None,
+        retention_policy: None,
+        kind: None,
+        path: None,
+        id: None,
+        force: false,
+        source: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        files: Vec::new(),
+        flow_id: None,
+        event: None,
+        state: None,
+        project: None,
+        domain: None,
+        compact: false,
+    }
+}
+
+async fn save_grep_evidence_feedback_rule(server: &MemoryServer) -> String {
+    let mut params = memory_params("save");
+    params.kind = Some("feedback_rule".to_string());
+    params.title = Some("Subagent audit prompts require explicit search evidence".to_string());
+    params.topic = Some("Subagent audit prompts require explicit search evidence".to_string());
+    params.path = Some("/feedback/subagent/code-audit/grep-evidence".to_string());
+    params.category = Some("prompt_rule".to_string());
+    params.text = Some(
+        "When dispatching subagents for code audits or dead-code scans, give exact search patterns and require grep/ripgrep evidence in reports."
+            .to_string(),
+    );
+    params.keywords = vec![
+        "subagent".to_string(),
+        "code_audit".to_string(),
+        "dead_code".to_string(),
+        "grep".to_string(),
+        "false_positive".to_string(),
+    ];
+    params.force = true;
+    params.metadata = Some(json!({
+        "applies_to": {
+            "task_type": ["review_request", "code_audit", "dead_code_scan"],
+            "profiles": ["codex_55_review", "codex_53_fast", "deepseek_explore"],
+            "stage": ["review", "explore"]
+        },
+        "trigger_keywords": ["unused", "no callers", "dead code", "grep", "search repo"],
+        "prompt_patch": "For any 'unused', 'no callers', or dead-code claim: search both identifier form and call form; include exact grep/ripgrep commands; list paths searched; report uncertainty if the search scope is incomplete.",
+        "evidence_contract": [
+            "grep_commands",
+            "paths_searched",
+            "matching_files_or_none",
+            "confidence",
+            "uncertainty_notes"
+        ]
+    }));
+
+    let raw = crate::facade_memory_ops::handle_tachi_memory(server, params)
+        .await
+        .expect("feedback rule save should succeed");
+    serde_json::from_str::<Value>(&raw)
+        .expect("save JSON")
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("saved rule id")
+        .to_string()
 }
 
 #[tokio::test]
@@ -260,6 +351,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
                 cost_tokens: Some(321),
                 cost_usd: None,
             }],
+            feedback_rules_applied: Vec::new(),
             dispatch_id: None,
             flow_id: Some("flow-194".to_string()),
             issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -501,6 +593,7 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             diff: None,
             worktree: None,
             subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
             evidence_refs: Vec::new(),
             tests_run: vec!["cargo test -p memory-server dispatch_tests".to_string()],
             diff_present: Some(true),
@@ -580,6 +673,7 @@ async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
             diff: None,
             worktree: None,
             subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
             dispatch_id: None,
             flow_id: Some("flow-194".to_string()),
             issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -775,6 +869,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
                 diff: Some("diff --git a/x b/x".to_string()),
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-route-sim".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -885,6 +980,7 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
                 diff: Some("diff --git a/x b/x".to_string()),
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-route-policy-proposals".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -989,6 +1085,7 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-loadout-evolution-proposal".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -1406,6 +1503,7 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-loadout-evolution-threshold".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -1464,6 +1562,7 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
                 diff: None,
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-card-risk-evolution".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -1660,6 +1759,7 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
                 diff: Some("diff --git a/x b/x".to_string()),
                 worktree: None,
                 subagents: Vec::new(),
+                feedback_rules_applied: Vec::new(),
                 dispatch_id: None,
                 flow_id: Some("flow-route-policy-loader".to_string()),
                 issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -1916,6 +2016,7 @@ async fn tachi_task_recommend_surfaces_human_override_and_retry_penalties() {
                 cost_tokens: Some(2000),
                 cost_usd: Some(0.05),
             }],
+            feedback_rules_applied: Vec::new(),
             dispatch_id: None,
             flow_id: Some("flow-194".to_string()),
             issue_ref: Some("kckylechen1/tachi#194".to_string()),
@@ -2022,6 +2123,7 @@ async fn tachi_task_recommend_does_not_apply_same_backend_wrong_role_subagent_ev
                 cost_tokens: None,
                 cost_usd: None,
             }],
+            feedback_rules_applied: Vec::new(),
             dispatch_id: None,
             flow_id: Some("flow-role-guard".to_string()),
             issue_ref: None,
@@ -3615,6 +3717,29 @@ async fn dispatch_prompt_includes_task_route_overlay() {
 }
 
 #[tokio::test]
+async fn dispatch_prompt_injects_applicable_feedback_rules_separately() {
+    let server = make_server();
+    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+
+    let mut params = dispatch_params(
+        Some("codex"),
+        "Review the repo for unused functions and dead code claims.",
+    );
+    params.profile = Some("codex_55_review".to_string());
+    params.stage = Some("review".to_string());
+
+    let assembly = crate::dispatch_ops::assemble_prompt_with_trace(&server, &params).await;
+    let prompt = assembly.prompt;
+    assert!(prompt.contains("## Applicable feedback rules"), "{prompt}");
+    assert!(prompt.contains("Subagent audit prompts require explicit search evidence"));
+    assert!(prompt.contains("grep_commands"));
+    assert!(prompt.contains("paths_searched"));
+    assert!(!prompt.contains("## Relevant context from Tachi memory/wiki"));
+    assert_eq!(assembly.feedback_rules["status"], json!("applied"));
+    assert_eq!(assembly.feedback_rules["rules"][0]["id"], json!(rule_id));
+}
+
+#[tokio::test]
 async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
     let server = make_server();
     let prompt = crate::dispatch_ops::assemble_prompt(
@@ -3668,6 +3793,58 @@ async fn dispatch_prompt_invokes_stage_and_waza_skills_for_execute_slice() {
         prompt.contains("embedded_contract"),
         "child prompt should include fallback contract when tachi_skill MCP is unavailable: {prompt}"
     );
+}
+
+#[tokio::test]
+async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
+    let server = make_server();
+    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+    let raw = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("feedback-rule-complete".to_string()),
+            task: "Review unused code with grep evidence".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("code_audit".to_string()),
+            profile: Some("codex_55_review".to_string()),
+            risk: Some("medium".to_string()),
+            duration_ms: Some(42),
+            skills_used: vec!["skill:waza-check".to_string()],
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.9),
+            notes: Some("Applied grep evidence feedback rule.".to_string()),
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            feedback_rules_applied: vec![rule_id.clone()],
+            dispatch_id: None,
+            flow_id: None,
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: vec!["grep output".to_string()],
+            tests_run: vec!["cargo test feedback rules".to_string()],
+            diff_present: Some(false),
+            scope: None,
+            project: None,
+        }))
+        .await
+        .expect("completion should succeed");
+    let completed: Value = serde_json::from_str(&raw).expect("complete JSON");
+    let memory_id = completed["eval_entry"]["id"].as_str().expect("memory id");
+    let fetched = crate::memory_ops::handle_get_memory(
+        &server,
+        GetMemoryParams {
+            id: memory_id.to_string(),
+            include_archived: false,
+            project: None,
+        },
+    )
+    .await
+    .expect("eval memory should be readable");
+    let eval: Value = serde_json::from_str(&fetched).expect("eval JSON");
+    assert_eq!(eval["metadata"]["feedback_rules_applied"], json!([rule_id]));
 }
 
 #[tokio::test]
@@ -3971,6 +4148,7 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
     assert_eq!(response["capability_bundle"]["requested"], json!(true));
     assert_eq!(response["capability_bundle"]["status"], json!("injected"));
     assert_eq!(response["capability_bundle"]["injected"], json!(true));
+    assert_eq!(response["feedback_rules"]["status"], json!("none"));
     let artifact_file = response["capability_bundle_file"]
         .as_str()
         .expect("capability bundle file");
@@ -3980,6 +4158,7 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
     assert_eq!(artifact["requested"], json!(true));
     assert_eq!(artifact["status"], json!("injected"));
     assert_eq!(artifact["injected"], json!(true));
+    assert_eq!(artifact["feedback_rules"]["status"], json!("none"));
 
     let status: Value = serde_json::from_str(
         &std::fs::read_to_string(run_dir.join("status.json")).expect("status"),
