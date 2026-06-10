@@ -3,6 +3,8 @@ use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
 use serde_json::{json, Value};
 
+const FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS: usize = 512;
+
 #[derive(Clone, Debug)]
 pub(crate) struct FeedbackRuleQuery {
     pub task: String,
@@ -64,7 +66,7 @@ pub(crate) async fn applicable_feedback_rules(
     query: FeedbackRuleQuery,
 ) -> Vec<FeedbackRuleHit> {
     let search_query = feedback_search_query(&query);
-    let Ok(rows) = search_memory_rows(
+    let rows = match search_memory_rows(
         server,
         SearchMemoryParams {
             query: search_query,
@@ -90,8 +92,12 @@ pub(crate) async fn applicable_feedback_rules(
         false,
     )
     .await
-    else {
-        return Vec::new();
+    {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::warn!("feedback rule search failed: {err}");
+            return Vec::new();
+        }
     };
 
     let mut hits = rows
@@ -115,9 +121,9 @@ pub(crate) fn render_feedback_rules_section(rules: &[FeedbackRuleHit]) -> Option
         out.push_str(&format!("- rule_id: `{}`\n", rule.id));
         out.push_str(&format!("- path: `{}`\n", rule.path));
         if !rule.prompt_patch.trim().is_empty() {
-            out.push_str(&format!("- prompt_patch: {}\n", rule.prompt_patch.trim()));
+            render_multiline_field(&mut out, "prompt_patch", rule.prompt_patch.trim());
         } else {
-            out.push_str(&format!("- guidance: {}\n", rule.text.trim()));
+            render_multiline_field(&mut out, "guidance", rule.text.trim());
         }
         if !rule.evidence_contract.is_empty() {
             out.push_str("- evidence_contract:\n");
@@ -232,7 +238,10 @@ fn feedback_rule_hit(row: &Value, query: &FeedbackRuleQuery) -> Option<FeedbackR
 }
 
 fn feedback_search_query(query: &FeedbackRuleQuery) -> String {
-    let mut parts = vec![query.task.clone()];
+    let mut parts = vec![truncate_chars(
+        &query.task,
+        FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS,
+    )];
     if let Some(task_type) = query.task_type.as_deref() {
         parts.push(task_type.to_string());
     }
@@ -291,8 +300,53 @@ fn token_hits(haystack: &str, needles: Option<&Value>) -> usize {
     let haystack = haystack.to_ascii_lowercase();
     string_values(needles.unwrap_or(&Value::Null))
         .iter()
-        .filter(|needle| haystack.contains(needle.as_str()))
+        .filter(|needle| contains_keyword(&haystack, needle))
         .count()
+}
+
+fn render_multiline_field(out: &mut String, label: &str, value: &str) {
+    if !value.contains('\n') {
+        out.push_str(&format!("- {label}: {value}\n"));
+        return;
+    }
+
+    out.push_str(&format!("- {label}:\n"));
+    for line in value.lines() {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn contains_keyword(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return false;
+    }
+
+    let mut offset = 0;
+    while let Some(pos) = haystack[offset..].find(&needle) {
+        let start = offset + pos;
+        let end = start + needle.len();
+        if is_keyword_boundary(haystack[..start].chars().next_back())
+            && is_keyword_boundary(haystack[end..].chars().next())
+        {
+            return true;
+        }
+        offset = end;
+    }
+    false
+}
+
+fn is_keyword_boundary(ch: Option<char>) -> bool {
+    ch.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    value.chars().take(max_chars).collect()
 }
 
 fn string_values(value: &Value) -> Vec<String> {
@@ -312,5 +366,57 @@ fn string_values(value: &Value) -> Vec<String> {
 fn push_unique(items: &mut Vec<String>, value: &str) {
     if !items.iter().any(|item| item.eq_ignore_ascii_case(value)) {
         items.push(value.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_hits_requires_keyword_boundaries() {
+        let needles = json!(["rust", "dead code", "grep"]);
+
+        assert_eq!(token_hits("trust me, this is robust", Some(&needles)), 0);
+        assert_eq!(
+            token_hits("Rust workers should grep for dead code.", Some(&needles)),
+            3
+        );
+        assert_eq!(token_hits("dead-code grep", Some(&needles)), 1);
+    }
+
+    #[test]
+    fn feedback_search_query_truncates_long_task_text() {
+        let query = FeedbackRuleQuery {
+            task: "a".repeat(FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS + 200),
+            task_type: Some("review".to_string()),
+            profile: None,
+            stage: None,
+            keywords: vec!["grep".to_string()],
+            project: None,
+        };
+
+        let rendered = feedback_search_query(&query);
+        assert!(rendered.starts_with(&"a".repeat(FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS)));
+        assert!(!rendered.contains(&"a".repeat(FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS + 1)));
+        assert!(rendered.ends_with("review grep"));
+    }
+
+    #[test]
+    fn render_feedback_rules_section_preserves_multiline_prompt_patch() {
+        let section = render_feedback_rules_section(&[FeedbackRuleHit {
+            id: "rule-1".to_string(),
+            path: "/feedback/rule-1".to_string(),
+            title: "Evidence rule".to_string(),
+            text: String::new(),
+            prompt_patch: "Use this checklist:\n- search identifiers\n- list files".to_string(),
+            evidence_contract: Vec::new(),
+            score: 1,
+        }])
+        .expect("section");
+
+        assert!(section.contains("- prompt_patch:\n"));
+        assert!(section.contains("  - search identifiers\n"));
+        assert!(section.contains("  - list files\n"));
     }
 }

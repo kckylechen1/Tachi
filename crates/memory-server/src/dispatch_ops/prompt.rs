@@ -264,7 +264,7 @@ pub(crate) async fn assemble_prompt_with_trace(
         .to_string();
 
     if !context_query.is_empty() {
-        if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
+        match crate::memory_search_ops::search_memory_rows(
             server,
             SearchMemoryParams {
                 query: context_query.clone(),
@@ -291,33 +291,36 @@ pub(crate) async fn assemble_prompt_with_trace(
         )
         .await
         {
-            let rows = rows
-                .into_iter()
-                .filter(|row| {
-                    !row.get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .starts_with("/feedback")
-                })
-                .collect::<Vec<_>>();
-            if !rows.is_empty() {
-                parts.push("## Relevant context from Tachi memory/wiki".to_string());
-                for row in &rows {
-                    if let Some(text) =
-                        prompt_row_text(server, row, params.project.as_deref()).await
-                    {
-                        let path = row
-                            .get("path")
+            Ok(rows) => {
+                let rows = rows
+                    .into_iter()
+                    .filter(|row| {
+                        !row.get("path")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        parts.push(format!("### {}\n{}", path, text));
+                            .unwrap_or("")
+                            .starts_with("/feedback")
+                    })
+                    .collect::<Vec<_>>();
+                if !rows.is_empty() {
+                    parts.push("## Relevant context from Tachi memory/wiki".to_string());
+                    for row in &rows {
+                        if let Some(text) =
+                            prompt_row_text(server, row, params.project.as_deref()).await
+                        {
+                            let path = row
+                                .get("path")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            parts.push(format!("### {}\n{}", path, text));
+                        }
                     }
+                    parts.push(String::new());
                 }
-                parts.push(String::new());
             }
+            Err(err) => tracing::warn!("dispatch prompt memory context search failed: {err}"),
         }
 
-        if let Ok(rows) = crate::memory_search_ops::search_memory_rows(
+        match crate::memory_search_ops::search_memory_rows(
             server,
             SearchMemoryParams {
                 query: context_query.clone(),
@@ -344,29 +347,32 @@ pub(crate) async fn assemble_prompt_with_trace(
         )
         .await
         {
-            if !rows.is_empty() {
-                parts.push("## SFT gold examples (style only, not live facts)".to_string());
-                parts.push(
-                    "Use these as answer-shape references. Do not treat historical SFT samples as current project truth."
-                        .to_string(),
-                );
-                for row in &rows {
-                    if let Some(text) =
-                        prompt_row_text(server, row, params.project.as_deref()).await
-                    {
-                        let path = row
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        parts.push(format!(
-                            "### {}\n{}",
-                            path,
-                            compact_example_text(&text, 900)
-                        ));
+            Ok(rows) => {
+                if !rows.is_empty() {
+                    parts.push("## SFT gold examples (style only, not live facts)".to_string());
+                    parts.push(
+                        "Use these as answer-shape references. Do not treat historical SFT samples as current project truth."
+                            .to_string(),
+                    );
+                    for row in &rows {
+                        if let Some(text) =
+                            prompt_row_text(server, row, params.project.as_deref()).await
+                        {
+                            let path = row
+                                .get("path")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            parts.push(format!(
+                                "### {}\n{}",
+                                path,
+                                compact_example_text(&text, 900)
+                            ));
+                        }
                     }
+                    parts.push(String::new());
                 }
-                parts.push(String::new());
             }
+            Err(err) => tracing::warn!("dispatch prompt SFT context search failed: {err}"),
         }
     }
 
@@ -394,7 +400,7 @@ pub(crate) async fn assemble_prompt_with_trace(
 
     // 3. Avoidance: search for prior failures related to this task
     let avoidance_query = format!("{} failure OR partial OR watchdog", params.task);
-    if let Ok(eval_rows) = crate::memory_search_ops::search_memory_rows(
+    match crate::memory_search_ops::search_memory_rows(
         server,
         SearchMemoryParams {
             query: avoidance_query,
@@ -421,23 +427,26 @@ pub(crate) async fn assemble_prompt_with_trace(
     )
     .await
     {
-        if !eval_rows.is_empty() {
-            parts.push("## Prior pitfalls / avoidance notes".to_string());
-            for row in &eval_rows {
-                if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
-                    let path = row
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    parts.push(format!(
-                        "- **{}**: {}",
-                        path,
-                        text.chars().take(300).collect::<String>()
-                    ));
+        Ok(eval_rows) => {
+            if !eval_rows.is_empty() {
+                parts.push("## Prior pitfalls / avoidance notes".to_string());
+                for row in &eval_rows {
+                    if let Some(text) = row.get("text").and_then(|v| v.as_str()) {
+                        let path = row
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        parts.push(format!(
+                            "- **{}**: {}",
+                            path,
+                            text.chars().take(300).collect::<String>()
+                        ));
+                    }
                 }
+                parts.push(String::new());
             }
-            parts.push(String::new());
         }
+        Err(err) => tracing::warn!("dispatch prompt eval avoidance search failed: {err}"),
     }
 
     // 4. Operating instructions
