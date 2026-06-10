@@ -372,30 +372,32 @@ pub fn vault_get_key_health(
          FROM vault_key_health WHERE logical_name = ?1 AND key_id = ?2",
     )?;
 
-    let health = stmt.query_row(params![logical_name, key_id], |row| {
-        let auth_failed: i64 = row.get(8)?;
-        let disabled: i64 = row.get(9)?;
-        Ok(VaultKeyHealth {
-            logical_name: row.get(0)?,
-            key_id: row.get(1)?,
-            status: row.get(2)?,
-            cooldown_until: row.get(3)?,
-            last_success: row.get(4)?,
-            last_attempt: row.get(5)?,
-            last_error: row.get(6)?,
-            error_count: row.get(7)?,
-            auth_failed: auth_failed != 0,
-            disabled: disabled != 0,
-            metadata: row.get(10)?,
-            updated_at: row.get(11)?,
-        })
-    });
+    let health = stmt.query_row(params![logical_name, key_id], vault_key_health_from_row);
 
     match health {
         Ok(h) => Ok(Some(h)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+fn vault_key_health_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VaultKeyHealth> {
+    let auth_failed: i64 = row.get(8)?;
+    let disabled: i64 = row.get(9)?;
+    Ok(VaultKeyHealth {
+        logical_name: row.get(0)?,
+        key_id: row.get(1)?,
+        status: row.get(2)?,
+        cooldown_until: row.get(3)?,
+        last_success: row.get(4)?,
+        last_attempt: row.get(5)?,
+        last_error: row.get(6)?,
+        error_count: row.get(7)?,
+        auth_failed: auth_failed != 0,
+        disabled: disabled != 0,
+        metadata: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
 }
 
 pub fn vault_list_key_health(
@@ -411,45 +413,11 @@ pub fn vault_list_key_health(
     })?;
 
     let rows = if let Some(logical_name) = logical_name {
-        stmt.query_map(params![logical_name], |row| {
-            let auth_failed: i64 = row.get(8)?;
-            let disabled: i64 = row.get(9)?;
-            Ok(VaultKeyHealth {
-                logical_name: row.get(0)?,
-                key_id: row.get(1)?,
-                status: row.get(2)?,
-                cooldown_until: row.get(3)?,
-                last_success: row.get(4)?,
-                last_attempt: row.get(5)?,
-                last_error: row.get(6)?,
-                error_count: row.get(7)?,
-                auth_failed: auth_failed != 0,
-                disabled: disabled != 0,
-                metadata: row.get(10)?,
-                updated_at: row.get(11)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?
+        stmt.query_map(params![logical_name], vault_key_health_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
     } else {
-        stmt.query_map([], |row| {
-            let auth_failed: i64 = row.get(8)?;
-            let disabled: i64 = row.get(9)?;
-            Ok(VaultKeyHealth {
-                logical_name: row.get(0)?,
-                key_id: row.get(1)?,
-                status: row.get(2)?,
-                cooldown_until: row.get(3)?,
-                last_success: row.get(4)?,
-                last_attempt: row.get(5)?,
-                last_error: row.get(6)?,
-                error_count: row.get(7)?,
-                auth_failed: auth_failed != 0,
-                disabled: disabled != 0,
-                metadata: row.get(10)?,
-                updated_at: row.get(11)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?
+        stmt.query_map([], vault_key_health_from_row)?
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     Ok(rows)
