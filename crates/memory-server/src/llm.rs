@@ -93,6 +93,13 @@ enum KeyAvailability {
     Exhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRetryStatus {
+    Available,
+    RetryAfter(Duration),
+    Unavailable,
+}
+
 #[derive(Debug, Clone)]
 struct ClaudeCliFailure {
     kind: ClaudeCliFailureKind,
@@ -864,6 +871,139 @@ impl LlmClient {
         })
     }
 
+    fn remember_min_retry_delay(slot: &mut Option<Duration>, delay: Duration) {
+        if delay.is_zero() {
+            return;
+        }
+        match slot {
+            Some(existing) if *existing <= delay => {}
+            _ => *slot = Some(delay),
+        }
+    }
+
+    fn key_retry_status(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        now: Instant,
+        now_utc: DateTime<Utc>,
+        cooldowns: &HashMap<String, Instant>,
+    ) -> KeyRetryStatus {
+        let mut retry_after = None;
+        if let Some(until) = cooldowns.get(key_id).filter(|until| **until > now) {
+            Self::remember_min_retry_delay(&mut retry_after, until.saturating_duration_since(now));
+        }
+
+        let (availability, remaining_seconds) =
+            self.key_health_blocked_at(logical_name, key_id, now_utc);
+        match availability {
+            KeyAvailability::Available => match retry_after {
+                Some(delay) => KeyRetryStatus::RetryAfter(delay),
+                None => KeyRetryStatus::Available,
+            },
+            KeyAvailability::Cooldown => {
+                let remaining_seconds = remaining_seconds.unwrap_or(1).max(1) as u64;
+                Self::remember_min_retry_delay(
+                    &mut retry_after,
+                    Duration::from_secs(remaining_seconds),
+                );
+                retry_after
+                    .map(KeyRetryStatus::RetryAfter)
+                    .unwrap_or(KeyRetryStatus::Unavailable)
+            }
+            KeyAvailability::AuthFailed
+            | KeyAvailability::Disabled
+            | KeyAvailability::Exhausted => KeyRetryStatus::Unavailable,
+        }
+    }
+
+    fn selected_secret_retry_delay(&self, keys: &[&str]) -> Option<Duration> {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        {
+            let mut cooldowns = self
+                .provider_cooldowns
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cooldowns.retain(|_, until| *until > now);
+        }
+
+        let secrets = self
+            .provider_secrets
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cooldowns = self
+            .provider_cooldowns
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let mut saw_configured_key = false;
+        let mut retry_after = None;
+
+        for key in keys {
+            if let Some(entries) = secrets.get(*key) {
+                for entry in entries
+                    .iter()
+                    .filter(|entry| !entry.value.trim().is_empty())
+                {
+                    saw_configured_key = true;
+                    match self.key_retry_status(key, &entry.key_id, now, now_utc, &cooldowns) {
+                        KeyRetryStatus::Available => return None,
+                        KeyRetryStatus::RetryAfter(delay) => {
+                            Self::remember_min_retry_delay(&mut retry_after, delay);
+                        }
+                        KeyRetryStatus::Unavailable => {}
+                    }
+                }
+            }
+
+            if Self::first_env(&[*key])
+                .filter(|value| !value.trim().is_empty())
+                .is_some_and(|value| !crate::provider_config::is_vault_alias(&value))
+            {
+                saw_configured_key = true;
+                match self.key_retry_status(key, key, now, now_utc, &cooldowns) {
+                    KeyRetryStatus::Available => return None,
+                    KeyRetryStatus::RetryAfter(delay) => {
+                        Self::remember_min_retry_delay(&mut retry_after, delay);
+                    }
+                    KeyRetryStatus::Unavailable => {}
+                }
+            }
+        }
+
+        if saw_configured_key {
+            retry_after
+        } else {
+            None
+        }
+    }
+
+    async fn required_selected_secret_or_wait(
+        &self,
+        keys: &[&str],
+        attempt: usize,
+        context: &str,
+    ) -> Result<Option<SelectedProviderSecret>, String> {
+        match self.required_selected_secret(keys) {
+            Ok(selected) => Ok(Some(selected)),
+            Err(err) => {
+                if attempt < Self::MAX_ATTEMPTS {
+                    if let Some(retry_after) = self.selected_secret_retry_delay(keys) {
+                        let wait = retry_after.min(Self::retry_delay(attempt));
+                        tracing::warn!(
+                            "[provider] {context} keys are temporarily unavailable; retrying selection in {}ms",
+                            wait.as_millis()
+                        );
+                        tokio::time::sleep(wait).await;
+                        return Ok(None);
+                    }
+                }
+                Err(err)
+            }
+        }
+    }
+
     fn mark_secret_rate_limited(
         &self,
         selected: &SelectedProviderSecret,
@@ -1071,7 +1211,12 @@ impl LlmClient {
             let mut response_json: Option<Value> = None;
             let mut last_err = String::new();
             for attempt in 1..=Self::MAX_ATTEMPTS {
-                let selected = self.required_selected_secret(&["VOYAGE_API_KEY"])?;
+                let Some(selected) = self
+                    .required_selected_secret_or_wait(&["VOYAGE_API_KEY"], attempt, "Voyage batch")
+                    .await?
+                else {
+                    continue;
+                };
                 let response = self
                     .http
                     .post("https://api.voyageai.com/v1/embeddings")
@@ -1192,8 +1337,16 @@ impl LlmClient {
         let mut json: Option<Value> = None;
         let mut last_err = String::new();
         for attempt in 1..=Self::MAX_ATTEMPTS {
-            let selected =
-                self.required_selected_secret(&["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])?;
+            let Some(selected) = self
+                .required_selected_secret_or_wait(
+                    &["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
+                    attempt,
+                    "Voyage rerank",
+                )
+                .await?
+            else {
+                continue;
+            };
             let response = self
                 .http
                 .post("https://api.voyageai.com/v1/rerank")
@@ -1500,7 +1653,12 @@ impl LlmClient {
         let mut last_err = String::new();
 
         for attempt in 1..=Self::MAX_ATTEMPTS {
-            let selected = self.required_selected_secret(&lane_cfg.api_key_envs)?;
+            let Some(selected) = self
+                .required_selected_secret_or_wait(&lane_cfg.api_key_envs, attempt, "chat lane")
+                .await?
+            else {
+                continue;
+            };
             let resp = self
                 .http
                 .post(&lane_cfg.base_url)
@@ -1831,6 +1989,29 @@ mod tests {
     //   crates/memory-server/src/tests.rs::home_test_lock for the pattern we
     //   use when an env var (HOME) genuinely cannot be uniquified.
 
+    struct EnvRestore {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     #[test]
     fn llm_client_initializes_without_provider_env() {
         // Unique key — guaranteed never set by any other test or by the host
@@ -2113,6 +2294,97 @@ mod tests {
             .is_some_and(|status| status.rate_limited_keys.is_empty()));
     }
 
+    #[test]
+    fn cooldown_retry_ignores_permanently_failed_pool_members() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_MIXED_HEALTH";
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "bad-secret".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "cooling-secret".to_string(),
+                },
+            ],
+        );
+        client.mark_provider_key_auth_failed_for_tests(KEY, &format!("{KEY}_1"));
+        client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_2"), Some(30));
+
+        let delay = client
+            .selected_secret_retry_delay(&[KEY])
+            .expect("cooling key should still drive retry timing");
+        assert!(delay > Duration::ZERO);
+        assert!(delay <= Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let seen = Arc::new(Mutex::new(0usize));
+        let app = Router::new()
+            .route(
+                "/chat/completions",
+                post(|State(seen): State<Arc<Mutex<usize>>>| async move {
+                    *seen.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+                    Json(serde_json::json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "ok after cooldown"
+                                },
+                                "finish_reason": "stop"
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock provider");
+        let port = listener.local_addr().expect("mock provider addr").port();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("mock provider");
+        });
+
+        let _base_guard = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            "EXTRACT_API_KEY",
+            vec![ProviderSecret {
+                key_id: "EXTRACT_API_KEY_1".to_string(),
+                value: "pool-secret-one".to_string(),
+            }],
+        );
+        client.mark_provider_key_rate_limited_for_tests("EXTRACT_API_KEY_1", Some(1));
+
+        let out = client
+            .call_extract_llm("system", "user", None, 0.0, 16)
+            .await
+            .expect("cooldown retry should eventually use the pool key");
+        assert_eq!(out, "ok after cooldown");
+        assert_eq!(*seen.lock().unwrap_or_else(|e| e.into_inner()), 1);
+
+        server_task.abort();
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn chat_lane_retries_with_next_pool_key_after_429() {
@@ -2124,29 +2396,6 @@ mod tests {
             Json, Router,
         };
         use std::sync::{Arc, Mutex};
-
-        struct EnvRestore {
-            key: &'static str,
-            original: Option<std::ffi::OsString>,
-        }
-
-        impl EnvRestore {
-            fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-                let original = std::env::var_os(key);
-                std::env::set_var(key, value);
-                Self { key, original }
-            }
-        }
-
-        impl Drop for EnvRestore {
-            fn drop(&mut self) {
-                if let Some(value) = self.original.as_ref() {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
 
         let _guard = crate::utils::global_test_lock()
             .lock()
