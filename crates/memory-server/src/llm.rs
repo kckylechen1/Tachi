@@ -92,6 +92,13 @@ enum KeyAvailability {
     Exhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyRetryStatus {
+    Available,
+    RetryAfter(Duration),
+    Unavailable,
+}
+
 fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
     documents
         .iter()
@@ -833,14 +840,14 @@ impl LlmClient {
         }
     }
 
-    fn key_retry_delay(
+    fn key_retry_status(
         &self,
         logical_name: &str,
         key_id: &str,
         now: Instant,
         now_utc: DateTime<Utc>,
         cooldowns: &HashMap<String, Instant>,
-    ) -> Option<Duration> {
+    ) -> KeyRetryStatus {
         let mut retry_after = None;
         if let Some(until) = cooldowns.get(key_id).filter(|until| **until > now) {
             Self::remember_min_retry_delay(&mut retry_after, until.saturating_duration_since(now));
@@ -848,18 +855,25 @@ impl LlmClient {
 
         let (availability, remaining_seconds) =
             self.key_health_blocked_at(logical_name, key_id, now_utc);
-        if availability == KeyAvailability::Cooldown {
-            if let Some(remaining_seconds) = remaining_seconds.filter(|seconds| *seconds > 0) {
+        match availability {
+            KeyAvailability::Available => match retry_after {
+                Some(delay) => KeyRetryStatus::RetryAfter(delay),
+                None => KeyRetryStatus::Available,
+            },
+            KeyAvailability::Cooldown => {
+                let remaining_seconds = remaining_seconds.unwrap_or(1).max(1) as u64;
                 Self::remember_min_retry_delay(
                     &mut retry_after,
-                    Duration::from_secs(remaining_seconds as u64),
+                    Duration::from_secs(remaining_seconds),
                 );
+                retry_after
+                    .map(KeyRetryStatus::RetryAfter)
+                    .unwrap_or(KeyRetryStatus::Unavailable)
             }
-        } else if availability == KeyAvailability::Available && retry_after.is_none() {
-            return None;
+            KeyAvailability::AuthFailed
+            | KeyAvailability::Disabled
+            | KeyAvailability::Exhausted => KeyRetryStatus::Unavailable,
         }
-
-        retry_after
     }
 
     fn selected_secret_retry_delay(&self, keys: &[&str]) -> Option<Duration> {
@@ -892,9 +906,12 @@ impl LlmClient {
                     .filter(|entry| !entry.value.trim().is_empty())
                 {
                     saw_configured_key = true;
-                    match self.key_retry_delay(key, &entry.key_id, now, now_utc, &cooldowns) {
-                        Some(delay) => Self::remember_min_retry_delay(&mut retry_after, delay),
-                        None => return None,
+                    match self.key_retry_status(key, &entry.key_id, now, now_utc, &cooldowns) {
+                        KeyRetryStatus::Available => return None,
+                        KeyRetryStatus::RetryAfter(delay) => {
+                            Self::remember_min_retry_delay(&mut retry_after, delay);
+                        }
+                        KeyRetryStatus::Unavailable => {}
                     }
                 }
             }
@@ -904,9 +921,12 @@ impl LlmClient {
                 .is_some_and(|value| !crate::provider_config::is_vault_alias(&value))
             {
                 saw_configured_key = true;
-                match self.key_retry_delay(key, key, now, now_utc, &cooldowns) {
-                    Some(delay) => Self::remember_min_retry_delay(&mut retry_after, delay),
-                    None => return None,
+                match self.key_retry_status(key, key, now, now_utc, &cooldowns) {
+                    KeyRetryStatus::Available => return None,
+                    KeyRetryStatus::RetryAfter(delay) => {
+                        Self::remember_min_retry_delay(&mut retry_after, delay);
+                    }
+                    KeyRetryStatus::Unavailable => {}
                 }
             }
         }
@@ -2104,6 +2124,33 @@ mod tests {
             .into_iter()
             .find(|status| status.logical_name == KEY)
             .is_some_and(|status| status.rate_limited_keys.is_empty()));
+    }
+
+    #[test]
+    fn cooldown_retry_ignores_permanently_failed_pool_members() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_MIXED_HEALTH";
+        let client = LlmClient::new().expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "bad-secret".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "cooling-secret".to_string(),
+                },
+            ],
+        );
+        client.mark_provider_key_auth_failed_for_tests(KEY, &format!("{KEY}_1"));
+        client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_2"), Some(30));
+
+        let delay = client
+            .selected_secret_retry_delay(&[KEY])
+            .expect("cooling key should still drive retry timing");
+        assert!(delay > Duration::ZERO);
+        assert!(delay <= Duration::from_secs(30));
     }
 
     #[tokio::test]
