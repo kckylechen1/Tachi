@@ -30,10 +30,11 @@ pub(crate) async fn handle_tachi_memory(
                 .query
                 .clone()
                 .ok_or_else(|| "query is required when action='search'".to_string())?;
+            let top_k = crate::clamp_facade_top_k(params.top_k);
             let search_params = TachiSearchParams {
                 query,
                 scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
-                top_k: params.top_k,
+                top_k,
                 path_prefix: params.path_prefix.clone(),
                 project: params.project.clone(),
                 domain: params.domain.clone(),
