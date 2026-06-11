@@ -52,6 +52,13 @@ struct ManifestDbTarget {
     last_classification: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TruthMaintenanceRoute {
+    target_db: DbScope,
+    named_project: Option<String>,
+    db_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DatabaseStats {
     name: String,
@@ -285,20 +292,74 @@ async fn run_truth_maintenance_stage(
 ) -> Result<(), String> {
     let targets = load_manifest_targets(server, &app_home.join("manifest.json"))?;
     for target in targets.into_iter().filter(|target| target.allow_write) {
-        let target_db = if target.role == "global" {
-            DbScope::Global
-        } else {
-            DbScope::Project
-        };
-        run_truth_maintenance_for_target(server, target, target_db).await?;
+        let route = resolve_truth_maintenance_route(server, &target);
+        run_truth_maintenance_for_target(server, target, route).await?;
     }
     Ok(())
+}
+
+fn resolve_truth_maintenance_route(
+    server: &MemoryServer,
+    target: &ManifestDbTarget,
+) -> TruthMaintenanceRoute {
+    resolve_truth_maintenance_route_for_paths(
+        &server.global_db_path_buf(),
+        server.project_db_path_buf().as_deref(),
+        target,
+    )
+}
+
+fn resolve_truth_maintenance_route_for_paths(
+    global_db_path: &std::path::Path,
+    project_db_path: Option<&std::path::Path>,
+    target: &ManifestDbTarget,
+) -> TruthMaintenanceRoute {
+    let role_is_global = target.role == "global";
+    let target_db = if role_is_global {
+        DbScope::Global
+    } else {
+        DbScope::Project
+    };
+
+    if role_is_global {
+        return TruthMaintenanceRoute {
+            target_db,
+            named_project: None,
+            db_path: (!same_db_path(global_db_path, &target.path)).then(|| target.path.clone()),
+        };
+    }
+
+    if project_db_path.is_some_and(|path| same_db_path(path, &target.path)) {
+        return TruthMaintenanceRoute {
+            target_db,
+            named_project: None,
+            db_path: None,
+        };
+    }
+
+    if let Some(project_name) = crate::path_utils::named_project_for_db_path(&target.path) {
+        return TruthMaintenanceRoute {
+            target_db,
+            named_project: Some(project_name),
+            db_path: None,
+        };
+    }
+
+    TruthMaintenanceRoute {
+        target_db,
+        named_project: None,
+        db_path: Some(target.path.clone()),
+    }
+}
+
+fn same_db_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    crate::manifest::canonicalize_db_path(left) == crate::manifest::canonicalize_db_path(right)
 }
 
 async fn run_truth_maintenance_for_target(
     server: &MemoryServer,
     target: ManifestDbTarget,
-    target_db: DbScope,
+    route: TruthMaintenanceRoute,
 ) -> Result<(), String> {
     let Some(db_path) = target.path.to_str() else {
         return Ok(());
@@ -306,15 +367,6 @@ async fn run_truth_maintenance_for_target(
     let store = MemoryStore::open_with_label(db_path, &target.label)
         .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
     let conn = store.connection();
-    let named_project = match (target_db, server.project_db_path_buf()) {
-        (DbScope::Project, Some(default_path))
-            if default_path != target.path
-                && crate::path_utils::named_project_from_path(&target.path).is_some() =>
-        {
-            Some(target.label.clone())
-        }
-        _ => None,
-    };
 
     conn.execute(
         "UPDATE memories
@@ -400,9 +452,9 @@ async fn run_truth_maintenance_for_target(
                     entry,
                     true,  // needs_embedding
                     false, // needs_summary
-                    target_db,
-                    named_project.clone(),
-                    None,
+                    route.target_db,
+                    route.named_project.clone(),
+                    route.db_path.clone(),
                     None,
                     None,
                     entry.revision,
@@ -454,9 +506,9 @@ async fn run_truth_maintenance_for_target(
                     entry,
                     true,
                     false,
-                    target_db,
-                    named_project.clone(),
-                    None,
+                    route.target_db,
+                    route.named_project.clone(),
+                    route.db_path.clone(),
                     None,
                     None,
                     entry.revision,
@@ -1252,6 +1304,80 @@ fn shanghai_today() -> String {
         .with_timezone(&shanghai_offset())
         .format("%Y-%m-%d")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest_target(role: &str, path: PathBuf) -> ManifestDbTarget {
+        ManifestDbTarget {
+            name: "target".to_string(),
+            label: "target".to_string(),
+            path,
+            role: role.to_string(),
+            owner: "tachi".to_string(),
+            schema_kind: "tachi".to_string(),
+            allow_write: true,
+            last_classification: "healthy".to_string(),
+        }
+    }
+
+    fn restore_env_var(key: &str, saved: Option<std::ffi::OsString>) {
+        if let Some(value) = saved {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
+    }
+
+    #[test]
+    fn truth_maintenance_routes_external_project_target_by_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global").join("memory.db");
+        let current_project = tmp
+            .path()
+            .join("workspace")
+            .join(".tachi")
+            .join("memory.db");
+        let external = tmp.path().join("agent").join("memory.db");
+        let target = manifest_target("agent", external.clone());
+
+        let route =
+            resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+
+        assert_eq!(route.target_db, DbScope::Project);
+        assert_eq!(route.named_project, None);
+        assert_eq!(route.db_path.as_deref(), Some(external.as_path()));
+    }
+
+    #[test]
+    fn truth_maintenance_routes_plan_c_project_by_name() {
+        let _guard = crate::shell_ops::tachi_run_root_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let saved = std::env::var_os("TACHI_HOME");
+        std::env::set_var("TACHI_HOME", tmp.path());
+
+        let global = tmp.path().join("global").join("memory.db");
+        let current_project = tmp
+            .path()
+            .join("workspace")
+            .join(".tachi")
+            .join("memory.db");
+        let named = tmp.path().join("projects").join("sigil").join("memory.db");
+        let target = manifest_target("project", named);
+
+        let route =
+            resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+
+        assert_eq!(route.target_db, DbScope::Project);
+        assert_eq!(route.named_project.as_deref(), Some("sigil"));
+        assert_eq!(route.db_path, None);
+
+        restore_env_var("TACHI_HOME", saved);
+    }
 }
 
 fn shanghai_offset() -> FixedOffset {
