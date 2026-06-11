@@ -924,6 +924,49 @@ async fn vault_operations_record_audit_entries() {
 }
 
 #[tokio::test]
+async fn vault_lock_reports_audit_persistence_failure() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "audit-warning-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute("DROP TABLE vault_audit", [])
+                .map(|_| ())
+                .map_err(|e| format!("drop vault_audit: {e}"))
+        })
+        .expect("drop vault_audit");
+
+    let response = server
+        .vault_lock()
+        .await
+        .expect("vault_lock business result should still succeed");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("vault_lock response should be JSON");
+
+    assert_eq!(value["locked"], json!(true));
+    let warning = value["vault_audit_warning"]
+        .as_str()
+        .expect("audit warning should be visible");
+    assert!(warning.contains("vault_lock"), "{warning}");
+    assert!(
+        warning.contains("audit record was not persisted"),
+        "{warning}"
+    );
+    assert!(
+        !warning.contains("audit-warning-password"),
+        "warning must not leak vault password: {warning}"
+    );
+}
+
+#[tokio::test]
 async fn vault_remove_deletes_secret_and_audit_records() {
     let server = make_server();
 
