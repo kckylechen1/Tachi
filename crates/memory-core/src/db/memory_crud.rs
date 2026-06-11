@@ -786,7 +786,7 @@ pub fn search_fts(
         },
     )?;
 
-    let mut raw: Vec<(String, f64)> = rows.filter_map(|r| r.ok()).collect();
+    let mut raw: Vec<(String, f64)> = rows.collect::<Result<_, _>>()?;
     if raw.is_empty() {
         return Ok(HashMap::new());
     }
