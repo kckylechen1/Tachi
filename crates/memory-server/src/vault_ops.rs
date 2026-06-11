@@ -259,44 +259,29 @@ fn with_vault_key<T>(
     server: &MemoryServer,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
-    loop {
-        let key_bytes = {
-            let v = server.vault_read();
-            let Some(unlock_time) = v.unlock_time else {
-                return Err("Vault is locked. Call vault_unlock first.".to_string());
-            };
-
-            if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
-                let key = v
-                    .key
-                    .as_ref()
-                    .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
-                Some(*key.bytes())
-            } else {
-                None
-            }
+    let mut key_bytes = {
+        let mut v = server.vault_write();
+        let Some(unlock_time) = v.unlock_time else {
+            return Err("Vault is locked. Call vault_unlock first.".to_string());
         };
 
-        if let Some(key_bytes) = key_bytes {
-            return f(&key_bytes);
-        }
-
-        let auto_locked = {
-            let mut v = server.vault_write();
-            let expired = v.unlock_time.is_some_and(|unlock_time| {
-                unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs)
-            });
-            if expired {
-                clear_cached_vault_state_locked(&mut v);
-            }
-            expired
-        };
-
-        if auto_locked {
+        if unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs) {
+            clear_cached_vault_state_locked(&mut v);
+            drop(v);
             server.llm.clear_provider_secrets();
             return Err("Vault auto-locked. Call vault_unlock first.".into());
         }
-    }
+
+        let key = v
+            .key
+            .as_ref()
+            .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
+        *key.bytes()
+    };
+
+    let result = f(&key_bytes);
+    crypto::zero_key(&mut key_bytes);
+    result
 }
 
 #[cfg(test)]
@@ -326,6 +311,36 @@ mod vault_key_tests {
             Ok(())
         })
         .expect("vault key should be available");
+    }
+
+    #[tokio::test]
+    async fn with_vault_key_auto_lock_clears_key_and_provider_cache_atomically() {
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-vault-auto-lock-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = MemoryServer::new(db_path, None).expect("create test server");
+        let key = [9u8; 32];
+        {
+            let mut v = server.vault_write();
+            v.key = Some(crate::CachedVaultKey::copy_from(&key));
+            v.unlock_time = Some(Instant::now() - Duration::from_secs(60));
+            v.auto_lock_after_secs = 30;
+        }
+        assert!(server.llm.set_provider_secret("OPENAI_API_KEY", "cached"));
+
+        let err = with_vault_key(&server, |_| Ok(())).expect_err("expired key should auto-lock");
+
+        assert!(err.contains("Vault auto-locked"), "{err}");
+        {
+            let v = server.vault_read();
+            assert!(v.key.is_none());
+            assert!(v.unlock_time.is_none());
+        }
+        assert!(server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .is_none());
     }
 }
 
