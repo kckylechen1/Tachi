@@ -3701,6 +3701,34 @@ async fn dispatch_prompt_does_not_require_self_complete_without_tachi_mcp() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_rejects_unsupported_mcp_injection_before_run_dir() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let server = make_server();
+    let mut params = dispatch_params(Some("codex"), "unsupported mcp injection");
+    params.inject_tachi_mcp = Some(true);
+
+    let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("codex mcp injection should be rejected before run creation");
+    assert!(err.contains("not supported for the codex backend"), "{err}");
+
+    let runs_dir = temp_home.path().join("runs");
+    assert!(
+        !runs_dir.exists()
+            || std::fs::read_dir(&runs_dir)
+                .expect("read runs dir")
+                .next()
+                .is_none(),
+        "unsupported dispatch validation must not leave orphaned run dirs"
+    );
+}
+
+#[tokio::test]
 async fn dispatch_prompt_includes_task_route_overlay() {
     let server = make_server();
     let prompt = crate::dispatch_ops::assemble_prompt(
