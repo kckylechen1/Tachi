@@ -471,6 +471,28 @@ fn search_fts_respects_path_prefix() {
 }
 
 #[test]
+fn search_symbolic_candidates_treats_like_wildcards_as_literals() {
+    let mut conn = make_conn();
+    let plain = make_entry("plain-wildcard", "ordinary symbolic candidate text");
+    upsert(&mut conn, &plain, false).unwrap();
+
+    let literal = make_entry("literal-wildcard", "literal ___ marker text");
+    upsert(&mut conn, &literal, false).unwrap();
+
+    let results = search_symbolic_candidates(&conn, "___", 10, false, false, None, None).unwrap();
+    let ids = results
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec!["literal-wildcard"],
+        "underscore wildcards must not broaden symbolic LIKE matches"
+    );
+}
+
+#[test]
 fn raw_search_channels_exclude_superseded_by_default() {
     let mut conn = make_conn();
     let old = make_entry("old", "TrendLock old rule");

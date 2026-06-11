@@ -861,17 +861,17 @@ pub fn search_symbolic_candidates(
     if !terms.is_empty() {
         let mut term_clauses = Vec::new();
         for term in &terms {
-            let pattern = format!("%{term}%");
+            let pattern = format!("%{}%", escape_like_pattern(term));
             params.push(pattern.into());
             let idx = params.len();
             term_clauses.push(format!(
-                "(id LIKE ?{idx}
-                  OR path LIKE ?{idx}
-                  OR summary LIKE ?{idx}
-                  OR text LIKE ?{idx}
-                  OR keywords LIKE ?{idx}
-                  OR entities LIKE ?{idx}
-                  OR topic LIKE ?{idx})"
+                "(id LIKE ?{idx} ESCAPE '\\'
+                  OR path LIKE ?{idx} ESCAPE '\\'
+                  OR summary LIKE ?{idx} ESCAPE '\\'
+                  OR text LIKE ?{idx} ESCAPE '\\'
+                  OR keywords LIKE ?{idx} ESCAPE '\\'
+                  OR entities LIKE ?{idx} ESCAPE '\\'
+                  OR topic LIKE ?{idx} ESCAPE '\\')"
             ));
         }
         sql.push_str(" AND (");
@@ -890,6 +890,17 @@ pub fn search_symbolic_candidates(
         out.push(r?);
     }
     Ok(out)
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 // ─── BULK FETCH ───────────────────────────────────────────────────────────────
