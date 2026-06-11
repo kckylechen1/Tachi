@@ -45,12 +45,8 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
     let parsed: Value = serde_json::from_str(&raw).ok()?;
 
     parsed.get("pid").and_then(|v| v.as_u64())?;
-    let port = parsed.get("port").and_then(|v| v.as_u64())? as u16;
-    let url = parsed
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("http://127.0.0.1:{port}/mcp"));
+    let port = u16::try_from(parsed.get("port").and_then(|v| v.as_u64())?).ok()?;
+    let url = daemon_url_from_pid(&parsed, port)?;
 
     // Quick TCP probe so we don't hang the CLI on a stale pid file.
     let addr = format!("127.0.0.1:{port}");
@@ -75,6 +71,30 @@ pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
         }),
         _ => None,
     }
+}
+
+fn daemon_url_from_pid(parsed: &Value, port: u16) -> Option<String> {
+    let Some(raw_url) = parsed.get("url").and_then(|v| v.as_str()) else {
+        return Some(format!("http://127.0.0.1:{port}/mcp"));
+    };
+    let url = reqwest::Url::parse(raw_url).ok()?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/mcp"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let host = url.host_str()?;
+    if host != "127.0.0.1" && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    if url.port_or_known_default()? != port {
+        return None;
+    }
+    Some(format!("http://127.0.0.1:{port}/mcp"))
 }
 
 /// Call a tool over MCP-streamable-HTTP against a known daemon URL.

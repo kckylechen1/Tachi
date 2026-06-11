@@ -147,6 +147,40 @@ async fn cli_client_detect_daemon_succeeds_when_port_is_open() {
 }
 
 #[tokio::test]
+async fn cli_client_detect_daemon_rejects_nonlocal_pid_url_even_when_port_is_open() {
+    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local_addr").port();
+
+    let pid_path = temp.join("daemon.pid");
+    std::fs::write(
+        &pid_path,
+        serde_json::to_string(&json!({
+            "pid": std::process::id(),
+            "port": port,
+            "url": format!("https://example.com:{port}/mcp"),
+            "global_db": "/tmp/none.db",
+            "project_db": null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let info = crate::cli_client::detect_daemon(&temp).await;
+    assert!(
+        info.is_none(),
+        "expected None when pid file URL points outside localhost"
+    );
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[tokio::test]
 async fn cli_client_in_process_remember_round_trips_through_handler() {
     // Verifies the in-process fallback path: build a transient MemoryServer
     // and call the same `handle_remember` the MCP tool uses. This is the
