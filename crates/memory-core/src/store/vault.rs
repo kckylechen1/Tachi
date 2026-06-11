@@ -136,11 +136,6 @@ impl MemoryStore {
         db::vault_list_rotations(&self.conn)
     }
 
-    /// Delete rotation configuration for a prefix.
-    pub fn vault_delete_rotation(&self, prefix: &str) -> Result<bool, MemoryError> {
-        db::vault_delete_rotation(&self.conn, prefix)
-    }
-
     // ─── Key Health Ledger ────────────────────────────────────────────────────
 
     /// Insert or update one key-health row in the runtime ledger.

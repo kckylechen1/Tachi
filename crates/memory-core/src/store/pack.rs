@@ -26,11 +26,6 @@ impl MemoryStore {
         db::pack_delete(&self.conn, id)
     }
 
-    /// Enable or disable a pack.
-    pub fn pack_set_enabled(&self, id: &str, enabled: bool) -> Result<bool, MemoryError> {
-        db::pack_set_enabled(&self.conn, id, enabled)
-    }
-
     /// Upsert an agent projection record.
     pub fn projection_upsert(&self, proj: &AgentProjection) -> Result<(), MemoryError> {
         db::projection_upsert(&self.conn, proj)
@@ -43,10 +38,5 @@ impl MemoryStore {
         pack_id: Option<&str>,
     ) -> Result<Vec<AgentProjection>, MemoryError> {
         db::projection_list(&self.conn, agent, pack_id)
-    }
-
-    /// Delete an agent projection.
-    pub fn projection_delete(&self, agent: &str, pack_id: &str) -> Result<bool, MemoryError> {
-        db::projection_delete(&self.conn, agent, pack_id)
     }
 }
