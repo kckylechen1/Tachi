@@ -69,6 +69,10 @@ pub struct PrState {
     /// these links or an explicit Tachi `flow_id`.
     #[serde(default)]
     pub linked_issue_refs: Vec<String>,
+    /// Whether the caller has proven the merge gate input is current for
+    /// `head_sha`. `None` means the caller has not evaluated that proof.
+    #[serde(default)]
+    pub head_consistent: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,7 +337,11 @@ pub fn evaluate_merge_gate_with_policy(pr: &PrState, policy: MergeGatePolicy) ->
         }
     }
     if policy.require_head_consistency {
-        pending.push("head:consistency_unavailable".to_string());
+        match pr.head_consistent {
+            Some(true) => {}
+            Some(false) => blocked.push("head:consistency_mismatch".to_string()),
+            None => pending.push("head:consistency_unavailable".to_string()),
+        }
     }
 
     if !blocked.is_empty() {
@@ -565,6 +573,7 @@ mod tests {
             is_draft: false,
             head_sha: "abc123".to_string(),
             linked_issue_refs: Vec::new(),
+            head_consistent: None,
         }
     }
 
@@ -658,6 +667,28 @@ mod tests {
                     .any(|r| r == "head:consistency_unavailable"));
             }
             other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gate_strict_ready_when_head_consistency_is_proven() {
+        let mut pr = open_pr();
+        pr.head_consistent = Some(true);
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()),
+            MergeDecision::Ready
+        );
+    }
+
+    #[test]
+    fn gate_strict_blocks_when_head_consistency_mismatches() {
+        let mut pr = open_pr();
+        pr.head_consistent = Some(false);
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
+            MergeDecision::Blocked { reasons } => {
+                assert!(reasons.iter().any(|r| r == "head:consistency_mismatch"));
+            }
+            other => panic!("expected blocked, got {other:?}"),
         }
     }
 

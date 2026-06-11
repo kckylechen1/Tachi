@@ -1057,24 +1057,9 @@ fn verification_satisfies_head_consistency(gate: Option<&Value>, policy: MergeGa
         && gate.and_then(|v| v.get("overall")).and_then(Value::as_str) == Some("passed")
 }
 
-fn remove_waiting_on(decision: MergeDecision, reason: &str) -> MergeDecision {
-    match decision {
-        MergeDecision::Pending { mut waiting_on } => {
-            waiting_on.retain(|item| item != reason);
-            if waiting_on.is_empty() {
-                MergeDecision::Ready
-            } else {
-                MergeDecision::Pending { waiting_on }
-            }
-        }
-        other => other,
-    }
-}
-
 fn apply_verification_gate_to_decision(
     decision: MergeDecision,
     gate: Option<&Value>,
-    policy: MergeGatePolicy,
 ) -> MergeDecision {
     let Some(gate) = gate else {
         return decision;
@@ -1102,12 +1087,6 @@ fn apply_verification_gate_to_decision(
             _ => MergeDecision::Blocked { reasons },
         };
     }
-
-    let decision = if verification_satisfies_head_consistency(Some(gate), policy) {
-        remove_waiting_on(decision, "head:consistency_unavailable")
-    } else {
-        decision
-    };
 
     let waiting_on: Vec<String> = gate
         .get("waiting_on")
@@ -1441,6 +1420,7 @@ fn parse_pr_view_json(
         is_draft,
         head_sha,
         linked_issue_refs,
+        head_consistent: None,
     })
 }
 
@@ -1464,7 +1444,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         Some(fid) => Some(run_dir_for_flow_id(fid)?),
         None => None,
     };
-    let pr = client
+    let mut pr = client
         .pr_view(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
@@ -1502,8 +1482,11 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "reasons": [],
         }));
     }
+    if verification_satisfies_head_consistency(verification_gate.as_ref(), policy) {
+        pr.head_consistent = Some(true);
+    }
     let mut decision = evaluate_merge_gate_with_policy(&pr, policy);
-    decision = apply_verification_gate_to_decision(decision, verification_gate.as_ref(), policy);
+    decision = apply_verification_gate_to_decision(decision, verification_gate.as_ref());
     let has_linked_issue = !pr.linked_issue_refs.is_empty();
     if policy.require_linked_issue_or_flow && flow_id.is_none() && !has_linked_issue {
         decision = match decision {
@@ -1715,6 +1698,7 @@ mod safe_merge_tests {
             is_draft: false,
             head_sha: "deadbeef".to_string(),
             linked_issue_refs: Vec::new(),
+            head_consistent: None,
         }
     }
 
