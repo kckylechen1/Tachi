@@ -13,6 +13,34 @@ fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     ))])
 }
 
+pub(crate) fn split_proxy_tool_name<'a>(
+    name: &str,
+    server_names: impl Iterator<Item = &'a str>,
+) -> Option<(String, String)> {
+    let mut best_match: Option<(String, String)> = None;
+    for server_name in server_names {
+        let prefix = format!("{server_name}__");
+        let Some(remote_tool) = name.strip_prefix(&prefix) else {
+            continue;
+        };
+        if remote_tool.is_empty() {
+            continue;
+        }
+        if best_match
+            .as_ref()
+            .is_none_or(|(matched, _)| server_name.len() > matched.len())
+        {
+            best_match = Some((server_name.to_string(), remote_tool.to_string()));
+        }
+    }
+
+    best_match.or_else(|| {
+        name.split_once("__")
+            .filter(|(server_name, remote_tool)| !server_name.is_empty() && !remote_tool.is_empty())
+            .map(|(server_name, remote_tool)| (server_name.to_string(), remote_tool.to_string()))
+    })
+}
+
 fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
@@ -254,8 +282,12 @@ impl ServerHandler for MemoryServer {
                     }
                 }
                 // 3. Proxy tools (server__tool pattern)
-                else if let Some((server_name, tool_name)) = name.split_once("__") {
-                    let exposure_mode = self.proxy_tool_exposure_mode_for_server(server_name)?;
+                else if let Some((server_name, tool_name)) = {
+                    let proxy_tools =
+                        lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
+                    split_proxy_tool_name(name, proxy_tools.keys().map(String::as_str))
+                } {
+                    let exposure_mode = self.proxy_tool_exposure_mode_for_server(&server_name)?;
                     if exposure_mode == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
                             format!(
@@ -265,7 +297,7 @@ impl ServerHandler for MemoryServer {
                             None,
                         ))
                     } else {
-                        self.proxy_call_internal(server_name, tool_name, params.arguments)
+                        self.proxy_call_internal(&server_name, &tool_name, params.arguments)
                             .await
                     }
                 } else {

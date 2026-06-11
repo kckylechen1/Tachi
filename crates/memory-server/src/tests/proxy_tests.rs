@@ -161,6 +161,31 @@ fn resolve_mcp_tool_exposure_supports_definition_overrides() {
     assert_eq!(fallback_default, McpToolExposureMode::Gateway);
 }
 
+#[test]
+fn split_proxy_tool_name_preserves_double_underscore_remote_tools() {
+    let parsed =
+        crate::server_handler::split_proxy_tool_name("server__tool__name", ["server"].into_iter())
+            .expect("proxy tool name should parse");
+    assert_eq!(parsed, ("server".to_string(), "tool__name".to_string()));
+}
+
+#[test]
+fn split_proxy_tool_name_prefers_known_longest_server_prefix() {
+    let parsed = crate::server_handler::split_proxy_tool_name(
+        "server__beta__echo",
+        ["server", "server__beta"].into_iter(),
+    )
+    .expect("proxy tool name should parse");
+    assert_eq!(parsed, ("server__beta".to_string(), "echo".to_string()));
+}
+
+#[test]
+fn split_proxy_tool_name_keeps_legacy_fallback_without_cached_servers() {
+    let parsed = crate::server_handler::split_proxy_tool_name("gateway-only__echo", [].into_iter())
+        .expect("legacy proxy tool name should parse");
+    assert_eq!(parsed, ("gateway-only".to_string(), "echo".to_string()));
+}
+
 #[tokio::test]
 async fn retry_dispatch_blocks_direct_proxy_tool_when_gateway_mode() {
     let server = make_server();
