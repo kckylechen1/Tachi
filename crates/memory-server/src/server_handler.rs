@@ -330,11 +330,7 @@ impl ServerHandler for MemoryServer {
 
                     {
                         let mut dlq = self.dead_letters_lock();
-                        dlq.push_back(dl);
-                        // Enforce ring buffer max
-                        while dlq.len() > DLQ_MAX_ENTRIES {
-                            dlq.pop_front();
-                        }
+                        push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
                     }
                 }
             }

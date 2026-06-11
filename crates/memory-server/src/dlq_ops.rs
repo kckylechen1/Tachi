@@ -8,14 +8,7 @@ pub(crate) async fn handle_dlq_list(
     let now = Utc::now();
 
     let mut dlq = server.dead_letters_lock();
-
-    dlq.retain(|dl| {
-        if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&dl.timestamp) {
-            (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64
-        } else {
-            false
-        }
-    });
+    prune_expired_dead_letters(&mut dlq, now);
 
     let entries: Vec<serde_json::Value> = dlq
         .iter()

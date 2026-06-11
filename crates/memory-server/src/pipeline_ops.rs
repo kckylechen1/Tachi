@@ -221,10 +221,7 @@ fn enqueue_dead_letter(
         status: "pending".to_string(),
     };
     let mut dlq = server.dead_letters_lock();
-    dlq.push_back(dl);
-    while dlq.len() > DLQ_MAX_ENTRIES {
-        dlq.pop_front();
-    }
+    push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
 }
 
 fn insert_ingest_audit(server: &MemoryServer, label: &str, event_hash: &str) {

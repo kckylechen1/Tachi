@@ -16,6 +16,31 @@ pub(super) struct DeadLetter {
     pub(super) status: String,
 }
 
+fn dead_letter_is_fresh(dl: &DeadLetter, now: chrono::DateTime<Utc>) -> bool {
+    chrono::DateTime::parse_from_rfc3339(&dl.timestamp)
+        .map(|ts| (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64)
+        .unwrap_or(false)
+}
+
+pub(super) fn prune_expired_dead_letters(
+    dlq: &mut std::collections::VecDeque<DeadLetter>,
+    now: chrono::DateTime<Utc>,
+) {
+    dlq.retain(|dl| dead_letter_is_fresh(dl, now));
+}
+
+pub(super) fn push_dead_letter_with_limits(
+    dlq: &mut std::collections::VecDeque<DeadLetter>,
+    dl: DeadLetter,
+    now: chrono::DateTime<Utc>,
+) {
+    prune_expired_dead_letters(dlq, now);
+    dlq.push_back(dl);
+    while dlq.len() > DLQ_MAX_ENTRIES {
+        dlq.pop_front();
+    }
+}
+
 pub(super) fn categorize_error(error: &str) -> String {
     let lower = error.to_lowercase();
     if lower.contains("not found") || lower.contains("not_found") {
@@ -74,6 +99,41 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(obj)
+}
+
+#[cfg(test)]
+mod dlq_tests {
+    use super::*;
+
+    fn dead_letter(id: &str, timestamp: String) -> DeadLetter {
+        DeadLetter {
+            id: id.to_string(),
+            tool_name: "test_tool".to_string(),
+            arguments: None,
+            error: "boom".to_string(),
+            error_category: "internal".to_string(),
+            timestamp,
+            retry_count: 0,
+            max_retries: 3,
+            status: "pending".to_string(),
+        }
+    }
+
+    #[test]
+    fn push_dead_letter_prunes_expired_entries_before_enqueue() {
+        let now = Utc::now();
+        let stale = (now - chrono::Duration::seconds(DLQ_TTL_SECS as i64 + 1)).to_rfc3339();
+        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let mut dlq = std::collections::VecDeque::from([
+            dead_letter("stale", stale),
+            dead_letter("fresh", fresh),
+        ]);
+
+        push_dead_letter_with_limits(&mut dlq, dead_letter("new", now.to_rfc3339()), now);
+
+        let ids = dlq.iter().map(|dl| dl.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["fresh", "new"]);
+    }
 }
 
 /// Like `slim_entry` but additionally surfaces enrichment status fields:
