@@ -85,6 +85,31 @@ fn upsert_and_fts() {
 }
 
 #[test]
+fn search_fts_returns_row_decode_errors() {
+    let conn = make_conn();
+    let blob_id = [1u8, 2, 3, 4];
+    conn.execute(
+        "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
+        params![&blob_id[..], Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         VALUES (?1, '/test', 'needle', 'needle', 'needle', 'needle')",
+        params![&blob_id[..]],
+    )
+    .unwrap();
+
+    let err = search_fts(&conn, "needle", 5, false, false, None, None)
+        .expect_err("row decode errors must propagate instead of being dropped");
+    assert!(
+        err.to_string().contains("Invalid column type")
+            || err.to_string().contains("InvalidColumnType"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn jaccard_dedup_refreshes_candidate_fts() {
     let mut conn = make_conn();
     let text = "Rust memory systems need atomic full text search updates";
