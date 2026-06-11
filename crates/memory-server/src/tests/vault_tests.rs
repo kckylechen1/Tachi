@@ -89,6 +89,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
     server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct horse battery staple".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect("vault_unlock should succeed");
@@ -685,6 +686,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
         let err = server
             .vault_unlock(Parameters(VaultUnlockParams {
                 password: format!("wrong-password-{attempt}"),
+                password_fifo_path: None,
             }))
             .await
             .expect_err("wrong password should fail");
@@ -697,6 +699,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
     let lockout_err = server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "still-wrong".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect_err("fifth failed attempt should trigger lockout");
@@ -708,6 +711,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
     let blocked_err = server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect_err("correct password should still be blocked during lockout");
@@ -721,6 +725,7 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
     server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "correct-password".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect("vault_unlock should succeed after lockout expiry");
@@ -838,6 +843,7 @@ async fn vault_operations_record_audit_entries() {
     let unlock_err = server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "wrong-audit-password".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect_err("wrong password should fail");
@@ -846,6 +852,7 @@ async fn vault_operations_record_audit_entries() {
     server
         .vault_unlock(Parameters(VaultUnlockParams {
             password: "audit-password".to_string(),
+            password_fifo_path: None,
         }))
         .await
         .expect("vault_unlock should succeed");

@@ -29,7 +29,10 @@ impl Drop for VaultInitParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultUnlockParams {
+    #[serde(default)]
     pub password: String,
+    #[serde(default)]
+    pub password_fifo_path: Option<String>,
 }
 
 impl Drop for VaultUnlockParams {
@@ -341,6 +344,121 @@ mod vault_key_tests {
             .llm
             .provider_secret_for_tests(&["OPENAI_API_KEY"])
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn vault_unlock_rejects_password_and_fifo_path_together() {
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-vault-unlock-fifo-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = MemoryServer::new(db_path, None).expect("create test server");
+        handle_vault_init(
+            &server,
+            VaultInitParams {
+                password: "correct-password".to_string(),
+            },
+        )
+        .await
+        .expect("vault init should succeed");
+        handle_vault_lock(&server)
+            .await
+            .expect("vault lock should succeed");
+
+        let err = handle_vault_unlock(
+            &server,
+            VaultUnlockParams {
+                password: "correct-password".to_string(),
+                password_fifo_path: Some("/tmp/tachi-unlock-test.fifo".to_string()),
+            },
+        )
+        .await
+        .expect_err("mixed password transports should be rejected");
+
+        assert!(
+            err.contains("either password or password_fifo_path"),
+            "expected mixed-transport rejection, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_unlock_password_fifo_reads_secure_runtime_fifo() {
+        use std::ffi::CString;
+        use std::io::Write;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("TACHI_HOME");
+        let temp = tempfile::tempdir().expect("temp tachi home");
+        std::env::set_var("TACHI_HOME", temp.path());
+        let unlock_dir = temp.path().join("runtime").join("vault-unlock");
+        std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
+        std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock dir perms");
+        let fifo_path = unlock_dir.join("unlock-test.fifo");
+        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("fifo path");
+        let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(rc, 0, "mkfifo failed: {}", std::io::Error::last_os_error());
+
+        let writer_path = fifo_path.clone();
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .expect("open fifo writer");
+            file.write_all(b"fifo-password").expect("write fifo");
+        });
+
+        let password = read_unlock_password_fifo(fifo_path.to_str().unwrap()).expect("read fifo");
+        writer.join().expect("writer thread");
+        assert_eq!(password, "fifo-password");
+        assert!(!fifo_path.exists(), "daemon reader should remove FIFO");
+
+        if let Some(value) = old_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var_os("TACHI_HOME");
+        let temp = tempfile::tempdir().expect("temp tachi home");
+        std::env::set_var("TACHI_HOME", temp.path());
+        let unlock_dir = temp.path().join("runtime").join("vault-unlock");
+        std::fs::create_dir_all(&unlock_dir).expect("unlock dir");
+        std::fs::set_permissions(&unlock_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock dir perms");
+        let regular_path = unlock_dir.join("not-a-fifo");
+        std::fs::write(&regular_path, b"not a fifo").expect("regular file");
+
+        let err =
+            read_unlock_password_fifo(regular_path.to_str().unwrap()).expect_err("regular file");
+        assert!(
+            err.contains("must be a FIFO"),
+            "expected FIFO rejection, got: {err}"
+        );
+        assert!(
+            regular_path.exists(),
+            "rejected non-FIFO input should not be removed"
+        );
+
+        if let Some(value) = old_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
     }
 }
 
@@ -907,7 +1025,7 @@ pub(crate) async fn handle_vault_unlock(
     server: &MemoryServer,
     params: VaultUnlockParams,
 ) -> Result<String, String> {
-    let result = (|| {
+    let result = async {
         ensure_vault_unlock_allowed(server)?;
 
         let config = server
@@ -918,7 +1036,46 @@ pub(crate) async fn handle_vault_unlock(
         let salt = B64
             .decode(&config.salt)
             .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
-        let key = crypto::DerivedVaultKey::derive(&params.password, &salt)?;
+        let fifo_path = params
+            .password_fifo_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if fifo_path.is_some() && !params.password.is_empty() {
+            return Err(
+                "vault_unlock accepts either password or password_fifo_path, not both".to_string(),
+            );
+        }
+        let mut fifo_password = match fifo_path {
+            Some(path) => Some(
+                tokio::task::spawn_blocking(move || read_unlock_password_fifo(&path))
+                    .await
+                    .map_err(|e| format!("unlock FIFO reader task failed: {e}"))??,
+            ),
+            None => None,
+        };
+        let password = match fifo_password.as_deref() {
+            Some(password) => password,
+            None => {
+                if params.password.is_empty() {
+                    return Err("vault_unlock requires password or password_fifo_path".to_string());
+                }
+                &params.password
+            }
+        };
+        let key = match crypto::DerivedVaultKey::derive(password, &salt) {
+            Ok(key) => key,
+            Err(err) => {
+                if let Some(password) = fifo_password.as_mut() {
+                    crypto::zero_string(password);
+                }
+                return Err(err);
+            }
+        };
+        if let Some(password) = fifo_password.as_mut() {
+            crypto::zero_string(password);
+        }
 
         if !crypto::verify_password(key.bytes(), &config.verifier)? {
             return record_vault_unlock_failure(server);
@@ -935,7 +1092,8 @@ pub(crate) async fn handle_vault_unlock(
             "unlocked": true
         }))
         .map_err(|e| format!("serialize: {e}"))
-    })();
+    }
+    .await;
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
@@ -947,6 +1105,121 @@ pub(crate) async fn handle_vault_unlock(
         result.as_ref().err().map(String::as_str),
     );
     result_with_vault_audit_warning(result, audit_result)
+}
+
+#[cfg(unix)]
+fn read_unlock_password_fifo(path: &str) -> Result<String, String> {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = PathBuf::from(path);
+    let unlock_dir = crate::path_utils::tachi_home()
+        .join("runtime")
+        .join("vault-unlock");
+    let expected_parent = unlock_dir
+        .canonicalize()
+        .map_err(|e| format!("unlock FIFO directory is not available: {e}"))?;
+    let actual_parent = path
+        .parent()
+        .ok_or_else(|| "unlock FIFO path has no parent".to_string())?
+        .canonicalize()
+        .map_err(|e| format!("unlock FIFO parent is not available: {e}"))?;
+    if actual_parent != expected_parent {
+        return Err("unlock FIFO path is outside the Tachi runtime unlock directory".to_string());
+    }
+    let parent_meta = std::fs::metadata(&actual_parent)
+        .map_err(|e| format!("unlock FIFO parent metadata failed: {e}"))?;
+    if parent_meta.permissions().mode() & 0o077 != 0 {
+        return Err(
+            "unlock FIFO directory permissions must not allow group/other access".to_string(),
+        );
+    }
+
+    let mut should_remove_fifo = false;
+    let result = (|| {
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|e| format!("unlock FIFO path contains interior NUL: {e}"))?;
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(format!(
+                "open unlock FIFO failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(format!("unlock FIFO fstat failed: {err}"));
+        }
+        let stat = unsafe { stat.assume_init() };
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err("unlock password path must be a FIFO".to_string());
+        }
+        if stat.st_mode & 0o077 != 0 {
+            unsafe {
+                libc::close(fd);
+            }
+            return Err("unlock FIFO permissions must not allow group/other access".to_string());
+        }
+        should_remove_fifo = true;
+
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 512];
+        loop {
+            match file.read(&mut buffer) {
+                Ok(0) if !bytes.is_empty() => break,
+                Ok(0) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(0) => return Err("timed out waiting for unlock FIFO password".to_string()),
+                Ok(n) => {
+                    bytes.extend_from_slice(&buffer[..n]);
+                    if bytes.len() > 4096 {
+                        return Err("unlock FIFO password exceeded maximum length".to_string());
+                    }
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::Interrupted =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err("timed out waiting for unlock FIFO password".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => return Err(format!("read unlock FIFO failed: {err}")),
+            }
+        }
+        String::from_utf8(bytes).map_err(|e| format!("unlock FIFO password is not UTF-8: {e}"))
+    })();
+    if should_remove_fifo {
+        let _ = std::fs::remove_file(&path);
+    }
+    let password = result?;
+    if password.is_empty() {
+        return Err("unlock FIFO did not contain a password".to_string());
+    }
+    Ok(password)
+}
+
+#[cfg(not(unix))]
+fn read_unlock_password_fifo(_path: &str) -> Result<String, String> {
+    Err("unlock password FIFO transport is only supported on Unix".to_string())
 }
 
 pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
