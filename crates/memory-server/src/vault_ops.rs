@@ -4,9 +4,7 @@ use super::*;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use memory_core::vault::{
-    api_key_pool_member_index, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
-};
+use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1207,59 +1205,36 @@ pub(crate) async fn handle_vault_set_api_key_pool(
         let now = Utc::now().to_rfc3339();
         let strategy = normalize_rotation_strategy(&params.strategy);
         let removed_members = with_vault_key(server, |key| {
+            let mut entries = Vec::with_capacity(values.len());
+            for (idx, value) in values.iter().enumerate() {
+                let name = format!("{}_{}", params.prefix, idx + 1);
+                let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
+                entries.push(VaultEntry {
+                    name,
+                    encrypted_value,
+                    nonce,
+                    secret_type: "api_key".to_string(),
+                    description: params.description.clone(),
+                    allowed_agents: allowed_agents.clone(),
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    accessed_at: String::new(),
+                    access_count: 0,
+                });
+            }
+            let rotation = VaultKeyRotation {
+                prefix: params.prefix.clone(),
+                current_index: 1,
+                total_keys: values.len() as i64,
+                rotation_strategy: strategy.clone(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
             server
                 .with_global_store(|store| {
-                    let existing_entries = store
-                        .vault_list_entries_by_type("api_key")
-                        .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
-                    let mut removed_members = Vec::new();
-                    for (idx, value) in values.iter().enumerate() {
-                        let name = format!("{}_{}", params.prefix, idx + 1);
-                        let is_new = !store
-                            .vault_entry_exists(&name)
-                            .map_err(|e| format!("vault_entry_exists: {e}"))?;
-                        let (encrypted_value, nonce) = crypto::encrypt(key, value.as_bytes())?;
-                        let entry = VaultEntry {
-                            name,
-                            encrypted_value,
-                            nonce,
-                            secret_type: "api_key".to_string(),
-                            description: params.description.clone(),
-                            allowed_agents: allowed_agents.clone(),
-                            created_at: if is_new { now.clone() } else { String::new() },
-                            updated_at: now.clone(),
-                            accessed_at: String::new(),
-                            access_count: 0,
-                        };
-                        store
-                            .vault_upsert_entry(&entry)
-                            .map_err(|e| format!("vault_upsert_entry: {e}"))?;
-                    }
-                    for entry in existing_entries {
-                        if api_key_pool_member_index(&entry.name, &params.prefix)
-                            .is_some_and(|idx| idx > values.len())
-                        {
-                            if store
-                                .vault_delete_entry(&entry.name)
-                                .map_err(|e| format!("vault_delete_entry: {e}"))?
-                            {
-                                removed_members.push(entry.name);
-                            }
-                        }
-                    }
-
-                    let rotation = VaultKeyRotation {
-                        prefix: params.prefix.clone(),
-                        current_index: 1,
-                        total_keys: values.len() as i64,
-                        rotation_strategy: strategy.clone(),
-                        created_at: now.clone(),
-                        updated_at: now.clone(),
-                    };
                     store
-                        .vault_set_rotation(&rotation)
-                        .map_err(|e| format!("vault_set_rotation: {e}"))?;
-                    Ok(removed_members)
+                        .vault_replace_api_key_pool(&params.prefix, &entries, &rotation)
+                        .map_err(|e| format!("vault_replace_api_key_pool: {e}"))
                 })
                 .map_err(|e| format!("save API key pool: {e}"))
         })?;
