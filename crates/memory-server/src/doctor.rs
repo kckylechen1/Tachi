@@ -24,6 +24,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GENERATED_ENV_REL_PATH: &str = ".tachi/env.generated";
+const PROJECT_SECRET_SCAN_PATHS: &[&str] = &[".env", GENERATED_ENV_REL_PATH];
+const MAX_SECRET_SCAN_BYTES: u64 = 256 * 1024;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -892,22 +894,27 @@ pub fn project_secret_file_warnings(git_root: Option<&Path>) -> Vec<DoctorWarnin
     let Some(git_root) = git_root else {
         return Vec::new();
     };
-    if !git_index_tracks(git_root, GENERATED_ENV_REL_PATH) {
-        return Vec::new();
+    let mut warnings = Vec::new();
+    if git_index_tracks(git_root, GENERATED_ENV_REL_PATH) {
+        let path = git_root.join(GENERATED_ENV_REL_PATH);
+        warnings.push(DoctorWarning {
+            code: "tracked_generated_env".to_string(),
+            path: path.display().to_string(),
+            message: format!(
+                "{} is tracked by git and may contain plaintext secrets; remove it from the index",
+                path.display()
+            ),
+            remediation: format!(
+                "run `git rm --cached -- {GENERATED_ENV_REL_PATH}` and keep {GENERATED_ENV_REL_PATH} ignored"
+            ),
+        });
     }
 
-    let path = git_root.join(GENERATED_ENV_REL_PATH);
-    vec![DoctorWarning {
-        code: "tracked_generated_env".to_string(),
-        path: path.display().to_string(),
-        message: format!(
-            "{} is tracked by git and may contain plaintext secrets; remove it from the index",
-            path.display()
-        ),
-        remediation: format!(
-            "run `git rm --cached -- {GENERATED_ENV_REL_PATH}` and keep {GENERATED_ENV_REL_PATH} ignored"
-        ),
-    }]
+    for rel_path in PROJECT_SECRET_SCAN_PATHS {
+        let path = git_root.join(rel_path);
+        warnings.extend(plaintext_provider_secret_warnings(&path, rel_path));
+    }
+    warnings
 }
 
 fn git_index_tracks(git_root: &Path, rel_path: &str) -> bool {
@@ -918,6 +925,92 @@ fn git_index_tracks(git_root: &Path, rel_path: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+fn plaintext_provider_secret_warnings(path: &Path, rel_path: &str) -> Vec<DoctorWarning> {
+    let Ok(metadata) = fs::metadata(path) else {
+        return Vec::new();
+    };
+    if !metadata.is_file() || metadata.len() > MAX_SECRET_SCAN_BYTES {
+        return Vec::new();
+    }
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let provider_keys = crate::provider_config::provider_env_keys();
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let (name, value) = parse_env_assignment(line)?;
+            if !is_provider_secret_name(name, &provider_keys)
+                || !looks_like_plaintext_provider_secret(value)
+            {
+                return None;
+            }
+            let line_no = idx + 1;
+            Some(DoctorWarning {
+                code: "plaintext_provider_secret".to_string(),
+                path: path.display().to_string(),
+                message: format!(
+                    "{}:{line_no} contains a plaintext provider secret for {name}; move it into Vault",
+                    path.display()
+                ),
+                remediation: format!("replace {name}=... in {rel_path} with {name}=vault:{name}"),
+            })
+        })
+        .collect()
+}
+
+fn parse_env_assignment(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim();
+    let (name, value) = line.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let value = strip_env_value_comment(value.trim());
+    Some((name, strip_matching_quotes(value.trim())))
+}
+
+fn strip_env_value_comment(value: &str) -> &str {
+    match value.find(" #") {
+        Some(idx) => value[..idx].trim_end(),
+        None => value,
+    }
+}
+
+fn strip_matching_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn is_provider_secret_name(name: &str, provider_keys: &std::collections::HashSet<String>) -> bool {
+    if provider_keys.contains(name) {
+        return true;
+    }
+    crate::provider_config::parse_rotation_member_name(name)
+        .is_some_and(|(prefix, _)| provider_keys.contains(prefix))
+}
+
+fn looks_like_plaintext_provider_secret(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && !crate::provider_config::is_vault_alias(value)
+        && value.len() >= 16
+        && value.chars().all(|c| c.is_ascii_graphic())
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -1183,6 +1276,53 @@ mod tests {
         assert_eq!(warnings[0].code, "tracked_generated_env");
         assert!(warnings[0].message.contains(".tachi/env.generated"));
         assert!(warnings[0].remediation.contains("git rm --cached"));
+    }
+
+    #[test]
+    fn project_secret_file_warnings_detects_plaintext_provider_env_without_leaking_value() {
+        let dir = tempdir().unwrap();
+        let secret_value = "test_plaintext_provider_key_123456";
+        fs::write(
+            dir.path().join(".env"),
+            format!(
+                "\
+OPENAI_API_KEY={secret_value}
+VOYAGE_API_KEY=vault:VOYAGE_API_KEY
+IGNORED_API_KEY=not-a-provider-secret
+"
+            ),
+        )
+        .unwrap();
+
+        let warnings = project_secret_file_warnings(Some(dir.path()));
+
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert_eq!(warnings[0].code, "plaintext_provider_secret");
+        assert!(warnings[0].message.contains(".env:1"));
+        assert!(warnings[0].message.contains("OPENAI_API_KEY"));
+        assert!(warnings[0].remediation.contains("vault:OPENAI_API_KEY"));
+        assert!(!warnings[0].message.contains(secret_value));
+        assert!(!warnings[0].remediation.contains(secret_value));
+    }
+
+    #[test]
+    fn project_secret_file_warnings_detects_generated_provider_env_values() {
+        let dir = tempdir().unwrap();
+        let generated = dir.path().join(".tachi/env.generated");
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(
+            &generated,
+            "export VOYAGE_API_KEY_1='test_plaintext_provider_key_abcdef'\n",
+        )
+        .unwrap();
+
+        let warnings = project_secret_file_warnings(Some(dir.path()));
+
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert_eq!(warnings[0].code, "plaintext_provider_secret");
+        assert!(warnings[0].message.contains(".tachi/env.generated:1"));
+        assert!(warnings[0].message.contains("VOYAGE_API_KEY_1"));
+        assert!(!warnings[0].message.contains("test_plaintext_provider_key"));
     }
 
     #[test]
