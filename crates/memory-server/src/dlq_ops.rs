@@ -77,6 +77,24 @@ pub(crate) async fn handle_dlq_retry(
         }
     };
 
+    let args_hash = dead_letter
+        .arguments
+        .as_ref()
+        .map(|args| stable_hash(&serde_json::to_string(args).unwrap_or_default()))
+        .unwrap_or_default();
+    if let Err(e) = server.check_rate_limit(&dead_letter.tool_name, &args_hash, "dlq_retry") {
+        let mut dlq = server.dead_letters_lock();
+        if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+            if dl.retry_count >= dl.max_retries {
+                dl.status = "abandoned".to_string();
+            } else {
+                dl.status = "pending".to_string();
+            }
+            dl.error = format!("{e}");
+        }
+        return Err(format!("Retry failed for '{}': {e}", params.dead_letter_id));
+    }
+
     let retry_result = server
         .retry_dispatch(&dead_letter.tool_name, dead_letter.arguments.clone())
         .await;
