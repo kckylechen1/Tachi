@@ -611,6 +611,28 @@ fn remote_mcp_error_summary(error: &serde_json::Value) -> String {
     }
 }
 
+async fn send_remote_mcp_initialized_notification(
+    client: &reqwest::Client,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+) -> Result<(), String> {
+    let response = client
+        .post(url)
+        .headers(headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("initialized notification failed: {e}"))?;
+    response
+        .error_for_status()
+        .map(|_| ())
+        .map_err(|e| format!("initialized notification failed: {e}"))
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod tests {
@@ -857,6 +879,36 @@ mod tests {
         assert!(err.contains("remote tool body exceeds"));
         server_task.abort();
     }
+
+    #[tokio::test]
+    async fn initialized_notification_reports_http_failure() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind initialized notification fixture");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+                let _ = socket.write_all(response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let err = send_remote_mcp_initialized_notification(
+            &reqwest::Client::new(),
+            &format!("http://127.0.0.1:{port}/mcp"),
+            reqwest::header::HeaderMap::new(),
+        )
+        .await
+        .expect_err("non-success initialized notification status should fail");
+
+        assert!(err.contains("initialized notification failed"));
+        server_task.abort();
+    }
 }
 
 impl MemoryServer {
@@ -1021,22 +1073,9 @@ impl MemoryServer {
             session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
         }
 
-        client
-            .post(&url)
-            .headers(session_headers.clone())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {}
-            }))
-            .send()
+        send_remote_mcp_initialized_notification(&client, &url, session_headers.clone())
             .await
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(
-                    format!("initialized notification failed: {e}"),
-                    None,
-                )
-            })?;
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
         let call_payload = json!({
             "jsonrpc": "2.0",
@@ -1151,16 +1190,7 @@ impl MemoryServer {
             session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
         }
 
-        let _ = client
-            .post(&url)
-            .headers(session_headers.clone())
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "method": "notifications/initialized",
-                "params": {}
-            }))
-            .send()
-            .await;
+        send_remote_mcp_initialized_notification(&client, &url, session_headers.clone()).await?;
 
         let list_response = client
             .post(&url)
