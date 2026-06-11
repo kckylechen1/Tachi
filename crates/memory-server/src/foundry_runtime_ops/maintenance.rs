@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 /// foundry_jobs.metadata.skip_reason answers "why didn't this run?" instead
 /// of the previous opaque "worker reported no-op".
 pub(crate) enum DistillOutcome {
-    Wrote(#[allow(dead_code)] String),
+    Wrote,
     Skipped(String),
 }
 
@@ -1268,7 +1268,7 @@ async fn process_memory_distill_job(
         None,
     );
 
-    Ok(DistillOutcome::Wrote(memory_id))
+    Ok(DistillOutcome::Wrote)
 }
 
 fn process_forget_sweep_job(
@@ -1385,7 +1385,7 @@ async fn handle_foundry_maintenance_item(
         memory_core::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
             .await
             .map(|outcome| match outcome {
-                DistillOutcome::Wrote(_) => FoundryMaintenanceOutcome::Terminal(
+                DistillOutcome::Wrote => FoundryMaintenanceOutcome::Terminal(
                     memory_core::FoundryJobStatus::Completed,
                     None,
                 ),

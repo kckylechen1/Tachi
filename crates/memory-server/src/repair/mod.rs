@@ -115,8 +115,6 @@ impl From<std::io::Error> for RepairError {
 pub struct DbContext {
     pub label: String,
     pub path: PathBuf,
-    #[allow(dead_code)]
-    pub schema_kind: String,
     pub conn: Connection,
 }
 
@@ -130,7 +128,6 @@ impl DbContext {
         Ok(DbContext {
             label: inventory::label_for(entry),
             path,
-            schema_kind: entry.schema_kind.clone(),
             conn,
         })
     }
