@@ -616,7 +616,7 @@ async fn vault_auto_lock_expires_cached_key() {
 
     server
         .vault_set(Parameters(VaultSetParams {
-            name: "AUTO_LOCK_SECRET".to_string(),
+            name: "OPENAI_API_KEY".to_string(),
             value: "secret-value".to_string(),
             secret_type: "api_key".to_string(),
             description: "auto lock test secret".to_string(),
@@ -626,12 +626,20 @@ async fn vault_auto_lock_expires_cached_key() {
         }))
         .await
         .expect("vault_set should succeed");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("secret-value"),
+        "vault_set should refresh provider cache before auto-lock"
+    );
 
     server.vault_write().unlock_time = Some(Instant::now() - Duration::from_secs(60));
 
     let err = server
         .vault_get(Parameters(VaultGetParams {
-            name: "AUTO_LOCK_SECRET".to_string(),
+            name: "OPENAI_API_KEY".to_string(),
             agent_id: None,
             auto_rotate: false,
         }))
@@ -649,6 +657,13 @@ async fn vault_auto_lock_expires_cached_key() {
     let status_json: serde_json::Value =
         serde_json::from_str(&status).expect("vault_status response should be JSON");
     assert_eq!(status_json["locked"], json!(true));
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .is_none(),
+        "auto-lock should clear provider keys cached from the vault"
+    );
 }
 
 #[tokio::test]
