@@ -147,6 +147,8 @@ fn probe_harness_server_status(url: Option<&str>) -> serde_json::Value {
     if !url.starts_with("http://127.0.0.1:") && !url.starts_with("http://localhost:") {
         return json!({
             "reachable": null,
+            "probe": "unsupported",
+            "evidence_strength": "none",
             "reason": "probe only supports local http server URLs",
         });
     }
@@ -156,14 +158,29 @@ fn probe_harness_server_status(url: Option<&str>) -> serde_json::Value {
         .and_then(|rest| rest.split('/').next())
         .and_then(|raw| raw.parse::<u16>().ok())
     else {
-        return json!({"reachable": false, "reason": "could not parse local port"});
+        return json!({
+            "reachable": false,
+            "probe": "tcp",
+            "evidence_strength": "weak",
+            "readiness": "tcp_only",
+            "reason": "could not parse local port",
+        });
     };
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)) {
-        Ok(_) => json!({"reachable": true, "probe": "tcp", "port": port}),
+        Ok(_) => json!({
+            "reachable": true,
+            "probe": "tcp",
+            "evidence_strength": "weak",
+            "readiness": "tcp_only",
+            "port": port,
+            "warning": "TCP reachability only; OpenCode API version, session creation, model availability, and credentials were not verified",
+        }),
         Err(err) => json!({
             "reachable": false,
             "probe": "tcp",
+            "evidence_strength": "weak",
+            "readiness": "tcp_only",
             "port": port,
             "error": err.to_string(),
         }),
@@ -586,5 +603,25 @@ mod tests {
     fn harness_probe_rejects_non_local_urls() {
         let status = probe_harness_server_status(Some("https://example.com:4321"));
         assert_eq!(status["reachable"], serde_json::Value::Null);
+        assert_eq!(status["evidence_strength"], json!("none"));
+    }
+
+    #[test]
+    fn harness_probe_labels_tcp_only_as_weak_evidence() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let port = listener.local_addr().expect("local addr").port();
+
+        let status = probe_harness_server_status(Some(&format!("http://127.0.0.1:{port}")));
+
+        assert_eq!(status["reachable"], json!(true));
+        assert_eq!(status["probe"], json!("tcp"));
+        assert_eq!(status["evidence_strength"], json!("weak"));
+        assert_eq!(status["readiness"], json!("tcp_only"));
+        assert!(
+            status["warning"]
+                .as_str()
+                .is_some_and(|warning| warning.contains("OpenCode API version")),
+            "TCP-only probe must explain what it did not verify: {status:#}"
+        );
     }
 }
