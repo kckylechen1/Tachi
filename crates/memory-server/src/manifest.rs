@@ -915,6 +915,7 @@ mod tests {
             scanned_roots: vec![],
             findings,
             summary: SummaryByClass::default(),
+            warnings: vec![],
             auto_fix_actions: vec![],
             quarantine_dir: Some("/tmp/q".to_string()),
             generated_at: "2026-04-28T00:00:00+00:00".to_string(),
