@@ -922,6 +922,12 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
     assert!(parsed["runtime"]["provider_secret_count"]
         .as_u64()
         .is_some());
+    assert!(parsed["runtime"]["provider_health"]["source_of_truth"]
+        .as_str()
+        .is_some());
+    assert!(parsed["runtime"]["provider_health"]["reload_ttl_secs"]
+        .as_u64()
+        .is_some());
     assert_eq!(
         parsed["runtime"]["provider_pools"][0]["logical_name"],
         json!("VOYAGE_API_KEY")
