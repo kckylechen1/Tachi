@@ -45,7 +45,19 @@ impl Drop for DerivedVaultKey {
 
 /// Overwrite key bytes before dropping stack buffers or cached key material.
 pub fn zero_key(key: &mut [u8; 32]) {
-    for byte in key.iter_mut() {
+    zero_bytes(key);
+}
+
+/// Overwrite sensitive string contents before dropping the allocation.
+pub fn zero_string(value: &mut String) {
+    // `String` stores UTF-8 bytes; writing NUL bytes preserves UTF-8 validity
+    // while clearing the previous password contents in-place.
+    let bytes = unsafe { value.as_mut_vec() };
+    zero_bytes(bytes);
+}
+
+fn zero_bytes(bytes: &mut [u8]) {
+    for byte in bytes.iter_mut() {
         unsafe {
             std::ptr::write_volatile(byte, 0);
         }
@@ -156,6 +168,17 @@ mod tests {
         let key1 = DerivedVaultKey::derive("password1", salt).unwrap();
         let key2 = DerivedVaultKey::derive("password2", salt).unwrap();
         assert_ne!(key1.bytes(), key2.bytes());
+    }
+
+    #[test]
+    fn zero_string_overwrites_contents_in_place() {
+        let mut value = String::from("correct horse battery staple");
+        let len = value.len();
+
+        zero_string(&mut value);
+
+        assert_eq!(value.len(), len);
+        assert!(value.as_bytes().iter().all(|byte| *byte == 0));
     }
 
     #[test]
