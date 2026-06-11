@@ -1094,12 +1094,33 @@ pub(crate) enum VaultAction {
         /// Allow writing the encrypted bundle to a cloud-sync path such as iCloud Drive.
         #[arg(long)]
         allow_cloud: bool,
+        /// Read Vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read Vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read Vault password from the first line of a file.
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// Import encrypted Vault rows from a sync bundle.
     SyncImport {
         /// Input bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
         #[arg(long, value_name = "PATH")]
         input: Option<PathBuf>,
+        /// Import a legacy unsigned bundle. Signed bundles are still verified.
+        #[arg(long)]
+        allow_unsigned: bool,
+        /// Read Vault password from stdin.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read Vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read Vault password from the first line of a file.
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
     },
     /// Show the default Vault sync bundle path and whether it exists.
     SyncStatus {

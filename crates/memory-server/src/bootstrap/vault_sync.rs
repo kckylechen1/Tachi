@@ -8,6 +8,7 @@ use super::{open_cli_store, open_cli_store_read_only};
 
 const BUNDLE_TYPE: &str = "tachi.vault.bundle";
 const BUNDLE_VERSION: u32 = 1;
+const BUNDLE_SIGNATURE_ALGORITHM: &str = "aes-256-gcm-aad-v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VaultSyncBundle {
@@ -17,6 +18,15 @@ struct VaultSyncBundle {
     vault_config: VaultConfig,
     entries: Vec<VaultEntry>,
     rotations: Vec<VaultKeyRotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signature: Option<VaultSyncSignature>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VaultSyncSignature {
+    algorithm: String,
+    nonce: String,
+    tag: String,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +77,7 @@ pub(super) fn export_vault_bundle(
     global_db_path: &PathBuf,
     output: &Path,
     allow_cloud: bool,
+    signing_key: &[u8; 32],
 ) -> Result<VaultSyncStatus, Box<dyn std::error::Error>> {
     ensure_cloud_export_allowed(output, allow_cloud)?;
 
@@ -82,14 +93,16 @@ pub(super) fn export_vault_bundle(
         .vault_list_rotations()
         .map_err(|e| format!("vault_list_rotations: {e}"))?;
 
-    let bundle = VaultSyncBundle {
+    let mut bundle = VaultSyncBundle {
         bundle_type: BUNDLE_TYPE.to_string(),
         version: BUNDLE_VERSION,
         exported_at: Utc::now().to_rfc3339(),
         vault_config,
         entries,
         rotations,
+        signature: None,
     };
+    sign_bundle(&mut bundle, signing_key)?;
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)
@@ -140,12 +153,15 @@ fn vault_sync_path_requires_cloud_ack(path: &Path) -> bool {
 pub(super) fn import_vault_bundle(
     global_db_path: &PathBuf,
     input: &Path,
+    verification_key: Option<&[u8; 32]>,
+    allow_unsigned: bool,
 ) -> Result<VaultSyncImportReport, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(input)
         .map_err(|e| format!("read sync bundle {}: {e}", input.display()))?;
     let bundle: VaultSyncBundle = serde_json::from_str(&raw)
         .map_err(|e| format!("parse sync bundle {}: {e}", input.display()))?;
     validate_bundle(&bundle)?;
+    verify_bundle_signature(&bundle, verification_key, allow_unsigned)?;
 
     let store = open_cli_store(global_db_path)?;
     let local_config = store
@@ -176,6 +192,78 @@ pub(super) fn import_vault_bundle(
         rotations_imported: bundle.rotations.len(),
         initialized_vault,
     })
+}
+
+pub(super) fn read_bundle_vault_config(
+    input: &Path,
+) -> Result<VaultConfig, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(input)
+        .map_err(|e| format!("read sync bundle {}: {e}", input.display()))?;
+    let bundle: VaultSyncBundle = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse sync bundle {}: {e}", input.display()))?;
+    validate_bundle(&bundle)?;
+    Ok(bundle.vault_config)
+}
+
+pub(super) fn bundle_has_signature(input: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    let raw = std::fs::read_to_string(input)
+        .map_err(|e| format!("read sync bundle {}: {e}", input.display()))?;
+    let bundle: VaultSyncBundle = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse sync bundle {}: {e}", input.display()))?;
+    validate_bundle(&bundle)?;
+    Ok(bundle.signature.is_some())
+}
+
+fn sign_bundle(
+    bundle: &mut VaultSyncBundle,
+    key: &[u8; 32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    bundle.signature = None;
+    let aad = canonical_bundle_bytes(bundle)?;
+    let (tag, nonce) = crate::vault_crypto::authenticate(key, &aad)?;
+    bundle.signature = Some(VaultSyncSignature {
+        algorithm: BUNDLE_SIGNATURE_ALGORITHM.to_string(),
+        nonce,
+        tag,
+    });
+    Ok(())
+}
+
+fn verify_bundle_signature(
+    bundle: &VaultSyncBundle,
+    key: Option<&[u8; 32]>,
+    allow_unsigned: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(signature) = bundle.signature.as_ref() else {
+        if allow_unsigned {
+            return Ok(());
+        }
+        return Err(
+            "Vault sync bundle is unsigned; refusing to import without --allow-unsigned".into(),
+        );
+    };
+    if signature.algorithm != BUNDLE_SIGNATURE_ALGORITHM {
+        return Err(format!(
+            "Unsupported vault sync bundle signature algorithm '{}' (expected '{}')",
+            signature.algorithm, BUNDLE_SIGNATURE_ALGORITHM
+        )
+        .into());
+    }
+    let Some(key) = key else {
+        return Err(
+            "Vault sync bundle is signed; provide the Vault password to verify integrity".into(),
+        );
+    };
+    let aad = canonical_bundle_bytes(bundle)?;
+    crate::vault_crypto::verify_authentication(key, &aad, &signature.nonce, &signature.tag)
+        .map_err(|e| format!("Vault sync bundle integrity verification failed: {e}"))?;
+    Ok(())
+}
+
+fn canonical_bundle_bytes(bundle: &VaultSyncBundle) -> Result<Vec<u8>, serde_json::Error> {
+    let mut unsigned = bundle.clone();
+    unsigned.signature = None;
+    serde_json::to_vec(&unsigned)
 }
 
 pub(super) fn vault_sync_status(
@@ -341,8 +429,8 @@ mod tests {
             })
             .expect("set source rotation");
 
-        let status =
-            export_vault_bundle(&source_db, &bundle_path, false).expect("export vault sync bundle");
+        let status = export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+            .expect("export vault sync bundle");
         assert!(status.exists);
         #[cfg(unix)]
         {
@@ -355,8 +443,8 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
-        let report =
-            import_vault_bundle(&target_db, &bundle_path).expect("import vault sync bundle");
+        let report = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect("import vault sync bundle");
         assert_eq!(report.entries_imported, 1);
         assert_eq!(report.rotations_imported, 1);
         assert!(report.initialized_vault);
@@ -388,5 +476,79 @@ mod tests {
 
         ensure_cloud_export_allowed(&cloud_path, true)
             .expect("explicit cloud allowance should pass");
+    }
+
+    #[test]
+    fn vault_sync_rejects_tampered_signed_bundle() {
+        let source_db = temp_db_path();
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config())
+            .expect("set source config");
+        source
+            .vault_upsert_entry(&VaultEntry {
+                name: "OPENAI_API_KEY_1".to_string(),
+                encrypted_value: "ciphertext".to_string(),
+                nonce: "nonce".to_string(),
+                secret_type: "api_key".to_string(),
+                description: "original".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("upsert source entry");
+        export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+            .expect("export vault sync bundle");
+
+        let raw = std::fs::read_to_string(&bundle_path).expect("read bundle");
+        let mut json: serde_json::Value = serde_json::from_str(&raw).expect("parse bundle json");
+        json["entries"][0]["encrypted_value"] = serde_json::json!("attacker-ciphertext");
+        std::fs::write(&bundle_path, serde_json::to_string_pretty(&json).unwrap())
+            .expect("write tampered bundle");
+
+        let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect_err("tampered bundle should fail integrity verification");
+        assert!(err.to_string().contains("integrity"), "{err}");
+
+        let _ = std::fs::remove_file(source_db);
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_unsigned_bundle_requires_explicit_override() {
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+        let unsigned = VaultSyncBundle {
+            bundle_type: BUNDLE_TYPE.to_string(),
+            version: BUNDLE_VERSION,
+            exported_at: "2026-01-01T00:00:00Z".to_string(),
+            vault_config: sample_config(),
+            entries: Vec::new(),
+            rotations: Vec::new(),
+            signature: None,
+        };
+        std::fs::write(
+            &bundle_path,
+            serde_json::to_string_pretty(&unsigned).expect("serialize unsigned bundle"),
+        )
+        .expect("write unsigned bundle");
+
+        let err = import_vault_bundle(&target_db, &bundle_path, None, false)
+            .expect_err("unsigned bundle should be rejected by default");
+        assert!(err.to_string().contains("--allow-unsigned"), "{err}");
+
+        let report = import_vault_bundle(&target_db, &bundle_path, None, true)
+            .expect("explicit unsigned import should remain available");
+        assert!(report.initialized_vault);
+        assert_eq!(report.entries_imported, 0);
+
+        let _ = std::fs::remove_file(target_db);
     }
 }

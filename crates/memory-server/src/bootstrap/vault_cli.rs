@@ -174,19 +174,57 @@ pub(super) async fn run_vault_command(
         VaultAction::SyncExport {
             output,
             allow_cloud,
+            stdin_password,
+            keychain,
+            password_file,
         } => {
             let output = super::vault_sync::resolve_vault_sync_path(output)?;
-            let status =
-                super::vault_sync::export_vault_bundle(global_db_path, &output, allow_cloud)?;
+            let config = read_vault_config_for_key(global_db_path)?;
+            let key = read_verified_vault_key(
+                &config,
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+            )?;
+            let status = super::vault_sync::export_vault_bundle(
+                global_db_path,
+                &output,
+                allow_cloud,
+                key.bytes(),
+            )?;
             println!("Vault sync export complete.");
             super::vault_sync::print_status(&status);
-            println!("  contents: encrypted Vault config, entries, and key-rotation metadata");
+            println!(
+                "  contents: signed encrypted Vault config, entries, and key-rotation metadata"
+            );
             Ok(())
         }
 
-        VaultAction::SyncImport { input } => {
+        VaultAction::SyncImport {
+            input,
+            allow_unsigned,
+            stdin_password,
+            keychain,
+            password_file,
+        } => {
             let input = super::vault_sync::resolve_vault_sync_path(input)?;
-            let report = super::vault_sync::import_vault_bundle(global_db_path, &input)?;
+            let key = if allow_unsigned && !super::vault_sync::bundle_has_signature(&input)? {
+                None
+            } else {
+                let config = super::vault_sync::read_bundle_vault_config(&input)?;
+                Some(read_verified_vault_key(
+                    &config,
+                    stdin_password,
+                    keychain,
+                    password_file.as_deref(),
+                )?)
+            };
+            let report = super::vault_sync::import_vault_bundle(
+                global_db_path,
+                &input,
+                key.as_ref().map(|key| key.bytes()),
+                allow_unsigned,
+            )?;
             println!("Vault sync import complete.");
             println!("  path: {}", report.path);
             println!("  initialized_vault: {}", report.initialized_vault);
@@ -689,6 +727,37 @@ fn vault_config_exists_cli(global_db_path: &Path) -> Result<bool, Box<dyn std::e
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?
         .is_some())
+}
+
+fn read_vault_config_for_key(
+    global_db_path: &PathBuf,
+) -> Result<memory_core::vault::VaultConfig, Box<dyn std::error::Error>> {
+    let store = open_cli_store_read_only(global_db_path)?;
+    store
+        .vault_get_config()
+        .map_err(|e| format!("vault_get_config: {e}"))?
+        .ok_or_else(|| "Vault not initialized. Run `tachi vault init` first.".into())
+}
+
+fn read_verified_vault_key(
+    config: &memory_core::vault::VaultConfig,
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&Path>,
+) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let mut password = read_vault_password(stdin_password, keychain, password_file)?;
+    let salt = B64
+        .decode(&config.salt)
+        .map_err(|e| format!("Invalid vault salt: {e}"))?;
+    let key_result = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt);
+    crate::vault_crypto::zero_string(&mut password);
+    let key = key_result?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
+        return Err("Wrong password".into());
+    }
+    Ok(key)
 }
 
 fn decrypt_profile_secret_values(

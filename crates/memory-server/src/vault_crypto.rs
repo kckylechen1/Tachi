@@ -1,14 +1,16 @@
 // vault_crypto.rs — encryption primitives for Tachi Vault
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
-    Aes256Gcm, Key, Nonce,
+    aead::{Aead, AeadInPlace, KeyInit},
+    Aes256Gcm, Key, Nonce, Tag,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::RngCore;
 
 const VERIFIER_PLAINTEXT: &[u8] = b"tachi-vault-ok";
+const AES_GCM_NONCE_LEN: usize = 12;
+const AES_GCM_TAG_LEN: usize = 16;
 
 /// Derive a 32-byte encryption key from password + salt using Argon2id.
 pub fn derive_key_into(password: &str, salt: &[u8], key: &mut [u8; 32]) -> Result<(), String> {
@@ -105,6 +107,57 @@ pub fn decrypt(key: &[u8; 32], ciphertext_b64: &str, nonce_b64: &str) -> Result<
         .map_err(|e| format!("Decryption failed: {e}"))
 }
 
+/// Authenticate associated data with AES-256-GCM detached tag and no ciphertext.
+///
+/// This is used for Vault sync bundles where the payload is already encrypted
+/// row-by-row but the JSON wrapper still needs keyed tamper detection.
+pub fn authenticate(key: &[u8; 32], aad: &[u8]) -> Result<(String, String), String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce_bytes = generate_nonce();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, aad, &mut [])
+        .map_err(|e| format!("Authentication failed: {e}"))?;
+    Ok((B64.encode(tag), B64.encode(nonce_bytes)))
+}
+
+/// Verify a detached AES-256-GCM authentication tag over associated data.
+pub fn verify_authentication(
+    key: &[u8; 32],
+    aad: &[u8],
+    nonce_b64: &str,
+    tag_b64: &str,
+) -> Result<(), String> {
+    let nonce_bytes = B64
+        .decode(nonce_b64)
+        .map_err(|e| format!("Bad authentication nonce base64: {e}"))?;
+    if nonce_bytes.len() != AES_GCM_NONCE_LEN {
+        return Err(format!(
+            "Bad authentication nonce length: {} (expected {AES_GCM_NONCE_LEN})",
+            nonce_bytes.len()
+        ));
+    }
+    let tag_bytes = B64
+        .decode(tag_b64)
+        .map_err(|e| format!("Bad authentication tag base64: {e}"))?;
+    if tag_bytes.len() != AES_GCM_TAG_LEN {
+        return Err(format!(
+            "Bad authentication tag length: {} (expected {AES_GCM_TAG_LEN})",
+            tag_bytes.len()
+        ));
+    }
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    cipher
+        .decrypt_in_place_detached(
+            Nonce::from_slice(&nonce_bytes),
+            aad,
+            &mut [],
+            Tag::from_slice(&tag_bytes),
+        )
+        .map_err(|_| "Authentication tag verification failed".to_string())
+}
+
 /// Create the verifier blob (encrypt known plaintext). Format: "nonce_b64:ciphertext_b64"
 pub fn create_verifier(key: &[u8; 32]) -> Result<String, String> {
     let (ciphertext_b64, nonce_b64) = encrypt(key, VERIFIER_PLAINTEXT)?;
@@ -198,6 +251,17 @@ mod tests {
         let (ciphertext_b64, nonce_b64) = encrypt(&key1, plaintext).unwrap();
         let result = decrypt(&key2, &ciphertext_b64, &nonce_b64);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_authentication_detects_tampered_aad() {
+        let key = [7u8; 32];
+        let aad = br#"{"bundle":"one"}"#;
+        let (tag, nonce) = authenticate(&key, aad).unwrap();
+
+        verify_authentication(&key, aad, &nonce, &tag).unwrap();
+        assert!(verify_authentication(&key, br#"{"bundle":"two"}"#, &nonce, &tag).is_err());
+        assert!(verify_authentication(&[8u8; 32], aad, &nonce, &tag).is_err());
     }
 
     #[test]
