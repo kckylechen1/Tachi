@@ -369,15 +369,15 @@ impl MemoryStore {
 
     /// Count entries with empty keywords or entities.
     pub fn metadata_stats(&self) -> Result<(i64, i64), MemoryError> {
-        let total: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let missing: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM memories
-             WHERE trim(keywords) IN ('', '[]')
-                OR trim(entities) IN ('', '[]')",
+        let (total, missing): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE
+                        WHEN trim(keywords) IN ('', '[]')
+                          OR trim(entities) IN ('', '[]')
+                        THEN 1 ELSE 0 END), 0)
+             FROM memories",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         Ok((total, total - missing))
     }
@@ -811,5 +811,22 @@ mod tests {
         assert_eq!(rows[0]["text"], "second");
         assert_eq!(rows[0]["summary"], "second summary");
         assert_eq!(rows[0]["importance"], 0.9);
+    }
+
+    #[test]
+    fn metadata_stats_counts_total_and_coverage_in_one_query() {
+        let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+
+        let mut complete = test_entry("metadata-complete");
+        complete.keywords = vec!["hermes".to_string()];
+        complete.entities = vec!["ZAI".to_string()];
+        store.upsert(&complete).expect("seed complete metadata");
+
+        let mut missing = test_entry("metadata-missing");
+        missing.keywords = vec!["routing".to_string()];
+        missing.entities = vec![];
+        store.upsert(&missing).expect("seed missing metadata");
+
+        assert_eq!(store.metadata_stats().expect("metadata stats"), (2, 1));
     }
 }
