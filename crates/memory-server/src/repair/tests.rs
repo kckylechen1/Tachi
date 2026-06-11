@@ -30,7 +30,6 @@ fn open_ctx(path: &PathBuf, label: &str) -> DbContext {
     DbContext {
         label: label.to_string(),
         path: path.clone(),
-        schema_kind: "tachi".to_string(),
         conn: Connection::open(path).unwrap(),
     }
 }
@@ -441,7 +440,6 @@ fn r5_integrity_detects_corruption() {
     let mut ctx = DbContext {
         label: "test".to_string(),
         path: path.clone(),
-        schema_kind: "tachi".to_string(),
         conn: Connection::open(&path).expect("DB must remain openable after page-2 corruption"),
     };
     let r = IntegrityCheck
