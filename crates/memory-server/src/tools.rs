@@ -87,6 +87,9 @@ use crate::wiki_ops::{
 };
 use crate::{AgentProfile, MemoryServer};
 
+const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
+const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
+
 // ─── Tool Implementations ────────────────────────────────────────────────────────
 
 #[tool_router(vis = "pub(crate)")]
@@ -2158,6 +2161,7 @@ async fn handle_tachi_task_wait(
     let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(600).min(86_400));
     let deadline = Instant::now() + timeout;
     let mut last_task = None;
+    let mut poll_delay = TASK_WAIT_INITIAL_POLL_DELAY;
 
     loop {
         let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id);
@@ -2196,8 +2200,14 @@ async fn handle_tachi_task_wait(
             .map_err(|e| format!("serialize wait timeout response: {e}"));
         }
 
-        tokio::time::sleep(StdDuration::from_millis(250)).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep(poll_delay.min(remaining)).await;
+        poll_delay = next_task_wait_poll_delay(poll_delay);
     }
+}
+
+fn next_task_wait_poll_delay(current: StdDuration) -> StdDuration {
+    current.saturating_mul(2).min(TASK_WAIT_MAX_POLL_DELAY)
 }
 
 fn is_terminal_task_state(state: &str) -> bool {
@@ -2792,6 +2802,24 @@ mod tests {
             .expect_err("markdown formatting should fail on invalid JSON");
         assert!(err.contains("format Tachi shell plan markdown response"));
         assert!(err.contains("expected JSON"));
+    }
+
+    #[test]
+    fn task_wait_poll_delay_backs_off_to_cap() {
+        let mut delay = TASK_WAIT_INITIAL_POLL_DELAY;
+        assert_eq!(delay, StdDuration::from_millis(250));
+
+        delay = next_task_wait_poll_delay(delay);
+        assert_eq!(delay, StdDuration::from_millis(500));
+
+        delay = next_task_wait_poll_delay(delay);
+        assert_eq!(delay, StdDuration::from_secs(1));
+
+        delay = next_task_wait_poll_delay(delay);
+        assert_eq!(delay, StdDuration::from_secs(2));
+
+        delay = next_task_wait_poll_delay(delay);
+        assert_eq!(delay, TASK_WAIT_MAX_POLL_DELAY);
     }
 
     #[test]
