@@ -170,27 +170,34 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
     }
 }
 
-fn clear_cached_vault_state(server: &MemoryServer) {
-    let mut v = server.vault_write();
+fn clear_cached_vault_state_locked(v: &mut crate::VaultState) {
     let _ = v.key.take();
     v.unlock_time = None;
+}
+
+fn clear_cached_vault_state(server: &MemoryServer) {
+    {
+        let mut v = server.vault_write();
+        clear_cached_vault_state_locked(&mut v);
+    }
     server.llm.clear_provider_secrets();
 }
 
 fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
-    let v = server.vault_read();
-    let Some(unlock_time) = v.unlock_time else {
-        return false;
+    let locked = {
+        let mut v = server.vault_write();
+        let expired = v.unlock_time.is_some_and(|unlock_time| {
+            unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs)
+        });
+        if expired {
+            clear_cached_vault_state_locked(&mut v);
+        }
+        expired
     };
-    let auto_lock_secs = v.auto_lock_after_secs;
-    drop(v);
-
-    if unlock_time.elapsed() > Duration::from_secs(auto_lock_secs) {
-        clear_cached_vault_state(server);
-        return true;
+    if locked {
+        server.llm.clear_provider_secrets();
     }
-
-    false
+    locked
 }
 
 fn record_vault_audit(
@@ -215,23 +222,74 @@ fn with_vault_key<T>(
     server: &MemoryServer,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let v = server.vault_read();
-    if let Some(unlock_time) = v.unlock_time {
-        if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
-            let key = v
-                .key
-                .as_ref()
-                .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
-            return f(key.bytes());
+    loop {
+        let key_bytes = {
+            let v = server.vault_read();
+            let Some(unlock_time) = v.unlock_time else {
+                return Err("Vault is locked. Call vault_unlock first.".to_string());
+            };
+
+            if unlock_time.elapsed() <= Duration::from_secs(v.auto_lock_after_secs) {
+                let key = v
+                    .key
+                    .as_ref()
+                    .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
+                Some(*key.bytes())
+            } else {
+                None
+            }
+        };
+
+        if let Some(key_bytes) = key_bytes {
+            return f(&key_bytes);
+        }
+
+        let auto_locked = {
+            let mut v = server.vault_write();
+            let expired = v.unlock_time.is_some_and(|unlock_time| {
+                unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs)
+            });
+            if expired {
+                clear_cached_vault_state_locked(&mut v);
+            }
+            expired
+        };
+
+        if auto_locked {
+            server.llm.clear_provider_secrets();
+            return Err("Vault auto-locked. Call vault_unlock first.".into());
         }
     }
-    drop(v);
+}
 
-    if maybe_auto_lock_vault(server) {
-        return Err("Vault auto-locked. Call vault_unlock first.".into());
+#[cfg(test)]
+mod vault_key_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn with_vault_key_drops_vault_lock_before_running_work() {
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-vault-lock-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = MemoryServer::new(db_path, None).expect("create test server");
+        let key = [9u8; 32];
+        {
+            let mut v = server.vault_write();
+            v.key = Some(crate::CachedVaultKey::copy_from(&key));
+            v.unlock_time = Some(Instant::now());
+        }
+
+        with_vault_key(&server, |cached_key| {
+            assert_eq!(cached_key, &key);
+            assert!(
+                server.vault.try_write().is_ok(),
+                "vault lock should not be held while user work runs"
+            );
+            Ok(())
+        })
+        .expect("vault key should be available");
     }
-
-    Err("Vault is locked. Call vault_unlock first.".to_string())
 }
 
 fn ensure_vault_unlocked(server: &MemoryServer) -> Result<(), String> {
