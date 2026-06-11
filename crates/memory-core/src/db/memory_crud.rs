@@ -155,14 +155,11 @@ pub fn upsert(
 
     // ── Write-time Jaccard deduplication (new entries only) ──────────────────
     // Only for net-new IDs; ON CONFLICT path below handles updates.
-    let is_new: bool = tx
-        .query_row(
-            "SELECT COUNT(*) FROM memories WHERE id = ?1",
-            params![entry.id],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        == 0;
+    let is_new: bool = tx.query_row(
+        "SELECT COUNT(*) FROM memories WHERE id = ?1",
+        params![entry.id],
+        |r| r.get::<_, i64>(0),
+    )? == 0;
 
     if is_new {
         // Run FTS search for potential overlapping entries
@@ -174,25 +171,17 @@ pub fn upsert(
             .join(" ");
         if !safe_query.is_empty() {
             let fts_candidates: Vec<(String, String)> = {
-                let mut stmt = tx
-                    .prepare(
-                        "SELECT m.id, m.text FROM memories_fts
+                let mut stmt = tx.prepare(
+                    "SELECT m.id, m.text FROM memories_fts
                      JOIN memories m ON m.id = memories_fts.id
                      WHERE memories_fts MATCH simple_query(?1)
                        AND m.archived = 0 AND m.superseded_by IS NULL
                      LIMIT 5",
-                    )
-                    .ok();
-                if let Some(ref mut s) = stmt {
-                    s.query_map(params![safe_query], |r| {
-                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                    })
-                    .ok()
-                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                    .unwrap_or_default()
-                } else {
-                    vec![]
-                }
+                )?;
+                let rows = stmt.query_map(params![safe_query], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
+                rows.collect::<Result<_, _>>()?
             };
             for (cand_id, cand_text) in fts_candidates {
                 if jaccard_similarity(&entry.text, &cand_text) > 0.9 {
@@ -1216,9 +1205,8 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
         // Clean up FTS index
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
 
-        // Clean up vector table (best-effort)
         if vec_available {
-            let _ = tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed]);
+            tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;
         }
 
         // Clean up graph edges

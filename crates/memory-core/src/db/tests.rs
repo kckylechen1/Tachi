@@ -110,6 +110,41 @@ fn search_fts_returns_row_decode_errors() {
 }
 
 #[test]
+fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
+    let mut conn = make_conn();
+    let blob_id = [5u8, 6, 7, 8];
+    conn.execute(
+        "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
+        params![&blob_id[..], Utc::now().to_rfc3339()],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+         VALUES (?1, '/test', 'needle overlap', 'needle overlap', 'needle', 'needle')",
+        params![&blob_id[..]],
+    )
+    .unwrap();
+
+    let entry = make_entry("dedup-bad-row", "needle overlap");
+    let err = upsert(&mut conn, &entry, false)
+        .expect_err("dedup FTS row decode errors must abort the write");
+    assert!(
+        err.to_string().contains("Invalid column type")
+            || err.to_string().contains("InvalidColumnType"),
+        "unexpected error: {err}"
+    );
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'dedup-bad-row'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0, "failed dedup query should roll back the upsert");
+}
+
+#[test]
 fn jaccard_dedup_refreshes_candidate_fts() {
     let mut conn = make_conn();
     let text = "Rust memory systems need atomic full text search updates";
@@ -443,6 +478,41 @@ fn delete_existing() {
     // Verify it's gone from FTS
     let fts_results = search_fts(&conn, "deleted", 5, false, false, None, None).unwrap();
     assert!(!fts_results.contains_key("del-1"));
+}
+
+#[test]
+fn delete_returns_vector_cleanup_errors_and_rolls_back() {
+    let mut conn = make_conn();
+    let has_vec: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if has_vec == 0 {
+        return;
+    }
+
+    let e = make_entry("del-vec-error", "to be deleted after vector cleanup");
+    upsert(&mut conn, &e, false).unwrap();
+    conn.execute("DROP TABLE memories_vec", []).unwrap();
+
+    let err = delete(&mut conn, "del-vec-error", true)
+        .expect_err("vector cleanup errors must be returned");
+    assert!(
+        err.to_string().contains("memories_vec") || err.to_string().contains("no such table"),
+        "unexpected error: {err}"
+    );
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id = 'del-vec-error'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "failed vector cleanup should roll back delete");
 }
 
 #[test]
