@@ -21,9 +21,21 @@ pub(super) struct VaultInitParams {
     pub password: String,
 }
 
+impl Drop for VaultInitParams {
+    fn drop(&mut self) {
+        crypto::zero_string(&mut self.password);
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct VaultUnlockParams {
     pub password: String,
+}
+
+impl Drop for VaultUnlockParams {
+    fn drop(&mut self) {
+        crypto::zero_string(&mut self.password);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
