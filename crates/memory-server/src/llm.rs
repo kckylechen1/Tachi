@@ -100,6 +100,48 @@ enum KeyRetryStatus {
     Unavailable,
 }
 
+#[derive(Default)]
+struct ProviderState {
+    secrets: HashMap<String, Vec<ProviderSecret>>,
+    cooldowns: HashMap<String, Instant>,
+    indices: HashMap<String, usize>,
+    health: HashMap<String, HashMap<String, VaultKeyHealth>>,
+}
+
+impl ProviderState {
+    fn with_health(health: HashMap<String, HashMap<String, VaultKeyHealth>>) -> Self {
+        Self {
+            health,
+            ..Self::default()
+        }
+    }
+
+    fn get_or_insert_health(&mut self, logical_name: &str, key_id: &str) -> &mut VaultKeyHealth {
+        self.health
+            .entry(logical_name.to_string())
+            .or_default()
+            .entry(key_id.to_string())
+            .or_insert_with(|| VaultKeyHealth {
+                logical_name: logical_name.to_string(),
+                key_id: key_id.to_string(),
+                status: HEALTH_OK.to_string(),
+                cooldown_until: None,
+                last_success: None,
+                last_attempt: None,
+                last_error: None,
+                error_count: 0,
+                auth_failed: false,
+                disabled: false,
+                metadata: "{}".to_string(),
+                updated_at: Utc::now().to_rfc3339(),
+            })
+    }
+
+    fn prune_expired_cooldowns(&mut self, now: Instant) {
+        self.cooldowns.retain(|_, until| *until > now);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ClaudeCliFailure {
     kind: ClaudeCliFailureKind,
@@ -157,10 +199,7 @@ pub struct LlmClient {
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
     vault_db_path: Option<PathBuf>,
-    provider_secrets: Arc<RwLock<HashMap<String, Vec<ProviderSecret>>>>,
-    provider_cooldowns: Arc<RwLock<HashMap<String, Instant>>>,
-    provider_indices: Arc<RwLock<HashMap<String, usize>>>,
-    provider_health: Arc<RwLock<HashMap<String, HashMap<String, VaultKeyHealth>>>>,
+    provider_state: Arc<RwLock<ProviderState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
 }
 
@@ -296,10 +335,7 @@ impl LlmClient {
             reasoning,
             summary,
             vault_db_path,
-            provider_secrets: Arc::new(RwLock::new(HashMap::new())),
-            provider_cooldowns: Arc::new(RwLock::new(HashMap::new())),
-            provider_indices: Arc::new(RwLock::new(HashMap::new())),
-            provider_health: Arc::new(RwLock::new(provider_health)),
+            provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
             claude_cli_failure: Arc::new(RwLock::new(None)),
         })
     }
@@ -348,20 +384,10 @@ impl LlmClient {
         }
     }
 
-    fn key_health_blocked_at(
-        &self,
-        logical_name: &str,
-        key_id: &str,
+    fn key_health_blocked(
+        health: Option<&VaultKeyHealth>,
         now: DateTime<Utc>,
     ) -> (KeyAvailability, Option<i64>) {
-        let status_map = self
-            .provider_health
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let health = status_map
-            .get(logical_name)
-            .and_then(|members| members.get(key_id));
-
         let Some(health) = health else {
             return (KeyAvailability::Available, None);
         };
@@ -391,6 +417,21 @@ impl LlmClient {
         }
 
         (KeyAvailability::Available, None)
+    }
+
+    fn key_health_blocked_in_state(
+        state: &ProviderState,
+        logical_name: &str,
+        key_id: &str,
+        now: DateTime<Utc>,
+    ) -> (KeyAvailability, Option<i64>) {
+        Self::key_health_blocked(
+            state
+                .health
+                .get(logical_name)
+                .and_then(|members| members.get(key_id)),
+            now,
+        )
     }
 
     fn persist_key_health(&self, health: &VaultKeyHealth) {
@@ -462,26 +503,13 @@ impl LlmClient {
     }
 
     fn read_key_health_entry(&self, logical_name: &str, key_id: &str) -> Option<VaultKeyHealth> {
-        self.provider_health
+        self.provider_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .health
             .get(logical_name)
             .and_then(|members| members.get(key_id))
             .cloned()
-    }
-
-    fn write_key_health_entry(&self, mut health: VaultKeyHealth) {
-        health.updated_at = Self::format_now_utc();
-        {
-            let mut all = self
-                .provider_health
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            all.entry(health.logical_name.clone())
-                .or_default()
-                .insert(health.key_id.clone(), health.clone());
-        }
-        self.persist_key_health(&health);
     }
 
     fn with_key_health(
@@ -490,26 +518,19 @@ impl LlmClient {
         key_id: &str,
         mutator: impl FnOnce(&mut VaultKeyHealth),
     ) {
-        let existing = self
-            .read_key_health_entry(logical_name, key_id)
-            .unwrap_or_else(|| VaultKeyHealth {
-                logical_name: logical_name.to_string(),
-                key_id: key_id.to_string(),
-                status: HEALTH_OK.to_string(),
-                cooldown_until: None,
-                last_success: None,
-                last_attempt: None,
-                last_error: None,
-                error_count: 0,
-                auth_failed: false,
-                disabled: false,
-                metadata: "{}".to_string(),
-                updated_at: Self::format_now_utc(),
-            });
-        let mut health = existing;
-        mutator(&mut health);
-        health.last_attempt = Some(Self::format_now_utc());
-        self.write_key_health_entry(health);
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let persisted = {
+            let health = state.get_or_insert_health(logical_name, key_id);
+            mutator(health);
+            health.last_attempt = Some(Self::format_now_utc());
+            health.updated_at = Self::format_now_utc();
+            health.clone()
+        };
+        drop(state);
+        self.persist_key_health(&persisted);
     }
 
     fn mark_secret_auth_failed(&self, selected: &SelectedProviderSecret, reason: Option<&str>) {
@@ -524,19 +545,25 @@ impl LlmClient {
     }
 
     fn mark_secret_success(&self, selected: &SelectedProviderSecret) {
-        self.with_key_health(&selected.logical_name, &selected.key_id, |health| {
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let persisted = {
+            let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
             health.status = HEALTH_OK.to_string();
             health.auth_failed = false;
             health.last_success = Some(Self::format_now_utc());
+            health.last_attempt = Some(Self::format_now_utc());
             health.last_error = None;
             health.error_count = 0;
             health.cooldown_until = None;
-        });
-
-        self.provider_cooldowns
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&selected.key_id);
+            health.updated_at = Self::format_now_utc();
+            health.clone()
+        };
+        state.cooldowns.remove(&selected.key_id);
+        drop(state);
+        self.persist_key_health(&persisted);
     }
 
     fn load_lane(
@@ -626,15 +653,12 @@ impl LlmClient {
             return false;
         }
 
-        let mut secrets = self
-            .provider_secrets
+        let mut state = self
+            .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        secrets.insert(name.to_string(), entries);
-        self.provider_indices
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(name);
+        state.secrets.insert(name.to_string(), entries);
+        state.indices.remove(name);
         true
     }
 
@@ -649,59 +673,45 @@ impl LlmClient {
     }
 
     pub fn clear_provider_secrets(&self) {
-        self.provider_secrets
+        let mut state = self
+            .provider_state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.provider_cooldowns
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        self.provider_indices
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.secrets.clear();
+        state.cooldowns.clear();
+        state.indices.clear();
     }
 
     pub fn provider_secret_count(&self) -> usize {
-        self.provider_secrets
+        self.provider_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .secrets
             .len()
     }
 
     pub(crate) fn provider_pool_statuses(&self) -> Vec<ProviderPoolStatus> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
-        {
-            let mut cooldowns = self
-                .provider_cooldowns
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cooldowns.retain(|_, until| *until > now);
-        }
-
-        let secrets = self
-            .provider_secrets
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let cooldowns = self
-            .provider_cooldowns
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let indices = self
-            .provider_indices
+        let state = self
+            .provider_state
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        let mut statuses = secrets
+        let mut statuses = state
+            .secrets
             .iter()
             .map(|(logical_name, entries)| {
                 let mut unavailable_keys = Vec::new();
                 for entry in entries.iter() {
-                    let (availability, remaining_seconds) =
-                        self.key_health_blocked_at(logical_name, &entry.key_id, now_utc);
-                    let memory_blocked = cooldowns
+                    let (availability, remaining_seconds) = Self::key_health_blocked_in_state(
+                        &state,
+                        logical_name,
+                        &entry.key_id,
+                        now_utc,
+                    );
+                    let memory_blocked = state
+                        .cooldowns
                         .get(&entry.key_id)
                         .is_some_and(|until| *until > now);
 
@@ -717,7 +727,8 @@ impl LlmClient {
 
                     if is_blocked {
                         let remaining_seconds = if memory_blocked {
-                            cooldowns
+                            state
+                                .cooldowns
                                 .get(&entry.key_id)
                                 .map(|until| {
                                     until.saturating_duration_since(now).as_secs().max(1) as i64
@@ -745,7 +756,7 @@ impl LlmClient {
                     total_keys: entries.len(),
                     available_keys: entries.len().saturating_sub(unavailable_keys.len()),
                     rate_limited_keys: unavailable_keys,
-                    current_index: *indices.get(logical_name).unwrap_or(&0),
+                    current_index: *state.indices.get(logical_name).unwrap_or(&0),
                     strategy: "round_robin_skip_cooldown",
                 }
             })
@@ -757,80 +768,59 @@ impl LlmClient {
     fn select_secret(&self, keys: &[&str]) -> Option<SelectedProviderSecret> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
-        {
-            let mut cooldowns = self
-                .provider_cooldowns
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cooldowns.retain(|_, until| *until > now);
-        }
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.prune_expired_cooldowns(now);
 
-        let vault_value = {
-            let secrets = self
-                .provider_secrets
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let cooldowns = self
-                .provider_cooldowns
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let mut indices = self
-                .provider_indices
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            keys.iter().find_map(|key| {
-                secrets
-                    .get(*key)
-                    .and_then(|entries| {
-                        if entries.is_empty() {
-                            return None;
-                        }
-                        let start = *indices.get(*key).unwrap_or(&0);
-                        let mut found_usable = None;
-                        for offset in 0..entries.len() {
-                            let idx = (start + offset) % entries.len();
-                            if cooldowns.contains_key(&entries[idx].key_id) {
-                                continue;
-                            }
+        let vault_value = keys.iter().find_map(|key| {
+            let entries = state.secrets.get(*key)?;
+            if entries.is_empty() {
+                return None;
+            }
+            let start = *state.indices.get(*key).unwrap_or(&0);
+            let mut selected: Option<(usize, usize, ProviderSecret)> = None;
+            for offset in 0..entries.len() {
+                let idx = (start + offset) % entries.len();
+                let entry = &entries[idx];
+                if state.cooldowns.contains_key(&entry.key_id) {
+                    continue;
+                }
 
-                            let (availability, remaining_seconds) =
-                                self.key_health_blocked_at(key, &entries[idx].key_id, now_utc);
-                            let unusable = match availability {
-                                KeyAvailability::AuthFailed
-                                | KeyAvailability::Disabled
-                                | KeyAvailability::Exhausted => true,
-                                KeyAvailability::Cooldown => remaining_seconds.unwrap_or(0) > 0,
-                                KeyAvailability::Available => false,
-                            };
-                            if unusable {
-                                continue;
-                            }
-                            found_usable = Some(idx);
-                            break;
-                        }
+                let (availability, remaining_seconds) =
+                    Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
+                let unusable = match availability {
+                    KeyAvailability::AuthFailed
+                    | KeyAvailability::Disabled
+                    | KeyAvailability::Exhausted => true,
+                    KeyAvailability::Cooldown => remaining_seconds.unwrap_or(0) > 0,
+                    KeyAvailability::Available => false,
+                };
+                if !unusable {
+                    selected = Some((idx, entries.len(), entry.clone()));
+                    break;
+                }
+            }
 
-                        found_usable.and_then(|idx| {
-                            indices.insert((*key).to_string(), (idx + 1) % entries.len());
-                            entries.get(idx)
-                        })
-                    })
-                    .map(|entry| SelectedProviderSecret {
+            selected
+                .map(|(idx, entries_len, entry)| {
+                    state
+                        .indices
+                        .insert((*key).to_string(), (idx + 1) % entries_len);
+                    SelectedProviderSecret {
                         logical_name: (*key).to_string(),
-                        key_id: entry.key_id.clone(),
+                        key_id: entry.key_id,
                         value: entry.value.trim().to_string(),
-                    })
-                    .filter(|entry| !entry.value.is_empty())
-            })
-        };
+                    }
+                })
+                .filter(|entry| !entry.value.is_empty())
+        });
 
         vault_value.or_else(|| {
-            let cooldowns = self
-                .provider_cooldowns
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             keys.iter().find_map(|key| {
                 let (availability, remaining_seconds) =
-                    self.key_health_blocked_at(key, key, now_utc);
+                    Self::key_health_blocked_in_state(&state, key, key, now_utc);
                 let unusable = match availability {
                     KeyAvailability::AuthFailed
                     | KeyAvailability::Disabled
@@ -839,7 +829,7 @@ impl LlmClient {
                     KeyAvailability::Available => false,
                 };
 
-                if unusable || cooldowns.contains_key(*key) {
+                if unusable || state.cooldowns.contains_key(*key) {
                     return None;
                 }
                 Self::first_env(&[*key])
@@ -887,15 +877,15 @@ impl LlmClient {
         key_id: &str,
         now: Instant,
         now_utc: DateTime<Utc>,
-        cooldowns: &HashMap<String, Instant>,
+        state: &ProviderState,
     ) -> KeyRetryStatus {
         let mut retry_after = None;
-        if let Some(until) = cooldowns.get(key_id).filter(|until| **until > now) {
+        if let Some(until) = state.cooldowns.get(key_id).filter(|until| **until > now) {
             Self::remember_min_retry_delay(&mut retry_after, until.saturating_duration_since(now));
         }
 
         let (availability, remaining_seconds) =
-            self.key_health_blocked_at(logical_name, key_id, now_utc);
+            Self::key_health_blocked_in_state(state, logical_name, key_id, now_utc);
         match availability {
             KeyAvailability::Available => match retry_after {
                 Some(delay) => KeyRetryStatus::RetryAfter(delay),
@@ -920,34 +910,23 @@ impl LlmClient {
     fn selected_secret_retry_delay(&self, keys: &[&str]) -> Option<Duration> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
-        {
-            let mut cooldowns = self
-                .provider_cooldowns
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            cooldowns.retain(|_, until| *until > now);
-        }
-
-        let secrets = self
-            .provider_secrets
-            .read()
+        let mut state = self
+            .provider_state
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let cooldowns = self
-            .provider_cooldowns
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.prune_expired_cooldowns(now);
 
         let mut saw_configured_key = false;
         let mut retry_after = None;
 
         for key in keys {
-            if let Some(entries) = secrets.get(*key) {
+            if let Some(entries) = state.secrets.get(*key) {
                 for entry in entries
                     .iter()
                     .filter(|entry| !entry.value.trim().is_empty())
                 {
                     saw_configured_key = true;
-                    match self.key_retry_status(key, &entry.key_id, now, now_utc, &cooldowns) {
+                    match self.key_retry_status(key, &entry.key_id, now, now_utc, &state) {
                         KeyRetryStatus::Available => return None,
                         KeyRetryStatus::RetryAfter(delay) => {
                             Self::remember_min_retry_delay(&mut retry_after, delay);
@@ -962,7 +941,7 @@ impl LlmClient {
                 .is_some_and(|value| !crate::provider_config::is_vault_alias(&value))
             {
                 saw_configured_key = true;
-                match self.key_retry_status(key, key, now, now_utc, &cooldowns) {
+                match self.key_retry_status(key, key, now, now_utc, &state) {
                     KeyRetryStatus::Available => return None,
                     KeyRetryStatus::RetryAfter(delay) => {
                         Self::remember_min_retry_delay(&mut retry_after, delay);
@@ -1012,24 +991,30 @@ impl LlmClient {
         let now = Self::now_utc();
         let cooldown = retry_after.unwrap_or(60).clamp(1, 3600);
         let until = Instant::now() + Duration::from_secs(cooldown);
-        self.provider_cooldowns
+        let mut state = self
+            .provider_state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(selected.key_id.clone(), until);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.cooldowns.insert(selected.key_id.clone(), until);
+        let persisted = {
+            let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
+            health.status = HEALTH_RATE_LIMITED.to_string();
+            health.cooldown_until =
+                Some((now + chrono::Duration::seconds(cooldown as i64)).to_rfc3339());
+            health.last_attempt = Some(Self::format_now_utc());
+            health.last_error = Some(format!("rate limited; retry after {cooldown}s"));
+            health.error_count += 1;
+            health.updated_at = Self::format_now_utc();
+            health.clone()
+        };
+        drop(state);
         tracing::warn!(
             "[provider] key {} for {} is rate-limited; cooling down for {}s",
             selected.key_id,
             selected.logical_name,
             cooldown
         );
-
-        self.with_key_health(&selected.logical_name, &selected.key_id, |health| {
-            health.status = HEALTH_RATE_LIMITED.to_string();
-            health.cooldown_until =
-                Some((now + chrono::Duration::seconds(cooldown as i64)).to_rfc3339());
-            health.last_error = Some(format!("rate limited; retry after {cooldown}s"));
-            health.error_count += 1;
-        });
+        self.persist_key_health(&persisted);
     }
 
     #[cfg(test)]
@@ -2152,6 +2137,42 @@ mod tests {
         let raw = serde_json::to_string(&statuses).expect("serialize statuses");
         assert!(!raw.contains("secret-one"));
         assert!(!raw.contains("secret-two"));
+    }
+
+    #[test]
+    fn provider_runtime_maps_share_one_state_lock() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_PROVIDER_STATE";
+        let client = LlmClient::new().expect("client should initialize");
+        let key_id = format!("{KEY}_1");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![ProviderSecret {
+                key_id: key_id.clone(),
+                value: "secret-one".to_string(),
+            }],
+        );
+
+        assert_eq!(
+            client.provider_key_id_for_tests(&[KEY]).as_deref(),
+            Some(key_id.as_str())
+        );
+        client.mark_provider_key_rate_limited_for_tests(&key_id, Some(60));
+
+        let state = client
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(state.secrets.contains_key(KEY));
+        assert_eq!(state.indices.get(KEY), Some(&0));
+        assert!(state.cooldowns.contains_key(&key_id));
+        assert_eq!(
+            state
+                .health
+                .get(KEY)
+                .and_then(|members| members.get(&key_id))
+                .map(|health| health.status.as_str()),
+            Some(HEALTH_RATE_LIMITED)
+        );
     }
 
     #[test]
