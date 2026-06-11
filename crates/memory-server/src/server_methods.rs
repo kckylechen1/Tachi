@@ -8,12 +8,44 @@ pub(super) struct ResolvedCallTarget {
 }
 
 impl MemoryServer {
+    fn reserve_rate_limiter_entry_capacity(
+        map: &mut HashMap<String, VecDeque<Instant>>,
+        max_entries: usize,
+        stale_cutoff: Instant,
+        new_key: &str,
+    ) {
+        if max_entries == 0 || map.contains_key(new_key) {
+            return;
+        }
+
+        if map.len() >= max_entries {
+            map.retain(|_, deque| deque.back().is_some_and(|&t| t >= stale_cutoff));
+        }
+
+        while map.len() >= max_entries {
+            let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, deque)| deque.back().copied().unwrap_or(stale_cutoff))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest_key);
+        }
+    }
+
     pub(super) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
         self.agent_runtime_write().tool_profile = profile;
     }
 
     pub(super) fn active_tool_profile(&self) -> Option<ToolProfile> {
         self.agent_runtime_read().tool_profile
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rate_limiter_entry_counts_for_tests(&self) -> (usize, usize) {
+        let rl = self.rate_limiter_lock();
+        (rl.windows.len(), rl.bursts.len())
     }
 
     pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {
@@ -893,11 +925,12 @@ impl MemoryServer {
         if effective_rpm > 0 {
             let windows = &mut rl.windows;
 
-            // Evict stale sessions when map exceeds cap
-            if windows.len() > RATE_LIMIT_MAX_SESSIONS {
-                let cutoff = now - Duration::from_secs(120);
-                windows.retain(|_, deque| deque.back().is_some_and(|&t| t >= cutoff));
-            }
+            Self::reserve_rate_limiter_entry_capacity(
+                windows,
+                RATE_LIMIT_MAX_SESSIONS,
+                now - Duration::from_secs(120),
+                session_id,
+            );
 
             let window = windows.entry(session_id.to_string()).or_default();
 
@@ -937,11 +970,12 @@ impl MemoryServer {
             let burst_key = format!("{}:{}:{}", session_id, tool_name, args_hash);
             let bursts = &mut rl.bursts;
 
-            // Evict stale burst keys when map exceeds cap
-            if bursts.len() > RATE_LIMIT_MAX_BURST_KEYS {
-                let cutoff = now - RATE_LIMIT_BURST_WINDOW;
-                bursts.retain(|_, deque| deque.back().is_some_and(|&t| t >= cutoff));
-            }
+            Self::reserve_rate_limiter_entry_capacity(
+                bursts,
+                RATE_LIMIT_MAX_BURST_KEYS,
+                now - RATE_LIMIT_BURST_WINDOW,
+                &burst_key,
+            );
 
             let stamps = bursts.entry(burst_key).or_default();
 
