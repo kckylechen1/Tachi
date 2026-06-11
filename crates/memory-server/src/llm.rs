@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use memory_core::vault::VaultKeyHealth;
 
@@ -277,6 +277,7 @@ pub struct LlmClient {
 impl LlmClient {
     const MAX_ATTEMPTS: usize = 3;
     const BASE_RETRY_DELAY_MS: u64 = 500;
+    const RETRY_JITTER_PERCENT: u64 = 20;
     const KEY_HEALTH_RELOAD_TTL: Duration = Duration::from_secs(30);
 
     pub fn new() -> Result<Self, String> {
@@ -2226,8 +2227,20 @@ impl LlmClient {
     }
 
     fn retry_delay(attempt: usize) -> Duration {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Self::retry_delay_with_jitter(attempt, seed)
+    }
+
+    fn retry_delay_with_jitter(attempt: usize, seed: u64) -> Duration {
         let multiplier = 1u64 << attempt.saturating_sub(1).min(4);
-        Duration::from_millis(Self::BASE_RETRY_DELAY_MS * multiplier)
+        let base_ms = Self::BASE_RETRY_DELAY_MS * multiplier;
+        let jitter_ms = ((base_ms * Self::RETRY_JITTER_PERCENT) / 100).max(1);
+        let mixed =
+            seed ^ (attempt as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ base_ms.rotate_left(17);
+        Duration::from_millis(base_ms + (mixed % (jitter_ms + 1)))
     }
 
     /// Remove ```json markdown code fences from response
@@ -2565,6 +2578,36 @@ mod tests {
             err.contains("retry after"),
             "expected retry guidance, got: {err}"
         );
+    }
+
+    #[test]
+    fn retry_delay_adds_bounded_jitter_to_exponential_backoff() {
+        let first = LlmClient::retry_delay_with_jitter(1, 0);
+        assert!(first >= Duration::from_millis(LlmClient::BASE_RETRY_DELAY_MS));
+        assert!(
+            first
+                <= Duration::from_millis(
+                    LlmClient::BASE_RETRY_DELAY_MS
+                        + (LlmClient::BASE_RETRY_DELAY_MS * LlmClient::RETRY_JITTER_PERCENT / 100)
+                )
+        );
+
+        let later = LlmClient::retry_delay_with_jitter(3, 0);
+        let later_base = LlmClient::BASE_RETRY_DELAY_MS * 4;
+        assert!(later >= Duration::from_millis(later_base));
+        assert!(
+            later
+                <= Duration::from_millis(
+                    later_base + (later_base * LlmClient::RETRY_JITTER_PERCENT / 100)
+                )
+        );
+    }
+
+    #[test]
+    fn retry_delay_jitter_varies_by_seed() {
+        let first = LlmClient::retry_delay_with_jitter(2, 1);
+        let second = LlmClient::retry_delay_with_jitter(2, 2);
+        assert_ne!(first, second);
     }
 
     #[test]
