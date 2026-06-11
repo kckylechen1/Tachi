@@ -819,8 +819,14 @@ impl MemoryServer {
             return self.call_skill_tool(tool_name, args_obj).await;
         }
 
-        if let Some((server_name, remote_tool)) = tool_name.split_once("__") {
-            let exposure_mode = self.proxy_tool_exposure_mode_for_server(server_name)?;
+        if let Some((server_name, remote_tool)) = {
+            let proxy_tools = lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
+            crate::server_handler::split_proxy_tool_name(
+                tool_name,
+                proxy_tools.keys().map(String::as_str),
+            )
+        } {
+            let exposure_mode = self.proxy_tool_exposure_mode_for_server(&server_name)?;
             if exposure_mode == McpToolExposureMode::Gateway {
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
@@ -831,7 +837,7 @@ impl MemoryServer {
                 ));
             }
             return self
-                .proxy_call_internal(server_name, remote_tool, args_obj)
+                .proxy_call_internal(&server_name, &remote_tool, args_obj)
                 .await;
         }
 
