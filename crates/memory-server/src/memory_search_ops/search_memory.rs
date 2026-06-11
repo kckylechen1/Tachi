@@ -53,8 +53,9 @@ pub(crate) async fn search_memory_rows(
     if !wiki_path_prefix && memory_core::should_skip_query(&params.query) {
         return Ok(vec![]);
     }
-    let top_k = params.top_k.max(1);
+    let top_k = params.normalized_top_k();
     params.top_k = top_k;
+    params.candidates_per_channel = params.normalized_candidates_per_channel();
 
     let named_project_vec_available = if let Some(ref project_name) = params.project {
         server
@@ -374,13 +375,14 @@ pub(crate) async fn handle_search_memory(
     params: SearchMemoryParams,
     project_only: bool,
 ) -> Result<String, String> {
-    let top_k = params.top_k.max(1);
+    let top_k = params.normalized_top_k();
     let mut search_params = params.clone();
     if params.enable_rerank {
-        search_params.top_k = top_k.saturating_mul(3).max(top_k + 1);
+        search_params.top_k = top_k.saturating_mul(3);
         search_params.candidates_per_channel = search_params
             .candidates_per_channel
-            .max(search_params.top_k);
+            .max(search_params.top_k)
+            .min(crate::tool_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL);
     }
     let mut rows = search_memory_rows(server, search_params, project_only).await?;
     if params.enable_rerank && rows.len() > top_k {
@@ -432,9 +434,11 @@ pub(crate) async fn handle_find_similar_memory(
         use_rrf: false,
     };
 
+    let top_k = params.normalized_top_k();
+    let candidates_per_channel = params.normalized_candidates_per_channel();
     let global_opts = SearchOptions {
-        candidates_per_channel: params.candidates_per_channel.max(params.top_k),
-        top_k: params.top_k,
+        candidates_per_channel,
+        top_k,
         weights: common_weights.clone(),
         path_prefix: params.path_prefix.clone(),
         query_vec: Some(params.query_vec.clone()),
@@ -458,8 +462,8 @@ pub(crate) async fn handle_find_similar_memory(
 
     if server.has_project_db() {
         let project_opts = SearchOptions {
-            candidates_per_channel: params.candidates_per_channel.max(params.top_k),
-            top_k: params.top_k,
+            candidates_per_channel,
+            top_k,
             weights: common_weights,
             path_prefix: params.path_prefix.clone(),
             query_vec: Some(params.query_vec.clone()),
