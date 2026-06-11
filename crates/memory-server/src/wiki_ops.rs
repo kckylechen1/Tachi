@@ -2,7 +2,7 @@ use super::*;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use memory_core::scorer::local_pagerank;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
@@ -13,6 +13,12 @@ const WIKI_LOG_MAX_ENTRIES: usize = 200;
 const WIKI_LOG_ENTRY_MAX_BYTES: usize = 4096;
 const WIKI_INGEST_HTTP_MAX_BYTES: usize = 2 * 1024 * 1024;
 static WIKI_INGEST_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct ValidatedWikiIngestHttpUrl {
+    url: reqwest::Url,
+    resolved_addrs: Option<Vec<SocketAddr>>,
+}
 
 fn default_checks() -> Vec<String> {
     vec![
@@ -188,10 +194,10 @@ fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
 
 async fn source_for_path(source: &str) -> Result<String, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
-        let url = validate_wiki_ingest_http_url(source).await?;
-        let client = wiki_ingest_http_client()?;
+        let validated = validate_wiki_ingest_http_url(source).await?;
+        let client = wiki_ingest_http_client_for_url(&validated)?;
         let response = client
-            .get(url)
+            .get(validated.url)
             .send()
             .await
             .map_err(|e| format!("fetch source URL: {e}"))?;
@@ -216,6 +222,24 @@ async fn source_for_path(source: &str) -> Result<String, String> {
     }
 }
 
+fn wiki_ingest_http_client_for_url(
+    validated: &ValidatedWikiIngestHttpUrl,
+) -> Result<reqwest::Client, String> {
+    let Some(resolved_addrs) = validated.resolved_addrs.as_deref() else {
+        return wiki_ingest_http_client().cloned();
+    };
+    let host = validated
+        .url
+        .host_str()
+        .ok_or_else(|| "wiki ingest source URL must include a host".to_string())?;
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(StdDuration::from_secs(30))
+        .resolve_to_addrs(host, resolved_addrs)
+        .build()
+        .map_err(|e| format!("build source URL client: {e}"))
+}
+
 fn wiki_ingest_http_client() -> Result<&'static reqwest::Client, String> {
     WIKI_INGEST_HTTP_CLIENT
         .get_or_init(|| {
@@ -229,7 +253,7 @@ fn wiki_ingest_http_client() -> Result<&'static reqwest::Client, String> {
         .map_err(Clone::clone)
 }
 
-async fn validate_wiki_ingest_http_url(source: &str) -> Result<reqwest::Url, String> {
+async fn validate_wiki_ingest_http_url(source: &str) -> Result<ValidatedWikiIngestHttpUrl, String> {
     let url = reqwest::Url::parse(source).map_err(|e| format!("parse source URL: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err("wiki ingest only supports http:// and https:// source URLs".to_string());
@@ -244,14 +268,22 @@ async fn validate_wiki_ingest_http_url(source: &str) -> Result<reqwest::Url, Str
     if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
         return Err("wiki ingest source URL host is not allowed".to_string());
     }
-    if let Ok(ip) = host.parse::<IpAddr>() {
+    let ip_literal = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_literal.parse::<IpAddr>() {
         reject_blocked_wiki_ingest_ip(ip)?;
-        return Ok(url);
+        return Ok(ValidatedWikiIngestHttpUrl {
+            url,
+            resolved_addrs: None,
+        });
     }
 
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "wiki ingest source URL has no usable port".to_string())?;
+    let mut resolved_addrs = Vec::new();
     let mut resolved_any = false;
     for addr in lookup_host((host, port))
         .await
@@ -259,12 +291,16 @@ async fn validate_wiki_ingest_http_url(source: &str) -> Result<reqwest::Url, Str
     {
         resolved_any = true;
         reject_blocked_wiki_ingest_ip(addr.ip())?;
+        resolved_addrs.push(addr);
     }
     if !resolved_any {
         return Err("wiki ingest source URL host resolved to no addresses".to_string());
     }
 
-    Ok(url)
+    Ok(ValidatedWikiIngestHttpUrl {
+        url,
+        resolved_addrs: Some(resolved_addrs),
+    })
 }
 
 fn reject_blocked_wiki_ingest_ip(ip: IpAddr) -> Result<(), String> {
@@ -1952,8 +1988,9 @@ pub(crate) async fn handle_wiki_lint(
 mod reference_validation_tests {
     use super::{
         validate_reference_format, validate_references, validate_wiki_ingest_http_url,
-        wiki_ingest_http_client,
+        wiki_ingest_http_client, wiki_ingest_http_client_for_url, ValidatedWikiIngestHttpUrl,
     };
+    use std::net::SocketAddr;
 
     #[test]
     fn valid_reference_formats() {
@@ -1999,6 +2036,39 @@ mod reference_validation_tests {
             .await
             .unwrap_err();
         assert!(err.contains("private or local"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_metadata_link_local_ip() {
+        let err = validate_wiki_ingest_http_url("http://169.254.169.254/latest/meta-data")
+            .await
+            .unwrap_err();
+        assert!(err.contains("private or local"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_ipv6_unique_local_ip() {
+        let err = validate_wiki_ingest_http_url("http://[fd00::1]/source.md")
+            .await
+            .unwrap_err();
+        assert!(err.contains("private or local"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_accepts_public_ip_literal_without_dns_override() {
+        let validated = validate_wiki_ingest_http_url("http://93.184.216.34/source.md")
+            .await
+            .expect("public IP literal should be allowed");
+        assert!(validated.resolved_addrs.is_none());
+    }
+
+    #[test]
+    fn wiki_ingest_http_client_accepts_validated_dns_override() {
+        let validated = ValidatedWikiIngestHttpUrl {
+            url: reqwest::Url::parse("https://example.com/source.md").unwrap(),
+            resolved_addrs: Some(vec!["93.184.216.34:443".parse::<SocketAddr>().unwrap()]),
+        };
+        wiki_ingest_http_client_for_url(&validated).expect("client with DNS override should build");
     }
 
     #[tokio::test]
