@@ -204,14 +204,41 @@ fn record_vault_audit(
     secret_name: Option<&str>,
     success: bool,
     detail: Option<&str>,
-) {
+) -> Result<(), String> {
     let timestamp = Utc::now().to_rfc3339();
-    if let Err(err) = server.with_global_store(|store| {
-        store
-            .vault_insert_audit(&timestamp, operation, secret_name, success, detail)
-            .map_err(|e| e.to_string())
-    }) {
-        eprintln!("WARNING: failed to record vault audit: {err}");
+    server
+        .with_global_store(|store| {
+            store
+                .vault_insert_audit(&timestamp, operation, secret_name, success, detail)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|err| {
+            tracing::warn!("failed to record vault audit for {operation}: {err}");
+            format!("failed to record vault audit for {operation}: {err}")
+        })
+}
+
+fn attach_vault_audit_warning(body: String, warning: String) -> Result<String, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("serialize vault audit warning: {e}"))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "vault_audit_warning".to_string(),
+            json!(format!(
+                "Vault operation succeeded, but its audit record was not persisted: {warning}"
+            )),
+        );
+    }
+    serde_json::to_string(&value).map_err(|e| format!("serialize: {e}"))
+}
+
+fn result_with_vault_audit_warning(
+    result: Result<String, String>,
+    audit_result: Result<(), String>,
+) -> Result<String, String> {
+    match (result, audit_result) {
+        (Ok(body), Err(warning)) => attach_vault_audit_warning(body, warning),
+        (result, _) => result,
     }
 }
 
@@ -839,14 +866,14 @@ pub(crate) async fn handle_vault_init(
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_init",
         None,
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_unlock(
@@ -885,14 +912,14 @@ pub(crate) async fn handle_vault_unlock(
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_unlock",
         None,
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
@@ -904,14 +931,14 @@ pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, S
         .map_err(|e| format!("serialize: {e}"))
     };
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_lock",
         None,
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_set(
@@ -1011,7 +1038,7 @@ pub(crate) async fn handle_vault_set(
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_set",
         Some(&secret_name),
@@ -1021,7 +1048,7 @@ pub(crate) async fn handle_vault_set(
             Err(err) => Some(err.as_str()),
         },
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_get(
@@ -1058,14 +1085,14 @@ pub(crate) async fn handle_vault_get(
         .map_err(|e| format!("serialize: {e}"))
     });
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_get",
         Some(&requested_name),
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_list(
@@ -1135,7 +1162,7 @@ pub(crate) async fn handle_vault_remove(
         }
     })();
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_remove",
         Some(&secret_name),
@@ -1143,7 +1170,7 @@ pub(crate) async fn handle_vault_remove(
         result.as_ref().err().map(String::as_str),
     );
 
-    match result {
+    let result = match result {
         Ok(value) => Ok(value),
         Err(err) if err.starts_with("Secret not found: ") => serde_json::to_string(&json!({
             "removed": false,
@@ -1151,7 +1178,8 @@ pub(crate) async fn handle_vault_remove(
         }))
         .map_err(|e| format!("serialize: {e}")),
         Err(err) => Err(err),
-    }
+    };
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
@@ -1309,7 +1337,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
     })();
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_set_api_key_pool",
         Some(&logical_name),
@@ -1319,7 +1347,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
             Err(err) => Some(err.as_str()),
         },
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 fn advance_rotation_after_key(
@@ -1410,14 +1438,14 @@ pub(crate) async fn handle_vault_lease_api_key(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_lease_api_key",
         Some(&requested_name),
         result.is_ok(),
         result.as_ref().err().map(String::as_str),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_record_key_result(
@@ -1464,12 +1492,12 @@ pub(crate) async fn handle_vault_record_key_result(
         "health": health,
     });
     let result = serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
-    record_vault_audit(
+    let audit_result = record_vault_audit(
         server,
         "vault_record_key_result",
         Some(&params.logical_name),
         result.is_ok(),
         params.reason.as_deref(),
     );
-    result
+    result_with_vault_audit_warning(result, audit_result)
 }
