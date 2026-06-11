@@ -34,9 +34,11 @@ pub fn normalize(v: f64) -> f64 {
 }
 
 /// Cosine similarity between two equal-length f32 slices.
-/// Returns 0.0 if either vector is zero-magnitude.
+/// Returns 0.0 if dimensions differ or either vector is zero-magnitude.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    debug_assert_eq!(a.len(), b.len(), "vector dimension mismatch");
+    if a.len() != b.len() {
+        return 0.0;
+    }
     let mut dot = 0.0_f64;
     let mut mag_a = 0.0_f64;
     let mut mag_b = 0.0_f64;
@@ -716,6 +718,13 @@ mod tests {
         let a = vec![1.0_f32, 0.0];
         let b = vec![0.0_f32, 1.0];
         assert!((cosine_similarity(&a, &b)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cosine_dimension_mismatch_returns_zero() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![1.0_f32, 0.0, 999.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
     }
 
     #[test]
