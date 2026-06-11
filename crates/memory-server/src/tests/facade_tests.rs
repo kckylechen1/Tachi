@@ -65,6 +65,47 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
     assert!(markdown.starts_with("## Tachi search:"), "{markdown}");
 }
 
+#[tokio::test]
+async fn tachi_memory_search_caps_large_top_k() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            for idx in 0..(crate::MAX_FACADE_TOP_K + 25) {
+                let mut entry = make_entry(&format!("facade-clamp-{idx}"));
+                entry.path = format!("/facade/clamp/{idx}");
+                entry.summary = format!("facade clamp sentinel {idx}");
+                entry.text = format!("facade clamp sentinel searchable row {idx}");
+                entry.keywords = vec!["facade".to_string(), "clamp".to_string()];
+                store
+                    .upsert(&entry)
+                    .map_err(|e| format!("seed clamp row: {e}"))?;
+            }
+            Ok(())
+        })
+        .expect("seed clamp memories");
+
+    let mut params = tachi_memory_params("search");
+    params.format = None;
+    params.query = Some("facade clamp sentinel".to_string());
+    params.top_k = 10_000;
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("search should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("search JSON");
+    let memory_rows = parsed["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .and_then(|section| section["rows"].as_array())
+        .expect("memory rows");
+
+    assert_eq!(memory_rows.len(), crate::MAX_FACADE_TOP_K);
+}
+
 // ─── cli_client: daemon detection + in-process fallback ─────────────────────
 
 #[tokio::test]
