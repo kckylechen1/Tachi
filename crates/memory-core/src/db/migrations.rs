@@ -212,6 +212,7 @@ fn migrate_v7_reconcile_legacy_memory_columns(conn: &Connection) -> Result<usize
 
     for column in ["indexed_tags", "domain_key"] {
         if table_has_column(conn, "memories", column)? {
+            let column = quote_sql_identifier(column)?;
             conn.execute(&format!("ALTER TABLE memories DROP COLUMN {column}"), [])?;
             actions += 1;
         }
@@ -225,7 +226,8 @@ pub fn fold_and_drop_legacy_persons_column(conn: &Connection) -> Result<usize, M
         return Ok(0);
     }
     let folded = migrate_v6_fold_persons_into_entities(conn)?;
-    conn.execute("ALTER TABLE memories DROP COLUMN persons", [])?;
+    let column = quote_sql_identifier("persons")?;
+    conn.execute(&format!("ALTER TABLE memories DROP COLUMN {column}"), [])?;
     Ok(folded + 1)
 }
 
@@ -292,9 +294,23 @@ pub(crate) fn table_has_column(
     table: &str,
     column: &str,
 ) -> Result<bool, MemoryError> {
-    let sql = format!("SELECT 1 FROM pragma_table_info('{table}') WHERE name = ?1 LIMIT 1");
+    let table = quote_sql_identifier(table)?;
+    let sql = format!("SELECT 1 FROM pragma_table_info({table}) WHERE name = ?1 LIMIT 1");
     let exists = conn.query_row(&sql, [column], |_| Ok(())).is_ok();
     Ok(exists)
+}
+
+fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {
+    if identifier.is_empty()
+        || !identifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(MemoryError::InvalidArg(format!(
+            "invalid SQL identifier: {identifier}"
+        )));
+    }
+    Ok(format!("\"{identifier}\""))
 }
 
 // ─── v5: drop HyperTachi legacy columns ───────────────────────────────────────
@@ -303,6 +319,7 @@ fn migrate_v5_drop_hypertachi_legacy_columns(conn: &Connection) -> Result<usize,
     let mut dropped = 0usize;
     for column in ["indexed_tags", "domain_key"] {
         if table_has_column(conn, "memories", column)? {
+            let column = quote_sql_identifier(column)?;
             conn.execute(&format!("ALTER TABLE memories DROP COLUMN {column}"), [])?;
             dropped += 1;
         }
@@ -576,6 +593,18 @@ mod tests {
         let _ = try_load_sqlite_vec(&conn);
         init_schema(&conn).expect("init_schema");
         (conn, tmp)
+    }
+
+    #[test]
+    fn migration_table_has_column_rejects_dynamic_sql_identifiers() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)", [])
+            .expect("create minimal table");
+
+        let err = table_has_column(&conn, "memories'); DROP TABLE memories; --", "id")
+            .expect_err("dynamic table identifier should be rejected");
+
+        assert!(err.to_string().contains("invalid SQL identifier"));
     }
 
     fn insert_row(conn: &Connection, id: &str, path: &str, scope: &str, metadata: &str) {

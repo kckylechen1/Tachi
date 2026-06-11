@@ -1055,8 +1055,6 @@ fn sanitize_source_suffix_sql(s: &str) -> String {
     }
 }
 
-// SAFETY: table and column params must be literal strings only — this function
-// formats them directly into SQL DDL and is not injection-safe for dynamic input.
 fn ensure_column(
     conn: &Connection,
     table: &str,
@@ -1067,12 +1065,15 @@ fn ensure_column(
         return Ok(());
     }
 
+    let table = quote_sql_identifier(table)?;
+    let column = quote_sql_identifier(column)?;
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
     conn.execute(&sql, [])?;
     Ok(())
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MemoryError> {
+    let table = quote_sql_identifier(table)?;
     let pragma = format!("PRAGMA table_info({table})");
     let mut stmt = conn.prepare(&pragma)?;
     let mut rows = stmt.query([])?;
@@ -1083,6 +1084,19 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Memo
         }
     }
     Ok(false)
+}
+
+fn quote_sql_identifier(identifier: &str) -> Result<String, MemoryError> {
+    if identifier.is_empty()
+        || !identifier
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(MemoryError::InvalidArg(format!(
+            "invalid SQL identifier: {identifier}"
+        )));
+    }
+    Ok(format!("\"{identifier}\""))
 }
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
@@ -1120,6 +1134,21 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
 mod migration_tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn schema_identifier_helpers_reject_dynamic_sql_identifiers() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE memories (id TEXT PRIMARY KEY)", [])
+            .expect("create minimal table");
+
+        let table_err = has_column(&conn, "memories; DROP TABLE memories", "id")
+            .expect_err("dynamic table identifier should be rejected");
+        assert!(table_err.to_string().contains("invalid SQL identifier"));
+
+        let column_err = ensure_column(&conn, "memories", "bad; DROP", "TEXT")
+            .expect_err("dynamic column identifier should be rejected");
+        assert!(column_err.to_string().contains("invalid SQL identifier"));
+    }
 
     fn open_with_legacy_row(
         source: &str,
