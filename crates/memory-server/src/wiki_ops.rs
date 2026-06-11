@@ -12,6 +12,7 @@ const WIKI_LOG_MAX_BYTES: usize = 256 * 1024;
 const WIKI_LOG_MAX_ENTRIES: usize = 200;
 const WIKI_LOG_ENTRY_MAX_BYTES: usize = 4096;
 const WIKI_INGEST_HTTP_MAX_BYTES: usize = 2 * 1024 * 1024;
+static WIKI_INGEST_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
 
 fn default_checks() -> Vec<String> {
     vec![
@@ -188,11 +189,7 @@ fn wiki_ingest_local_file_allowed(source_path: &Path) -> bool {
 async fn source_for_path(source: &str) -> Result<String, String> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let url = validate_wiki_ingest_http_url(source).await?;
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(StdDuration::from_secs(30))
-            .build()
-            .map_err(|e| format!("build source URL client: {e}"))?;
+        let client = wiki_ingest_http_client()?;
         let response = client
             .get(url)
             .send()
@@ -217,6 +214,19 @@ async fn source_for_path(source: &str) -> Result<String, String> {
             .await
             .map_err(|e| format!("read source file: {e}"))
     }
+}
+
+fn wiki_ingest_http_client() -> Result<&'static reqwest::Client, String> {
+    WIKI_INGEST_HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(StdDuration::from_secs(30))
+                .build()
+                .map_err(|e| format!("build source URL client: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 async fn validate_wiki_ingest_http_url(source: &str) -> Result<reqwest::Url, String> {
@@ -1940,7 +1950,10 @@ pub(crate) async fn handle_wiki_lint(
 
 #[cfg(test)]
 mod reference_validation_tests {
-    use super::{validate_reference_format, validate_references, validate_wiki_ingest_http_url};
+    use super::{
+        validate_reference_format, validate_references, validate_wiki_ingest_http_url,
+        wiki_ingest_http_client,
+    };
 
     #[test]
     fn valid_reference_formats() {
@@ -1994,6 +2007,13 @@ mod reference_validation_tests {
             .await
             .unwrap_err();
         assert!(err.contains("host is not allowed"), "err: {err}");
+    }
+
+    #[test]
+    fn wiki_ingest_http_client_is_reused() {
+        let first = wiki_ingest_http_client().expect("client should build");
+        let second = wiki_ingest_http_client().expect("client should build");
+        assert!(std::ptr::eq(first, second));
     }
 }
 
