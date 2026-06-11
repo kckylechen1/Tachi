@@ -36,7 +36,7 @@ pub struct MaterializeReport {
     pub loaded: usize,
     pub from_vault: usize,
     pub from_alias: usize,
-    pub stripped_env_placeholders: usize,
+    pub env_fallbacks_bypassed: usize,
 }
 
 pub(crate) fn provider_env_keys() -> HashSet<String> {
@@ -148,7 +148,7 @@ fn group_api_key_values_by_configured_rotations(
         })
 }
 
-/// Apply Vault + config.env aliases into `LlmClient` and strip `vault:` placeholders from env.
+/// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
 pub fn materialize_provider_secrets(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
@@ -188,18 +188,16 @@ pub fn materialize_provider_secrets(
                         "{key}={trimmed} in config.env but Vault secret '{vault_name}' is missing or Vault is locked. \
                          Run vault_unlock and vault_set, or store the key in Vault as '{vault_name}'."
                     )
-                })?;
+            })?;
             resolved_pools.insert(key.clone(), pool);
-            std::env::remove_var(&key);
             report.from_alias += 1;
-            report.stripped_env_placeholders += 1;
+            report.env_fallbacks_bypassed += 1;
             continue;
         }
 
         if vault_map.contains_key(&key) {
             // Vault wins over duplicate plaintext in env/config.env.
-            std::env::remove_var(&key);
-            report.stripped_env_placeholders += 1;
+            report.env_fallbacks_bypassed += 1;
             continue;
         }
 
@@ -269,6 +267,28 @@ pub fn collect_config_env_values() -> HashMap<String, String> {
 mod tests {
     use super::*;
 
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.as_ref() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     fn parse_vault_alias_accepts_colon_form() {
         assert_eq!(
@@ -307,5 +327,62 @@ mod tests {
                 .map(|entry| entry.value.as_str()),
             Some("standalone")
         );
+    }
+
+    #[test]
+    fn materialize_provider_secrets_preserves_vault_alias_env() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:VOYAGE_API_KEY");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([(
+            "VOYAGE_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "VOYAGE_API_KEY".to_string(),
+                value: "vault-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools).expect("materialize");
+
+        assert_eq!(report.from_alias, 1);
+        assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(
+            llm.provider_secret_for_tests(&["VOYAGE_API_KEY"])
+                .as_deref(),
+            Some("vault-secret")
+        );
+        assert_eq!(
+            std::env::var("VOYAGE_API_KEY").as_deref(),
+            Ok("vault:VOYAGE_API_KEY")
+        );
+    }
+
+    #[test]
+    fn materialize_provider_secrets_preserves_duplicate_plaintext_env_when_vault_wins() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set("OPENAI_API_KEY", "env-secret");
+        let llm = LlmClient::new().expect("llm client");
+        let vault_pools = HashMap::from([(
+            "OPENAI_API_KEY".to_string(),
+            vec![ProviderSecret {
+                key_id: "OPENAI_API_KEY".to_string(),
+                value: "vault-secret".to_string(),
+            }],
+        )]);
+
+        let report = materialize_provider_secrets(&llm, &vault_pools).expect("materialize");
+
+        assert_eq!(report.from_alias, 0);
+        assert_eq!(report.env_fallbacks_bypassed, 1);
+        assert_eq!(
+            llm.provider_secret_for_tests(&["OPENAI_API_KEY"])
+                .as_deref(),
+            Some("vault-secret")
+        );
+        assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
     }
 }
