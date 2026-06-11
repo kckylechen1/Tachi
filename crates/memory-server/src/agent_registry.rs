@@ -13,7 +13,6 @@ pub(crate) enum DispatchMcpSupport {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)] // binary/default_timeout used when wiring runtime capability checks (#155)
 pub(crate) struct DispatchAgentDef {
     pub name: &'static str,
     pub display_name: &'static str,
