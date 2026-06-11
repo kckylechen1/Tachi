@@ -72,7 +72,7 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
             entry
                 .timestamp
                 .parse::<chrono::DateTime<Utc>>()
-                .unwrap_or(now)
+                .unwrap_or_else(|_| stale_reference_datetime())
         });
     let age_days = (now - reference).num_seconds().max(0) as f64 / 86_400.0;
 
@@ -103,6 +103,14 @@ fn leading_event_datetime(text: &str) -> Option<chrono::DateTime<Utc>> {
     }
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
     Some(date.and_hms_opt(12, 0, 0)?.and_utc())
+}
+
+fn stale_reference_datetime() -> chrono::DateTime<Utc> {
+    NaiveDate::from_ymd_opt(1970, 1, 1)
+        .expect("valid epoch date")
+        .and_hms_opt(0, 0, 0)
+        .expect("valid epoch time")
+        .and_utc()
 }
 
 /// ACT-R Base-Level Activation: B_i = ln(Σ t_j^(-d))
@@ -866,6 +874,22 @@ mod tests {
         entry.importance = 1.0;
         let s2 = decay_score(&entry);
         assert!(s2 >= 0.3, "importance floor violated: {s2}");
+    }
+
+    #[test]
+    fn decay_invalid_timestamp_does_not_rank_as_fresh() {
+        let mut entry = test_entry("bad-timestamp");
+        entry.timestamp = "not-a-timestamp".to_string();
+        entry.importance = 0.1;
+        entry.last_access = None;
+        entry.text.clear();
+
+        let score = decay_score(&entry);
+
+        assert!(
+            score <= 0.05,
+            "invalid timestamp should fall back to stale reference, got {score}"
+        );
     }
 
     #[test]
