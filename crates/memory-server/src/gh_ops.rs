@@ -45,7 +45,6 @@ const GH_ENV_ALLOWLIST: &[&str] = &[
     "no_proxy",
     "GIT_CONFIG_GLOBAL",
     "GIT_CONFIG_SYSTEM",
-    "GIT_SSH_COMMAND",
     "SSH_AUTH_SOCK",
     "SYSTEMROOT",
     "WINDIR",
@@ -2709,12 +2708,16 @@ mod safe_merge_tests {
         let old_https = std::env::var_os("HTTPS_PROXY");
         let old_cert = std::env::var_os("SSL_CERT_FILE");
         let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_git_ssh_command = std::env::var_os("GIT_SSH_COMMAND");
+        let old_ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK");
         let old_gh = std::env::var_os("GH_TOKEN");
         let old_github = std::env::var_os("GITHUB_TOKEN");
 
         std::env::set_var("HTTPS_PROXY", "http://proxy.local:8080");
         std::env::set_var("SSL_CERT_FILE", "/tmp/test-ca.pem");
         std::env::set_var("XDG_CONFIG_HOME", "/tmp/test-xdg");
+        std::env::set_var("GIT_SSH_COMMAND", "sh -c 'echo should-not-run'");
+        std::env::set_var("SSH_AUTH_SOCK", "/tmp/test-ssh-agent.sock");
         std::env::remove_var("GH_TOKEN");
         std::env::set_var("GITHUB_TOKEN", "github-env-token");
 
@@ -2736,6 +2739,11 @@ mod safe_merge_tests {
         );
         assert_eq!(get("SSL_CERT_FILE").as_deref(), Some("/tmp/test-ca.pem"));
         assert_eq!(get("XDG_CONFIG_HOME").as_deref(), Some("/tmp/test-xdg"));
+        assert_eq!(
+            get("SSH_AUTH_SOCK").as_deref(),
+            Some("/tmp/test-ssh-agent.sock")
+        );
+        assert_eq!(get("GIT_SSH_COMMAND"), None);
         assert_eq!(get("GITHUB_TOKEN").as_deref(), Some("github-env-token"));
 
         if let Some(v) = old_https {
@@ -2752,6 +2760,16 @@ mod safe_merge_tests {
             std::env::set_var("XDG_CONFIG_HOME", v);
         } else {
             std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        if let Some(v) = old_git_ssh_command {
+            std::env::set_var("GIT_SSH_COMMAND", v);
+        } else {
+            std::env::remove_var("GIT_SSH_COMMAND");
+        }
+        if let Some(v) = old_ssh_auth_sock {
+            std::env::set_var("SSH_AUTH_SOCK", v);
+        } else {
+            std::env::remove_var("SSH_AUTH_SOCK");
         }
         if let Some(v) = old_gh {
             std::env::set_var("GH_TOKEN", v);
