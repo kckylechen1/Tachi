@@ -28,6 +28,8 @@ const MCP_PRESERVED_ENV_VARS: &[&str] = &[
     "no_proxy",
     "all_proxy",
 ];
+const REMOTE_MCP_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+const REMOTE_MCP_ERROR_MESSAGE_MAX_CHARS: usize = 240;
 
 fn apply_sanitized_child_env(cmd: &mut tokio::process::Command, env_map: &HashMap<String, String>) {
     cmd.env_clear();
@@ -538,8 +540,75 @@ fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
         }
     }
 
-    serde_json::from_str(body)
-        .map_err(|_| format!("No JSON payload found in response body: {body}"))
+    serde_json::from_str(body).map_err(|_| {
+        format!(
+            "No JSON payload found in response body ({} bytes)",
+            body.len()
+        )
+    })
+}
+
+async fn read_remote_mcp_body(
+    mut response: reqwest::Response,
+    context: &str,
+) -> Result<String, String> {
+    if response
+        .content_length()
+        .is_some_and(|len| len > REMOTE_MCP_MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(format!(
+            "{context} body exceeds {} bytes",
+            REMOTE_MCP_MAX_RESPONSE_BYTES
+        ));
+    }
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| format!("{context} body: {e}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > REMOTE_MCP_MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "{context} body exceeds {} bytes",
+                REMOTE_MCP_MAX_RESPONSE_BYTES
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|e| format!("{context} body is not UTF-8: {e}"))
+}
+
+fn truncate_for_remote_mcp_error(message: &str) -> String {
+    let mut out = message
+        .chars()
+        .take(REMOTE_MCP_ERROR_MESSAGE_MAX_CHARS)
+        .collect::<String>();
+    if message.chars().count() > REMOTE_MCP_ERROR_MESSAGE_MAX_CHARS {
+        out.push_str("...");
+    }
+    out
+}
+
+fn remote_mcp_error_summary(error: &serde_json::Value) -> String {
+    if let Some(obj) = error.as_object() {
+        let code = obj
+            .get("code")
+            .and_then(|value| value.as_i64())
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = obj
+            .get("message")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(truncate_for_remote_mcp_error)
+            .unwrap_or_else(|| "remote server returned an error".to_string());
+        format!("code={code}, message={message}")
+    } else {
+        "remote server returned a non-object error".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -690,6 +759,104 @@ mod tests {
             "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key"
         );
     }
+
+    #[test]
+    fn parse_sse_payload_errors_do_not_echo_body() {
+        let err = parse_sse_payload("not json with SECRET_TOKEN=ghp_leaky")
+            .expect_err("invalid remote body should fail");
+
+        assert!(err.contains("No JSON payload found"));
+        assert!(err.contains("bytes"));
+        assert!(!err.contains("SECRET_TOKEN"));
+        assert!(!err.contains("ghp_leaky"));
+    }
+
+    #[test]
+    fn remote_mcp_error_summary_omits_error_data() {
+        let error = json!({
+            "code": -32000,
+            "message": "provider refused request",
+            "data": {
+                "secret": "github_pat_leaky",
+                "trace": "full remote trace"
+            }
+        });
+
+        let summary = remote_mcp_error_summary(&error);
+        assert!(summary.contains("code=-32000"));
+        assert!(summary.contains("provider refused request"));
+        assert!(!summary.contains("github_pat_leaky"));
+        assert!(!summary.contains("full remote trace"));
+        assert!(!summary.contains("data"));
+    }
+
+    #[tokio::test]
+    async fn remote_mcp_body_reader_rejects_large_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind remote body fixture");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n",
+                    REMOTE_MCP_MAX_RESPONSE_BYTES + 1
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/mcp"))
+            .send()
+            .await
+            .expect("response headers");
+        let err = read_remote_mcp_body(response, "tools/list")
+            .await
+            .expect_err("oversized content-length should be rejected before body read");
+
+        assert!(err.contains("tools/list body exceeds"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_mcp_body_reader_rejects_streaming_oversize_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind streaming body fixture");
+        let port = listener.local_addr().expect("listener addr").port();
+        let server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let headers =
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n";
+                let _ = socket.write_all(headers).await;
+                let body = vec![b'a'; REMOTE_MCP_MAX_RESPONSE_BYTES + 1];
+                let _ = socket.write_all(&body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let response = reqwest::Client::new()
+            .get(format!("http://127.0.0.1:{port}/mcp"))
+            .send()
+            .await
+            .expect("response headers");
+        let err = read_remote_mcp_body(response, "remote tool")
+            .await
+            .expect_err("streaming body should stop at the configured limit");
+
+        assert!(err.contains("remote tool body exceeds"));
+        server_task.abort();
+    }
 }
 
 impl MemoryServer {
@@ -825,16 +992,19 @@ impl MemoryServer {
                 rmcp::ErrorData::internal_error(format!("initialize request failed: {e}"), None)
             })?;
         let init_headers = init_response.headers().clone();
-        let init_body = init_response
-            .text()
+        let init_body = read_remote_mcp_body(init_response, "initialize")
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("initialize body: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
         let init_json = parse_sse_payload(&init_body).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("parse initialize response: {e}"), None)
         })?;
         if init_json.get("error").is_some() {
+            let error = init_json.get("error").expect("checked above");
             return Err(rmcp::ErrorData::internal_error(
-                format!("remote MCP initialize failed: {}", init_json),
+                format!(
+                    "remote MCP initialize failed: {}",
+                    remote_mcp_error_summary(error)
+                ),
                 None,
             ));
         }
@@ -886,23 +1056,22 @@ impl MemoryServer {
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("remote tool call failed: {e}"), None)
             })?;
-        let call_body = call_response
-            .text()
+        let call_body = read_remote_mcp_body(call_response, "remote tool")
             .await
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("remote tool body: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
         let call_json = parse_sse_payload(&call_body).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("parse tool response: {e}"), None)
         })?;
 
         if let Some(error) = call_json.get("error") {
             return Err(rmcp::ErrorData::internal_error(
-                format!("remote MCP tool error: {error}"),
+                format!("remote MCP tool error: {}", remote_mcp_error_summary(error)),
                 None,
             ));
         }
 
         let result_json = call_json.get("result").cloned().ok_or_else(|| {
-            rmcp::ErrorData::internal_error(format!("remote MCP missing result: {call_json}"), None)
+            rmcp::ErrorData::internal_error("remote MCP missing result field".to_string(), None)
         })?;
         serde_json::from_value(result_json).map_err(|e| {
             rmcp::ErrorData::internal_error(format!("decode remote tool result failed: {e}"), None)
@@ -962,14 +1131,14 @@ impl MemoryServer {
             .await
             .map_err(|e| format!("initialize request failed: {e}"))?;
         let init_headers = init_response.headers().clone();
-        let init_body = init_response
-            .text()
-            .await
-            .map_err(|e| format!("initialize body: {e}"))?;
+        let init_body = read_remote_mcp_body(init_response, "initialize").await?;
         let init_json =
             parse_sse_payload(&init_body).map_err(|e| format!("parse initialize response: {e}"))?;
         if let Some(error) = init_json.get("error") {
-            return Err(format!("remote MCP initialize failed: {error}"));
+            return Err(format!(
+                "remote MCP initialize failed: {}",
+                remote_mcp_error_summary(error)
+            ));
         }
 
         let mut session_headers = headers.clone();
@@ -1005,19 +1174,19 @@ impl MemoryServer {
             .send()
             .await
             .map_err(|e| format!("tools/list request failed: {e}"))?;
-        let list_body = list_response
-            .text()
-            .await
-            .map_err(|e| format!("tools/list body: {e}"))?;
+        let list_body = read_remote_mcp_body(list_response, "tools/list").await?;
         let list_json =
             parse_sse_payload(&list_body).map_err(|e| format!("parse tools/list response: {e}"))?;
         if let Some(error) = list_json.get("error") {
-            return Err(format!("remote MCP tools/list failed: {error}"));
+            return Err(format!(
+                "remote MCP tools/list failed: {}",
+                remote_mcp_error_summary(error)
+            ));
         }
         let result_json = list_json
             .get("result")
             .cloned()
-            .ok_or_else(|| format!("remote MCP tools/list missing result: {list_json}"))?;
+            .ok_or_else(|| "remote MCP tools/list missing result field".to_string())?;
         let result: rmcp::model::ListToolsResult = serde_json::from_value(result_json)
             .map_err(|e| format!("decode tools/list result failed: {e}"))?;
         Ok(result.tools)
