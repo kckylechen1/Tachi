@@ -259,6 +259,51 @@ fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>
         .unzip()
 }
 
+fn parse_voyage_batch_embeddings(
+    data: &[Value],
+    expected_count: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    if data.len() != expected_count {
+        return Err(format!(
+            "Voyage batch returned {} embeddings for {} inputs",
+            data.len(),
+            expected_count
+        ));
+    }
+
+    let mut embeddings = Vec::with_capacity(expected_count);
+    for (expected_index, item) in data.iter().enumerate() {
+        if let Some(index) = item.get("index") {
+            let actual_index = index
+                .as_u64()
+                .ok_or("Invalid Voyage batch response: index is not an unsigned integer")?
+                as usize;
+            if actual_index != expected_index {
+                return Err(format!(
+                    "Voyage batch response index mismatch: expected {expected_index}, got {actual_index}"
+                ));
+            }
+        }
+
+        let embedding = item["embedding"]
+            .as_array()
+            .ok_or("Invalid Voyage batch response: missing embedding in item")?;
+
+        let vec: Vec<f32> = embedding
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+
+        if vec.len() != 1024 {
+            return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+        }
+
+        embeddings.push(vec);
+    }
+
+    Ok(embeddings)
+}
+
 /// LLM and embedding client using Voyage API for embeddings
 /// and lane-specific OpenAI-compatible chat providers.
 #[derive(Clone)]
@@ -1602,31 +1647,7 @@ impl LlmClient {
             let data = json["data"]
                 .as_array()
                 .ok_or("Invalid Voyage batch response: missing data array")?;
-
-            for item in data {
-                let embedding = item["embedding"]
-                    .as_array()
-                    .ok_or("Invalid Voyage batch response: missing embedding in item")?;
-
-                let vec: Vec<f32> = embedding
-                    .iter()
-                    .filter_map(|v| v.as_f64().map(|f| f as f32))
-                    .collect();
-
-                if vec.len() != 1024 {
-                    return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
-                }
-
-                all_embeddings.push(vec);
-            }
-        }
-
-        if all_embeddings.len() != texts.len() {
-            return Err(format!(
-                "Voyage batch returned {} embeddings for {} inputs",
-                all_embeddings.len(),
-                texts.len()
-            ));
+            all_embeddings.extend(parse_voyage_batch_embeddings(data, chunk.len())?);
         }
 
         Ok(all_embeddings)
@@ -2315,6 +2336,8 @@ impl LlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
     // NOTE: each test below MUST use a unique env-var name. Cargo runs
     // `#[test]` fns in parallel by default, so sharing a process-wide env var
     // causes ordering-dependent flakes (e.g. one test setting the var while
@@ -2608,6 +2631,38 @@ mod tests {
         let first = LlmClient::retry_delay_with_jitter(2, 1);
         let second = LlmClient::retry_delay_with_jitter(2, 2);
         assert_ne!(first, second);
+    }
+
+    fn embedding_values(seed: f64) -> Vec<f64> {
+        (0..1024).map(|idx| seed + idx as f64).collect()
+    }
+
+    #[test]
+    fn voyage_batch_embeddings_accept_matching_response_indexes() {
+        let data = vec![
+            json!({"index": 0, "embedding": embedding_values(0.0)}),
+            json!({"index": 1, "embedding": embedding_values(1000.0)}),
+        ];
+
+        let embeddings =
+            parse_voyage_batch_embeddings(&data, 2).expect("matching indexes should parse");
+
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0][0], 0.0);
+        assert_eq!(embeddings[1][0], 1000.0);
+    }
+
+    #[test]
+    fn voyage_batch_embeddings_reject_mismatched_response_index() {
+        let data = vec![
+            json!({"index": 1, "embedding": embedding_values(1000.0)}),
+            json!({"index": 0, "embedding": embedding_values(0.0)}),
+        ];
+
+        let err = parse_voyage_batch_embeddings(&data, 2)
+            .expect_err("out-of-order response indexes should fail");
+
+        assert!(err.contains("index mismatch"));
     }
 
     #[test]
