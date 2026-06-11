@@ -47,7 +47,7 @@ pub struct ClaudePool {
     sem: Arc<Semaphore>,
     runs_dir: PathBuf,
     timeout: Duration,
-    binary: String,
+    binary: Result<String, String>,
 }
 
 #[derive(Debug)]
@@ -162,7 +162,8 @@ impl ClaudePool {
         let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
-        let mut cmd = Command::new(&self.binary);
+        let binary = self.binary.as_ref().map_err(|err| err.clone())?;
+        let mut cmd = Command::new(binary);
         cmd.arg("-p").arg("--output-format").arg("json");
         if skip_perms {
             cmd.arg("--dangerously-skip-permissions");
@@ -172,7 +173,7 @@ impl ClaudePool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("claude cli spawn failed ({}): {e}", self.binary))?;
+            .map_err(|e| format!("claude cli spawn failed ({binary}): {e}"))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -408,11 +409,11 @@ fn cleanup_runs_dir_recursive(root: &Path, now: SystemTime, depth: usize) -> (us
     (removed, scanned)
 }
 
-fn resolve_claude_binary() -> String {
-    std::env::var("CLAUDE_BIN")
-        .ok()
-        .and_then(|raw| validate_claude_binary_override(&raw).ok())
-        .unwrap_or_else(|| "claude".to_string())
+fn resolve_claude_binary() -> Result<String, String> {
+    match std::env::var("CLAUDE_BIN") {
+        Ok(raw) => validate_claude_binary_override(&raw),
+        Err(_) => Ok("claude".to_string()),
+    }
 }
 
 fn validate_claude_binary_override(raw: &str) -> Result<String, String> {
@@ -442,9 +443,27 @@ fn validate_claude_binary_override(raw: &str) -> Result<String, String> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| "CLAUDE_BIN must include a valid executable name".to_string())?;
     if file_name == "claude" || file_name.starts_with("claude-") {
+        let metadata = std::fs::metadata(path)
+            .map_err(|_| "CLAUDE_BIN must point to an existing executable".to_string())?;
+        if !metadata.is_file() || !is_executable(&metadata) {
+            return Err("CLAUDE_BIN must point to an executable file".to_string());
+        }
         Ok(value.to_string())
     } else {
         Err("CLAUDE_BIN executable name must be 'claude' or start with 'claude-'".to_string())
+    }
+}
+
+fn is_executable(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -466,14 +485,27 @@ mod tests {
 
     #[test]
     fn claude_binary_override_accepts_only_claude_executables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = tmp.path().join("claude");
+        std::fs::write(&claude_path, "#!/bin/sh\nexit 0\n").unwrap();
+        let claude_beta_path = tmp.path().join("claude-beta");
+        std::fs::write(&claude_beta_path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&claude_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&claude_beta_path, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
         assert_eq!(validate_claude_binary_override("claude").unwrap(), "claude");
         assert_eq!(
-            validate_claude_binary_override("/opt/homebrew/bin/claude").unwrap(),
-            "/opt/homebrew/bin/claude"
+            validate_claude_binary_override(claude_path.to_str().unwrap()).unwrap(),
+            claude_path.to_str().unwrap()
         );
         assert_eq!(
-            validate_claude_binary_override("/usr/local/bin/claude-beta").unwrap(),
-            "/usr/local/bin/claude-beta"
+            validate_claude_binary_override(claude_beta_path.to_str().unwrap()).unwrap(),
+            claude_beta_path.to_str().unwrap()
         );
 
         for bad in [
@@ -482,11 +514,29 @@ mod tests {
             "./claude",
             "/tmp/not-claude",
             "/tmp/../tmp/claude",
+            "/nonexistent/claude",
         ] {
             assert!(
                 validate_claude_binary_override(bad).is_err(),
                 "expected invalid override: {bad}"
             );
+        }
+    }
+
+    #[test]
+    fn resolve_claude_binary_reports_invalid_override() {
+        let prev = std::env::var("CLAUDE_BIN").ok();
+        std::env::set_var("CLAUDE_BIN", "/nonexistent/claude");
+
+        let err = resolve_claude_binary().expect_err("invalid override should be surfaced");
+        assert!(
+            err.contains("existing executable"),
+            "unexpected error: {err}"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("CLAUDE_BIN", v),
+            None => std::env::remove_var("CLAUDE_BIN"),
         }
     }
 
@@ -584,7 +634,7 @@ mod tests {
             sem: Arc::new(Semaphore::new(1)),
             runs_dir: tmp.path().to_path_buf(),
             timeout: Duration::from_secs(5),
-            binary: "/nonexistent/__tachi_test_no_such_claude__".to_string(),
+            binary: Ok("/nonexistent/__tachi_test_no_such_claude__".to_string()),
         };
 
         let (text, source) = pool_call_with_fallback(&pool, "sys", "usr", "unit-test", || async {
@@ -640,7 +690,7 @@ mod tests {
             sem: Arc::new(Semaphore::new(1)),
             runs_dir: tmp.path().to_path_buf(),
             timeout: Duration::from_secs(5),
-            binary: "/nonexistent/__tachi_test_no_such_claude_2__".to_string(),
+            binary: Ok("/nonexistent/__tachi_test_no_such_claude_2__".to_string()),
         };
 
         let err = pool_call_with_fallback(&pool, "sys", "usr", "unit-test-err", || async {

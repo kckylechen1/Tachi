@@ -5243,7 +5243,7 @@ async fn v2_two_stage_smoke() {
 
     // Fake claude binary: prints a JSON envelope matching the pool's
     // expected `{"result": "..."}` shape, embedding a valid plan.
-    let fake_claude = temp_home.join("fake-claude.sh");
+    let fake_claude = temp_home.join("claude-test");
     {
         let mut f = std::fs::File::create(&fake_claude).expect("create fake claude");
         // The pool invokes `claude -p --output-format json --dangerously-skip-permissions`
