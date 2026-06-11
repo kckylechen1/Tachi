@@ -1624,12 +1624,7 @@ impl MemoryServer {
                     };
                     handle_tachi_wiki_write(self, wiki_params).await?
                 };
-                Ok(format_facade_response(
-                    "Tachi wiki write",
-                    "write",
-                    &raw,
-                    format.as_deref(),
-                ))
+                format_facade_response("Tachi wiki write", "write", &raw, format.as_deref())
             }
             _ => Err(format!(
                 "Invalid action '{}'. Use 'search', 'browse', 'read', or 'write'.",
@@ -2076,12 +2071,12 @@ impl MemoryServer {
                 params.action
             )),
         }?;
-        Ok(format_facade_response(
+        format_facade_response(
             &format!("Tachi task {}", action),
             &action,
             &raw,
             params.format.as_deref(),
-        ))
+        )
     }
 
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
@@ -2108,12 +2103,12 @@ impl MemoryServer {
         let action = params.action.to_ascii_lowercase();
         let format = params.format.clone();
         let raw = handle_tachi_arena(self, params).await?;
-        Ok(format_facade_response(
+        format_facade_response(
             &format!("Tachi arena {}", action),
             &action,
             &raw,
             format.as_deref(),
-        ))
+        )
     }
 
     // ─── Tachi Verify: background verification evidence ledger ─────────────
@@ -2140,12 +2135,12 @@ impl MemoryServer {
         let action = params.action.to_ascii_lowercase();
         let format = params.format.clone();
         let raw = crate::shell_ops::handle_tachi_shell(self, params).await?;
-        Ok(format_facade_response(
+        format_facade_response(
             &format!("Tachi shell {}", action),
             &action,
             &raw,
             format.as_deref(),
-        ))
+        )
     }
 }
 
@@ -2250,13 +2245,18 @@ pub(crate) fn build_task_pr_status_gh_params(
     })
 }
 
-fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&str>) -> String {
+fn format_facade_response(
+    title: &str,
+    action: &str,
+    raw: &str,
+    format: Option<&str>,
+) -> Result<String, String> {
     if wants_json_format(format) {
-        return raw.to_string();
+        return Ok(raw.to_string());
     }
-    let Ok(value) = serde_json::from_str::<Value>(raw) else {
-        return raw.to_string();
-    };
+    let value = serde_json::from_str::<Value>(raw).map_err(|e| {
+        format!("format {title} markdown response: expected JSON from action '{action}': {e}")
+    })?;
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
     append_known_field(&mut lines, &value, "arena_id");
@@ -2386,7 +2386,7 @@ fn format_facade_response(title: &str, action: &str, raw: &str, format: Option<&
     if lines.len() <= 2 {
         lines.push(format!("```json\n{}\n```", value));
     }
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 #[derive(Debug, Default)]
@@ -2772,13 +2772,26 @@ mod tests {
     #[test]
     fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
         let raw = r#"{"flow_id":"flow_1","stage":"plan","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
-        let json = format_facade_response("Tachi shell plan", "plan", raw, None);
+        let json = format_facade_response("Tachi shell plan", "plan", raw, None).unwrap();
         assert_eq!(json, raw);
 
-        let markdown = format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"));
+        let markdown =
+            format_facade_response("Tachi shell plan", "plan", raw, Some("markdown")).unwrap();
         assert!(markdown.starts_with("## Tachi shell plan"));
         assert!(markdown.contains("flow_id: `flow_1`"));
         assert!(markdown.contains("- `d1` running agent=codex - Fix search"));
+    }
+
+    #[test]
+    fn facade_response_markdown_parse_failure_is_visible() {
+        let raw = "not json";
+        let json = format_facade_response("Tachi shell plan", "plan", raw, None).unwrap();
+        assert_eq!(json, raw);
+
+        let err = format_facade_response("Tachi shell plan", "plan", raw, Some("markdown"))
+            .expect_err("markdown formatting should fail on invalid JSON");
+        assert!(err.contains("format Tachi shell plan markdown response"));
+        assert!(err.contains("expected JSON"));
     }
 
     #[test]
