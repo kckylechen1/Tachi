@@ -66,7 +66,10 @@ pub(super) fn resolve_vault_sync_path(
 pub(super) fn export_vault_bundle(
     global_db_path: &PathBuf,
     output: &Path,
+    allow_cloud: bool,
 ) -> Result<VaultSyncStatus, Box<dyn std::error::Error>> {
+    ensure_cloud_export_allowed(output, allow_cloud)?;
+
     let store = open_cli_store_read_only(global_db_path)?;
     let vault_config = store
         .vault_get_config()
@@ -101,6 +104,37 @@ pub(super) fn export_vault_bundle(
     set_owner_only_permissions(output)?;
 
     vault_sync_status(output)
+}
+
+fn ensure_cloud_export_allowed(
+    output: &Path,
+    allow_cloud: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !allow_cloud && vault_sync_path_requires_cloud_ack(output) {
+        return Err(format!(
+            "Refusing to export Vault sync bundle to cloud-synced path {} without --allow-cloud. The bundle contains encrypted Vault entries plus password verifier material and is not integrity signed; choose --output outside cloud storage or re-run with --allow-cloud.",
+            output.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn vault_sync_path_requires_cloud_ack(path: &Path) -> bool {
+    let mut saw_mobile_documents = false;
+    for component in path.components() {
+        let Some(name) = component.as_os_str().to_str() else {
+            continue;
+        };
+        if name == "Mobile Documents" {
+            saw_mobile_documents = true;
+            continue;
+        }
+        if saw_mobile_documents && name == "com~apple~CloudDocs" {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn import_vault_bundle(
@@ -308,7 +342,7 @@ mod tests {
             .expect("set source rotation");
 
         let status =
-            export_vault_bundle(&source_db, &bundle_path).expect("export vault sync bundle");
+            export_vault_bundle(&source_db, &bundle_path, false).expect("export vault sync bundle");
         assert!(status.exists);
         #[cfg(unix)]
         {
@@ -340,5 +374,19 @@ mod tests {
 
         let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_cloud_path_requires_explicit_allowance() {
+        let cloud_path = PathBuf::from(
+            "/Users/me/Library/Mobile Documents/com~apple~CloudDocs/Tachi/vault/vault.bundle.json",
+        );
+
+        let err = ensure_cloud_export_allowed(&cloud_path, false)
+            .expect_err("cloud export should require explicit allowance");
+        assert!(err.to_string().contains("--allow-cloud"), "{err}");
+
+        ensure_cloud_export_allowed(&cloud_path, true)
+            .expect("explicit cloud allowance should pass");
     }
 }

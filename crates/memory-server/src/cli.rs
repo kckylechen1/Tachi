@@ -1091,6 +1091,9 @@ pub(crate) enum VaultAction {
         /// Output bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
+        /// Allow writing the encrypted bundle to a cloud-sync path such as iCloud Drive.
+        #[arg(long)]
+        allow_cloud: bool,
     },
     /// Import encrypted Vault rows from a sync bundle.
     SyncImport {

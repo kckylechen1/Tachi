@@ -171,9 +171,13 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
-        VaultAction::SyncExport { output } => {
+        VaultAction::SyncExport {
+            output,
+            allow_cloud,
+        } => {
             let output = super::vault_sync::resolve_vault_sync_path(output)?;
-            let status = super::vault_sync::export_vault_bundle(global_db_path, &output)?;
+            let status =
+                super::vault_sync::export_vault_bundle(global_db_path, &output, allow_cloud)?;
             println!("Vault sync export complete.");
             super::vault_sync::print_status(&status);
             println!("  contents: encrypted Vault config, entries, and key-rotation metadata");
