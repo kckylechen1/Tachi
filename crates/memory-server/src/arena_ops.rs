@@ -141,6 +141,19 @@ fn dispatch_run_dir(dispatch_id: &str, run_dir_hint: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| tachi_home().join("runs").join(dispatch_id))
 }
 
+fn dispatch_response_summary(response: &Value) -> Value {
+    json!({
+        "dispatch_id": response.get("dispatch_id").cloned().unwrap_or(Value::Null),
+        "run_dir": response.get("run_dir").cloned().unwrap_or(Value::Null),
+        "agent": response.get("agent").cloned().unwrap_or(Value::Null),
+        "selected_profile": response.get("selected_profile").cloned().unwrap_or(Value::Null),
+        "harness_transport": response.get("harness_transport").cloned().unwrap_or(Value::Null),
+        "harness_server_url": response.get("harness_server_url").cloned().unwrap_or(Value::Null),
+        "source": "dispatch_response_summary",
+        "redacted": true,
+    })
+}
+
 fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Value> {
     let run_dir = dispatch_run_dir(dispatch_id, run_dir_hint);
     let status_path = run_dir.join("status.json");
@@ -150,11 +163,15 @@ fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) ->
         "dispatch_id": dispatch_id,
         "state": status.get("state").cloned().unwrap_or(Value::Null),
         "agent": status.get("agent").cloned().unwrap_or(Value::Null),
+        "profile": status.get("profile").cloned().unwrap_or(Value::Null),
+        "harness_transport": status.get("harness_transport").cloned().unwrap_or(Value::Null),
+        "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(Value::Null),
         "exit_code": status.get("exit_code").cloned().unwrap_or(Value::Null),
         "updated_at": status.get("updated_at").cloned().unwrap_or(Value::Null),
-        "run_dir": run_dir,
+        "run_dir": run_dir.to_string_lossy().to_string(),
         "result_written": result_written,
-        "status": status,
+        "source": "dispatch_run_summary",
+        "redacted": true,
     }))
 }
 
@@ -180,6 +197,7 @@ fn refresh_linked_dispatch_fields(status: &mut Value) {
     else {
         return;
     };
+    obj.remove("dispatch_response");
     let run_dir_hint = obj.get("run_dir").and_then(Value::as_str);
     if let Some(linked) = read_linked_dispatch_status(&dispatch_id, run_dir_hint) {
         let linked_result_written = linked
@@ -794,7 +812,7 @@ async fn handle_spawn(server: &MemoryServer, params: TachiArenaParams) -> Result
                             "run_dir": run_dir,
                             "dispatch_agent": dispatch_agent,
                             "dispatch_profile_name": dispatch_profile_name,
-                            "dispatch_response": response,
+                            "dispatch_link": dispatch_response_summary(&response),
                         }),
                     )?;
                     Some(json!({
@@ -1700,6 +1718,18 @@ mod tests {
                 .as_str()
                 .expect("linked run dir"),
         );
+        let spawned_status = spawned["status"]
+            .as_object()
+            .expect("spawned status object");
+        assert!(
+            !spawned_status.contains_key("dispatch_response"),
+            "arena status must not persist full dispatch response: {spawned_status:#?}"
+        );
+        assert_eq!(spawned["status"]["dispatch_link"]["redacted"], json!(true));
+        assert_eq!(
+            spawned["status"]["dispatch_link"]["source"],
+            json!("dispatch_response_summary")
+        );
         let dispatch_result = wait_for_nonempty_file(&run_dir.join("result.md")).await;
         assert!(dispatch_result.contains("fake opencode completed"));
 
@@ -1709,6 +1739,15 @@ mod tests {
             serde_json::from_str(&handle_tachi_arena(&server, board).await.unwrap()).unwrap();
         let mission = &board["result"]["missions"][0];
         assert_eq!(mission["dispatch_id"], json!(dispatch_id));
+        assert_eq!(mission["linked_dispatch"]["redacted"], json!(true));
+        assert_eq!(
+            mission["linked_dispatch"]["source"],
+            json!("dispatch_run_summary")
+        );
+        assert!(
+            mission["linked_dispatch"].get("status").is_none(),
+            "linked dispatch must be a redacted summary: {mission:#}"
+        );
         assert_eq!(
             mission["collection_state"],
             json!("pending_collect_from_dispatch")
