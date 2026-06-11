@@ -241,3 +241,72 @@ async fn retry_dispatch_rejects_native_write_tools() {
         "unexpected error: {err}"
     );
 }
+
+#[tokio::test]
+async fn dlq_retry_respects_rate_limiter_before_dispatch() {
+    let server = make_server();
+    {
+        let mut guard = server.agent_runtime_write();
+        guard.agent_profile = Some(AgentProfile {
+            agent_id: "dlq-rate-limit-test".to_string(),
+            display_name: "DLQ Rate Limit Test".to_string(),
+            capabilities: vec![],
+            tool_filter: None,
+            rate_limit_rpm: None,
+            rate_limit_burst: Some(1),
+            registered_at: Utc::now().to_rfc3339(),
+        });
+    }
+
+    let dead_letter_id = "dlq-rate-limit-1".to_string();
+    let args = serde_json::Map::from_iter([(
+        "text".to_string(),
+        json!("do not replay native writes repeatedly"),
+    )]);
+    server.dead_letters_lock().push_back(DeadLetter {
+        id: dead_letter_id.clone(),
+        tool_name: "save_memory".to_string(),
+        arguments: Some(args),
+        error: "original failure".to_string(),
+        error_category: "internal".to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        retry_count: 0,
+        max_retries: 3,
+        status: "pending".to_string(),
+    });
+
+    let first = crate::dlq_ops::handle_dlq_retry(
+        &server,
+        DlqRetryParams {
+            dead_letter_id: dead_letter_id.clone(),
+        },
+    )
+    .await
+    .expect_err("native retry should still be rejected after passing rate limit");
+    assert!(
+        first.contains("cannot be retried via DLQ"),
+        "unexpected first retry error: {first}"
+    );
+
+    let second = crate::dlq_ops::handle_dlq_retry(
+        &server,
+        DlqRetryParams {
+            dead_letter_id: dead_letter_id.clone(),
+        },
+    )
+    .await
+    .expect_err("second identical retry should be rate limited before dispatch");
+
+    assert!(
+        second.contains("Loop detected"),
+        "expected burst rate-limit error, got: {second}"
+    );
+    let dlq = server.dead_letters_lock();
+    let dl = dlq
+        .iter()
+        .find(|dl| dl.id == dead_letter_id)
+        .expect("dead letter should remain");
+    assert_eq!(dl.retry_count, 2);
+    assert_eq!(dl.status, "pending");
+    assert!(dl.error.contains("Loop detected"));
+}
