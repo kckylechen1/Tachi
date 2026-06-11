@@ -306,14 +306,6 @@ pub fn vault_list_rotations(conn: &Connection) -> Result<Vec<VaultKeyRotation>, 
     rotations.collect::<Result<_, _>>().map_err(|e| e.into())
 }
 
-pub fn vault_delete_rotation(conn: &Connection, prefix: &str) -> Result<bool, MemoryError> {
-    let rows = conn.execute(
-        "DELETE FROM vault_key_rotations WHERE prefix = ?1",
-        params![prefix],
-    )?;
-    Ok(rows > 0)
-}
-
 pub fn vault_upsert_key_health(
     conn: &Connection,
     health: &VaultKeyHealth,

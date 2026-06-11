@@ -143,21 +143,6 @@ pub fn save_derived_with_id(
     Ok(())
 }
 
-/// Count derived items by source and path prefix.
-pub fn count_derived_by_source(
-    conn: &Connection,
-    source: &str,
-    path_prefix: &str,
-) -> Result<u64, MemoryError> {
-    let like_pattern = format!("{}%", path_prefix);
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM derived_items WHERE source = ?1 AND path LIKE ?2",
-        params![source, like_pattern],
-        |row| row.get(0),
-    )?;
-    Ok(count as u64)
-}
-
 /// List derived items by source and path prefix.
 pub fn list_derived_by_source(
     conn: &Connection,
