@@ -69,6 +69,16 @@ pub(crate) struct ProviderPoolStatus {
     pub(crate) strategy: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProviderHealthStatus {
+    pub(crate) source_of_truth: &'static str,
+    pub(crate) reload_ttl_secs: u64,
+    pub(crate) last_attempt_at: Option<String>,
+    pub(crate) last_success_at: Option<String>,
+    pub(crate) last_success_age_secs: Option<u64>,
+    pub(crate) last_error: Option<String>,
+}
+
 #[derive(Clone)]
 struct SelectedProviderSecret {
     logical_name: String,
@@ -118,6 +128,54 @@ struct ProviderState {
     cooldowns: HashMap<String, Instant>,
     indices: HashMap<String, usize>,
     health: HashMap<String, HashMap<String, VaultKeyHealth>>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderHealthReloadState {
+    source_of_truth: &'static str,
+    last_attempt: Option<Instant>,
+    last_attempt_at: Option<String>,
+    last_success: Option<Instant>,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
+impl ProviderHealthReloadState {
+    fn memory_only() -> Self {
+        Self {
+            source_of_truth: "memory_only",
+            last_attempt: None,
+            last_attempt_at: None,
+            last_success: None,
+            last_success_at: None,
+            last_error: None,
+        }
+    }
+
+    fn vault_db_attempt(now: Instant, now_utc: String) -> Self {
+        Self {
+            source_of_truth: "vault_db",
+            last_attempt: Some(now),
+            last_attempt_at: Some(now_utc),
+            last_success: None,
+            last_success_at: None,
+            last_error: None,
+        }
+    }
+
+    fn mark_success(&mut self, now: Instant, now_utc: String) {
+        self.last_attempt = Some(now);
+        self.last_attempt_at = Some(now_utc.clone());
+        self.last_success = Some(now);
+        self.last_success_at = Some(now_utc);
+        self.last_error = None;
+    }
+
+    fn mark_error(&mut self, now: Instant, now_utc: String, error: String) {
+        self.last_attempt = Some(now);
+        self.last_attempt_at = Some(now_utc);
+        self.last_error = Some(error);
+    }
 }
 
 impl ProviderState {
@@ -212,12 +270,14 @@ pub struct LlmClient {
     summary: ChatLaneConfig,
     vault_db_path: Option<PathBuf>,
     provider_state: Arc<RwLock<ProviderState>>,
+    provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
 }
 
 impl LlmClient {
     const MAX_ATTEMPTS: usize = 3;
     const BASE_RETRY_DELAY_MS: u64 = 500;
+    const KEY_HEALTH_RELOAD_TTL: Duration = Duration::from_secs(30);
 
     pub fn new() -> Result<Self, String> {
         Self::new_with_vault_db(None)
@@ -323,10 +383,8 @@ impl LlmClient {
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-        let provider_health = vault_db_path
-            .as_ref()
-            .and_then(|path| Self::load_key_health_from_db(path).ok())
-            .unwrap_or_default();
+        let (provider_health, provider_health_reload) =
+            Self::initial_key_health_from_db(vault_db_path.as_deref());
 
         // Warn when foundry lanes collapse to the same model/endpoint as extract.
         // This is expected when dedicated DISTILL_*/REASONING_* env vars are unset,
@@ -348,13 +406,41 @@ impl LlmClient {
             summary,
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
+            provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             claude_cli_failure: Arc::new(RwLock::new(None)),
         })
+    }
+
+    fn initial_key_health_from_db(
+        vault_db_path: Option<&Path>,
+    ) -> (
+        HashMap<String, HashMap<String, VaultKeyHealth>>,
+        ProviderHealthReloadState,
+    ) {
+        let Some(path) = vault_db_path else {
+            return (HashMap::new(), ProviderHealthReloadState::memory_only());
+        };
+        let now = Instant::now();
+        let now_utc = Self::format_now_utc();
+        let mut reload = ProviderHealthReloadState::vault_db_attempt(now, now_utc.clone());
+        match Self::load_key_health_from_db(path) {
+            Ok(health) => {
+                reload.mark_success(now, now_utc);
+                (health, reload)
+            }
+            Err(err) => {
+                reload.mark_error(now, now_utc, err);
+                (HashMap::new(), reload)
+            }
+        }
     }
 
     fn load_key_health_from_db(
         path: &Path,
     ) -> Result<HashMap<String, HashMap<String, VaultKeyHealth>>, String> {
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
         let Some(db_path) = path.to_str() else {
             return Err("Invalid vault db path".to_string());
         };
@@ -370,6 +456,112 @@ impl LlmClient {
                 .insert(row.key_id.clone(), row);
             map
         }))
+    }
+
+    fn key_health_is_newer_or_equal(incoming: &VaultKeyHealth, existing: &VaultKeyHealth) -> bool {
+        match (
+            Self::parse_timestamp(&incoming.updated_at),
+            Self::parse_timestamp(&existing.updated_at),
+        ) {
+            (Some(incoming_ts), Some(existing_ts)) => incoming_ts >= existing_ts,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => true,
+        }
+    }
+
+    fn merge_loaded_key_health(&self, loaded: HashMap<String, HashMap<String, VaultKeyHealth>>) {
+        let now_utc = Self::now_utc();
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (logical_name, members) in loaded {
+            for (key_id, incoming) in members {
+                let should_apply = state
+                    .health
+                    .get(&logical_name)
+                    .and_then(|target| target.get(&key_id))
+                    .map(|existing| Self::key_health_is_newer_or_equal(&incoming, existing))
+                    .unwrap_or(true);
+                if should_apply {
+                    let (availability, remaining_seconds) =
+                        Self::key_health_blocked(Some(&incoming), now_utc);
+                    let still_cooling = availability == KeyAvailability::Cooldown
+                        && remaining_seconds.unwrap_or(0) > 0;
+                    if !still_cooling {
+                        state.cooldowns.remove(&key_id);
+                    }
+                    state
+                        .health
+                        .entry(logical_name.clone())
+                        .or_default()
+                        .insert(key_id, incoming);
+                }
+            }
+        }
+    }
+
+    fn key_health_reload_due(&self, now: Instant) -> bool {
+        if self.vault_db_path.is_none() {
+            return false;
+        }
+        let reload = self
+            .provider_health_reload
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reload
+            .last_attempt
+            .map(|last| now.duration_since(last) >= Self::KEY_HEALTH_RELOAD_TTL)
+            .unwrap_or(true)
+    }
+
+    async fn refresh_key_health_from_db_if_stale(&self) {
+        let Some(db_path) = self.vault_db_path.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        if !self.key_health_reload_due(now) {
+            return;
+        }
+        {
+            let mut reload = self
+                .provider_health_reload
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if reload
+                .last_attempt
+                .map(|last| now.duration_since(last) < Self::KEY_HEALTH_RELOAD_TTL)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            reload.last_attempt = Some(now);
+            reload.last_attempt_at = Some(Self::format_now_utc());
+        }
+
+        let loaded = tokio::task::spawn_blocking(move || Self::load_key_health_from_db(&db_path))
+            .await
+            .map_err(|err| format!("key health reload task failed: {err}"))
+            .and_then(|inner| inner);
+        let completed_at = Instant::now();
+        let completed_at_utc = Self::format_now_utc();
+        match loaded {
+            Ok(health) => {
+                self.merge_loaded_key_health(health);
+                self.provider_health_reload
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .mark_success(completed_at, completed_at_utc);
+            }
+            Err(err) => {
+                tracing::warn!("[provider] failed to reload vault key health: {err}");
+                self.provider_health_reload
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .mark_error(completed_at, completed_at_utc, err);
+            }
+        }
     }
 
     fn now_utc() -> DateTime<Utc> {
@@ -777,6 +969,23 @@ impl LlmClient {
         statuses
     }
 
+    pub(crate) fn provider_health_status(&self) -> ProviderHealthStatus {
+        let reload = self
+            .provider_health_reload
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ProviderHealthStatus {
+            source_of_truth: reload.source_of_truth,
+            reload_ttl_secs: Self::KEY_HEALTH_RELOAD_TTL.as_secs(),
+            last_attempt_at: reload.last_attempt_at.clone(),
+            last_success_at: reload.last_success_at.clone(),
+            last_success_age_secs: reload
+                .last_success
+                .map(|instant| instant.elapsed().as_secs()),
+            last_error: reload.last_error.clone(),
+        }
+    }
+
     fn select_secret(&self, keys: &[&str]) -> Option<SelectedProviderSecret> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
@@ -1076,6 +1285,7 @@ impl LlmClient {
         attempt: usize,
         context: &str,
     ) -> Result<Option<SelectedProviderSecret>, String> {
+        self.refresh_key_health_from_db_if_stale().await;
         match self.required_selected_secret(keys) {
             Ok(selected) => Ok(Some(selected)),
             Err(err) => {
@@ -1243,6 +1453,16 @@ impl LlmClient {
     #[cfg(test)]
     pub(crate) fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
         self.first_secret(keys)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_provider_health_reload_due_for_tests(&self) {
+        let mut reload = self
+            .provider_health_reload
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reload.last_attempt =
+            Instant::now().checked_sub(Self::KEY_HEALTH_RELOAD_TTL + Duration::from_secs(1));
     }
 
     fn should_disable_thinking(base_url: &str, model: &str) -> bool {
@@ -2501,6 +2721,111 @@ mod tests {
             persisted.last_error.as_deref(),
             Some("rate limited; retry after 30s")
         );
+    }
+
+    #[tokio::test]
+    async fn provider_key_health_reloads_external_db_cooldowns_before_selection() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_RELOAD_COOLDOWN";
+        let temp = tempfile::tempdir().expect("temp vault db");
+        let db_path = temp.path().join("vault.db");
+        let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+        drop(store);
+
+        let client =
+            LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "secret-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "secret-two".to_string(),
+                },
+            ],
+        );
+
+        let now = Utc::now();
+        let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+        store
+            .vault_upsert_key_health(&VaultKeyHealth {
+                logical_name: KEY.to_string(),
+                key_id: format!("{KEY}_1"),
+                status: HEALTH_RATE_LIMITED.to_string(),
+                cooldown_until: Some((now + chrono::Duration::seconds(60)).to_rfc3339()),
+                last_attempt: Some(now.to_rfc3339()),
+                last_error: Some("manual CLI cooldown".to_string()),
+                updated_at: now.to_rfc3339(),
+                ..VaultKeyHealth::default()
+            })
+            .expect("write external key health");
+        drop(store);
+
+        client.force_provider_health_reload_due_for_tests();
+        let selected = client
+            .required_selected_secret_or_wait(&[KEY], 1, "test reload")
+            .await
+            .expect("selection should not fail")
+            .expect("second key should be selected");
+
+        assert_eq!(selected.key_id, format!("{KEY}_2"));
+        let status = client.provider_health_status();
+        assert_eq!(status.source_of_truth, "vault_db");
+        assert!(status.last_success_at.is_some());
+        assert!(status.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_key_health_reload_clears_local_cooldown_on_external_success() {
+        const KEY: &str = "TACHI_TEST_ONLY_API_KEY_RELOAD_SUCCESS";
+        let temp = tempfile::tempdir().expect("temp vault db");
+        let db_path = temp.path().join("vault.db");
+        let client =
+            LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+        client.set_provider_secret_pool(
+            KEY,
+            vec![
+                ProviderSecret {
+                    key_id: format!("{KEY}_1"),
+                    value: "secret-one".to_string(),
+                },
+                ProviderSecret {
+                    key_id: format!("{KEY}_2"),
+                    value: "secret-two".to_string(),
+                },
+            ],
+        );
+        client.mark_provider_key_rate_limited_for_tests(&format!("{KEY}_1"), Some(300));
+
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let store = memory_core::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
+        store
+            .vault_upsert_key_health(&VaultKeyHealth {
+                logical_name: KEY.to_string(),
+                key_id: format!("{KEY}_1"),
+                status: HEALTH_OK.to_string(),
+                last_success: Some(now.to_rfc3339()),
+                updated_at: now.to_rfc3339(),
+                ..VaultKeyHealth::default()
+            })
+            .expect("write external success health");
+        drop(store);
+
+        client.force_provider_health_reload_due_for_tests();
+        let selected = client
+            .required_selected_secret_or_wait(&[KEY], 1, "test reload")
+            .await
+            .expect("selection should not fail")
+            .expect("first key should be reinstated");
+
+        assert_eq!(selected.key_id, format!("{KEY}_1"));
+        assert!(client
+            .provider_pool_statuses()
+            .into_iter()
+            .find(|status| status.logical_name == KEY)
+            .is_some_and(|status| status.available_keys == 2));
     }
 
     #[test]

@@ -989,6 +989,7 @@ pub(crate) fn runtime_observability_json(
             "matches_current_process": serving_daemon,
         },
         "provider_secret_count": server.llm.provider_secret_count(),
+        "provider_health": server.llm.provider_health_status(),
         "provider_pools": server.llm.provider_pool_statuses(),
         "vault": vault,
     })
@@ -1480,6 +1481,7 @@ async fn handle_tachi_status_detail(
             "daily_pipeline": snapshot.last_daily_report,
             "distill": snapshot.distill_marker,
             "api_keys": snapshot.api_keys,
+            "provider_health": server.llm.provider_health_status(),
             "provider_pools": server.llm.provider_pool_statuses(),
             "provider_probe_cache": snapshot.provider_probe_cache,
             "models": status_health::model_lanes_json(),
@@ -1525,6 +1527,7 @@ async fn handle_tachi_status_detail(
             "api_keys": {
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
+                "provider_health": server.llm.provider_health_status(),
                 "provider_pools": server.llm.provider_pool_statuses(),
             },
             "provider_probe_cache": snapshot.provider_probe_cache,
