@@ -712,13 +712,13 @@ impl MemoryServer {
 
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
         crate::provider_config::materialize_for_server(self).map(|report| {
-            if report.from_alias > 0 || report.stripped_env_placeholders > 0 {
+            if report.from_alias > 0 || report.env_fallbacks_bypassed > 0 {
                 tracing::info!(
-                    "[provider] materialized {} secret(s) (vault={}, aliases={}, stripped_env={})",
+                    "[provider] materialized {} secret(s) (vault={}, aliases={}, env_fallbacks_bypassed={})",
                     report.loaded,
                     report.from_vault,
                     report.from_alias,
-                    report.stripped_env_placeholders
+                    report.env_fallbacks_bypassed
                 );
             }
             report.loaded
