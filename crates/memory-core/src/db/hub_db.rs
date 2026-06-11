@@ -341,12 +341,6 @@ pub fn hub_record_feedback(
     Ok(true)
 }
 
-/// Delete a hub capability. Returns true if found and deleted.
-pub fn hub_delete(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
-    conn.execute("DELETE FROM hub_capabilities WHERE id = ?1", params![id])?;
-    Ok(conn.changes() > 0)
-}
-
 /// Helper: build HubCapability from a row (tolerant of unexpected data).
 fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
     HubCapability {

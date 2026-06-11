@@ -27,9 +27,8 @@ pub use graph::{
     get_superseded_ids, graph_expand, remove_edge, remove_edges_for_memory,
 };
 pub use hub_db::{
-    hub_delete, hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome,
-    hub_record_feedback, hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review,
-    hub_upsert,
+    hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
+    hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_upsert,
 };
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
@@ -39,8 +38,7 @@ pub use memory_crud::{
     update_enrichment_fields, update_with_revision, upsert,
 };
 pub use pack_db::{
-    pack_delete, pack_get, pack_list, pack_set_enabled, pack_upsert, projection_delete,
-    projection_list, projection_upsert,
+    pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
 };
 pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
@@ -49,16 +47,15 @@ pub use sandbox::{
 pub use schema::{init_schema, init_schema_with_label, init_schema_with_label_mut};
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
-    count_derived_by_source, get_state, list_derived_by_source, list_state, save_derived,
-    save_derived_with_id, set_state, StateRow,
+    get_state, list_derived_by_source, list_state, save_derived, save_derived_with_id, set_state,
+    StateRow,
 };
 pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 pub use vault_db::{
-    vault_count_entries, vault_delete_entry, vault_delete_rotation, vault_entry_exists,
-    vault_get_config, vault_get_entry, vault_get_key_health, vault_get_rotation,
-    vault_insert_audit, vault_list_entries, vault_list_entries_by_type, vault_list_key_health,
-    vault_list_rotations, vault_set_config, vault_set_rotation, vault_touch_entry,
-    vault_upsert_entry, vault_upsert_key_health,
+    vault_count_entries, vault_delete_entry, vault_entry_exists, vault_get_config, vault_get_entry,
+    vault_get_key_health, vault_get_rotation, vault_insert_audit, vault_list_entries,
+    vault_list_entries_by_type, vault_list_key_health, vault_list_rotations, vault_set_config,
+    vault_set_rotation, vault_touch_entry, vault_upsert_entry, vault_upsert_key_health,
 };
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 

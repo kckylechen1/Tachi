@@ -108,16 +108,6 @@ pub fn pack_delete(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
     Ok(deleted > 0)
 }
 
-/// Enable or disable a pack.
-pub fn pack_set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool, MemoryError> {
-    let now = now_utc_iso();
-    let updated = conn.execute(
-        "UPDATE packs SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
-        params![enabled as i32, now, id],
-    )?;
-    Ok(updated > 0)
-}
-
 // ─── Agent Projection CRUD ──────────────────────────────────────────────────
 
 /// Upsert an agent projection record.
@@ -191,17 +181,4 @@ pub fn projection_list(
 
     rows.collect::<rusqlite::Result<Vec<AgentProjection>>>()
         .map_err(Into::into)
-}
-
-/// Delete a projection.
-pub fn projection_delete(
-    conn: &Connection,
-    agent: &str,
-    pack_id: &str,
-) -> Result<bool, MemoryError> {
-    let deleted = conn.execute(
-        "DELETE FROM agent_projections WHERE agent = ?1 AND pack_id = ?2",
-        params![agent, pack_id],
-    )?;
-    Ok(deleted > 0)
 }
