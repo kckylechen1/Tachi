@@ -93,6 +93,18 @@ enum KeyAvailability {
     Exhausted,
 }
 
+impl KeyAvailability {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Cooldown => "cooldown",
+            Self::AuthFailed => "auth_failed",
+            Self::Disabled => "disabled",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyRetryStatus {
     Available,
@@ -850,15 +862,115 @@ impl LlmClient {
 
     #[cfg(test)]
     fn required_secret(&self, keys: &[&str]) -> Result<String, String> {
-        self.first_secret(keys).ok_or_else(|| {
-            "Missing API key. Add one to Tachi Vault or set the appropriate env var.".to_string()
-        })
+        self.first_secret(keys)
+            .ok_or_else(|| self.provider_secret_unavailable_error(keys))
     }
 
     fn required_selected_secret(&self, keys: &[&str]) -> Result<SelectedProviderSecret, String> {
-        self.select_secret(keys).ok_or_else(|| {
-            "Missing API key. Add one to Tachi Vault or set the appropriate env var.".to_string()
-        })
+        self.select_secret(keys)
+            .ok_or_else(|| self.provider_secret_unavailable_error(keys))
+    }
+
+    fn provider_secret_unavailable_error(&self, keys: &[&str]) -> String {
+        let now = Instant::now();
+        let now_utc = Self::now_utc();
+        let mut state = self
+            .provider_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.prune_expired_cooldowns(now);
+
+        let mut configured = 0usize;
+        let mut empty = 0usize;
+        let mut status_counts: HashMap<&'static str, usize> = HashMap::new();
+        let mut retry_after = None;
+
+        for key in keys {
+            if let Some(entries) = state.secrets.get(*key) {
+                for entry in entries {
+                    if entry.value.trim().is_empty() {
+                        empty += 1;
+                        continue;
+                    }
+                    configured += 1;
+                    if let Some(until) = state
+                        .cooldowns
+                        .get(&entry.key_id)
+                        .filter(|until| **until > now)
+                    {
+                        Self::remember_min_retry_delay(
+                            &mut retry_after,
+                            until.saturating_duration_since(now),
+                        );
+                        *status_counts.entry("cooldown").or_default() += 1;
+                        continue;
+                    }
+                    let (availability, remaining_seconds) =
+                        Self::key_health_blocked_in_state(&state, key, &entry.key_id, now_utc);
+                    if availability == KeyAvailability::Cooldown {
+                        let delay =
+                            Duration::from_secs(remaining_seconds.unwrap_or(1).max(1) as u64);
+                        Self::remember_min_retry_delay(&mut retry_after, delay);
+                    }
+                    *status_counts.entry(availability.label()).or_default() += 1;
+                }
+            }
+
+            if let Some(value) = Self::first_env(&[*key])
+                .filter(|value| !value.trim().is_empty())
+                .filter(|value| !crate::provider_config::is_vault_alias(value))
+            {
+                if value.trim().is_empty() {
+                    empty += 1;
+                    continue;
+                }
+                configured += 1;
+                if let Some(until) = state.cooldowns.get(*key).filter(|until| **until > now) {
+                    Self::remember_min_retry_delay(
+                        &mut retry_after,
+                        until.saturating_duration_since(now),
+                    );
+                    *status_counts.entry("cooldown").or_default() += 1;
+                    continue;
+                }
+                let (availability, remaining_seconds) =
+                    Self::key_health_blocked_in_state(&state, key, key, now_utc);
+                if availability == KeyAvailability::Cooldown {
+                    let delay = Duration::from_secs(remaining_seconds.unwrap_or(1).max(1) as u64);
+                    Self::remember_min_retry_delay(&mut retry_after, delay);
+                }
+                *status_counts.entry(availability.label()).or_default() += 1;
+            }
+        }
+
+        if configured == 0 {
+            return "Missing API key. Add one to Tachi Vault or set the appropriate env var."
+                .to_string();
+        }
+
+        let names = keys.join(", ");
+        if let Some(delay) = retry_after {
+            return format!(
+                "API key unavailable for [{names}]: all configured provider keys are temporarily unavailable; retry after about {}s",
+                delay.as_secs().max(1)
+            );
+        }
+
+        let mut reasons = status_counts
+            .into_iter()
+            .filter(|(status, _)| *status != "available")
+            .map(|(status, count)| format!("{status}: {count}"))
+            .collect::<Vec<_>>();
+        if empty > 0 {
+            reasons.push(format!("empty: {empty}"));
+        }
+        reasons.sort();
+        let reason = if reasons.is_empty() {
+            "no usable configured key was selected".to_string()
+        } else {
+            reasons.join(", ")
+        };
+        format!("API key unavailable for [{names}]: all configured provider keys are unusable ({reason})")
     }
 
     fn remember_min_retry_delay(slot: &mut Option<Duration>, delay: Duration) {
@@ -1678,10 +1790,25 @@ impl LlmClient {
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok());
-            let resp_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("<read error: {e}>"));
+            let resp_text = match resp.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    if status.as_u16() == 429 {
+                        self.mark_secret_rate_limited(&selected, retry_after);
+                    } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                        self.mark_secret_auth_failed(
+                            &selected,
+                            Some(&format!("Chat auth failure {status}")),
+                        );
+                    }
+                    last_err = format!("Chat response body read failed after HTTP {status}: {e}");
+                    if attempt < Self::MAX_ATTEMPTS && status.is_server_error() {
+                        tokio::time::sleep(Self::retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
             // Retry on 429 rate-limit or 5xx server errors
             if status.as_u16() == 429 {
@@ -1773,30 +1900,18 @@ impl LlmClient {
 
     /// Generate L0 summary using SUMMARY_PROMPT.
     ///
-    /// On LLM error this falls back to a 100-char truncation of the input.
-    /// This is intentional for *summary* (we always want some text), but is
-    /// catastrophic for *distill* — the truncated input is never a real
-    /// distillation. Distill callers MUST use `generate_distill` instead.
+    /// LLM failures are returned to callers so enrichment/backfill can record a
+    /// real failure instead of storing a truncated input as if it were a summary.
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
-        match self
-            .call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
+        self.call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
             .await
-        {
-            Ok(summary) => Ok(summary),
-            Err(e) => {
-                eprintln!("[llm] generate_summary fell back to truncation after error: {e}");
-                // Fallback to truncation on error
-                Ok(text.chars().take(100).collect())
-            }
-        }
     }
 
     /// Generate a distilled synthesis from concatenated source memories.
     ///
-    /// Unlike `generate_summary`, this does NOT silently fall back to
-    /// truncation on error. Callers (Foundry distill worker) want a hard
-    /// failure so the job is marked failed/skipped rather than persisting
-    /// a "frankenstein" memory whose text is just the prompt's input prefix.
+    /// Distill callers (Foundry distill worker) want a hard failure so the job
+    /// is marked failed/skipped rather than persisting a "frankenstein" memory
+    /// whose text is just the prompt's input prefix.
     ///
     /// Historical bug: prior to this method, `generate_summary` was reused
     /// for distill and its silent fallback produced 15/23 (65%) garbage
@@ -2218,6 +2333,18 @@ mod tests {
             client.provider_key_id_for_tests(&[KEY]).is_none(),
             "pool selection should return None when all members are cooling down"
         );
+
+        let err = client
+            .required_secret(&[KEY])
+            .expect_err("cooling pool should not be reported as a missing key");
+        assert!(
+            err.contains("temporarily unavailable"),
+            "expected cooldown-specific error, got: {err}"
+        );
+        assert!(
+            err.contains("retry after"),
+            "expected retry guidance, got: {err}"
+        );
     }
 
     #[test]
@@ -2244,6 +2371,93 @@ mod tests {
             None,
             "pool selection should not return blocked auth-failed members"
         );
+        let err = client
+            .required_secret(&[KEY])
+            .expect_err("auth-failed pool should not be reported as a missing key");
+        assert!(
+            err.contains("unusable") && err.contains("auth_failed"),
+            "expected auth-failed reason, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn generate_summary_propagates_llm_failures() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        std::env::remove_var("SUMMARY_API_KEY");
+        std::env::remove_var("SILICONFLOW_API_KEY");
+        std::env::remove_var("EXTRACT_API_KEY");
+        std::env::remove_var("REASONING_API_KEY");
+        std::env::remove_var("ZAI_API_KEY");
+        std::env::remove_var("BIGMODEL_API_KEY");
+
+        let client = LlmClient::new().expect("client should initialize");
+        let err = client
+            .generate_summary("this text used to be silently truncated")
+            .await
+            .expect_err("summary should surface provider/key failures");
+
+        assert!(
+            err.contains("Missing API key") || err.contains("API key unavailable"),
+            "expected provider error, got: {err}"
+        );
+        assert!(
+            !err.contains("this text used to be silently truncated"),
+            "summary errors must not return truncated input as success"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn chat_lane_reports_response_body_read_errors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind broken provider");
+        let port = listener.local_addr().expect("provider addr").port();
+        let server_task = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 64\r\ncontent-type: application/json\r\n\r\n{\"choices\"";
+                let _ = socket.write_all(response).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let _base_guard = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
+        let _key_guard = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let client = LlmClient::new().expect("client should initialize");
+        let err = client
+            .call_extract_llm("system", "user", None, 0.0, 16)
+            .await
+            .expect_err("truncated provider body should be a body read error");
+
+        assert!(
+            err.contains("Chat response body read failed after HTTP 200 OK"),
+            "expected body read error, got: {err}"
+        );
+        assert!(
+            !err.contains("<read error:"),
+            "body read failures must not be converted into synthetic body text"
+        );
+
+        server_task.abort();
     }
 
     #[tokio::test]
