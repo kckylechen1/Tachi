@@ -456,9 +456,7 @@ pub(super) async fn run_tidy_command(
 
         let cfg = MigrationConfig {
             target_db,
-            archive_root,
             manifest_path: crate::manifest::Manifest::default_path(home),
-            yes,
             dry_run: false,
             interactive: !yes && atty_stdout(),
         };
@@ -532,13 +530,9 @@ pub(super) async fn run_tidy_command(
 
 /// Configuration controlling how migrations are executed.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct MigrationConfig {
     pub target_db: PathBuf,
-    pub archive_root: PathBuf,
     pub manifest_path: PathBuf,
-    /// Skip per-DB y/n prompts.
-    pub yes: bool,
     /// When true, do not perform any write. Used by integration tests and
     /// equivalent to `--dry-run --execute` (which is currently disallowed at
     /// the CLI but useful for tests).

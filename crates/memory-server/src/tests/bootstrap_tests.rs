@@ -322,9 +322,7 @@ fn manifest_update_drops_migrated_sources_and_inserts_target() {
 
     let cfg = crate::bootstrap::MigrationConfig {
         target_db: root.join(".tachi").join("global").join("memory.db"),
-        archive_root: root.join(".tachi").join("archive").join("ts"),
         manifest_path: manifest_path.clone(),
-        yes: true,
         dry_run: false,
         interactive: false,
     };
@@ -380,9 +378,7 @@ fn tidy_execute_migrates_rows_and_archives_source() {
     // First: dry-run via MigrationConfig — verify zero writes.
     let dry_cfg = crate::bootstrap::MigrationConfig {
         target_db: target_db.clone(),
-        archive_root: archive_root.clone(),
         manifest_path: app_home.join("manifest.json"),
-        yes: true,
         dry_run: true,
         interactive: false,
     };
@@ -416,9 +412,7 @@ fn tidy_execute_migrates_rows_and_archives_source() {
     // Second: real execute.
     let exec_cfg = crate::bootstrap::MigrationConfig {
         target_db: target_db.clone(),
-        archive_root: archive_root.clone(),
         manifest_path: app_home.join("manifest.json"),
-        yes: true,
         dry_run: false,
         interactive: false,
     };
