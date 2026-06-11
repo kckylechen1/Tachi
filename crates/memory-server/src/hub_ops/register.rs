@@ -3,10 +3,24 @@ use super::security_scan::{
 };
 use super::*;
 
+const MAX_HUB_DEFINITION_BYTES: usize = 256 * 1024;
+
+fn ensure_hub_definition_size(label: &str, definition: &str) -> Result<(), String> {
+    let len = definition.len();
+    if len > MAX_HUB_DEFINITION_BYTES {
+        return Err(format!(
+            "{label} definition is too large: {len} bytes exceeds {MAX_HUB_DEFINITION_BYTES} byte limit"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_hub_register(
     server: &MemoryServer,
     params: HubRegisterParams,
 ) -> Result<String, String> {
+    ensure_hub_definition_size("hub_register", &params.definition)?;
+
     let (target_db, warning) = server.resolve_write_scope(&params.scope);
 
     let mut resp = serde_json::Map::new();
@@ -77,6 +91,7 @@ pub(crate) async fn handle_hub_register(
 
         cap_definition = serde_json::to_string(&def)
             .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
+        ensure_hub_definition_size("serialized MCP", &cap_definition)?;
 
         // Governance gate: MCP capabilities must be reviewed before activation.
         enabled = false;
@@ -122,6 +137,7 @@ pub(crate) async fn handle_hub_register(
         }
         cap_definition = serde_json::to_string(&def)
             .map_err(|e| format!("Failed to serialize skill definition: {e}"))?;
+        ensure_hub_definition_size("serialized skill", &cap_definition)?;
     }
 
     let cap = HubCapability {

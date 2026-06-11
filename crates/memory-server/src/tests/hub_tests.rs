@@ -192,6 +192,45 @@ async fn hub_register_skill_rejects_invalid_definition_json() {
 }
 
 #[tokio::test]
+async fn hub_register_rejects_oversized_definition_before_persisting() {
+    let server = make_server();
+
+    let params = HubRegisterParams {
+        id: "skill:oversized-definition".to_string(),
+        cap_type: "skill".to_string(),
+        name: "oversized definition".to_string(),
+        description: "definition should be size capped".to_string(),
+        definition: format!(
+            "{{\"prompt\":\"{}\",\"inputSchema\":{{\"type\":\"object\"}}}}",
+            "x".repeat(300 * 1024)
+        ),
+        version: 1,
+        scope: "global".to_string(),
+    };
+
+    let err = server
+        .hub_register(Parameters(params))
+        .await
+        .expect_err("oversized definition should be rejected");
+    assert!(
+        err.contains("definition is too large"),
+        "unexpected error: {err}"
+    );
+
+    let missing = server
+        .with_global_store_read(|store| {
+            store
+                .hub_get("skill:oversized-definition")
+                .map_err(|e| format!("hub get: {e}"))
+        })
+        .expect("hub get should succeed");
+    assert!(
+        missing.is_none(),
+        "oversized definition should not be persisted"
+    );
+}
+
+#[tokio::test]
 async fn hub_register_skill_marks_prompt_injection_as_medium_without_blocking() {
     let server = make_server();
 
