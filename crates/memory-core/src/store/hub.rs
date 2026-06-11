@@ -90,11 +90,6 @@ impl MemoryStore {
         db::hub_record_feedback(&self.conn, id, success, rating)
     }
 
-    /// Delete a hub capability.
-    pub fn hub_delete(&self, id: &str) -> Result<bool, MemoryError> {
-        db::hub_delete(&self.conn, id)
-    }
-
     /// Upsert one binding from virtual capability to concrete capability.
     pub fn vc_upsert_binding(&self, binding: &VirtualCapabilityBinding) -> Result<(), MemoryError> {
         db::vc_upsert_binding(&self.conn, binding)

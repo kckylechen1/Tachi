@@ -271,14 +271,6 @@ impl MemoryStore {
         db::record_enrichment_failure(&self.conn, id, stage, error)
     }
 
-    /// List entries that are missing vector embeddings.
-    /// Returns (id, text, summary, revision) tuples.
-    pub fn entries_missing_vectors(
-        &self,
-    ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
-        self.entries_missing_vectors_filtered(None, None)
-    }
-
     /// Like [`entries_missing_vectors`], but can exclude a source and cap row count.
     pub fn entries_missing_vectors_filtered(
         &self,
@@ -630,15 +622,6 @@ impl MemoryStore {
         db::save_derived_with_id(
             &self.conn, id, text, path, summary, importance, source, scope, metadata,
         )
-    }
-
-    /// Count derived items by source and path prefix.
-    pub fn count_derived_by_source(
-        &self,
-        source: &str,
-        path_prefix: &str,
-    ) -> Result<u64, MemoryError> {
-        db::count_derived_by_source(&self.conn, source, path_prefix)
     }
 
     /// List derived items by source and path prefix.
