@@ -464,6 +464,8 @@ fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<St
     };
     let entry = if let Some(name) = item.named_project.as_deref() {
         server.with_named_project_store_read(name, lookup).ok()?
+    } else if let Some(db_path) = item.db_path.as_ref() {
+        server.with_path_store_read(db_path, lookup).ok()?
     } else {
         server
             .with_store_for_scope_read(item.target_db, lookup)
