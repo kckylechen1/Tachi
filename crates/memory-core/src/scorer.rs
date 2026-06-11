@@ -324,20 +324,6 @@ pub fn graph_relation_activation_weight(relation: &str) -> f64 {
     }
 }
 
-pub fn graph_spreading_activation(
-    seed_ids: &[String],
-    edges: &[crate::types::MemoryEdge],
-    max_hops: u32,
-    decay: f64,
-) -> HashMap<String, f64> {
-    let capped_hops = max_hops.min(4);
-    let seed_weights = seed_ids
-        .iter()
-        .map(|id| (id.clone(), 1.0))
-        .collect::<HashMap<_, _>>();
-    graph_spreading_activation_with_seed_weights(&seed_weights, edges, capped_hops, decay)
-}
-
 pub fn graph_spreading_activation_with_seed_weights(
     seed_weights: &HashMap<String, f64>,
     edges: &[crate::types::MemoryEdge],
@@ -943,7 +929,7 @@ mod tests {
     fn graph_spreading_activation_decays_by_hop_and_relation_type() {
         use crate::types::MemoryEdge;
 
-        let seeds = vec!["a".to_string()];
+        let seeds = HashMap::from([("a".to_string(), 1.0)]);
         let edges = vec![
             MemoryEdge {
                 source_id: "a".to_string(),
@@ -977,7 +963,7 @@ mod tests {
             },
         ];
 
-        let activation = graph_spreading_activation(&seeds, &edges, 2, 0.5);
+        let activation = graph_spreading_activation_with_seed_weights(&seeds, &edges, 2, 0.5);
         assert!(!activation.contains_key("a"));
         assert!(activation["b"] > activation["c"]);
         assert!(activation["b"] > activation["d"]);

@@ -32,5 +32,3 @@ pub enum MemoryError {
     #[error("Internal error: {0}")]
     Internal(String),
 }
-
-pub type MemoryResult<T> = Result<T, MemoryError>;
