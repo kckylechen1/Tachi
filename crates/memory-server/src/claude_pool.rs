@@ -12,7 +12,7 @@
 //!     `TACHI_CLAUDE_SKIP_PERMISSIONS=false` to restore prompts for
 //!     non-daemon use;
 //!   * enforces a wall-clock timeout (default 180s, env
-//!     `CLAUDE_POOL_TIMEOUT_SECS`).
+//!     `CLAUDE_POOL_TIMEOUT_SECS`) and kills timed-out children on drop.
 //!
 //! The pool also exposes `cleanup_expired` which removes run directories
 //! older than the policy (7d success / 30d failed) so the foundry runs
@@ -168,6 +168,7 @@ impl ClaudePool {
         if skip_perms {
             cmd.arg("--dangerously-skip-permissions");
         }
+        cmd.kill_on_drop(true);
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -651,6 +652,48 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("CLAUDE_BIN", v),
             None => std::env::remove_var("CLAUDE_BIN"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_claude_cli_kills_timed_out_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_claude = tmp.path().join("claude");
+        let sentinel = tmp.path().join("sentinel");
+        std::fs::write(
+            &fake_claude,
+            "#!/bin/sh\nsleep 1\nprintf done > \"$SENTINEL_FILE\"\nprintf '{\"result\":\"late\"}\\n'\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let previous_sentinel = std::env::var("SENTINEL_FILE").ok();
+        std::env::set_var("SENTINEL_FILE", &sentinel);
+        let pool = ClaudePool {
+            sem: Arc::new(Semaphore::new(1)),
+            runs_dir: tmp.path().to_path_buf(),
+            timeout: Duration::from_millis(50),
+            binary: Ok(fake_claude.to_string_lossy().to_string()),
+        };
+
+        let err = pool
+            .run_claude_cli("prompt from stdin")
+            .await
+            .expect_err("fake claude should time out");
+        assert!(err.contains("timed out"), "unexpected error: {err}");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(
+            !sentinel.exists(),
+            "timed-out claude child should be killed before it continues work"
+        );
+
+        match previous_sentinel {
+            Some(value) => std::env::set_var("SENTINEL_FILE", value),
+            None => std::env::remove_var("SENTINEL_FILE"),
         }
     }
 
