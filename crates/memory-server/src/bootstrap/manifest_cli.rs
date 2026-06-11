@@ -20,7 +20,12 @@ pub(super) async fn run_doctor_command(
         auto_fix: fix,
         max_depth: 10,
     };
-    let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+    let mut report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+    report
+        .warnings
+        .extend(crate::doctor::project_secret_file_warnings(
+            git_root.map(|p| p.as_path()),
+        ));
 
     // Always update the manifest after a doctor run (idempotent; preserves notes).
     let manifest_path = crate::manifest::Manifest::default_path(home);

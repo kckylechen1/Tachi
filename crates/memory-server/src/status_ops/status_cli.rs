@@ -435,6 +435,14 @@ async fn render_one(
     }
     println!();
 
+    if !snapshot.project_warnings.is_empty() {
+        println!("Project Warnings");
+        for warning in &snapshot.project_warnings {
+            println!("  [!] {warning}");
+        }
+        println!();
+    }
+
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
     let total_orphan = snapshot.dbs.iter().filter(|d| d.orphan).count();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();

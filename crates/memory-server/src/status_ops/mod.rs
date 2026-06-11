@@ -91,6 +91,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) distill_marker: Option<DistillMarkerStatus>,
     pub(crate) api_keys: Vec<ApiKeyStatus>,
     pub(crate) provider_probe_cache: Option<status_health::ProviderProbeCache>,
+    pub(crate) project_warnings: Vec<String>,
     pub(crate) health_score: u8,
 }
 
@@ -390,6 +391,11 @@ fn collect_snapshot_inner(
         .as_ref()
         .filter(|cache| !cache.is_stale())
         .map(|cache| cache.probes.as_slice());
+    let git_root = crate::utils::find_project_git_root();
+    let project_warnings = crate::doctor::project_secret_file_warnings(git_root.as_deref())
+        .into_iter()
+        .map(|warning| warning.message)
+        .collect();
     let health_score = status_health::calculate_health_score(
         &daemon,
         &dbs,
@@ -409,6 +415,7 @@ fn collect_snapshot_inner(
         distill_marker,
         api_keys,
         provider_probe_cache,
+        project_warnings,
         health_score,
     }
 }
@@ -1607,6 +1614,7 @@ fn build_status_warnings(
                 .to_string(),
         );
     }
+    warnings.extend(snapshot.project_warnings.iter().cloned());
     if low_coverage_count > 0 {
         warnings.push(format!(
             "{low_coverage_count} db(s) have vector coverage below 90%: {}",
@@ -2028,6 +2036,7 @@ mod tests {
             distill_marker: None,
             api_keys: Vec::new(),
             provider_probe_cache: None,
+            project_warnings: Vec::new(),
             health_score: 95,
         }
     }
@@ -2208,6 +2217,24 @@ mod tests {
         assert!(
             !low_cov.contains("global"),
             "healthy dbs must not appear in low-coverage warning, got: {low_cov}"
+        );
+    }
+
+    #[test]
+    fn build_status_warnings_includes_project_warnings() {
+        let mut snapshot = empty_snapshot(vec![]);
+        snapshot.project_warnings = vec![
+            "/repo/.tachi/env.generated is tracked by git and may contain plaintext secrets"
+                .to_string(),
+        ];
+
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains(".tachi/env.generated")),
+            "project warning should be surfaced in status warnings, got: {warnings:?}"
         );
     }
 

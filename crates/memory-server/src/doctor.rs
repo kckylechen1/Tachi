@@ -23,6 +23,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const GENERATED_ENV_REL_PATH: &str = ".tachi/env.generated";
+
 // ─── Public types ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -113,10 +115,19 @@ pub struct AutoFixAction {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DoctorWarning {
+    pub code: String,
+    pub path: String,
+    pub message: String,
+    pub remediation: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub scanned_roots: Vec<String>,
     pub findings: Vec<DoctorFinding>,
     pub summary: SummaryByClass,
+    pub warnings: Vec<DoctorWarning>,
     pub auto_fix_actions: Vec<AutoFixAction>,
     pub quarantine_dir: Option<String>,
     pub generated_at: String,
@@ -870,10 +881,43 @@ pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> 
         scanned_roots: roots.iter().map(|p| p.display().to_string()).collect(),
         findings,
         summary,
+        warnings: Vec::new(),
         auto_fix_actions,
         quarantine_dir: Some(quarantine_root.display().to_string()),
         generated_at: Utc::now().to_rfc3339(),
     }
+}
+
+pub fn project_secret_file_warnings(git_root: Option<&Path>) -> Vec<DoctorWarning> {
+    let Some(git_root) = git_root else {
+        return Vec::new();
+    };
+    if !git_index_tracks(git_root, GENERATED_ENV_REL_PATH) {
+        return Vec::new();
+    }
+
+    let path = git_root.join(GENERATED_ENV_REL_PATH);
+    vec![DoctorWarning {
+        code: "tracked_generated_env".to_string(),
+        path: path.display().to_string(),
+        message: format!(
+            "{} is tracked by git and may contain plaintext secrets; remove it from the index",
+            path.display()
+        ),
+        remediation: format!(
+            "run `git rm --cached -- {GENERATED_ENV_REL_PATH}` and keep {GENERATED_ENV_REL_PATH} ignored"
+        ),
+    }]
+}
+
+fn git_index_tracks(git_root: &Path, rel_path: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(git_root)
+        .args(["ls-files", "--error-unmatch", "--", rel_path])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -901,6 +945,15 @@ pub fn render_report(report: &DoctorReport) -> String {
         report.summary.backup,
     ));
     lines.push(String::new());
+
+    if !report.warnings.is_empty() {
+        lines.push("warnings:".to_string());
+        for warning in &report.warnings {
+            lines.push(format!("  [!] {}: {}", warning.code, warning.message));
+            lines.push(format!("      fix: {}", warning.remediation));
+        }
+        lines.push(String::new());
+    }
 
     for f in &report.findings {
         let mem = f
@@ -1093,6 +1146,43 @@ mod tests {
         assert_eq!(report.summary.placeholder, 1);
         assert!(report.auto_fix_actions.is_empty());
         assert!(p.exists(), "default doctor scan must not move files");
+    }
+
+    #[test]
+    fn project_secret_file_warnings_detects_tracked_generated_env() {
+        let dir = tempdir().unwrap();
+        if std::process::Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .output()
+            .map(|output| !output.status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let generated = dir.path().join(".tachi/env.generated");
+        fs::create_dir_all(generated.parent().unwrap()).unwrap();
+        fs::write(&generated, "OPENAI_API_KEY=sk-test\n").unwrap();
+
+        let untracked = project_secret_file_warnings(Some(dir.path()));
+        assert!(
+            untracked.is_empty(),
+            "untracked generated env must not warn"
+        );
+
+        let add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "--", ".tachi/env.generated"])
+            .output()
+            .unwrap();
+        assert!(add.status.success(), "git add failed: {add:?}");
+
+        let warnings = project_secret_file_warnings(Some(dir.path()));
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code, "tracked_generated_env");
+        assert!(warnings[0].message.contains(".tachi/env.generated"));
+        assert!(warnings[0].remediation.contains("git rm --cached"));
     }
 
     #[test]
