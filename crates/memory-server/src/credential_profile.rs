@@ -12,7 +12,7 @@ use std::fs;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::utils::stable_hash;
 
@@ -887,6 +887,12 @@ fn metadata_matches_cleanup_scope(
     }
     if let Some(run_dir) = &options.run_dir {
         let target = PathBuf::from(&metadata.target);
+        if target
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        {
+            return false;
+        }
         if !target.starts_with(run_dir) {
             return false;
         }
