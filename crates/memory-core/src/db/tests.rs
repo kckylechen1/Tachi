@@ -1183,6 +1183,63 @@ fn fetch_by_ids_returns_entries() {
 }
 
 #[test]
+fn fetch_by_ids_hydrates_vectors_in_main_query() {
+    let mut conn = make_conn();
+    let has_vec: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if has_vec == 0 {
+        return;
+    }
+
+    let mut entry = make_entry("fid-vec", "vector memory");
+    entry.vector = Some(vec![0.25_f32; 1024]);
+    upsert(&mut conn, &entry, true).unwrap();
+
+    let result = fetch_by_ids(&conn, &["fid-vec".into()], false).unwrap();
+    let fetched = result.get("fid-vec").expect("entry should be fetched");
+    assert_eq!(
+        fetched.vector.as_ref().map(Vec::len),
+        Some(1024),
+        "fetch_by_ids should hydrate the vector from the joined row"
+    );
+}
+
+#[test]
+fn fetch_by_ids_returns_vector_decode_errors() {
+    let mut conn = make_conn();
+    upsert(
+        &mut conn,
+        &make_entry("fid-bad-vec", "bad vector memory"),
+        false,
+    )
+    .unwrap();
+    conn.execute("DROP TABLE IF EXISTS memories_vec", [])
+        .unwrap();
+    conn.execute(
+        "CREATE TABLE memories_vec(id TEXT PRIMARY KEY, embedding BLOB)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+        params!["fid-bad-vec", vec![1_u8, 2, 3]],
+    )
+    .unwrap();
+
+    let err = fetch_by_ids(&conn, &["fid-bad-vec".into()], false)
+        .expect_err("invalid vector blob length should not be silently ignored");
+    assert!(
+        err.to_string().contains("invalid vector blob length"),
+        "{err}"
+    );
+}
+
+#[test]
 fn fetch_by_ids_empty_input() {
     let conn = make_conn();
     let result = fetch_by_ids(&conn, &[], false).unwrap();

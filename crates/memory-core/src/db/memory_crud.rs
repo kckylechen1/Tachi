@@ -39,6 +39,7 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 }
 
 const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
+const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
 
 fn sync_memories_fts(
     tx: &rusqlite::Transaction<'_>,
@@ -910,6 +911,13 @@ pub fn fetch_by_ids(
     }
 
     let mut out = HashMap::new();
+    let has_vector_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE name = 'memories_vec' LIMIT 1",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
 
     for batch in ids.chunks(IN_BATCH_SIZE) {
         let placeholders = batch
@@ -918,48 +926,59 @@ pub fn fetch_by_ids(
             .map(|(i, _)| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
-        let mut sql = format!(
-            "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE id IN ({})",
-            placeholders
-        );
+        let mut sql = if has_vector_table {
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS_QUALIFIED}, v.embedding
+                 FROM memories m
+                 LEFT JOIN memories_vec v ON v.id = m.id
+                 WHERE m.id IN ({})",
+                placeholders
+            )
+        } else {
+            format!(
+                "SELECT {MEMORY_SELECT_COLUMNS} FROM memories WHERE id IN ({})",
+                placeholders
+            )
+        };
         if !include_archived {
-            sql.push_str(" AND archived = 0");
+            if has_vector_table {
+                sql.push_str(" AND m.archived = 0");
+            } else {
+                sql.push_str(" AND archived = 0");
+            }
         }
 
         let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), row_to_entry)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            let mut entry = row_to_entry(row)?;
+            if has_vector_table {
+                let blob: Option<Vec<u8>> = row.get(26)?;
+                if let Some(blob) = blob {
+                    if blob.len() % 4 != 0 {
+                        return Err(rusqlite::Error::FromSqlConversionFailure(
+                            26,
+                            rusqlite::types::Type::Blob,
+                            format!(
+                                "invalid vector blob length for '{}': {}",
+                                entry.id,
+                                blob.len()
+                            )
+                            .into(),
+                        ));
+                    }
+                    entry.vector = Some(
+                        blob.chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect(),
+                    );
+                }
+            }
+            Ok(entry)
+        })?;
 
         for r in rows {
             let entry = r?;
             out.insert(entry.id.clone(), entry);
-        }
-
-        // Hydrate vectors from memories_vec (best-effort: table may not exist)
-        let vec_sql = format!(
-            "SELECT id, embedding FROM memories_vec WHERE id IN ({})",
-            placeholders
-        );
-        if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
-            if let Ok(vec_rows) =
-                vec_stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
-                    let id: String = row.get(0)?;
-                    let blob: Vec<u8> = row.get(1)?;
-                    Ok((id, blob))
-                })
-            {
-                for r in vec_rows.flatten() {
-                    let (id, blob) = r;
-                    if let Some(entry) = out.get_mut(&id) {
-                        if blob.len() % 4 == 0 {
-                            let vec: Vec<f32> = blob
-                                .chunks_exact(4)
-                                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                                .collect();
-                            entry.vector = Some(vec);
-                        }
-                    }
-                }
-            }
         }
     }
 
