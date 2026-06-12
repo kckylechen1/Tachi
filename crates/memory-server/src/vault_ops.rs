@@ -523,10 +523,16 @@ fn ensure_agent_allowed(entry: &VaultEntry, agent_id: Option<&str>) -> Result<()
     }
 }
 
+struct SelectedVaultEntry {
+    target_name: String,
+    entry: VaultEntry,
+    pending_rotation: Option<VaultKeyRotation>,
+}
+
 fn select_vault_entry(
     store: &mut MemoryStore,
     params: &VaultGetParams,
-) -> Result<(String, VaultEntry), String> {
+) -> Result<SelectedVaultEntry, String> {
     let exact_entry = store
         .vault_get_entry(&params.name)
         .map_err(|e| format!("Failed to get secret: {e}"))?;
@@ -548,7 +554,7 @@ fn select_vault_entry(
                 ));
             }
 
-            let selected = match rotation.rotation_strategy.as_str() {
+            let (selected, pending_rotation) = match rotation.rotation_strategy.as_str() {
                 "round_robin" => {
                     let idx = if rotation.current_index <= 0 {
                         matching_keys.len() - 1
@@ -561,32 +567,59 @@ fn select_vault_entry(
                         updated_at: Utc::now().to_rfc3339(),
                         ..rotation.clone()
                     };
-                    store
-                        .vault_set_rotation(&new_rotation)
-                        .map_err(|e| format!("Failed to update rotation: {e}"))?;
-                    matching_keys.get(idx).cloned()
+                    (matching_keys.get(idx).cloned(), Some(new_rotation))
                 }
                 "random" => {
                     use rand::Rng;
                     let idx = rand::thread_rng().gen_range(0..matching_keys.len());
-                    matching_keys.get(idx).cloned()
+                    (matching_keys.get(idx).cloned(), None)
                 }
-                "least_recently_used" => matching_keys
-                    .into_iter()
-                    .min_by_key(|(_, entry)| (entry.access_count, entry.accessed_at.clone())),
-                _ => matching_keys.into_iter().next(),
-            }
-            .ok_or_else(|| "No key selected".to_string())?;
+                "least_recently_used" => (
+                    matching_keys
+                        .into_iter()
+                        .min_by_key(|(_, entry)| (entry.access_count, entry.accessed_at.clone())),
+                    None,
+                ),
+                _ => (matching_keys.into_iter().next(), None),
+            };
+            let selected = selected.ok_or_else(|| "No key selected".to_string())?;
 
-            Ok((selected.1.name.clone(), selected.1))
+            Ok(SelectedVaultEntry {
+                target_name: selected.1.name.clone(),
+                entry: selected.1,
+                pending_rotation,
+            })
         } else {
             let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
-            Ok((entry.name.clone(), entry))
+            Ok(SelectedVaultEntry {
+                target_name: entry.name.clone(),
+                entry,
+                pending_rotation: None,
+            })
         }
     } else {
         let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
-        Ok((entry.name.clone(), entry))
+        Ok(SelectedVaultEntry {
+            target_name: entry.name.clone(),
+            entry,
+            pending_rotation: None,
+        })
     }
+}
+
+fn record_successful_vault_access(
+    store: &mut MemoryStore,
+    target_name: &str,
+    pending_rotation: Option<&VaultKeyRotation>,
+) -> Result<i64, String> {
+    if let Some(rotation) = pending_rotation {
+        store
+            .vault_set_rotation(rotation)
+            .map_err(|e| format!("Failed to update rotation: {e}"))?;
+    }
+    store
+        .vault_touch_entry(target_name)
+        .map_err(|e| e.to_string())
 }
 
 fn is_shell_env_name(name: &str) -> bool {
@@ -941,20 +974,26 @@ pub(crate) fn read_unlocked_vault_secret(
             agent_id: agent_id.map(str::to_string),
             auto_rotate,
         };
-        let (target_name, entry) =
-            server.with_global_store(|store| select_vault_entry(store, &params))?;
+        let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())?;
 
-        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)
-            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        let decrypted =
+            crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
+        let value = String::from_utf8(decrypted).map_err(|e| {
+            format!(
+                "Vault secret '{}' is not valid UTF-8: {e}",
+                selected.entry.name
+            )
+        })?;
 
         server
             .with_global_store(|store| {
-                store
-                    .vault_touch_entry(&target_name)
-                    .map_err(|e| e.to_string())
+                record_successful_vault_access(
+                    store,
+                    &selected.target_name,
+                    selected.pending_rotation.as_ref(),
+                )
             })
             .map_err(|e| format!("Failed to update access stats: {e}"))?;
 
@@ -1357,29 +1396,31 @@ pub(crate) async fn handle_vault_get(
 ) -> Result<String, String> {
     let requested_name = params.name.clone();
     let result = with_vault_key(server, |key| {
-        let (target_name, entry) =
-            server.with_global_store(|store| select_vault_entry(store, &params))?;
+        let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())?;
 
-        let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        let decrypted =
+            crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
         let value = String::from_utf8(decrypted)
             .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
 
         let new_access_count = server
             .with_global_store(|store| {
-                store
-                    .vault_touch_entry(&target_name)
-                    .map_err(|e| e.to_string())
+                record_successful_vault_access(
+                    store,
+                    &selected.target_name,
+                    selected.pending_rotation.as_ref(),
+                )
             })
             .map_err(|e| format!("Failed to update access stats: {e}"))?;
 
         serde_json::to_string(&json!({
-            "name": entry.name,
+            "name": selected.entry.name,
             "value": value,
-            "secret_type": entry.secret_type,
-            "description": entry.description,
-            "allowed_agents": entry.allowed_agents,
+            "secret_type": selected.entry.secret_type,
+            "description": selected.entry.description,
+            "allowed_agents": selected.entry.allowed_agents,
             "access_count": new_access_count,
         }))
         .map_err(|e| format!("serialize: {e}"))
