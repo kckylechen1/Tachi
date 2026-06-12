@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 
 use crate::error::MemoryError;
@@ -629,44 +629,32 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
         rows
     };
 
-    conn.execute_batch("BEGIN IMMEDIATE")?;
-    let result = (|| -> Result<(), MemoryError> {
-        for (id, timestamp, valid_from, valid_until) in rows {
-            let valid_from_raw = valid_from
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(timestamp.trim());
-            let normalized_from =
-                normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
-            let normalized_until = valid_until
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
-            if valid_from.as_deref() == Some(normalized_from.as_str())
-                && valid_until == normalized_until
-            {
-                continue;
-            }
-            conn.execute(
-                "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
-                params![id, normalized_from, normalized_until],
-            )?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    for (id, timestamp, valid_from, valid_until) in rows {
+        let valid_from_raw = valid_from
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(timestamp.trim());
+        let normalized_from =
+            normalize_utc_iso(valid_from_raw).unwrap_or_else(|_| valid_from_raw.to_string());
+        let normalized_until = valid_until
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| normalize_utc_iso(value).unwrap_or_else(|_| value.to_string()));
+        if valid_from.as_deref() == Some(normalized_from.as_str())
+            && valid_until == normalized_until
+        {
+            continue;
         }
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
+        tx.execute(
+            "UPDATE memories SET valid_from = ?2, valid_until = ?3 WHERE id = ?1",
+            params![id, normalized_from, normalized_until],
+        )?;
     }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Idempotent migration that:
