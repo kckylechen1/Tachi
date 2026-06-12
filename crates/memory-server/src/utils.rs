@@ -133,6 +133,44 @@ pub(super) fn value_to_template_text(v: &Value) -> String {
     }
 }
 
+fn is_safe_template_arg_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
+}
+
+pub(super) fn render_skill_prompt_template(
+    template: &str,
+    args: &serde_json::Map<String, Value>,
+) -> Result<String, serde_json::Error> {
+    let args_value = Value::Object(args.clone());
+    let args_json = serde_json::to_string_pretty(&args_value)?;
+    let mut prompt = template.replace("{{args_json}}", &args_json);
+    prompt = prompt.replace("{{args}}", &args_json);
+
+    for (key, value) in args {
+        if matches!(key.as_str(), "args" | "args_json" | "input") || !is_safe_template_arg_key(key)
+        {
+            continue;
+        }
+        let placeholder = format!("{{{{{key}}}}}");
+        prompt = prompt.replace(&placeholder, &value_to_template_text(value));
+    }
+
+    if prompt.contains("{{input}}") {
+        let input = args
+            .get("input")
+            .map(value_to_template_text)
+            .unwrap_or(args_json);
+        prompt = prompt.replace("{{input}}", &input);
+    }
+
+    Ok(prompt)
+}
+
 pub(super) fn redact_sensitive_value(value: &mut Value) {
     match value {
         Value::Object(map) => {
@@ -303,6 +341,49 @@ mod tests {
         assert_eq!(
             compact_text_line("one two three four five", 10),
             "one two..."
+        );
+    }
+
+    #[test]
+    fn skill_prompt_template_renders_safe_args_only() {
+        let args = serde_json::Map::from_iter([
+            ("name".to_string(), json!("Ada")),
+            ("input".to_string(), json!("review this")),
+        ]);
+
+        let rendered = render_skill_prompt_template(
+            "Name={{name}}\nInput={{input}}\nAll={{args_json}}",
+            &args,
+        )
+        .expect("render prompt");
+
+        assert!(rendered.contains("Name=Ada"));
+        assert!(rendered.contains("Input=review this"));
+        assert!(rendered.contains("\"name\": \"Ada\""));
+    }
+
+    #[test]
+    fn skill_prompt_template_ignores_reserved_and_unsafe_arg_keys() {
+        let args = serde_json::Map::from_iter([
+            ("args_json".to_string(), json!("replace all args")),
+            ("input".to_string(), json!("safe input value")),
+            ("name}} {{args_json".to_string(), json!("injected")),
+            ("unsafe.key".to_string(), json!("dot value")),
+        ]);
+
+        let rendered = render_skill_prompt_template(
+            "Args={{args_json}}\nInput={{input}}\nBad={{name}} {{args_json}}\nDot={{unsafe.key}}",
+            &args,
+        )
+        .expect("render prompt");
+
+        assert!(rendered.contains("Input=safe input value"));
+        assert!(rendered.contains("\"args_json\": \"replace all args\""));
+        assert!(rendered.contains("Bad={{name}}"));
+        assert!(rendered.contains("Dot={{unsafe.key}}"));
+        assert!(
+            !rendered.contains("Bad=injected"),
+            "unsafe keys must not synthesize template placeholders: {rendered}"
         );
     }
 

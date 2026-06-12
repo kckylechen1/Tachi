@@ -53,25 +53,10 @@ pub(crate) async fn handle_run_skill(
             "skill definition missing 'prompt', 'template', or 'content' field".to_string()
         })?;
 
-    let mut resolved_prompt = prompt_template.to_string();
-    if let Some(args_obj) = params.args.as_object() {
-        let args_json = serde_json::to_string_pretty(&params.args)
-            .map_err(|e| format!("serialize skill args: {e}"))?;
-        resolved_prompt = resolved_prompt.replace("{{args_json}}", &args_json);
-        resolved_prompt = resolved_prompt.replace("{{args}}", &args_json);
-        for (k, v) in args_obj {
-            let placeholder = format!("{{{{{}}}}}", k);
-            let val_str = value_to_template_text(v);
-            resolved_prompt = resolved_prompt.replace(&placeholder, &val_str);
-        }
-        if resolved_prompt.contains("{{input}}") {
-            let input = args_obj
-                .get("input")
-                .map(value_to_template_text)
-                .unwrap_or_else(|| args_json.clone());
-            resolved_prompt = resolved_prompt.replace("{{input}}", &input);
-        }
-    }
+    let empty_args = serde_json::Map::new();
+    let args_obj = params.args.as_object().unwrap_or(&empty_args);
+    let resolved_prompt = render_skill_prompt_template(prompt_template, args_obj)
+        .map_err(|e| format!("serialize skill args: {e}"))?;
 
     let result = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
         Ok(mock_response.to_string())

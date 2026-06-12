@@ -783,29 +783,13 @@ impl MemoryServer {
         })?;
 
         let args = arguments.unwrap_or_default();
-        let args_value = Value::Object(args.clone());
-        let args_json = serde_json::to_string_pretty(&args_value)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("serialize args: {e}"), None))?;
-
-        let mut prompt = def
+        let prompt_template = def
             .get("prompt")
             .and_then(|v| v.as_str())
             .or_else(|| def.get("template").and_then(|v| v.as_str()))
-            .unwrap_or("{{args_json}}")
-            .to_string();
-        prompt = prompt.replace("{{args_json}}", &args_json);
-        prompt = prompt.replace("{{args}}", &args_json);
-        for (k, v) in &args {
-            let key = format!("{{{{{k}}}}}");
-            prompt = prompt.replace(&key, &value_to_template_text(v));
-        }
-        if prompt.contains("{{input}}") {
-            let input = args
-                .get("input")
-                .map(value_to_template_text)
-                .unwrap_or_else(|| args_json.clone());
-            prompt = prompt.replace("{{input}}", &input);
-        }
+            .unwrap_or("{{args_json}}");
+        let prompt = render_skill_prompt_template(prompt_template, &args)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("serialize args: {e}"), None))?;
 
         let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str())
         {
