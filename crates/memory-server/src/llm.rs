@@ -122,12 +122,92 @@ enum KeyRetryStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone)]
+struct ProviderHealthSnapshot {
+    availability: KeyAvailability,
+    cooldown_until: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+impl ProviderHealthSnapshot {
+    fn from_health(health: &VaultKeyHealth) -> Self {
+        Self::from_health_parts(
+            health,
+            LlmClient::parse_timestamp(&health.updated_at),
+            health
+                .cooldown_until
+                .as_deref()
+                .and_then(LlmClient::parse_timestamp),
+        )
+    }
+
+    fn from_health_parts(
+        health: &VaultKeyHealth,
+        updated_at: Option<DateTime<Utc>>,
+        cooldown_until: Option<DateTime<Utc>>,
+    ) -> Self {
+        let mut snapshot = Self {
+            availability: KeyAvailability::Available,
+            cooldown_until: None,
+            updated_at,
+        };
+
+        if health.disabled {
+            snapshot.availability = KeyAvailability::Disabled;
+            return snapshot;
+        }
+
+        if health.auth_failed {
+            snapshot.availability = KeyAvailability::AuthFailed;
+            return snapshot;
+        }
+
+        match LlmClient::status_from_key_health_status(health.status.as_str()) {
+            HEALTH_RATE_LIMITED => {
+                snapshot.cooldown_until = cooldown_until;
+                snapshot.availability = if snapshot.cooldown_until.is_some() {
+                    KeyAvailability::Cooldown
+                } else {
+                    KeyAvailability::Available
+                };
+            }
+            HEALTH_EXHAUSTED => {
+                snapshot.availability = KeyAvailability::Exhausted;
+            }
+            HEALTH_AUTH_FAILED => {
+                snapshot.availability = KeyAvailability::AuthFailed;
+            }
+            HEALTH_DISABLED => {
+                snapshot.availability = KeyAvailability::Disabled;
+            }
+            _ => {}
+        }
+
+        snapshot
+    }
+
+    fn availability_at(&self, now: DateTime<Utc>) -> (KeyAvailability, Option<i64>) {
+        if self.availability == KeyAvailability::Cooldown {
+            if let Some(until) = self.cooldown_until {
+                let remaining_seconds = (until - now).num_seconds().max(0);
+                if until > now {
+                    return (KeyAvailability::Cooldown, Some(remaining_seconds));
+                }
+            }
+            return (KeyAvailability::Available, None);
+        }
+
+        (self.availability, None)
+    }
+}
+
 #[derive(Default)]
 struct ProviderState {
     secrets: HashMap<String, Vec<ProviderSecret>>,
     cooldowns: HashMap<String, Instant>,
     indices: HashMap<String, usize>,
     health: HashMap<String, HashMap<String, VaultKeyHealth>>,
+    health_snapshots: HashMap<String, HashMap<String, ProviderHealthSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,10 +260,13 @@ impl ProviderHealthReloadState {
 
 impl ProviderState {
     fn with_health(health: HashMap<String, HashMap<String, VaultKeyHealth>>) -> Self {
-        Self {
-            health,
-            ..Self::default()
+        let mut state = Self::default();
+        for (logical_name, members) in health {
+            for (key_id, health) in members {
+                state.set_health_entry(logical_name.clone(), key_id, health);
+            }
         }
+        state
     }
 
     fn get_or_insert_health(&mut self, logical_name: &str, key_id: &str) -> &mut VaultKeyHealth {
@@ -205,6 +288,40 @@ impl ProviderState {
                 metadata: "{}".to_string(),
                 updated_at: Utc::now().to_rfc3339(),
             })
+    }
+
+    fn set_health_entry(&mut self, logical_name: String, key_id: String, health: VaultKeyHealth) {
+        let snapshot = ProviderHealthSnapshot::from_health(&health);
+        self.set_health_entry_with_snapshot(logical_name, key_id, health, snapshot);
+    }
+
+    fn set_health_entry_with_snapshot(
+        &mut self,
+        logical_name: String,
+        key_id: String,
+        health: VaultKeyHealth,
+        snapshot: ProviderHealthSnapshot,
+    ) {
+        self.health
+            .entry(logical_name.clone())
+            .or_default()
+            .insert(key_id.clone(), health);
+        self.health_snapshots
+            .entry(logical_name)
+            .or_default()
+            .insert(key_id, snapshot);
+    }
+
+    fn set_health_snapshot(
+        &mut self,
+        logical_name: &str,
+        key_id: &str,
+        snapshot: ProviderHealthSnapshot,
+    ) {
+        self.health_snapshots
+            .entry(logical_name.to_string())
+            .or_default()
+            .insert(key_id.to_string(), snapshot);
     }
 
     fn prune_expired_cooldowns(&mut self, now: Instant) {
@@ -504,11 +621,11 @@ impl LlmClient {
         }))
     }
 
-    fn key_health_is_newer_or_equal(incoming: &VaultKeyHealth, existing: &VaultKeyHealth) -> bool {
-        match (
-            Self::parse_timestamp(&incoming.updated_at),
-            Self::parse_timestamp(&existing.updated_at),
-        ) {
+    fn key_health_snapshot_is_newer_or_equal(
+        incoming: &ProviderHealthSnapshot,
+        existing: &ProviderHealthSnapshot,
+    ) -> bool {
+        match (incoming.updated_at, existing.updated_at) {
             (Some(incoming_ts), Some(existing_ts)) => incoming_ts >= existing_ts,
             (Some(_), None) => true,
             (None, Some(_)) => false,
@@ -518,32 +635,34 @@ impl LlmClient {
 
     fn merge_loaded_key_health(&self, loaded: HashMap<String, HashMap<String, VaultKeyHealth>>) {
         let now_utc = Self::now_utc();
+        let loaded = loaded
+            .into_iter()
+            .flat_map(|(logical_name, members)| {
+                members.into_iter().map(move |(key_id, health)| {
+                    let snapshot = ProviderHealthSnapshot::from_health(&health);
+                    (logical_name.clone(), key_id, health, snapshot)
+                })
+            })
+            .collect::<Vec<_>>();
         let mut state = self
             .provider_state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for (logical_name, members) in loaded {
-            for (key_id, incoming) in members {
-                let should_apply = state
-                    .health
-                    .get(&logical_name)
-                    .and_then(|target| target.get(&key_id))
-                    .map(|existing| Self::key_health_is_newer_or_equal(&incoming, existing))
-                    .unwrap_or(true);
-                if should_apply {
-                    let (availability, remaining_seconds) =
-                        Self::key_health_blocked(Some(&incoming), now_utc);
-                    let still_cooling = availability == KeyAvailability::Cooldown
-                        && remaining_seconds.unwrap_or(0) > 0;
-                    if !still_cooling {
-                        state.cooldowns.remove(&key_id);
-                    }
-                    state
-                        .health
-                        .entry(logical_name.clone())
-                        .or_default()
-                        .insert(key_id, incoming);
+        for (logical_name, key_id, incoming, snapshot) in loaded {
+            let should_apply = state
+                .health_snapshots
+                .get(&logical_name)
+                .and_then(|target| target.get(&key_id))
+                .map(|existing| Self::key_health_snapshot_is_newer_or_equal(&snapshot, existing))
+                .unwrap_or(true);
+            if should_apply {
+                let (availability, remaining_seconds) = snapshot.availability_at(now_utc);
+                let still_cooling =
+                    availability == KeyAvailability::Cooldown && remaining_seconds.unwrap_or(0) > 0;
+                if !still_cooling {
+                    state.cooldowns.remove(&key_id);
                 }
+                state.set_health_entry_with_snapshot(logical_name, key_id, incoming, snapshot);
             }
         }
     }
@@ -634,54 +753,18 @@ impl LlmClient {
         }
     }
 
-    fn key_health_blocked(
-        health: Option<&VaultKeyHealth>,
-        now: DateTime<Utc>,
-    ) -> (KeyAvailability, Option<i64>) {
-        let Some(health) = health else {
-            return (KeyAvailability::Available, None);
-        };
-
-        if health.disabled {
-            return (KeyAvailability::Disabled, None);
-        }
-
-        if health.auth_failed {
-            return (KeyAvailability::AuthFailed, None);
-        }
-
-        let status = Self::status_from_key_health_status(health.status.as_str());
-        if status == HEALTH_EXHAUSTED {
-            return (KeyAvailability::Exhausted, None);
-        }
-
-        if status == HEALTH_RATE_LIMITED {
-            if let Some(cooldown_until) = health.cooldown_until.as_deref() {
-                if let Some(until) = Self::parse_timestamp(cooldown_until) {
-                    let remaining_seconds = (until - now).num_seconds().max(0);
-                    if until > now {
-                        return (KeyAvailability::Cooldown, Some(remaining_seconds));
-                    }
-                }
-            }
-        }
-
-        (KeyAvailability::Available, None)
-    }
-
     fn key_health_blocked_in_state(
         state: &ProviderState,
         logical_name: &str,
         key_id: &str,
         now: DateTime<Utc>,
     ) -> (KeyAvailability, Option<i64>) {
-        Self::key_health_blocked(
-            state
-                .health
-                .get(logical_name)
-                .and_then(|members| members.get(key_id)),
-            now,
-        )
+        state
+            .health_snapshots
+            .get(logical_name)
+            .and_then(|members| members.get(key_id))
+            .map(|snapshot| snapshot.availability_at(now))
+            .unwrap_or((KeyAvailability::Available, None))
     }
 
     fn persist_key_health(&self, health: &VaultKeyHealth) {
@@ -768,6 +851,8 @@ impl LlmClient {
         key_id: &str,
         mutator: impl FnOnce(&mut VaultKeyHealth),
     ) {
+        let now = Self::now_utc();
+        let now_utc = now.to_rfc3339();
         let mut state = self
             .provider_state
             .write()
@@ -775,10 +860,15 @@ impl LlmClient {
         let persisted = {
             let health = state.get_or_insert_health(logical_name, key_id);
             mutator(health);
-            health.last_attempt = Some(Self::format_now_utc());
-            health.updated_at = Self::format_now_utc();
+            health.last_attempt = Some(now_utc.clone());
+            health.updated_at = now_utc;
             health.clone()
         };
+        state.set_health_snapshot(
+            logical_name,
+            key_id,
+            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), None),
+        );
         drop(state);
         self.persist_key_health(&persisted);
     }
@@ -795,6 +885,8 @@ impl LlmClient {
     }
 
     fn mark_secret_success(&self, selected: &SelectedProviderSecret) {
+        let now = Self::now_utc();
+        let now_utc = now.to_rfc3339();
         let mut state = self
             .provider_state
             .write()
@@ -803,15 +895,20 @@ impl LlmClient {
             let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
             health.status = HEALTH_OK.to_string();
             health.auth_failed = false;
-            health.last_success = Some(Self::format_now_utc());
-            health.last_attempt = Some(Self::format_now_utc());
+            health.last_success = Some(now_utc.clone());
+            health.last_attempt = Some(now_utc.clone());
             health.last_error = None;
             health.error_count = 0;
             health.cooldown_until = None;
-            health.updated_at = Self::format_now_utc();
+            health.updated_at = now_utc;
             health.clone()
         };
         state.cooldowns.remove(&selected.key_id);
+        state.set_health_snapshot(
+            &selected.logical_name,
+            &selected.key_id,
+            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), None),
+        );
         drop(state);
         self.persist_key_health(&persisted);
     }
@@ -1358,6 +1455,8 @@ impl LlmClient {
     ) {
         let now = Self::now_utc();
         let cooldown = retry_after.unwrap_or(60).clamp(1, 3600);
+        let cooldown_until = now + chrono::Duration::seconds(cooldown as i64);
+        let now_utc = now.to_rfc3339();
         let until = Instant::now() + Duration::from_secs(cooldown);
         let mut state = self
             .provider_state
@@ -1367,14 +1466,18 @@ impl LlmClient {
         let persisted = {
             let health = state.get_or_insert_health(&selected.logical_name, &selected.key_id);
             health.status = HEALTH_RATE_LIMITED.to_string();
-            health.cooldown_until =
-                Some((now + chrono::Duration::seconds(cooldown as i64)).to_rfc3339());
-            health.last_attempt = Some(Self::format_now_utc());
+            health.cooldown_until = Some(cooldown_until.to_rfc3339());
+            health.last_attempt = Some(now_utc.clone());
             health.last_error = Some(format!("rate limited; retry after {cooldown}s"));
             health.error_count += 1;
-            health.updated_at = Self::format_now_utc();
+            health.updated_at = now_utc;
             health.clone()
         };
+        state.set_health_snapshot(
+            &selected.logical_name,
+            &selected.key_id,
+            ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), Some(cooldown_until)),
+        );
         drop(state);
         tracing::warn!(
             "[provider] key {} for {} is rate-limited; cooling down for {}s",
@@ -2543,6 +2646,14 @@ mod tests {
                 .and_then(|members| members.get(&key_id))
                 .map(|health| health.status.as_str()),
             Some(HEALTH_RATE_LIMITED)
+        );
+        assert_eq!(
+            state
+                .health_snapshots
+                .get(KEY)
+                .and_then(|members| members.get(&key_id))
+                .map(|snapshot| snapshot.availability),
+            Some(KeyAvailability::Cooldown)
         );
     }
 
