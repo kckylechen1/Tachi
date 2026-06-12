@@ -380,35 +380,6 @@ pub fn upsert(
     Ok(())
 }
 
-/// Check if an event has already been processed by a specific worker.
-pub fn is_event_processed(
-    conn: &Connection,
-    event_hash: &str,
-    worker: &str,
-) -> Result<bool, MemoryError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
-        params![event_hash, worker],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
-}
-
-/// Mark an event as processed by a specific worker.
-pub fn mark_event_processed(
-    conn: &Connection,
-    event_hash: &str,
-    event_id: &str,
-    worker: &str,
-) -> Result<(), MemoryError> {
-    let now = now_utc_iso();
-    conn.execute(
-        "INSERT OR IGNORE INTO processed_events (event_hash, event_id, worker, created_at) VALUES (?1, ?2, ?3, ?4)",
-        params![event_hash, event_id, worker, now],
-    )?;
-    Ok(())
-}
-
 /// Atomically try to claim an event for processing.
 /// Uses INSERT OR IGNORE: if the row didn't exist, it's inserted and we return true (claimed).
 /// If the row already existed, nothing happens and we return false (already processed).

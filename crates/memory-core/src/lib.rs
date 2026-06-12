@@ -172,21 +172,6 @@ impl MemoryStore {
         db::upsert(&mut self.conn, entry, self.vec_available)
     }
 
-    /// Check whether an event hash has already been processed by a worker.
-    pub fn is_event_processed(&self, event_hash: &str, worker: &str) -> Result<bool, MemoryError> {
-        db::is_event_processed(&self.conn, event_hash, worker)
-    }
-
-    /// Mark an event hash as processed by a worker.
-    pub fn mark_event_processed(
-        &self,
-        event_hash: &str,
-        event_id: &str,
-        worker: &str,
-    ) -> Result<(), MemoryError> {
-        db::mark_event_processed(&self.conn, event_hash, event_id, worker)
-    }
-
     /// Atomically try to claim an event for processing.
     /// Returns true if claimed (first processor), false if already processed.
     pub fn try_claim_event(

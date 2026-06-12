@@ -391,15 +391,6 @@ fn search_vec_respects_as_of_validity_window() {
 }
 
 #[test]
-fn processed_events_dedup_by_worker() {
-    let conn = make_conn();
-    assert!(!is_event_processed(&conn, "abc", "ingest").unwrap());
-    mark_event_processed(&conn, "abc", "conv:1", "ingest").unwrap();
-    assert!(is_event_processed(&conn, "abc", "ingest").unwrap());
-    assert!(!is_event_processed(&conn, "abc", "causal").unwrap());
-}
-
-#[test]
 fn update_with_revision_detects_conflict() {
     let mut conn = make_conn();
     let e = make_entry("rev-1", "original");
