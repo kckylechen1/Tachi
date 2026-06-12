@@ -407,30 +407,11 @@ pub(crate) async fn handle_tachi_dispatch(
         serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
     let timeout_secs_for_status = params.timeout_secs;
     let timeout = Duration::from_secs(timeout_secs_for_status);
-
-    // 1. Create isolated workspace directory
-    let workspace_dir = {
-        let base = if let Ok(home) = std::env::var("TACHI_HOME") {
-            PathBuf::from(home)
-        } else if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".tachi")
-        } else {
-            std::env::temp_dir().join("tachi")
-        };
-        base.join("runs").join(&dispatch_id)
-    };
-    tokio::fs::create_dir_all(&workspace_dir)
-        .await
-        .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
-
-    // 2. Generate MCP config if requested
     let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
     let inject_hub = params.inject_hub_mcps.unwrap_or(false);
-    // Codex's `codex exec` CLI does not consume an external mcp-config file
-    // the way Claude Code's `--mcp-config` does (see build_codex_command,
-    // where the generated config path is deliberately ignored). Failing
-    // loudly here is clearer than silently producing a config file the
-    // subprocess will never read.
+
+    // Validate backend/MCP compatibility before creating the run ledger. A
+    // rejected dispatch should not leave an empty run directory with no status.
     if inject_tachi || inject_hub {
         if agent_norm == "custom" {
             return Err(
@@ -451,6 +432,23 @@ pub(crate) async fn handle_tachi_dispatch(
             ));
         }
     }
+
+    // 1. Create isolated workspace directory
+    let workspace_dir = {
+        let base = if let Ok(home) = std::env::var("TACHI_HOME") {
+            PathBuf::from(home)
+        } else if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".tachi")
+        } else {
+            std::env::temp_dir().join("tachi")
+        };
+        base.join("runs").join(&dispatch_id)
+    };
+    tokio::fs::create_dir_all(&workspace_dir)
+        .await
+        .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
+
+    // 2. Generate MCP config if requested
     let mcp_config_path = if inject_tachi || inject_hub {
         generate_mcp_config(
             server,
