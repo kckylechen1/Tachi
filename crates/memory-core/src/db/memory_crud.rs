@@ -1080,6 +1080,9 @@ pub fn record_access(
 
     let now = now_utc_iso();
     let query_hash = query.map(fnv1a_hash).unwrap_or_default();
+    // `record_access` is called from search paths that only hold `&Connection`.
+    // The unchecked transaction keeps the access_count/history/recall updates
+    // atomic without widening the public search API to require `&mut Connection`.
     let tx = conn.unchecked_transaction()?;
 
     // Build a set of FTS hit IDs for O(1) lookup
