@@ -192,12 +192,9 @@ where
     }
 
     let base = if candidates.len() == 1 {
-        format!("Vault secret '{}' not available", candidates[0])
+        "Vault secret not available".to_string()
     } else {
-        format!(
-            "None of the vault secrets [{}] are available",
-            candidates.join(", ")
-        )
+        "No configured vault secret fallback is available".to_string()
     };
     if let Some(err) = last_secret_error {
         Err(format!("{base}: {err}"))
@@ -683,6 +680,29 @@ mod tests {
             .expect("vault placeholder should resolve");
 
         assert_eq!(expanded, "Bearer vault-secret");
+    }
+
+    #[test]
+    fn missing_vault_placeholders_do_not_enumerate_secret_names() {
+        std::env::remove_var("PRIMARY_REMOTE_SECRET");
+        std::env::remove_var("SECONDARY_REMOTE_SECRET");
+
+        let single = expand_placeholders_with_secret_resolver(
+            "Bearer ${vault:PRIMARY_REMOTE_SECRET}",
+            &|_| Ok(None),
+        )
+        .expect_err("missing single vault placeholder should fail");
+        assert!(single.contains("Vault secret not available"));
+        assert!(!single.contains("PRIMARY_REMOTE_SECRET"));
+
+        let chain = expand_placeholders_with_secret_resolver(
+            "Bearer ${vault:PRIMARY_REMOTE_SECRET|SECONDARY_REMOTE_SECRET}",
+            &|_| Ok(None),
+        )
+        .expect_err("missing vault fallback chain should fail");
+        assert!(chain.contains("No configured vault secret fallback is available"));
+        assert!(!chain.contains("PRIMARY_REMOTE_SECRET"));
+        assert!(!chain.contains("SECONDARY_REMOTE_SECRET"));
     }
 
     #[test]
