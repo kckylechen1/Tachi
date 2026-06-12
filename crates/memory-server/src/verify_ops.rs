@@ -9,6 +9,7 @@ use crate::shell_ops::{run_dir_for_flow_id, shell_runs_root};
 use crate::{MemoryServer, TachiVerifyParams};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const LEDGER_FILE: &str = "verification.json";
@@ -88,8 +89,25 @@ fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     let raw =
         serde_json::to_string_pretty(value).map_err(|e| format!("serialize verification: {e}"))?;
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, raw).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        file.write_all(raw.as_bytes())
+            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("sync {}: {e}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, path).map_err(|e| format!("rename verification tmp: {e}"))?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|e| format!("sync verification directory {}: {e}", parent.display()))?;
+    }
     Ok(())
 }
 
