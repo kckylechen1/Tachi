@@ -474,7 +474,7 @@ fn is_vault_initialized(server: &MemoryServer) -> Result<bool, String> {
 }
 
 fn ensure_vault_unlock_allowed(server: &MemoryServer) -> Result<(), String> {
-    let mut v = server.vault_write();
+    let v = server.vault_read();
     if let Some(until) = v.failed_attempts.1 {
         if Instant::now() < until {
             return Err(format!(
@@ -482,7 +482,6 @@ fn ensure_vault_unlock_allowed(server: &MemoryServer) -> Result<(), String> {
                 remaining_lockout_seconds(until)
             ));
         }
-        v.failed_attempts = (0, None);
     }
     Ok(())
 }
