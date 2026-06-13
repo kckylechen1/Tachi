@@ -691,6 +691,29 @@ pub(super) fn load_unlocked_api_key_secret_pools(
                 .insert(row.key_id.clone(), row);
         }
 
+        // Merge in-memory health so that runtime mutations are visible even when
+        // background persistence is disabled (e.g. in tests).
+        for (logical_name, members) in server.llm.provider_health_memory_snapshot() {
+            let target = key_health_by_logical.entry(logical_name).or_default();
+            for (key_id, health) in members {
+                let keep_in_memory = target
+                    .get(&key_id)
+                    .and_then(|db_row| {
+                        let db_updated = chrono::DateTime::parse_from_rfc3339(&db_row.updated_at)
+                            .ok()?
+                            .with_timezone(&Utc);
+                        let mem_updated = chrono::DateTime::parse_from_rfc3339(&health.updated_at)
+                            .ok()?
+                            .with_timezone(&Utc);
+                        Some(mem_updated >= db_updated)
+                    })
+                    .unwrap_or(true);
+                if keep_in_memory {
+                    target.insert(key_id, health);
+                }
+            }
+        }
+
         let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
         let mut rotation_members: HashSet<String> = HashSet::new();
 
