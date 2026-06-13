@@ -1481,7 +1481,9 @@ impl MemoryServer {
 
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(&args);
-                cmd.kill_on_drop(true);
+                // Do NOT use kill_on_drop(true) here. TokioChildProcess owns the
+                // Child handle and kills via that handle on drop/graceful shutdown,
+                // which avoids the PID-reuse race inherent in storing a bare PID.
                 apply_sanitized_child_env(&mut cmd, &env_map);
                 if let Some(cwd_str) = cwd {
                     cmd.current_dir(normalize_path(cwd_str));
