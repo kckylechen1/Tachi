@@ -244,13 +244,3 @@ pub fn graph_expand(
         distances,
     })
 }
-
-/// Remove all edges referencing a memory ID (both as source and target).
-/// Call this when deleting a memory entry to keep the graph consistent.
-pub fn remove_edges_for_memory(conn: &Connection, memory_id: &str) -> Result<usize, MemoryError> {
-    let count = conn.execute(
-        "DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1",
-        params![memory_id],
-    )?;
-    Ok(count)
-}

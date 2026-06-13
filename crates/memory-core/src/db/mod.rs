@@ -24,7 +24,7 @@ pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
-    get_superseded_ids, graph_expand, remove_edge, remove_edges_for_memory,
+    get_superseded_ids, graph_expand, remove_edge,
 };
 pub use hub_db::{
     hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
