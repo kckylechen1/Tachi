@@ -102,7 +102,7 @@ impl MemoryServer {
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
         if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await
+            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await?
         {
             return Ok(body);
         }
@@ -117,7 +117,7 @@ impl MemoryServer {
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
         if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await
+            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await?
         {
             return Ok(body);
         }
@@ -132,7 +132,7 @@ impl MemoryServer {
         Parameters(params): Parameters<RememberParams>,
     ) -> Result<String, String> {
         if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "remember", &params).await
+            crate::cli_client::maybe_forward_server_write(self, "remember", &params).await?
         {
             return Ok(body);
         }
@@ -408,7 +408,7 @@ impl MemoryServer {
         Parameters(params): Parameters<WikiWriteParams>,
     ) -> Result<String, String> {
         if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "tachi_wiki_write", &params).await
+            crate::cli_client::maybe_forward_server_write(self, "tachi_wiki_write", &params).await?
         {
             return Ok(body);
         }
@@ -507,7 +507,7 @@ impl MemoryServer {
         Parameters(params): Parameters<ExtractFactsParams>,
     ) -> Result<String, String> {
         if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "extract_facts", &params).await
+            crate::cli_client::maybe_forward_server_write(self, "extract_facts", &params).await?
         {
             return Ok(body);
         }
@@ -1593,7 +1593,8 @@ impl MemoryServer {
             }
             "write" => {
                 let raw = if let Some(body) =
-                    crate::cli_client::maybe_forward_server_write(self, "tachi_wiki", &params).await
+                    crate::cli_client::maybe_forward_server_write(self, "tachi_wiki", &params)
+                        .await?
                 {
                     body
                 } else {

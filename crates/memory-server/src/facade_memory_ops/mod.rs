@@ -86,7 +86,7 @@ pub(crate) async fn handle_tachi_memory(
         "save" => {
             if let Some(body) =
                 crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
-            .await
+                    .await?
             {
                 return Ok(body);
             }
@@ -159,7 +159,7 @@ pub(crate) async fn handle_tachi_memory(
         "extract_facts" => {
             if let Some(body) =
                 crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
-            .await
+                    .await?
             {
                 return Ok(body);
             }
