@@ -826,6 +826,9 @@ impl LlmClient {
     }
 
     fn persist_key_health_now(&self, health: &VaultKeyHealth) {
+        if provider_key_health_persist_disabled_for_tests() {
+            return;
+        }
         let Some(db_path) = self.vault_db_path.clone() else {
             return;
         };
@@ -2933,6 +2936,37 @@ mod tests {
         );
 
         server_task.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn provider_key_health_blocking_persist_honors_test_disable_env() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        let temp = tempfile::tempdir().expect("temp vault db");
+        let db_path = temp.path().join("vault.db");
+        let client =
+            LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+
+        let health = client.record_provider_key_result_blocking(
+            "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST",
+            "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST_1",
+            Some(429),
+            None,
+            Some(30),
+            Some("provider throttled"),
+        );
+
+        assert_eq!(health.status, HEALTH_RATE_LIMITED);
+        assert!(
+            !db_path.exists(),
+            "blocking persist should not create a DB when test persistence is disabled"
+        );
+        let status = client.provider_health_status();
+        assert!(status.persist_last_attempt_at.is_none());
+        assert!(status.persist_last_error.is_none());
     }
 
     #[tokio::test]
