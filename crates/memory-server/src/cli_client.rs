@@ -6,8 +6,9 @@
 //!   1. Read `~/.tachi/daemon.pid` (written by `tachi --daemon` on startup).
 //!   2. Confirm liveness with a quick TCP connect to the recorded port.
 //!   3. If both succeed, forward via MCP `tools/call` over streamable HTTP.
-//!   4. Otherwise, build an in-process `MemoryServer` and call the handler
-//!      directly.
+//!   4. If no compatible daemon is reached before dispatch, build an in-process
+//!      `MemoryServer` and call the handler directly. Once a compatible daemon
+//!      dispatch is attempted, fail closed instead of repeating writes locally.
 //!
 //! All write paths (remember, wiki_write, extract_facts) use this so they go
 //! through capture gate, provenance, auto-link, and enrichment exactly the
@@ -27,6 +28,32 @@ use crate::MemoryServer;
 
 const DAEMON_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DaemonCallError {
+    BeforeDispatch(String),
+    AfterDispatch(String),
+}
+
+impl DaemonCallError {
+    fn message(&self) -> &str {
+        match self {
+            Self::BeforeDispatch(message) | Self::AfterDispatch(message) => message,
+        }
+    }
+
+    pub(crate) fn allows_in_process_fallback(&self) -> bool {
+        matches!(self, Self::BeforeDispatch(_))
+    }
+}
+
+impl std::fmt::Display for DaemonCallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl std::error::Error for DaemonCallError {}
 
 /// Discovery info for a running Tachi daemon.
 #[derive(Debug, Clone)]
@@ -103,13 +130,13 @@ pub(crate) async fn call_daemon_tool(
     info: &DaemonInfo,
     tool_name: &str,
     arguments: serde_json::Map<String, Value>,
-) -> Result<String, String> {
+) -> Result<String, DaemonCallError> {
     let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
     let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve((), transport)
-        .await
-        .map_err(|e| format!("daemon handshake failed at {}: {e}", info.url))?;
+    let client = ServiceExt::serve((), transport).await.map_err(|e| {
+        DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
+    })?;
 
     let mut params = CallToolRequestParams::new(daemon_tool.clone());
     if !daemon_args.is_empty() {
@@ -120,12 +147,14 @@ pub(crate) async fn call_daemon_tool(
     let result = tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.call_tool(params))
         .await
         .map_err(|_| {
-            format!(
+            DaemonCallError::AfterDispatch(format!(
                 "daemon call '{daemon_tool}' timed out after {:?}",
                 DAEMON_CALL_TIMEOUT
-            )
+            ))
         })?
-        .map_err(|e| format!("daemon call '{daemon_tool}' failed: {e}"))?;
+        .map_err(|e| {
+            DaemonCallError::AfterDispatch(format!("daemon call '{daemon_tool}' failed: {e}"))
+        })?;
 
     // Dropping the client is enough to close the short-lived CLI HTTP session.
     // Calling `cancel()` here has caused daemon-side lifecycle confusion with
@@ -136,9 +165,9 @@ pub(crate) async fn call_daemon_tool(
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
-        return Err(format!(
+        return Err(DaemonCallError::AfterDispatch(format!(
             "daemon tool '{daemon_tool}' returned error: {err_text}"
-        ));
+        )));
     }
 
     Ok(first_text_block(&result.content).unwrap_or_else(|| "{}".to_string()))
@@ -268,13 +297,15 @@ fn remap_daemon_tool(
 }
 
 /// Forward a write tool to the running daemon when available.
-/// Returns `Some(body)` on success. Returns `None` when already in daemon
-/// mode, no daemon is listening, or forward failed (caller continues in-process).
+/// Returns `Ok(Some(body))` on success and `Ok(None)` when no compatible daemon
+/// was reached before dispatch. If a compatible daemon was reached and the
+/// request outcome is unknown, returns `Err` so callers do not repeat writes
+/// in-process after a possibly successful daemon-side commit.
 pub(crate) async fn maybe_forward_server_write<T: serde::Serialize>(
     server: &MemoryServer,
     tool_name: &str,
     params: &T,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     let project_db_path = server.project_db_path_buf();
     maybe_forward_write(
         server.global_db_path.as_path(),
@@ -290,32 +321,47 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
     project_db_path: Option<&Path>,
     tool_name: &str,
     params: &T,
-) -> Option<String> {
+) -> Result<Option<String>, String> {
     if is_daemon_process() {
-        return None;
+        return Ok(None);
     }
-    let args = serde_json::to_value(params)
+    let Some(args) = serde_json::to_value(params)
         .ok()
-        .and_then(|value| value.as_object().cloned())?;
+        .and_then(|value| value.as_object().cloned())
+    else {
+        eprintln!(
+            "[mcp] failed to serialize daemon forward args for '{tool_name}'; executing in-process"
+        );
+        return Ok(None);
+    };
     let app_home = app_home_from_global_db(global_db_path);
-    let info = detect_daemon(&app_home).await?;
+    let Some(info) = detect_daemon(&app_home).await else {
+        return Ok(None);
+    };
     if !daemon_version_matches(&info) {
         eprintln!(
             "[mcp] daemon version mismatch (daemon {:?}, binary {}); executing in-process",
             info.version,
             env!("CARGO_PKG_VERSION")
         );
-        return None;
+        return Ok(None);
     }
     if !daemon_matches_requested_dbs(&info, global_db_path, project_db_path) {
-        return None;
+        return Ok(None);
     }
     match call_daemon_tool(&info, tool_name, args).await {
-        Ok(body) => Some(body),
-        Err(error) => {
-            eprintln!("[mcp] daemon forward '{tool_name}' failed ({error}); executing in-process");
-            None
+        Ok(body) => Ok(Some(body)),
+        Err(error) if error.allows_in_process_fallback() => {
+            eprintln!(
+                "[mcp] daemon forward '{tool_name}' failed before dispatch ({}); executing in-process",
+                error.message()
+            );
+            Ok(None)
         }
+        Err(error) => Err(format!(
+            "daemon forward '{tool_name}' failed after dispatch; refusing in-process fallback to avoid duplicate writes: {}",
+            error.message()
+        )),
     }
 }
 
@@ -394,5 +440,24 @@ mod tests {
             global,
             Some(requested_project)
         ));
+    }
+
+    #[test]
+    fn daemon_call_error_fallback_is_only_safe_before_dispatch() {
+        assert!(
+            DaemonCallError::BeforeDispatch("handshake failed".to_string())
+                .allows_in_process_fallback()
+        );
+        assert!(!DaemonCallError::AfterDispatch("timeout".to_string()).allows_in_process_fallback());
+    }
+
+    #[tokio::test]
+    async fn daemon_forward_non_object_args_fall_back_in_process() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let result = maybe_forward_write(global, None, "remember", &vec!["not", "an", "object"])
+            .await
+            .expect("non-object args should not fail the write path");
+
+        assert!(result.is_none());
     }
 }

@@ -649,11 +649,14 @@ where
                 );
                 match crate::cli_client::call_daemon_tool(&info, tool_name, daemon_args).await {
                     Ok(body) => return Ok(body),
-                    Err(e) => {
+                    Err(e) if e.allows_in_process_fallback() => {
                         eprintln!(
-                            "[cli] daemon named-project dispatch failed ({e}); falling back to in-process execution"
+                            "[cli] daemon named-project dispatch failed before dispatch ({e}); falling back to in-process execution"
                         );
                     }
+                    Err(e) => return Err(format!(
+                        "daemon named-project dispatch failed after dispatch; refusing in-process fallback to avoid duplicate writes: {e}"
+                    ).into()),
                 }
             } else {
                 eprintln!(
@@ -663,11 +666,14 @@ where
         } else {
             match crate::cli_client::call_daemon_tool(&info, tool_name, args.clone()).await {
                 Ok(body) => return Ok(body),
-                Err(e) => {
+                Err(e) if e.allows_in_process_fallback() => {
                     eprintln!(
-                        "[cli] daemon dispatch failed ({e}); falling back to in-process execution"
+                        "[cli] daemon dispatch failed before dispatch ({e}); falling back to in-process execution"
                     );
                 }
+                Err(e) => return Err(format!(
+                    "daemon dispatch failed after dispatch; refusing in-process fallback to avoid duplicate writes: {e}"
+                ).into()),
             }
         }
     }

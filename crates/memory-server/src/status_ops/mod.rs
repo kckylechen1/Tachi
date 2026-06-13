@@ -952,7 +952,7 @@ pub(crate) fn runtime_observability_json(
     let write_forwarding = json!({
         "expected": daemon_running && !serving_daemon,
         "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
-        "fallback": if daemon_running && !serving_daemon { "in_process_on_forward_failure" } else { "none" },
+        "fallback": if daemon_running && !serving_daemon { "in_process_before_dispatch_only" } else { "none" },
     });
 
     let vault = {
