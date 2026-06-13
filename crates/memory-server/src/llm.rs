@@ -1178,6 +1178,21 @@ impl LlmClient {
         }
     }
 
+    /// Return the current in-memory provider key health map.
+    ///
+    /// This is used when loading API key pools so that tests (which may disable
+    /// background persistence) still see health mutations made in the same
+    /// process without requiring a DB round-trip.
+    pub(crate) fn provider_health_memory_snapshot(
+        &self,
+    ) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
+        let state = self
+            .provider_state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.health.clone()
+    }
+
     fn select_secret(&self, keys: &[&str]) -> Option<SelectedProviderSecret> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
