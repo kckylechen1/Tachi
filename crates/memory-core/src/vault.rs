@@ -140,20 +140,6 @@ impl Default for VaultEntry {
     }
 }
 
-impl VaultEntry {
-    /// Check if this entry is part of a rotation group.
-    pub fn is_rotation_key(&self) -> Option<String> {
-        // Check if name matches pattern like "KEY_1", "KEY_2", etc.
-        if let Some(pos) = self.name.rfind('_') {
-            let suffix = &self.name[pos + 1..];
-            if suffix.parse::<u32>().is_ok() {
-                return Some(self.name[..pos].to_string());
-            }
-        }
-        None
-    }
-}
-
 /// Extract the 1-based member index from an API key pool entry name.
 /// Returns `Some(n)` if `name` matches the pattern `prefix_n` where n > 0.
 pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
