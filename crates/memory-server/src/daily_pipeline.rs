@@ -1311,6 +1311,10 @@ fn manifest_db_label(entry: &crate::manifest::DbEntry, path: &std::path::Path) -
     name.split(':').next_back().unwrap_or(&name).to_string()
 }
 
+fn shanghai_offset() -> FixedOffset {
+    FixedOffset::east_opt(8 * 3600).expect("valid Asia/Shanghai fixed offset")
+}
+
 fn shanghai_today() -> String {
     Utc::now()
         .with_timezone(&shanghai_offset())
@@ -1412,8 +1416,4 @@ mod tests {
 
         restore_env_var("TACHI_HOME", saved);
     }
-}
-
-fn shanghai_offset() -> FixedOffset {
-    FixedOffset::east_opt(8 * 3600).expect("valid Asia/Shanghai fixed offset")
 }

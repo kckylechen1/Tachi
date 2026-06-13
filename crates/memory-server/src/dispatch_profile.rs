@@ -3531,7 +3531,7 @@ mod tests {
 
     #[test]
     fn compare_scores_desc_keeps_non_finite_scores_last() {
-        let mut scores = vec![
+        let mut scores = [
             ("nan", f64::NAN),
             ("best", 42.0),
             ("worst_finite", -1.0),
