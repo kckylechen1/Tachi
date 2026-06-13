@@ -565,6 +565,9 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let rate_limited_json: serde_json::Value =
         serde_json::from_str(&rate_limited).expect("record JSON");
     assert_eq!(rate_limited_json["health"]["status"], json!("rate_limited"));
+    assert!(rate_limited_json["health"]["last_error"].is_null());
+    assert!(rate_limited_json["health"]["metadata"].is_null());
+    assert!(rate_limited_json["health"]["updated_at"].is_null());
     assert_eq!(rate_limited_json["skipped_by_lease"], json!(true));
 
     let leased = server
@@ -592,6 +595,7 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let auth_failed_json: serde_json::Value =
         serde_json::from_str(&auth_failed).expect("auth record JSON");
     assert_eq!(auth_failed_json["health"]["auth_failed"], json!(true));
+    assert!(auth_failed_json["health"]["last_error"].is_null());
 
     let no_key = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
@@ -617,6 +621,7 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let success_json: serde_json::Value = serde_json::from_str(&success).expect("success JSON");
     assert_eq!(success_json["health"]["status"], json!("ok"));
     assert_eq!(success_json["health"]["auth_failed"], json!(false));
+    assert!(success_json["health"]["last_success"].is_null());
 }
 
 #[tokio::test]
