@@ -1089,6 +1089,24 @@ fn record_access_with_updates_returns_post_write_access_fields() {
 }
 
 #[test]
+fn record_access_with_updates_ignores_missing_ids() {
+    let mut conn = make_conn();
+    let e = make_entry("touch-present", "present access row");
+    upsert(&mut conn, &e, false).unwrap();
+
+    let updates = record_access_with_updates(
+        &conn,
+        &["touch-present".to_string(), "touch-missing".to_string()],
+        &[],
+        None,
+    )
+    .expect("missing rows should not abort accounting");
+
+    assert!(updates.contains_key("touch-present"));
+    assert!(!updates.contains_key("touch-missing"));
+}
+
+#[test]
 fn record_access_repeats_accumulate_on_access_history() {
     let mut conn = make_conn();
     let e = make_entry("touch-2", "repeat target");

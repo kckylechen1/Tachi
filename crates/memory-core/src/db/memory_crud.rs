@@ -1144,7 +1144,7 @@ pub(crate) fn record_access_with_updates(
             params![id],
         )?;
 
-        let update = tx.query_row(
+        let update = match tx.query_row(
             "SELECT access_count, last_access FROM memories WHERE id = ?1",
             params![id],
             |row| {
@@ -1153,7 +1153,11 @@ pub(crate) fn record_access_with_updates(
                     last_access: row.get(1)?,
                 })
             },
-        )?;
+        ) {
+            Ok(update) => update,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(err) => return Err(err.into()),
+        };
         updates.insert(id.clone(), update);
     }
 
