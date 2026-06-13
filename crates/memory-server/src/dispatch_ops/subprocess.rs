@@ -7,31 +7,52 @@ use super::dispatch::DispatchResult;
 /// Resolve the effective permission profile.
 ///
 /// Defaults to `"default"` (Claude prompts for confirmations; Codex uses the
-/// configured sandbox). Callers must explicitly pass `permission_profile:
-/// "full"` to opt into `--dangerously-skip-permissions` /
-/// `--dangerously-bypass-approvals-and-sandbox`. This is a deliberate safe
-/// default: the previous `"full"` default gave any caller of `tachi_dispatch`
-/// unsandboxed autonomous execution.
-pub(super) fn resolve_permission_profile(params: &TachiDispatchParams) -> &str {
-    params.permission_profile.as_deref().unwrap_or("default")
+/// configured sandbox). The `"allowlist"` profile is also accepted when
+/// `allowed_tools` is non-empty. The `"full"` profile is rejected unless the
+/// administrator explicitly opts in via `TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true`.
+pub(super) fn resolve_permission_profile(params: &TachiDispatchParams) -> Result<&str, String> {
+    let profile = params.permission_profile.as_deref().unwrap_or("default");
+    match profile {
+        "default" => Ok("default"),
+        "allowlist" if !params.allowed_tools.is_empty() => Ok("allowlist"),
+        "allowlist" => Err(
+            "permission_profile 'allowlist' requires at least one allowed_tool".to_string(),
+        ),
+        "full" => {
+            let allowed = std::env::var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if allowed {
+                Ok("full")
+            } else {
+                Err(
+                    "permission_profile 'full' requires explicit opt-in via TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE=true"
+                        .to_string(),
+                )
+            }
+        }
+        other => Err(format!(
+            "unsupported permission_profile '{other}'; allowed: default, allowlist, full (with opt-in)"
+        )),
+    }
 }
 
 pub(super) fn build_claude_command(
     params: &TachiDispatchParams,
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new("claude");
     cmd.arg("-p"); // print mode
     cmd.arg("--output-format").arg("json");
 
     // Permission profile
-    let profile = resolve_permission_profile(params);
+    let profile = resolve_permission_profile(params)?;
     match profile {
         "full" => {
             cmd.arg("--dangerously-skip-permissions");
         }
-        "allowlist" if !params.allowed_tools.is_empty() => {
+        "allowlist" => {
             for tool in &params.allowed_tools {
                 cmd.arg("--allowedTools").arg(tool);
             }
@@ -61,19 +82,19 @@ pub(super) fn build_claude_command(
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(cwd);
     }
-    cmd
+    Ok(cmd)
 }
 
 pub(super) fn build_codex_command(
     params: &TachiDispatchParams,
     prompt: &str,
     _mcp_config_path: Option<&PathBuf>,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new("codex");
     cmd.arg("exec"); // non-interactive subcommand
 
     // Permission profile
-    let profile = resolve_permission_profile(params);
+    let profile = resolve_permission_profile(params)?;
     if profile == "full" {
         cmd.arg("--dangerously-bypass-approvals-and-sandbox");
     } else {
@@ -97,19 +118,19 @@ pub(super) fn build_codex_command(
     if let Some(ref cwd) = params.cwd {
         cmd.arg("-C").arg(cwd);
     }
-    cmd
+    Ok(cmd)
 }
 
 pub(super) fn build_grok_command(
     params: &TachiDispatchParams,
     prompt: &str,
     mcp_config_path: Option<&PathBuf>,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new("grok");
     cmd.arg("-p").arg(prompt);
     cmd.arg("--output-format").arg("json");
 
-    let profile = resolve_permission_profile(params);
+    let profile = resolve_permission_profile(params)?;
     if profile == "full" {
         cmd.arg("--permission-mode").arg("bypassPermissions");
     }
@@ -129,29 +150,32 @@ pub(super) fn build_grok_command(
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(std::path::Path::new(cwd));
     }
-    cmd
+    Ok(cmd)
 }
 
-pub(super) fn build_kimi_command(params: &TachiDispatchParams, prompt: &str) -> Command {
+pub(super) fn build_kimi_command(
+    params: &TachiDispatchParams,
+    prompt: &str,
+) -> Result<Command, String> {
+    let profile = resolve_permission_profile(params)?;
     let mut cmd = Command::new("kimi");
-    for arg in kimi_command_args(params, prompt) {
+    for arg in kimi_command_args(params, prompt, profile) {
         cmd.arg(arg);
     }
 
     if let Some(ref cwd) = params.cwd {
         cmd.current_dir(cwd);
     }
-    cmd
+    Ok(cmd)
 }
 
-fn kimi_command_args(params: &TachiDispatchParams, prompt: &str) -> Vec<String> {
+fn kimi_command_args(params: &TachiDispatchParams, prompt: &str, profile: &str) -> Vec<String> {
     let mut args = vec![
         "-p".to_string(),
         prompt.to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
     ];
-    let profile = resolve_permission_profile(params);
     if profile == "full" {
         args.push("-y".to_string());
     }
@@ -285,7 +309,7 @@ mod tests {
     #[test]
     fn kimi_command_uses_supported_stream_json_output() {
         let params = dispatch_params("kimi");
-        let args = kimi_command_args(&params, "hello");
+        let args = kimi_command_args(&params, "hello", "default");
 
         assert!(args.windows(2).any(|pair| pair == ["-p", "hello"]));
         assert!(args
@@ -297,6 +321,39 @@ mod tests {
                 .any(|pair| pair == ["--output-format", "json"]),
             "Kimi Code supports text/stream-json, not json: {args:?}"
         );
+    }
+
+    #[test]
+    fn full_permission_profile_requires_opt_in_env() {
+        let mut params = dispatch_params("claude");
+        params.permission_profile = Some("full".to_string());
+
+        let prev = std::env::var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE").ok();
+        std::env::remove_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE");
+
+        assert!(
+            resolve_permission_profile(&params).is_err(),
+            "'full' should be rejected without opt-in env var"
+        );
+        assert!(
+            build_claude_command(&params, "hello", None).is_err(),
+            "command build should propagate full-profile rejection"
+        );
+
+        std::env::set_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE", "true");
+        assert_eq!(
+            resolve_permission_profile(&params).expect("opt-in should allow full"),
+            "full"
+        );
+        assert!(
+            build_claude_command(&params, "hello", None).is_ok(),
+            "build should succeed after opt-in"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE", v),
+            None => std::env::remove_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE"),
+        }
     }
 
     #[tokio::test]
