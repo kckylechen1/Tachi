@@ -478,16 +478,16 @@ pub struct MemoryEntry {
     #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Legacy OpenClaw/JSON field. Reads preserve old payloads; writes fold it into `entities`.
-    #[serde(default)]
+    /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes fold it into `entities`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persons: Vec<String>,
 
     /// Entity names mentioned (projects, tools, etc.)
     #[serde(default)]
     pub entities: Vec<String>,
 
-    /// Physical or logical location
-    #[serde(default)]
+    /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes store it in metadata.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub location: String,
 
     /// How this entry was created: "manual" | "extraction" | "migration"

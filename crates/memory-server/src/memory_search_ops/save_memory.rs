@@ -105,6 +105,12 @@ pub(crate) fn build_save_entry(
     );
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
+        if !params.location.trim().is_empty() {
+            obj.insert(
+                "legacy_location".to_string(),
+                serde_json::Value::String(params.location.trim().to_string()),
+            );
+        }
     }
     let tier = metadata
         .get("tier")
@@ -112,6 +118,9 @@ pub(crate) fn build_save_entry(
         .filter(|value| matches!(*value, "raw" | "consolidated" | "pattern"))
         .unwrap_or("raw")
         .to_string();
+
+    let mut entities = params.entities;
+    memory_core::types::fold_person_names_into_entities(&mut entities, params.persons);
 
     MemoryEntry {
         id,
@@ -125,9 +134,9 @@ pub(crate) fn build_save_entry(
         category,
         topic,
         keywords: params.keywords,
-        persons: params.persons,
-        entities: params.entities,
-        location: params.location,
+        persons: Vec::new(),
+        entities,
+        location: String::new(),
         source: "mcp".to_string(),
         scope: requested_scope,
         archived: false,
