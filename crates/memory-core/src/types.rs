@@ -653,9 +653,18 @@ pub fn is_path_like_location(location: &str) -> bool {
         return true;
     }
 
-    t.rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|tail| tail.contains('.') && !tail.starts_with('.') && !tail.ends_with('.'))
+    t.rsplit(['/', '\\']).next().is_some_and(|tail| {
+        let Some((stem, ext)) = tail.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty()
+            && !ext.is_empty()
+            && ext.len() <= 8
+            && stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    })
 }
 
 /// Relocate legacy `location` into `path` or `metadata` before persisting (schema v9).
@@ -941,10 +950,14 @@ mod tests {
         assert_eq!(metadata["geo"], "Shanghai/Pudong");
 
         assert!(!is_path_like_location("Shanghai/Pudong"));
+        assert!(!is_path_like_location("St. Louis"));
+        assert!(!is_path_like_location("Mt. Fuji"));
+        assert!(!is_path_like_location("Washington, D.C."));
         assert!(is_path_like_location("/code-review/sigil"));
         assert!(is_path_like_location("./notes/x"));
         assert!(is_path_like_location("../notes/x"));
         assert!(is_path_like_location("~/notes/x"));
+        assert!(is_path_like_location("../secrets"));
         assert!(is_path_like_location("notes/runbook.md"));
         assert!(is_path_like_location("C:/Users/kyle/notes.txt"));
     }
