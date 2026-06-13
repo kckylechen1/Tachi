@@ -640,7 +640,31 @@ pub fn fold_person_names_into_entities(
 /// True when legacy `location` looks like a hierarchical or file path, not a place name.
 pub fn is_path_like_location(location: &str) -> bool {
     let t = location.trim();
-    !t.is_empty() && (t.starts_with('/') || t.contains('/'))
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('/')
+        || t.starts_with("./")
+        || t.starts_with("../")
+        || t.starts_with("~/")
+        || t.starts_with("\\\\")
+        || t.get(1..3).is_some_and(|s| s == ":/" || s == ":\\")
+    {
+        return true;
+    }
+
+    t.rsplit(['/', '\\']).next().is_some_and(|tail| {
+        let Some((stem, ext)) = tail.rsplit_once('.') else {
+            return false;
+        };
+        !stem.is_empty()
+            && !ext.is_empty()
+            && ext.len() <= 8
+            && stem
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    })
 }
 
 /// Relocate legacy `location` into `path` or `metadata` before persisting (schema v9).
@@ -916,6 +940,26 @@ mod tests {
         assert_eq!(path, "/notes/x");
         assert_eq!(metadata["context_path"], "/code-review/sigil");
         assert_eq!(metadata["legacy_metadata"], "legacy note");
+    }
+
+    #[test]
+    fn location_relocation_keeps_slash_place_names_as_geo() {
+        let mut metadata = json!({});
+        let path = apply_location_relocation("/", "Shanghai/Pudong", &mut metadata);
+        assert_eq!(path, "/");
+        assert_eq!(metadata["geo"], "Shanghai/Pudong");
+
+        assert!(!is_path_like_location("Shanghai/Pudong"));
+        assert!(!is_path_like_location("St. Louis"));
+        assert!(!is_path_like_location("Mt. Fuji"));
+        assert!(!is_path_like_location("Washington, D.C."));
+        assert!(is_path_like_location("/code-review/sigil"));
+        assert!(is_path_like_location("./notes/x"));
+        assert!(is_path_like_location("../notes/x"));
+        assert!(is_path_like_location("~/notes/x"));
+        assert!(is_path_like_location("../secrets"));
+        assert!(is_path_like_location("notes/runbook.md"));
+        assert!(is_path_like_location("C:/Users/kyle/notes.txt"));
     }
 
     #[test]
