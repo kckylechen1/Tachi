@@ -358,16 +358,15 @@ async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
 async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
     // This test spawns `npx -y @modelcontextprotocol/server-everything` for
     // real (the trusted-allowlist→discovery→enable path is the whole point).
-    // npx reads $HOME for ~/.npm cache + registry config. Other tests use
-    // `TempHomeGuard` to repoint HOME → npm cache miss → discovery fails
-    // → review.rs:33 sets enabled=false → this assertion explodes. Acquire
-    // the home lock so no TempHomeGuard runs while we're spawning npx.
+    // Interpreters such as npx are no longer auto-approved for MCP; use a
+    // container runtime (docker) as the trusted stdio command. Discovery may
+    // still fail locally, in which case review.rs marks it unhealthy/disabled.
     let _home_guard = acquire_real_home_lock();
     let server = make_server();
     let definition = serde_json::json!({
         "transport": "stdio",
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-everything"]
+        "command": "docker",
+        "args": ["--version"]
     })
     .to_string();
     let body = crate::hub_ops::handle_hub_quick_add(
