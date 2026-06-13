@@ -10,8 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     db::{
-        fetch_by_ids, get_access_times, get_superseded_ids, graph_expand, record_access,
-        search_fts, search_symbolic_candidates, search_vec,
+        fetch_by_ids, get_access_times, get_superseded_ids, graph_expand,
+        record_access_with_updates, search_fts, search_symbolic_candidates, search_vec,
     },
     error::MemoryError,
     scorer::{
@@ -889,9 +889,13 @@ pub fn hybrid_search(
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         // FTS hits drive recall_count; collect before taking results slice
         let fts_hit_ids: Vec<String> = fts_scores.keys().cloned().collect();
-        record_access(conn, &accessed_ids, &fts_hit_ids, Some(query))?;
+        let access_updates =
+            record_access_with_updates(conn, &accessed_ids, &fts_hit_ids, Some(query))?;
         for r in &mut results {
-            r.entry.access_count += 1;
+            if let Some(update) = access_updates.get(&r.entry.id) {
+                r.entry.access_count = update.access_count;
+                r.entry.last_access = update.last_access.clone();
+            }
         }
     }
 
@@ -1019,6 +1023,30 @@ mod tests {
         let results = hybrid_search(&conn, "RECALL_PROBE_ALPHA_20260607", &opts).unwrap();
         assert_eq!(results[0].entry.id, "alpha");
         assert!(results[0].score.symbolic > results[1].score.symbolic);
+    }
+
+    #[test]
+    fn hybrid_search_returns_post_record_access_fields() {
+        let mut conn = setup();
+        let mut entry = memory_entry(
+            "access-return",
+            "AccessReturnProbe unique searchable memory",
+            &["access-return"],
+        );
+        entry.access_count = 7;
+        insert_entry(&mut conn, entry);
+
+        let opts = SearchOptions {
+            top_k: 1,
+            candidates_per_channel: 0,
+            record_access: true,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "AccessReturnProbe", &opts).unwrap();
+
+        assert_eq!(results[0].entry.id, "access-return");
+        assert_eq!(results[0].entry.access_count, 8);
+        assert!(results[0].entry.last_access.is_some());
     }
 
     #[test]

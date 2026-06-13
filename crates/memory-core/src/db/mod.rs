@@ -30,6 +30,9 @@ pub use hub_db::{
     hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome, hub_record_feedback,
     hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_upsert,
 };
+pub(crate) use memory_crud::record_access_with_updates;
+#[cfg(test)]
+pub(crate) use memory_crud::AccessUpdate;
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
     get_access_times, get_all, list_by_path, normalize_for_write, record_access,
