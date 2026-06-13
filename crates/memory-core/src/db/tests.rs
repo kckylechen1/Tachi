@@ -1061,6 +1061,52 @@ fn record_access_bumps_count_and_last_access_only() {
 }
 
 #[test]
+fn record_access_with_updates_returns_post_write_access_fields() {
+    let mut conn = make_conn();
+    let mut e = make_entry("touch-return", "return updated access fields");
+    e.access_count = 7;
+    upsert(&mut conn, &e, false).unwrap();
+
+    let updates = record_access_with_updates(&conn, &["touch-return".to_string()], &[], None)
+        .expect("record access updates");
+    let update = updates.get("touch-return").expect("updated row");
+    let db_update: AccessUpdate = conn
+        .query_row(
+            "SELECT access_count, last_access FROM memories WHERE id = ?1",
+            params!["touch-return"],
+            |row| {
+                Ok(AccessUpdate {
+                    access_count: row.get(0)?,
+                    last_access: row.get(1)?,
+                })
+            },
+        )
+        .unwrap();
+
+    assert_eq!(update.access_count, 8);
+    assert!(update.last_access.is_some());
+    assert_eq!(update, &db_update);
+}
+
+#[test]
+fn record_access_with_updates_ignores_missing_ids() {
+    let mut conn = make_conn();
+    let e = make_entry("touch-present", "present access row");
+    upsert(&mut conn, &e, false).unwrap();
+
+    let updates = record_access_with_updates(
+        &conn,
+        &["touch-present".to_string(), "touch-missing".to_string()],
+        &[],
+        None,
+    )
+    .expect("missing rows should not abort accounting");
+
+    assert!(updates.contains_key("touch-present"));
+    assert!(!updates.contains_key("touch-missing"));
+}
+
+#[test]
 fn record_access_repeats_accumulate_on_access_history() {
     let mut conn = make_conn();
     let e = make_entry("touch-2", "repeat target");

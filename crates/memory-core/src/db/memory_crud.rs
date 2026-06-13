@@ -10,6 +10,12 @@ use super::sqlite_vec::serialize_f32;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AccessUpdate {
+    pub access_count: i64,
+    pub last_access: Option<String>,
+}
+
 /// FNV-1a 32-bit hash of a query string for query_diversity tracking.
 fn fnv1a_hash(s: &str) -> String {
     let mut hash: u32 = 2_166_136_261;
@@ -1064,8 +1070,17 @@ pub fn record_access(
     fts_hits: &[String],
     query: Option<&str>,
 ) -> Result<(), MemoryError> {
+    record_access_with_updates(conn, ids, fts_hits, query).map(|_| ())
+}
+
+pub(crate) fn record_access_with_updates(
+    conn: &Connection,
+    ids: &[String],
+    fts_hits: &[String],
+    query: Option<&str>,
+) -> Result<HashMap<String, AccessUpdate>, MemoryError> {
     if ids.is_empty() {
-        return Ok(());
+        return Ok(HashMap::new());
     }
 
     let now = now_utc_iso();
@@ -1077,6 +1092,7 @@ pub fn record_access(
 
     // Build a set of FTS hit IDs for O(1) lookup
     let fts_set: std::collections::HashSet<&str> = fts_hits.iter().map(String::as_str).collect();
+    let mut updates = HashMap::with_capacity(ids.len());
 
     for id in ids {
         // NOTE: do NOT bump `updated_at` or `revision` here — see original comment.
@@ -1127,10 +1143,26 @@ pub fn record_access(
                AND query_diversity >= 3",
             params![id],
         )?;
+
+        let update = match tx.query_row(
+            "SELECT access_count, last_access FROM memories WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(AccessUpdate {
+                    access_count: row.get(0)?,
+                    last_access: row.get(1)?,
+                })
+            },
+        ) {
+            Ok(update) => update,
+            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+            Err(err) => return Err(err.into()),
+        };
+        updates.insert(id.clone(), update);
     }
 
     tx.commit()?;
-    Ok(())
+    Ok(updates)
 }
 
 /// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
