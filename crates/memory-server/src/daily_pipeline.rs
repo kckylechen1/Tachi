@@ -237,14 +237,7 @@ async fn run_health_check(
 ) -> Result<(DailyStageReport, Value, PathBuf), String> {
     let manifest_path = app_home.join("manifest.json");
     let targets = load_manifest_targets(server, &manifest_path)?;
-    let mut databases = Vec::with_capacity(targets.len());
-
-    for target in targets {
-        let stats = tokio::task::spawn_blocking(move || collect_database_stats(target))
-            .await
-            .map_err(|e| format!("health stats worker join failed: {e}"))?;
-        databases.push(stats);
-    }
+    let databases = collect_database_stats_for_targets(targets).await?;
 
     let payload = DailyHealthPayload {
         date: date.to_string(),
@@ -284,6 +277,25 @@ async fn run_health_check(
         health_json,
         report_path,
     ))
+}
+
+async fn collect_database_stats_for_targets(
+    targets: Vec<ManifestDbTarget>,
+) -> Result<Vec<DatabaseStats>, String> {
+    let handles = targets
+        .into_iter()
+        .map(|target| tokio::task::spawn_blocking(move || collect_database_stats(target)))
+        .collect::<Vec<_>>();
+    let mut databases = Vec::with_capacity(handles.len());
+
+    for handle in handles {
+        let stats = handle
+            .await
+            .map_err(|e| format!("health stats worker join failed: {e}"))?;
+        databases.push(stats);
+    }
+
+    Ok(databases)
 }
 
 async fn run_truth_maintenance_stage(
@@ -1321,6 +1333,28 @@ mod tests {
             allow_write: true,
             last_classification: "healthy".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn collect_database_stats_for_targets_preserves_manifest_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut first = manifest_target("global", tmp.path().join("first.db"));
+        first.name = "first".to_string();
+        let mut second = manifest_target("project", tmp.path().join("second.db"));
+        second.name = "second".to_string();
+
+        let stats = collect_database_stats_for_targets(vec![first, second])
+            .await
+            .expect("stats");
+
+        assert_eq!(
+            stats
+                .iter()
+                .map(|stat| stat.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert!(stats.iter().all(|stat| stat.error.is_some()));
     }
 
     fn restore_env_var(key: &str, saved: Option<std::ffi::OsString>) {
