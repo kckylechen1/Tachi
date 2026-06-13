@@ -479,7 +479,7 @@ pub struct MemoryEntry {
     pub keywords: Vec<String>,
 
     /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes fold it into `entities`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persons: Vec<String>,
 
     /// Entity names mentioned (projects, tools, etc.)
@@ -487,7 +487,7 @@ pub struct MemoryEntry {
     pub entities: Vec<String>,
 
     /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes store it in metadata.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub location: String,
 
     /// How this entry was created: "manual" | "extraction" | "migration"

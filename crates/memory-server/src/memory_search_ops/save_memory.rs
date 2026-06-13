@@ -106,8 +106,10 @@ pub(crate) fn build_save_entry(
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("force".to_string(), serde_json::Value::Bool(params.force));
         if !params.location.trim().is_empty() {
-            obj.entry("legacy_location".to_string())
-                .or_insert_with(|| serde_json::Value::String(params.location.trim().to_string()));
+            obj.insert(
+                "legacy_location".to_string(),
+                serde_json::Value::String(params.location.trim().to_string()),
+            );
         }
     }
     let tier = metadata
