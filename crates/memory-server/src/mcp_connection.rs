@@ -478,6 +478,58 @@ pub(crate) fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
         })
 }
 
+/// Validate that a remote MCP URL points to a publicly reachable host.
+/// Blocks non-HTTP(S) schemes, loopback, link-local, and private addresses
+/// to prevent SSRF against internal services.
+pub(crate) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL '{url}': {e}"))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "MCP URL scheme '{scheme}' is not allowed; only http/https are permitted"
+        ));
+    }
+
+    let host = parsed
+        .host()
+        .ok_or_else(|| format!("MCP URL '{url}' is missing a host"))?;
+
+    // Hostname-level blocklist for common local aliases; IPv6 literals keep brackets.
+    let host_str = host.to_string().to_ascii_lowercase();
+    if host_str == "localhost"
+        || host_str == "127.0.0.1"
+        || host_str == "[::1]"
+        || host_str.ends_with(".localhost")
+        || host_str == "0.0.0.0"
+    {
+        return Err(format!(
+            "MCP URL host '{host}' resolves to a loopback address and is not allowed"
+        ));
+    }
+
+    // IP-level blocklist (loopback, private, link-local).
+    match host {
+        url::Host::Ipv4(v4) => {
+            if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
+                return Err(format!(
+                    "MCP URL host '{host}' is a loopback/private/link-local address and is not allowed"
+                ));
+            }
+        }
+        url::Host::Ipv6(v6) => {
+            if v6.is_loopback() || v6.is_unicast_link_local() {
+                return Err(format!(
+                    "MCP URL host '{host}' is a loopback/link-local address and is not allowed"
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
 fn resolve_remote_mcp_url_with_secret_resolver<F>(
     def: &serde_json::Value,
     secret_resolver: &F,
@@ -486,6 +538,7 @@ where
     F: Fn(&str) -> Result<Option<String>, String>,
 {
     let url = remote_mcp_url(def).ok_or_else(|| "missing url for remote MCP".to_string())?;
+    validate_mcp_remote_url(url)?;
     expand_placeholders_with_secret_resolver(url, secret_resolver)
 }
 
@@ -928,6 +981,45 @@ mod tests {
 
         assert!(err.contains("initialized notification failed"));
         server_task.abort();
+    }
+
+    #[test]
+    fn validate_mcp_remote_url_allows_public_https() {
+        assert!(validate_mcp_remote_url("https://open.bigmodel.cn/api/mcp/").is_ok());
+        assert!(validate_mcp_remote_url("https://example.test/mcp").is_ok());
+    }
+
+    #[test]
+    fn validate_mcp_remote_url_rejects_internal_hosts() {
+        for url in [
+            "http://localhost/mcp",
+            "http://127.0.0.1/mcp",
+            "http://[::1]/mcp",
+            "http://192.168.1.1/mcp",
+            "http://10.0.0.1/mcp",
+            "http://172.16.0.1/mcp",
+            "http://169.254.1.1/mcp",
+            "http://0.0.0.0/mcp",
+            "file:///etc/passwd",
+            "https://foo.localhost/mcp",
+        ] {
+            assert!(
+                validate_mcp_remote_url(url).is_err(),
+                "{url} should be rejected as internal/unsafe"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_remote_mcp_url_rejects_loopback_after_expansion() {
+        let def = json!({
+            "transport": "streamable-http",
+            "url": "http://127.0.0.1:8080/mcp"
+        });
+        assert!(
+            resolve_remote_mcp_url_with_secret_resolver(&def, &|_| Ok(None)).is_err(),
+            "loopback URL should be rejected during resolution"
+        );
     }
 }
 
@@ -1580,6 +1672,7 @@ impl MemoryServer {
                 let url = def["url"]
                     .as_str()
                     .ok_or_else(|| "missing url for SSE".to_string())?;
+                validate_mcp_remote_url(url)?;
                 let mut transport_config =
                     rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
                 if let Some(token) = def
