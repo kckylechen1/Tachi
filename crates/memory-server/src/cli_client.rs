@@ -325,10 +325,15 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
     if is_daemon_process() {
         return Ok(None);
     }
-    let args = serde_json::to_value(params)
+    let Some(args) = serde_json::to_value(params)
         .ok()
         .and_then(|value| value.as_object().cloned())
-        .ok_or_else(|| format!("serialize daemon forward args for '{tool_name}'"))?;
+    else {
+        eprintln!(
+            "[mcp] failed to serialize daemon forward args for '{tool_name}'; executing in-process"
+        );
+        return Ok(None);
+    };
     let app_home = app_home_from_global_db(global_db_path);
     let Some(info) = detect_daemon(&app_home).await else {
         return Ok(None);
@@ -444,5 +449,15 @@ mod tests {
                 .allows_in_process_fallback()
         );
         assert!(!DaemonCallError::AfterDispatch("timeout".to_string()).allows_in_process_fallback());
+    }
+
+    #[tokio::test]
+    async fn daemon_forward_non_object_args_fall_back_in_process() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let result = maybe_forward_write(global, None, "remember", &vec!["not", "an", "object"])
+            .await
+            .expect("non-object args should not fail the write path");
+
+        assert!(result.is_none());
     }
 }
