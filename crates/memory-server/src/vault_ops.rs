@@ -1829,7 +1829,13 @@ pub(crate) async fn handle_vault_record_key_result(
         "status_code": params.status_code,
         "outcome": params.outcome,
         "skipped_by_lease": skipped_by_lease,
-        "health": health,
+        "health": {
+            "status": health.status,
+            "cooldown_until": health.cooldown_until,
+            "auth_failed": health.auth_failed,
+            "disabled": health.disabled,
+            "error_count": health.error_count,
+        },
     });
     let result = serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
     let audit_result = record_vault_audit(
