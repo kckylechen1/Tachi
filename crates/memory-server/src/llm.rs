@@ -77,6 +77,10 @@ pub(crate) struct ProviderHealthStatus {
     pub(crate) last_success_at: Option<String>,
     pub(crate) last_success_age_secs: Option<u64>,
     pub(crate) last_error: Option<String>,
+    pub(crate) persist_last_attempt_at: Option<String>,
+    pub(crate) persist_last_success_at: Option<String>,
+    pub(crate) persist_last_success_age_secs: Option<u64>,
+    pub(crate) persist_last_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -220,6 +224,14 @@ struct ProviderHealthReloadState {
     last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ProviderHealthPersistState {
+    last_attempt_at: Option<String>,
+    last_success: Option<Instant>,
+    last_success_at: Option<String>,
+    last_error: Option<String>,
+}
+
 impl ProviderHealthReloadState {
     fn memory_only() -> Self {
         Self {
@@ -253,6 +265,20 @@ impl ProviderHealthReloadState {
 
     fn mark_error(&mut self, now: Instant, now_utc: String, error: String) {
         self.last_attempt = Some(now);
+        self.last_attempt_at = Some(now_utc);
+        self.last_error = Some(error);
+    }
+}
+
+impl ProviderHealthPersistState {
+    fn mark_success(&mut self, now: Instant, now_utc: String) {
+        self.last_attempt_at = Some(now_utc.clone());
+        self.last_success = Some(now);
+        self.last_success_at = Some(now_utc);
+        self.last_error = None;
+    }
+
+    fn mark_error(&mut self, now_utc: String, error: String) {
         self.last_attempt_at = Some(now_utc);
         self.last_error = Some(error);
     }
@@ -433,6 +459,7 @@ pub struct LlmClient {
     vault_db_path: Option<PathBuf>,
     provider_state: Arc<RwLock<ProviderState>>,
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
+    provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
 }
 
@@ -570,6 +597,7 @@ impl LlmClient {
             vault_db_path,
             provider_state: Arc::new(RwLock::new(ProviderState::with_health(provider_health))),
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
+            provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             claude_cli_failure: Arc::new(RwLock::new(None)),
         })
     }
@@ -779,21 +807,21 @@ impl LlmClient {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let logical_name = health.logical_name.clone();
             let key_id = health.key_id.clone();
-            handle.spawn_blocking(move || {
-                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Self::persist_key_health_blocking(db_path, health);
-                }))
-                .is_err()
-                {
-                    tracing::warn!(
-                        "[provider] key health persistence task panicked for {}:{}",
-                        logical_name,
-                        key_id
-                    );
-                }
+            let persist_state = Arc::clone(&self.provider_health_persist);
+            handle.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    Self::persist_key_health_blocking(db_path, health)
+                })
+                .await
+                .map_err(|err| {
+                    format!("persist vault key health for {logical_name}:{key_id}: {err}")
+                })
+                .and_then(|inner| inner);
+                Self::record_key_health_persist_result(&persist_state, result);
             });
         } else {
-            Self::persist_key_health_blocking(db_path, health);
+            let result = Self::persist_key_health_blocking(db_path, health);
+            Self::record_key_health_persist_result(&self.provider_health_persist, result);
         }
     }
 
@@ -803,34 +831,42 @@ impl LlmClient {
         };
         let mut health = health.clone();
         health.updated_at = Self::format_now_utc();
-        Self::persist_key_health_blocking(db_path, health);
+        let result = Self::persist_key_health_blocking(db_path, health);
+        Self::record_key_health_persist_result(&self.provider_health_persist, result);
     }
 
-    fn persist_key_health_blocking(db_path: PathBuf, health: VaultKeyHealth) {
+    fn persist_key_health_blocking(db_path: PathBuf, health: VaultKeyHealth) -> Result<(), String> {
+        let target = format!("{}:{}", health.logical_name, health.key_id);
         let Some(db_path) = db_path.to_str() else {
-            tracing::warn!(
-                "[provider] failed to persist vault key health for {}:{}: invalid db path",
-                health.logical_name,
-                health.key_id
-            );
-            return;
+            return Err(format!(
+                "persist vault key health for {target}: invalid db path"
+            ));
         };
         match memory_core::MemoryStore::open(db_path) {
             Ok(store) => {
-                if let Err(err) = store.vault_upsert_key_health(&health) {
-                    tracing::warn!(
-                        "[provider] failed to persist vault key health for {}:{}: {err}",
-                        health.logical_name,
-                        health.key_id
-                    );
-                }
+                store
+                    .vault_upsert_key_health(&health)
+                    .map_err(|err| format!("persist vault key health for {target}: {err}"))?;
+                Ok(())
             }
+            Err(err) => Err(format!("persist vault key health for {target}: {err}")),
+        }
+    }
+
+    fn record_key_health_persist_result(
+        persist_state: &Arc<RwLock<ProviderHealthPersistState>>,
+        result: Result<(), String>,
+    ) {
+        let now = Instant::now();
+        let now_utc = Self::format_now_utc();
+        let mut state = persist_state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match result {
+            Ok(()) => state.mark_success(now, now_utc),
             Err(err) => {
-                tracing::warn!(
-                    "[provider] failed to persist vault key health for {}:{}: {err}",
-                    health.logical_name,
-                    health.key_id
-                );
+                tracing::warn!("[provider] {err}");
+                state.mark_error(now_utc, err);
             }
         }
     }
@@ -1117,6 +1153,10 @@ impl LlmClient {
             .provider_health_reload
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let persist = self
+            .provider_health_persist
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ProviderHealthStatus {
             source_of_truth: reload.source_of_truth,
             reload_ttl_secs: Self::KEY_HEALTH_RELOAD_TTL.as_secs(),
@@ -1126,6 +1166,12 @@ impl LlmClient {
                 .last_success
                 .map(|instant| instant.elapsed().as_secs()),
             last_error: reload.last_error.clone(),
+            persist_last_attempt_at: persist.last_attempt_at.clone(),
+            persist_last_success_at: persist.last_success_at.clone(),
+            persist_last_success_age_secs: persist
+                .last_success
+                .map(|instant| instant.elapsed().as_secs()),
+            persist_last_error: persist.last_error.clone(),
         }
     }
 
@@ -2929,6 +2975,56 @@ mod tests {
         assert_eq!(
             persisted.last_error.as_deref(),
             Some("rate limited; retry after 30s")
+        );
+
+        let mut status = client.provider_health_status();
+        for _ in 0..50 {
+            if status.persist_last_success_at.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            status = client.provider_health_status();
+        }
+        assert!(status.persist_last_attempt_at.is_some());
+        assert!(status.persist_last_success_at.is_some());
+        assert!(status.persist_last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn provider_key_health_persist_errors_are_visible_in_status() {
+        let temp = tempfile::tempdir().expect("temp vault db");
+        let db_path = temp.path().join("missing-parent").join("vault.db");
+        let client =
+            LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
+
+        let health = client.record_provider_key_result(
+            "TACHI_TEST_ONLY_API_KEY_PERSIST_ERROR",
+            "TACHI_TEST_ONLY_API_KEY_PERSIST_ERROR_1",
+            Some(429),
+            None,
+            Some(30),
+            Some("provider throttled"),
+        );
+        assert_eq!(health.status, HEALTH_RATE_LIMITED);
+
+        let mut status = client.provider_health_status();
+        for _ in 0..50 {
+            if status.persist_last_error.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            status = client.provider_health_status();
+        }
+
+        let error = status
+            .persist_last_error
+            .as_deref()
+            .expect("persist error should be visible");
+        assert!(status.persist_last_attempt_at.is_some());
+        assert!(status.persist_last_success_at.is_none());
+        assert!(
+            error.contains("persist vault key health for TACHI_TEST_ONLY_API_KEY_PERSIST_ERROR"),
+            "unexpected persist error: {error}"
         );
     }
 
