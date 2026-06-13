@@ -146,8 +146,7 @@ pub(super) fn render_skill_prompt_template(
     template: &str,
     args: &serde_json::Map<String, Value>,
 ) -> Result<String, serde_json::Error> {
-    let args_value = Value::Object(args.clone());
-    let args_json = serde_json::to_string(&args_value)?;
+    let args_json = serde_json::to_string(args)?;
     let mut prompt = template.replace("{{args_json}}", &args_json);
     prompt = prompt.replace("{{args}}", &args_json);
 
