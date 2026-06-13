@@ -508,13 +508,6 @@ impl MemoryStore {
         Ok(result == "ok")
     }
 
-    /// Flush SQLite state before process shutdown.
-    pub fn prepare_shutdown(&self) -> Result<(), MemoryError> {
-        self.conn
-            .execute_batch("PRAGMA optimize;\nPRAGMA wal_checkpoint(PASSIVE);")?;
-        Ok(())
-    }
-
     /// Get aggregate statistics about the memory store.
     pub fn stats(&self, include_archived: bool) -> Result<StatsResult, MemoryError> {
         db::stats(&self.conn, include_archived)
