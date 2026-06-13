@@ -170,7 +170,7 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Legacy DB column; programming-agent saves use `entities` instead.
+    /// Legacy OpenClaw wire field. Accepted for old clients; new writes fold it into `entities`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persons: Vec<String>,
 
@@ -178,7 +178,7 @@ pub(crate) struct SaveMemoryParams {
     #[serde(default)]
     pub entities: Vec<String>,
 
-    /// Physical or logical location
+    /// Legacy OpenClaw wire field. Accepted for old clients; new writes preserve it in metadata.
     #[serde(default)]
     pub location: String,
 

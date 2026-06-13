@@ -478,7 +478,7 @@ pub struct MemoryEntry {
     #[serde(default, alias = "indexed_tags")]
     pub keywords: Vec<String>,
 
-    /// Legacy OpenClaw/JSON field. Reads preserve old payloads; writes fold it into `entities`.
+    /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes fold it into `entities`.
     #[serde(default)]
     pub persons: Vec<String>,
 
@@ -486,7 +486,7 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub entities: Vec<String>,
 
-    /// Physical or logical location
+    /// Legacy OpenClaw/JSON field. Keep for deserialization compatibility; new writes store it in metadata.
     #[serde(default)]
     pub location: String,
 
