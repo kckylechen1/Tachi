@@ -3,9 +3,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported vault ciphers.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum VaultCipher {
     #[serde(rename = "aes-256-gcm")]
+    #[default]
     Aes256Gcm,
 }
 
@@ -15,18 +16,16 @@ impl VaultCipher {
             Self::Aes256Gcm => "aes-256-gcm",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl std::str::FromStr for VaultCipher {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "aes-256-gcm" => Ok(Self::Aes256Gcm),
             other => Err(format!("unsupported vault cipher: {other}")),
         }
-    }
-}
-
-impl Default for VaultCipher {
-    fn default() -> Self {
-        Self::Aes256Gcm
     }
 }
 
@@ -191,10 +190,10 @@ mod tests {
     #[test]
     fn vault_cipher_roundtrips_through_string() {
         assert_eq!(
-            VaultCipher::from_str("aes-256-gcm").unwrap(),
+            "aes-256-gcm".parse::<VaultCipher>().unwrap(),
             VaultCipher::Aes256Gcm
         );
-        assert!(VaultCipher::from_str("unknown").is_err());
+        assert!("unknown".parse::<VaultCipher>().is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use super::common::now_utc_iso;
 use crate::error::MemoryError;
-use crate::vault::{VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
+use crate::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use rusqlite::{params, Connection};
 
 fn parse_allowed_agents(raw: Option<String>) -> Result<Option<Vec<String>>, MemoryError> {
@@ -25,7 +25,7 @@ pub fn vault_get_config(conn: &Connection) -> Result<Option<VaultConfig>, Memory
             verifier: row.get(1)?,
             kdf_algorithm: row.get(2)?,
             kdf_params: row.get(3)?,
-            cipher: VaultCipher::from_str(&cipher_str).map_err(|e| {
+            cipher: cipher_str.parse().map_err(|e: String| {
                 rusqlite::Error::FromSqlConversionFailure(
                     4,
                     rusqlite::types::Type::Text,
