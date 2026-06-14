@@ -39,6 +39,7 @@ struct TempHomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<std::ffi::OsString>,
     original_tachi_home: Option<std::ffi::OsString>,
+    original_tachi_run_root: Option<std::ffi::OsString>,
     original_sigil_home: Option<std::ffi::OsString>,
     temp_home: std::path::PathBuf,
 }
@@ -48,17 +49,20 @@ impl TempHomeGuard {
         let lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         let original_home = std::env::var_os("HOME");
         let original_tachi_home = std::env::var_os("TACHI_HOME");
+        let original_tachi_run_root = std::env::var_os("TACHI_RUN_ROOT");
         let original_sigil_home = std::env::var_os("SIGIL_HOME");
         let temp_home =
             std::env::temp_dir().join(format!("tachi-test-home-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_home).expect("create temp home");
         std::env::set_var("HOME", &temp_home);
         std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
+        std::env::set_var("TACHI_RUN_ROOT", temp_home.join(".tachi/runs"));
         std::env::remove_var("SIGIL_HOME");
         Self {
             _lock: lock,
             original_home,
             original_tachi_home,
+            original_tachi_run_root,
             original_sigil_home,
             temp_home,
         }
@@ -76,6 +80,11 @@ impl Drop for TempHomeGuard {
             std::env::set_var("TACHI_HOME", value);
         } else {
             std::env::remove_var("TACHI_HOME");
+        }
+        if let Some(value) = self.original_tachi_run_root.as_ref() {
+            std::env::set_var("TACHI_RUN_ROOT", value);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
         }
         if let Some(value) = self.original_sigil_home.as_ref() {
             std::env::set_var("SIGIL_HOME", value);

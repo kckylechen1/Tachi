@@ -571,6 +571,101 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
 }
 
 #[tokio::test]
+async fn tachi_complete_scrubs_secretish_eval_metadata() {
+    let server = make_server();
+    let secret = "eval-redaction-fixture-token";
+
+    let resp = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("eval-secret-redaction".to_string()),
+            task: "Verify eval secret hygiene".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: Some("codex_55_review".to_string()),
+            risk: Some("high".to_string()),
+            duration_ms: Some(100),
+            skills_used: vec!["skill:check".to_string()],
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.8),
+            notes: Some(format!("Do not persist api_key={secret}")),
+            trajectory: Some(json!([
+                {
+                    "step": "run",
+                    "env": {
+                        "OPENAI_API_KEY": secret
+                    }
+                }
+            ])),
+            diff: Some(format!("+OPENAI_API_KEY={secret}\n")),
+            worktree: None,
+            subagents: vec![TachiSubagentEvalParams {
+                role: "reviewer".to_string(),
+                agent: "kimi".to_string(),
+                model: Some("kimi-for-coding".to_string()),
+                task: Some("Review secret hygiene".to_string()),
+                task_type: Some("review_request".to_string()),
+                outcome: Some("useful".to_string()),
+                usefulness_score: Some(0.9),
+                failure_mode: None,
+                verification_impact: Some("changed_plan".to_string()),
+                verification_present: true,
+                evaluator: Some("leader".to_string()),
+                plan_delta: Some("modified".to_string()),
+                human_override: false,
+                retry_count: 0,
+                notes: Some(format!("Saw token={secret} in draft evidence")),
+                latency_ms: Some(10),
+                input_tokens: None,
+                output_tokens: None,
+                cost_tokens: None,
+                cost_usd: None,
+            }],
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: None,
+            flow_id: None,
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: vec![format!("evidence token={secret}")],
+            tests_run: vec![format!("cargo test # token={secret}")],
+            diff_present: None,
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("tachi_complete should succeed");
+
+    assert!(!resp.contains(secret), "response leaked secret: {resp}");
+    assert!(
+        resp.contains("[REDACTED]"),
+        "response should show redaction"
+    );
+    let bundle: Value = serde_json::from_str(&resp).expect("complete JSON");
+    assert!(
+        bundle["secret_redactions"].as_u64().unwrap_or(0) > 0,
+        "redaction count should be reported: {bundle:#}"
+    );
+    let memory_id = bundle["eval_entry"]["id"].as_str().expect("memory id");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: memory_id.to_string(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("eval memory should be readable");
+    assert!(
+        !fetched.contains(secret),
+        "eval memory leaked secret: {fetched}"
+    );
+    assert!(
+        fetched.contains("[REDACTED]"),
+        "eval memory should persist redacted evidence"
+    );
+}
+
+#[tokio::test]
 async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
     let server = make_server();
 
@@ -2307,6 +2402,28 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             wiki.retention_policy = Some("permanent".to_string());
             store.upsert(&wiki).map_err(|e| e.to_string())?;
 
+            let mut guide = make_entry("guide-feature-briefing-agent-review");
+            guide.path = "/guide/global/workflows/agent-review".to_string();
+            guide.summary = "AgentReview guide for review dispatch".to_string();
+            guide.text = "FeatureBriefingNeedle AgentReview outputs should be routed by destination layer and promotion intent.".to_string();
+            guide.category = "guide".to_string();
+            guide.topic = "agent-review-guide".to_string();
+            guide.scope = "global".to_string();
+            guide.retention_policy = Some("permanent".to_string());
+            guide.metadata = json!({
+                "layer": "guide",
+                "scope": "global",
+                "authority": "playbook",
+                "status": "active",
+                "applies_to": {
+                    "task_type": ["agent_review"],
+                    "profiles": ["codex_55_review"],
+                    "stage": ["review"]
+                },
+                "keywords": ["FeatureBriefingNeedle", "agent-review"]
+            });
+            store.upsert(&guide).map_err(|e| e.to_string())?;
+
             let mut unrelated = make_entry("global-unrelated-feature-briefing");
             unrelated.path = "/scratch/other/global-memory-dump".to_string();
             unrelated.summary = "FeatureBriefingNeedle unrelated global fragment".to_string();
@@ -2340,6 +2457,9 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     params.issue_ref = Some("kckylechen1/tachi#194".to_string());
     params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
     params.top_k = Some(5);
+    params.task_type = Some("agent_review".to_string());
+    params.profile = Some("codex_55_review".to_string());
+    params.stage = Some("review".to_string());
 
     let raw = server
         .tachi_task(Parameters(params))
@@ -2372,6 +2492,17 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     assert!(briefing["wiki_hits"].as_array().is_some_and(|hits| hits
         .iter()
         .any(|hit| { hit["path"] == json!("/wiki/agent/tachi/feature-briefing") })));
+    assert!(briefing["guide_hits"]
+        .as_array()
+        .is_some_and(|hits| hits.iter().any(|hit| {
+            hit["path"] == json!("/guide/global/workflows/agent-review")
+                && hit["authority"] == json!("playbook")
+                && hit["applies_to"]["profiles"] == json!(["codex_55_review"])
+        })));
+    assert!(briefing["wiki_hits"].as_array().is_some_and(|hits| {
+        hits.iter()
+            .all(|hit| hit["path"] != json!("/guide/global/workflows/agent-review"))
+    }));
     assert!(briefing["route_recommendation"]["recommended_profile"]
         .as_str()
         .is_some_and(|profile| !profile.is_empty()));
@@ -2665,6 +2796,18 @@ async fn tachi_task_close_loop_writes_wiki_with_references() {
             "docs/engineering/architecture/agent-flow.md",
             "#153"
         ])
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["decision_mode"],
+        json!("explicit_invocation")
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["destination_layer"],
+        json!("wiki")
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["automatic_double_write"],
+        json!(false)
     );
 }
 
@@ -2980,10 +3123,8 @@ async fn dispatch_run_dir_is_created_with_0o700() {
     let tachi_home = std::env::var("TACHI_HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
-            std::path::PathBuf::from(
-                std::env::var("HOME").expect("HOME set by TempHomeGuard"),
-            )
-            .join(".tachi")
+            std::path::PathBuf::from(std::env::var("HOME").expect("HOME set by TempHomeGuard"))
+                .join(".tachi")
         });
     let run_dir = tachi_home.join("runs").join(dispatch_id);
     assert!(run_dir.exists(), "run dir should exist: {run_dir:?}");
@@ -4180,13 +4321,16 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
     let temp_home = tempfile::tempdir().expect("temp tachi home");
     let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
-    let flow_id = "flow_20260609T000003Z_capability_bundle_card";
-    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("flow run dir");
+    let flow_id = format!(
+        "flow_20260609T000003Z_capability_bundle_card_{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id.as_str()).expect("flow run dir");
     std::fs::create_dir_all(&run_dir).expect("create flow run dir");
     std::fs::write(
         run_dir.join("status.json"),
         serde_json::to_string_pretty(&json!({
-            "flow_id": flow_id,
+            "flow_id": flow_id.clone(),
             "status": "active",
             "dispatch_ids": [],
         }))
@@ -4198,7 +4342,7 @@ async fn dispatch_response_and_flow_card_link_capability_bundle_artifact() {
     params.command = vec!["python3".to_string(), "-c".to_string(), "pass".to_string()];
     params.cwd = Some(tmp.path().to_string_lossy().to_string());
     params.profile = Some("glm_51_impl".to_string());
-    params.flow_id = Some(flow_id.to_string());
+    params.flow_id = Some(flow_id.clone());
     params.auto_capability_bundle = Some(true);
 
     let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
@@ -5284,7 +5428,7 @@ async fn board_caps_corrupt_huge_timeout_before_duration_math() {
 //     so it must not run concurrently with other env-sensitive tests.
 //
 // Run explicitly via:
-//     cargo test -p memory-server --lib v2_two_stage_smoke -- --ignored --nocapture
+//     cargo test -p memory-server v2_two_stage_smoke -- --ignored --test-threads=1
 #[tokio::test]
 #[ignore]
 async fn v2_two_stage_smoke() {

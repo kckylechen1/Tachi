@@ -562,9 +562,7 @@ pub(crate) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
         }
         url::Host::Ipv6(v6) => {
             reject_blocked_mcp_remote_ip(IpAddr::V6(v6)).map_err(|_| {
-                format!(
-                    "MCP URL host '{host}' is a loopback/link-local address and is not allowed"
-                )
+                format!("MCP URL host '{host}' is a loopback/link-local address and is not allowed")
             })?;
         }
         _ => {}
@@ -701,6 +699,26 @@ fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
             body.len()
         )
     })
+}
+
+fn parse_remote_mcp_jsonrpc_response(
+    body: &str,
+    context: &str,
+    expected_id: i64,
+) -> Result<serde_json::Value, String> {
+    let value = parse_sse_payload(body)?;
+    if value.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+        return Err(format!("{context} response is not JSON-RPC 2.0"));
+    }
+    let id = value
+        .get("id")
+        .ok_or_else(|| format!("{context} response is missing JSON-RPC id"))?;
+    if id != &json!(expected_id) {
+        return Err(format!(
+            "{context} response JSON-RPC id does not match request id {expected_id}"
+        ));
+    }
+    Ok(value)
 }
 
 async fn read_remote_mcp_body(
@@ -969,6 +987,30 @@ mod tests {
         assert!(err.contains("bytes"));
         assert!(!err.contains("SECRET_TOKEN"));
         assert!(!err.contains("ghp_leaky"));
+    }
+
+    #[test]
+    fn remote_mcp_jsonrpc_response_requires_matching_id_without_echoing_body() {
+        let body = r#"event: message
+data: {"jsonrpc":"2.0","id":99,"result":{"secret":"github_pat_leaky"}}
+"#;
+
+        let err = parse_remote_mcp_jsonrpc_response(body, "tools/list", 2)
+            .expect_err("mismatched JSON-RPC ids should fail");
+
+        assert!(err.contains("does not match request id 2"), "{err}");
+        assert!(!err.contains("github_pat_leaky"));
+        assert!(!err.contains("secret"));
+    }
+
+    #[test]
+    fn remote_mcp_jsonrpc_response_requires_jsonrpc_version() {
+        let body = r#"data: {"id":1,"result":{}}"#;
+
+        let err = parse_remote_mcp_jsonrpc_response(body, "initialize", 1)
+            .expect_err("missing jsonrpc version should fail");
+
+        assert!(err.contains("not JSON-RPC 2.0"), "{err}");
     }
 
     #[test]
@@ -1284,9 +1326,10 @@ impl MemoryServer {
         let init_body = read_remote_mcp_body(init_response, "initialize")
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-        let init_json = parse_sse_payload(&init_body).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("parse initialize response: {e}"), None)
-        })?;
+        let init_json =
+            parse_remote_mcp_jsonrpc_response(&init_body, "initialize", 1).map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("parse initialize response: {e}"), None)
+            })?;
         if init_json.get("error").is_some() {
             let error = init_json.get("error").expect("checked above");
             return Err(rmcp::ErrorData::internal_error(
@@ -1335,9 +1378,10 @@ impl MemoryServer {
         let call_body = read_remote_mcp_body(call_response, "remote tool")
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-        let call_json = parse_sse_payload(&call_body).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("parse tool response: {e}"), None)
-        })?;
+        let call_json =
+            parse_remote_mcp_jsonrpc_response(&call_body, "remote tool", 2).map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("parse tool response: {e}"), None)
+            })?;
 
         if let Some(error) = call_json.get("error") {
             return Err(rmcp::ErrorData::internal_error(
@@ -1407,8 +1451,8 @@ impl MemoryServer {
             .map_err(|e| format!("initialize request failed: {e}"))?;
         let init_headers = init_response.headers().clone();
         let init_body = read_remote_mcp_body(init_response, "initialize").await?;
-        let init_json =
-            parse_sse_payload(&init_body).map_err(|e| format!("parse initialize response: {e}"))?;
+        let init_json = parse_remote_mcp_jsonrpc_response(&init_body, "initialize", 1)
+            .map_err(|e| format!("parse initialize response: {e}"))?;
         if let Some(error) = init_json.get("error") {
             return Err(format!(
                 "remote MCP initialize failed: {}",
@@ -1441,8 +1485,8 @@ impl MemoryServer {
             .await
             .map_err(|e| format!("tools/list request failed: {e}"))?;
         let list_body = read_remote_mcp_body(list_response, "tools/list").await?;
-        let list_json =
-            parse_sse_payload(&list_body).map_err(|e| format!("parse tools/list response: {e}"))?;
+        let list_json = parse_remote_mcp_jsonrpc_response(&list_body, "tools/list", 2)
+            .map_err(|e| format!("parse tools/list response: {e}"))?;
         if let Some(error) = list_json.get("error") {
             return Err(format!(
                 "remote MCP tools/list failed: {}",

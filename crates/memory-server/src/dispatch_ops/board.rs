@@ -140,53 +140,6 @@ fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
     None
 }
 
-fn probe_harness_server_status(url: Option<&str>) -> serde_json::Value {
-    let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
-        return serde_json::Value::Null;
-    };
-    if !url.starts_with("http://127.0.0.1:") && !url.starts_with("http://localhost:") {
-        return json!({
-            "reachable": null,
-            "probe": "unsupported",
-            "evidence_strength": "none",
-            "reason": "probe only supports local http server URLs",
-        });
-    }
-    let Some(port) = url
-        .split(':')
-        .nth(2)
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|raw| raw.parse::<u16>().ok())
-    else {
-        return json!({
-            "reachable": false,
-            "probe": "tcp",
-            "evidence_strength": "weak",
-            "readiness": "tcp_only",
-            "reason": "could not parse local port",
-        });
-    };
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(150)) {
-        Ok(_) => json!({
-            "reachable": true,
-            "probe": "tcp",
-            "evidence_strength": "weak",
-            "readiness": "tcp_only",
-            "port": port,
-            "warning": "TCP reachability only; OpenCode API version, session creation, model availability, and credentials were not verified",
-        }),
-        Err(err) => json!({
-            "reachable": false,
-            "probe": "tcp",
-            "evidence_strength": "weak",
-            "readiness": "tcp_only",
-            "port": port,
-            "error": err.to_string(),
-        }),
-    }
-}
-
 fn collect_run_tasks_from_dir(
     runs_dir: PathBuf,
     state_filter: &str,
@@ -280,7 +233,7 @@ fn collect_run_tasks_from_dir(
             "state_source": if abandoned { "run_stale_timeout" } else { "run" },
             "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
             "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
-            "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
+            "harness_server_status": super::probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
         }));
     }
 
@@ -364,7 +317,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         "state_source": if abandoned { "run_stale_timeout" } else { "run" },
         "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
         "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
-        "harness_server_status": probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
+        "harness_server_status": super::probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
     }))
 }
 
@@ -584,7 +537,77 @@ pub(crate) async fn handle_tachi_board(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch_ops::probe_harness_server_status;
     use std::ffi::OsStr;
+    use std::io::{Read, Write};
+
+    const OPENCODE_DOC_FIXTURE: &str = r#"{
+        "openapi":"3.1.0",
+        "info":{"title":"opencode","version":"1.0.0"},
+        "paths":{
+            "/api/session":{"post":{}},
+            "/api/session/{sessionID}/prompt":{"post":{}},
+            "/api/session/{sessionID}/wait":{"post":{}},
+            "/api/model":{"get":{}},
+            "/api/provider":{"get":{}}
+        }
+    }"#;
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn spawn_opencode_doc_probe_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe server");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept probe");
+                let mut buf = [0_u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.starts_with("GET /doc ") {
+                    OPENCODE_DOC_FIXTURE
+                } else {
+                    "<title>OpenCode</title>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
 
     #[test]
     fn dispatch_timestamp_key_extracts_embedded_timestamp() {
@@ -622,6 +645,84 @@ mod tests {
                 .as_str()
                 .is_some_and(|warning| warning.contains("OpenCode API version")),
             "TCP-only probe must explain what it did not verify: {status:#}"
+        );
+    }
+
+    #[test]
+    fn harness_probe_reports_http_responsive_readiness() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind local listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept probe");
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nopencode service")
+                .expect("write response");
+        });
+
+        let status = probe_harness_server_status(Some(&format!("http://127.0.0.1:{port}")));
+        server.join().expect("probe server thread");
+
+        assert_eq!(status["reachable"], json!(true));
+        assert_eq!(status["probe"], json!("http"));
+        assert_eq!(status["evidence_strength"], json!("medium"));
+        assert_eq!(status["readiness"], json!("http_responsive"));
+        assert_eq!(status["layers"]["tcp_reachable"], json!("passed"));
+        assert_eq!(status["layers"]["http_health"], json!("passed"));
+        assert_eq!(status["opencode_hint"], json!(true));
+    }
+
+    #[test]
+    fn harness_probe_requires_password_for_opencode_api_attach_ready() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _password = EnvRestore::remove("OPENCODE_SERVER_PASSWORD");
+        let (server_url, server) = spawn_opencode_doc_probe_server();
+
+        let status = probe_harness_server_status(Some(&server_url));
+        server.join().expect("probe server thread");
+
+        assert_eq!(status["reachable"], json!(true));
+        assert_eq!(status["attach_ready"], json!(false));
+        assert_eq!(status["readiness"], json!("server_auth_required"));
+        assert_eq!(status["layers"]["opencode_api_version"], json!("passed"));
+        assert_eq!(
+            status["layers"]["session_create_smoke"],
+            json!("route_available")
+        );
+        assert_eq!(
+            status["layers"]["credential_ready"],
+            json!("unsafe_to_probe")
+        );
+        assert!(status["sensitive_endpoints_skipped"]
+            .as_array()
+            .is_some_and(|items| items.contains(&json!("/api/model"))));
+    }
+
+    #[test]
+    fn harness_probe_reports_attach_ready_for_authenticated_opencode_schema() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _password = EnvRestore::set("OPENCODE_SERVER_PASSWORD", "test-password");
+        let (server_url, server) = spawn_opencode_doc_probe_server();
+
+        let status = probe_harness_server_status(Some(&server_url));
+        server.join().expect("probe server thread");
+
+        assert_eq!(status["reachable"], json!(true));
+        assert_eq!(status["attach_ready"], json!(true));
+        assert_eq!(status["readiness"], json!("attach_ready"));
+        assert_eq!(status["evidence_strength"], json!("strong"));
+        assert_eq!(
+            status["api_capabilities"]["routes"]["session_create"],
+            json!(true)
+        );
+        assert_eq!(
+            status["layers"]["model_available"],
+            json!("unsafe_to_probe")
         );
     }
 }

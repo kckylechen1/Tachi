@@ -755,7 +755,9 @@ pub(crate) fn mark_task_dispatch(
     if !status.is_object() {
         status = json!({});
     }
-    let obj = status.as_object_mut().expect("fresh status object");
+    let obj = status
+        .as_object_mut()
+        .ok_or_else(|| "flow status must be a JSON object".to_string())?;
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));
@@ -914,7 +916,9 @@ pub(crate) fn mark_task_dispatch_completion(
     if !status.is_object() {
         status = json!({});
     }
-    let obj = status.as_object_mut().expect("fresh status object");
+    let obj = status
+        .as_object_mut()
+        .ok_or_else(|| "flow status must be a JSON object".to_string())?;
     let dispatch_ids = obj
         .entry("dispatch_ids".to_string())
         .or_insert_with(|| json!([]));
@@ -1838,7 +1842,7 @@ fn write_intake_instruction(
     body.push_str("- `tachi_task(action='dispatch', flow_id=..., issue_ref=...)`\n");
     body.push_str("- `tachi_task(action='link_pr', flow_id=..., pr_ref=...)`\n");
     body.push_str("- `tachi_task(action='pr_status', flow_id=..., pr_ref=...)`\n");
-    std::fs::write(run_dir.join("instruction.md"), body)
+    write_text_atomic(&run_dir.join("instruction.md"), &body)
         .map_err(|e| format!("write intake instruction.md: {e}"))
 }
 
@@ -1868,29 +1872,16 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
 fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(value)
         .map_err(|e| format!("serialize {}: {e}", path.display()))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serialized).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+    crate::utils::write_owner_only_file_atomic(path, serialized.as_bytes())
 }
 
 fn write_text_atomic(path: &Path, body: &str) -> Result<(), String> {
-    let tmp = path.with_extension("md.tmp");
-    std::fs::write(&tmp, body).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+    crate::utils::write_owner_only_file_atomic(path, body.as_bytes())
 }
 
 fn append_flow_event(run_dir: &Path, event: Value) -> Result<(), String> {
-    use std::io::Write;
-    let mut line =
-        serde_json::to_string(&event).map_err(|e| format!("serialize flow event: {e}"))?;
-    line.push('\n');
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(run_dir.join("events.jsonl"))
-        .map_err(|e| format!("open events.jsonl: {e}"))?;
-    file.write_all(line.as_bytes())
-        .map_err(|e| format!("write events.jsonl: {e}"))
+    let line = serde_json::to_string(&event).map_err(|e| format!("serialize flow event: {e}"))?;
+    crate::utils::append_owner_only_jsonl_line(&run_dir.join("events.jsonl"), &line)
 }
 
 fn deep_merge(target: &mut Value, patch: Value) {

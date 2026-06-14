@@ -106,6 +106,52 @@ async fn tachi_memory_search_caps_large_top_k() {
     assert_eq!(memory_rows.len(), crate::MAX_FACADE_TOP_K);
 }
 
+#[tokio::test]
+async fn direct_tachi_search_caps_large_top_k() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            for idx in 0..(crate::MAX_FACADE_TOP_K + 25) {
+                let mut entry = make_entry(&format!("direct-search-clamp-{idx}"));
+                entry.path = format!("/facade/direct-clamp/{idx}");
+                entry.summary = format!("direct facade clamp sentinel {idx}");
+                entry.text = format!("direct facade clamp sentinel searchable row {idx}");
+                entry.keywords = vec!["direct".to_string(), "facade".to_string()];
+                store
+                    .upsert(&entry)
+                    .map_err(|e| format!("seed direct clamp row: {e}"))?;
+            }
+            Ok(())
+        })
+        .expect("seed direct clamp memories");
+
+    let params = TachiSearchParams {
+        query: "direct facade clamp sentinel".to_string(),
+        scope: "memory".to_string(),
+        top_k: 10_000,
+        path_prefix: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+    };
+
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
+    let memory_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .and_then(|(_, rows)| rows.as_array())
+        .expect("memory rows");
+
+    assert_eq!(memory_rows.len(), crate::MAX_FACADE_TOP_K);
+}
+
 // ─── cli_client: daemon detection + in-process fallback ─────────────────────
 
 #[tokio::test]

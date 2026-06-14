@@ -166,24 +166,13 @@ fn write_status(run_dir: &Path, status: &Value) -> Result<(), String> {
     let status_path = run_dir.join("status.json");
     let serialized =
         serde_json::to_string_pretty(status).map_err(|e| format!("serialize status.json: {e}"))?;
-    // Atomic write: write to temp file then rename to avoid corruption on crash
-    let tmp_path = status_path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, serialized).map_err(|e| format!("write status.json.tmp: {e}"))?;
-    std::fs::rename(&tmp_path, &status_path).map_err(|e| format!("rename status.json.tmp: {e}"))?;
-    Ok(())
+    crate::utils::write_owner_only_file_atomic(&status_path, serialized.as_bytes())
 }
 
 fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
-    use std::io::Write;
     let path = run_dir.join("events.jsonl");
     let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open events.jsonl: {e}"))?;
-    writeln!(f, "{}", line).map_err(|e| format!("write events.jsonl: {e}"))?;
-    Ok(())
+    crate::utils::append_owner_only_jsonl_line(&path, &line)
 }
 
 // ─── Meta skill injection ────────────────────────────────────────────────────

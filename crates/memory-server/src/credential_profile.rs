@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
+use std::io::ErrorKind;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -650,6 +651,21 @@ fn write_file_atomic(
         fs::create_dir_all(parent).map_err(|e| format!("create '{}': {e}", parent.display()))?;
     }
 
+    let cleanup_file = |path: &Path, label: &str| -> Result<(), String> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!("remove {label} '{}': {err}", path.display())),
+        }
+    };
+    let cleanup_temp_and_backup = |temp: &Path, backup: Option<&Path>| {
+        let _ = cleanup_file(temp, "temp credential file");
+        if let Some(backup) = backup {
+            let _ = cleanup_file(backup, "temporary credential backup");
+        }
+    };
+
+    let mut backup_path = None;
     if target.exists() {
         let backup = target.with_extension(format!(
             "{}.tachi-bak-{}",
@@ -666,6 +682,15 @@ fn write_file_atomic(
                 backup.display()
             )
         })?;
+        #[cfg(unix)]
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).map_err(|e| {
+            let _ = cleanup_file(&backup, "temporary credential backup");
+            format!(
+                "chmod temporary credential backup '{}': {e}",
+                backup.display()
+            )
+        })?;
+        backup_path = Some(backup);
     }
 
     let temp = target.with_extension(format!(
@@ -676,7 +701,7 @@ fn write_file_atomic(
             .unwrap_or("tmp"),
         uuid::Uuid::new_v4().as_simple()
     ));
-    {
+    let write_result = (|| -> Result<(), String> {
         let mut file = fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -686,23 +711,42 @@ fn write_file_atomic(
             .map_err(|e| format!("write temp credential file '{}': {e}", temp.display()))?;
         file.sync_all()
             .map_err(|e| format!("sync temp credential file '{}': {e}", temp.display()))?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        cleanup_temp_and_backup(&temp, backup_path.as_deref());
+        return Err(err);
     }
 
     #[cfg(unix)]
     {
-        let mode = mode_from_chmod(chmod)?;
-        fs::set_permissions(&temp, fs::Permissions::from_mode(mode))
-            .map_err(|e| format!("chmod temp credential file '{}': {e}", temp.display()))?;
+        let mode = match mode_from_chmod(chmod) {
+            Ok(mode) => mode,
+            Err(err) => {
+                cleanup_temp_and_backup(&temp, backup_path.as_deref());
+                return Err(err);
+            }
+        };
+        if let Err(err) = fs::set_permissions(&temp, fs::Permissions::from_mode(mode)) {
+            cleanup_temp_and_backup(&temp, backup_path.as_deref());
+            return Err(format!(
+                "chmod temp credential file '{}': {err}",
+                temp.display()
+            ));
+        }
     }
 
     fs::rename(&temp, target).map_err(|e| {
-        let _ = fs::remove_file(&temp);
+        cleanup_temp_and_backup(&temp, backup_path.as_deref());
         format!(
             "move temp credential file '{}' to '{}': {e}",
             temp.display(),
             target.display()
         )
     })?;
+    if let Some(backup) = backup_path.as_deref() {
+        cleanup_file(backup, "temporary credential backup")?;
+    }
     Ok(())
 }
 

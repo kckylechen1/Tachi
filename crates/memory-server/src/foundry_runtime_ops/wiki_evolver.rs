@@ -170,17 +170,21 @@ fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<MemoryEntry>, S
         let rows = stmt
             .query_map([], memory_core::row_to_entry)
             .map_err(|e| format!("query pattern memories: {e}"))?;
-        Ok(rows.filter_map(|r| r.ok()).collect())
+        let mut entries = Vec::new();
+        for row in rows {
+            entries.push(row.map_err(|e| format!("read pattern memory row: {e}"))?);
+        }
+        Ok(entries)
     };
 
-    let mut entries = Vec::new();
-    if let Ok(global) = server.with_global_store_read(collect) {
-        entries.extend(global);
-    }
+    let mut entries = server
+        .with_global_store_read(collect)
+        .map_err(|e| format!("REM global candidate collection: {e}"))?;
     if server.has_project_db() {
-        if let Ok(project) = server.with_project_store_read(collect) {
-            entries.extend(project);
-        }
+        let project = server
+            .with_project_store_read(collect)
+            .map_err(|e| format!("REM project candidate collection: {e}"))?;
+        entries.extend(project);
     }
     Ok(entries)
 }
@@ -459,9 +463,13 @@ fn mark_rem_processed<'a>(
     }
     let now = Utc::now().to_rfc3339();
 
-    let update = |store: &mut memory_core::MemoryStore| -> Result<(), String> {
+    fn mark_ids_in_store(
+        store: &mut memory_core::MemoryStore,
+        ids: &[String],
+        now: &str,
+    ) -> Result<(), String> {
         let conn = store.connection();
-        for id in &ids {
+        for id in ids {
             conn.execute(
                 r#"UPDATE memories
                    SET metadata = json_set(
@@ -475,27 +483,15 @@ fn mark_rem_processed<'a>(
             .map_err(|e| format!("mark rem.processed for {id}: {e}"))?;
         }
         Ok(())
-    };
+    }
 
-    // Try both stores; ignore errors on the project store (read-only setups).
-    let _ = server.with_global_store(update);
+    server
+        .with_global_store(|store| mark_ids_in_store(store, &ids, &now))
+        .map_err(|e| format!("mark REM processed in global store: {e}"))?;
     if server.has_project_db() {
-        let _ = server.with_project_store(|store: &mut memory_core::MemoryStore| {
-            let conn = store.connection();
-            for id in &ids {
-                let _ = conn.execute(
-                    r#"UPDATE memories
-                       SET metadata = json_set(
-                             CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                             '$.rem.processed', 1,
-                             '$.rem.processed_at', ?1
-                           )
-                       WHERE id = ?2"#,
-                    rusqlite::params![now, id],
-                );
-            }
-            Ok(())
-        });
+        server
+            .with_project_store(|store| mark_ids_in_store(store, &ids, &now))
+            .map_err(|e| format!("mark REM processed in project store: {e}"))?;
     }
     Ok(())
 }

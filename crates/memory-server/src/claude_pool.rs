@@ -27,8 +27,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::utils::{write_owner_only_file, write_owner_only_file_atomic};
 use chrono::Utc;
-use crate::utils::write_owner_only_file;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -126,8 +126,10 @@ impl ClaudePool {
 
         match result {
             Ok(text) => {
-                let _ = std::fs::write(run_dir.join("result.md"), &text);
-                let _ = write_status(
+                if let Err(err) = write_run_file(&run_dir.join("result.md"), &text) {
+                    tracing::warn!("claude_pool failed to write result.md: {err}");
+                }
+                if let Err(err) = write_status(
                     &run_dir,
                     &json!({
                         "status": "success",
@@ -137,12 +139,16 @@ impl ClaudePool {
                         "label": label,
                         "bytes": text.len(),
                     }),
-                );
+                ) {
+                    tracing::warn!("claude_pool failed to write status.json: {err}");
+                }
                 Ok(ClaudeCallOutcome { text })
             }
             Err(err) => {
-                let _ = std::fs::write(run_dir.join("result.md"), &err);
-                let _ = write_status(
+                if let Err(write_err) = write_run_file(&run_dir.join("result.md"), &err) {
+                    tracing::warn!("claude_pool failed to write error result.md: {write_err}");
+                }
+                if let Err(write_err) = write_status(
                     &run_dir,
                     &json!({
                         "status": "failed",
@@ -152,7 +158,9 @@ impl ClaudePool {
                         "label": label,
                         "error": err,
                     }),
-                );
+                ) {
+                    tracing::warn!("claude_pool failed to write failed status.json: {write_err}");
+                }
                 Err(err)
             }
         }
@@ -305,10 +313,14 @@ fn sanitize_label(label: &str) -> String {
     }
 }
 
-fn write_status(run_dir: &Path, value: &Value) -> std::io::Result<()> {
+fn write_run_file(path: &Path, body: &str) -> Result<(), String> {
+    write_owner_only_file_atomic(path, body.as_bytes())
+}
+
+fn write_status(run_dir: &Path, value: &Value) -> Result<(), String> {
     let path = run_dir.join("status.json");
     let body = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    std::fs::write(path, body)
+    write_run_file(&path, &body)
 }
 
 /// Extract the `result` field from Claude CLI's JSON envelope. Tolerates
@@ -710,7 +722,10 @@ mod tests {
         let skip = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        assert!(!skip, "default should be false (preserve interactive prompts)");
+        assert!(
+            !skip,
+            "default should be false (preserve interactive prompts)"
+        );
         match prev {
             Some(v) => std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", v),
             None => std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS"),

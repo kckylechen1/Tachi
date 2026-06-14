@@ -269,9 +269,9 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         }
     }
 
-    // Best-effort: write the audit manifest.
+    // Best-effort: write the audit manifest without failing the distill run.
     let manifest_path = runs_root.join("source_manifest.json");
-    if let Ok(body) = serde_json::to_string_pretty(&json!({
+    match serde_json::to_string_pretty(&json!({
         "batch_run_id": batch_run_id,
         "project": project_label,
         "backend": backend.as_str(),
@@ -280,7 +280,17 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         "report": &report,
         "groups": manifest,
     })) {
-        let _ = std::fs::write(&manifest_path, body);
+        Ok(body) => {
+            if let Err(err) =
+                crate::utils::write_owner_only_file_atomic(&manifest_path, body.as_bytes())
+            {
+                tracing::warn!(
+                    "failed to write distill source manifest {}: {err}",
+                    manifest_path.display()
+                );
+            }
+        }
+        Err(err) => tracing::warn!("failed to serialize distill source manifest: {err}"),
     }
 
     // Opportunistically prune stale foundry-runs subdirs.

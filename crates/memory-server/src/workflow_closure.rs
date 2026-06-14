@@ -28,6 +28,54 @@ pub(crate) fn build_closure_references(
     refs
 }
 
+fn promotion_destination_layer(path: Option<&str>) -> &'static str {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "wiki";
+    };
+    if path == "/guide"
+        || path.starts_with("/guide/")
+        || path == "guide"
+        || path.starts_with("guide/")
+    {
+        "guide"
+    } else {
+        "wiki"
+    }
+}
+
+fn trimmed_nonempty_unique(values: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !out.iter().any(|existing| existing == value) {
+            out.push(value.to_string());
+        }
+    }
+    out
+}
+
+pub(crate) fn build_close_loop_metadata(
+    issue_ref: &str,
+    doc_paths: &[String],
+    related_issues: &[String],
+    wiki_path: Option<&str>,
+    references: &[String],
+) -> Value {
+    json!({
+        "promotion": {
+            "source": "close_loop",
+            "decision": "promote",
+            "decision_mode": "explicit_invocation",
+            "destination_layer": promotion_destination_layer(wiki_path),
+            "source_ref": issue_ref,
+            "source_refs": references,
+            "doc_paths": trimmed_nonempty_unique(doc_paths),
+            "related_issues": trimmed_nonempty_unique(related_issues),
+            "automatic_double_write": false,
+        },
+    })
+}
+
 pub(crate) async fn handle_workflow(
     server: &MemoryServer,
     params: TachiWorkflowParams,
@@ -38,8 +86,10 @@ pub(crate) async fn handle_workflow(
             let issue_ref = params
                 .issue_ref
                 .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "issue_ref is required for close_loop".to_string())?;
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "issue_ref is required for close_loop".to_string())?
+                .to_string();
             let title = params
                 .wiki_title
                 .clone()
@@ -52,8 +102,15 @@ pub(crate) async fn handle_workflow(
                 .ok_or_else(|| "wiki_text is required for close_loop".to_string())?;
 
             let references =
-                build_closure_references(issue_ref, &params.doc_paths, &params.related_issues);
+                build_closure_references(&issue_ref, &params.doc_paths, &params.related_issues);
             crate::wiki_ops::validate_references(&references)?;
+            let metadata = build_close_loop_metadata(
+                &issue_ref,
+                &params.doc_paths,
+                &params.related_issues,
+                params.wiki_path.as_deref(),
+                &references,
+            );
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
                 server,
@@ -77,6 +134,7 @@ pub(crate) async fn handle_workflow(
                     retention_policy: "permanent".to_string(),
                     domain: params.wiki_domain.clone(),
                     project: params.project.clone(),
+                    metadata: Some(metadata),
                     force: params.force,
                     references,
                 },

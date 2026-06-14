@@ -151,16 +151,17 @@ pub(crate) async fn handle_memory_graph(
             .map(str::trim)
             .filter(|query| !query.is_empty())
             .ok_or_else(|| "memory_graph requires memory_id or query".to_string())?;
+        let seed_top_k = params.top_k.clamp(1, crate::MAX_SEARCH_TOP_K);
         let rows = search_memory_rows(
             server,
             SearchMemoryParams {
                 query: query.to_string(),
                 query_vec: None,
-                top_k: params.top_k.max(1),
+                top_k: seed_top_k,
                 path_prefix: params.path_prefix.clone(),
                 include_training: false,
                 include_archived: false,
-                candidates_per_channel: params.top_k.max(1).max(20),
+                candidates_per_channel: seed_top_k.max(20),
                 mmr_threshold: None,
                 graph_expand_hops: 0,
                 graph_relation_filter: None,

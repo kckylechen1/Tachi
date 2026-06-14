@@ -52,4 +52,32 @@ async fn workflow_close_loop_writes_wiki_with_references() {
             "#149".to_string(),
         ]
     );
+    assert_eq!(entry["metadata"]["layer"], json!("wiki"));
+    assert_eq!(entry["metadata"]["scope"], json!("global"));
+    assert_eq!(entry["metadata"]["authority"], json!("advisory"));
+    assert_eq!(entry["metadata"]["status"], json!("active"));
+    assert_eq!(
+        entry["metadata"]["source_ref"],
+        json!("kckylechen1/tachi#150")
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["decision_mode"],
+        json!("explicit_invocation")
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["destination_layer"],
+        json!("wiki")
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["automatic_double_write"],
+        json!(false)
+    );
+    assert_eq!(
+        entry["metadata"]["promotion"]["source_refs"],
+        json!([
+            "kckylechen1/tachi#150",
+            "docs/wiki-references-spec.md",
+            "#149"
+        ])
+    );
 }

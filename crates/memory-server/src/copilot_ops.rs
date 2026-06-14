@@ -36,11 +36,40 @@ fn normalize_wiki_path(path: Option<String>, topic: &str) -> String {
     } else {
         format!("/{raw}")
     };
-    if with_slash == "/wiki" || with_slash.starts_with("/wiki/") {
+    if with_slash == "/wiki"
+        || with_slash.starts_with("/wiki/")
+        || with_slash == "/guide"
+        || with_slash.starts_with("/guide/")
+    {
         with_slash
     } else {
         format!("/wiki{}", with_slash)
     }
+}
+
+fn wiki_layer_metadata(
+    path: &str,
+    scope: &str,
+    project: Option<&str>,
+    references: &[String],
+) -> Value {
+    let layer = if path == "/guide" || path.starts_with("/guide/") {
+        "guide"
+    } else {
+        "wiki"
+    };
+    let scope = if project.is_some() || scope.eq_ignore_ascii_case("project") {
+        "project"
+    } else {
+        "global"
+    };
+    json!({
+        "layer": layer,
+        "scope": scope,
+        "authority": "advisory",
+        "status": "active",
+        "source_ref": references.first().cloned(),
+    })
 }
 
 fn wiki_text_tokens(input: &str) -> HashSet<String> {
@@ -255,6 +284,262 @@ fn recommend_skills_light(
         .collect())
 }
 
+fn feature_guide_hits(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    query: &str,
+    current_stage: &str,
+    route_recommendation: &Value,
+    limit: usize,
+) -> Vec<Value> {
+    let profile = params.profile.as_deref().or_else(|| {
+        route_recommendation
+            .get("recommended_profile")
+            .and_then(Value::as_str)
+    });
+    let stage = params.stage.as_deref().unwrap_or(current_stage);
+    let task_type = params.task_type.as_deref();
+    let query_tokens = tokenize_skill_text(query);
+    let mut candidates = load_feature_guide_candidates(server, params, limit.max(20));
+
+    candidates.retain(|(entry, _, _)| {
+        entry.is_guide() && guide_applies_to(entry, task_type, profile, Some(stage), &query_tokens)
+    });
+
+    let mut scored = candidates
+        .into_iter()
+        .map(|(entry, scope, source)| {
+            let score = score_feature_guide(&entry, task_type, profile, Some(stage), &query_tokens);
+            (score, entry, scope, source)
+        })
+        .filter(|(score, entry, _, _)| *score > 0 || !guide_has_restrictive_applies_to(entry))
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.timestamp.cmp(&a.1.timestamp))
+            .then_with(|| a.1.path.cmp(&b.1.path))
+    });
+    scored.truncate(limit);
+
+    scored
+        .into_iter()
+        .map(|(score, entry, scope, source)| guide_hit_row(&entry, scope, source, score))
+        .collect()
+}
+
+fn load_feature_guide_candidates(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    limit: usize,
+) -> Vec<(MemoryEntry, DbScope, &'static str)> {
+    let limit = limit.clamp(1, 200);
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(project) = params
+        .project
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Ok(entries) = server.with_named_project_store_read(project, |store| {
+            store
+                .list_by_path("/guide", limit, false)
+                .map_err(|e| format!("guide named project list: {e}"))
+        }) {
+            merge_guide_candidates(&mut out, &mut seen, entries, DbScope::Project, "named");
+        }
+    } else if default_named_project_available(server, "wiki") {
+        if let Ok(entries) = server.with_named_project_store_read("wiki", |store| {
+            store
+                .list_by_path("/guide", limit, false)
+                .map_err(|e| format!("guide default wiki list: {e}"))
+        }) {
+            merge_guide_candidates(
+                &mut out,
+                &mut seen,
+                entries,
+                DbScope::Project,
+                "default_wiki",
+            );
+        }
+    }
+
+    if server.has_project_db() && out.len() < limit {
+        if let Ok(entries) = server.with_project_store_read(|store| {
+            store
+                .list_by_path("/guide", limit, false)
+                .map_err(|e| format!("guide project list: {e}"))
+        }) {
+            merge_guide_candidates(&mut out, &mut seen, entries, DbScope::Project, "project");
+        }
+    }
+
+    if out.len() < limit {
+        if let Ok(entries) = server.with_global_store_read(|store| {
+            store
+                .list_by_path("/guide", limit, false)
+                .map_err(|e| format!("guide global list: {e}"))
+        }) {
+            merge_guide_candidates(&mut out, &mut seen, entries, DbScope::Global, "global");
+        }
+    }
+
+    out
+}
+
+fn merge_guide_candidates(
+    out: &mut Vec<(MemoryEntry, DbScope, &'static str)>,
+    seen: &mut HashSet<String>,
+    entries: Vec<MemoryEntry>,
+    scope: DbScope,
+    source: &'static str,
+) {
+    for entry in entries {
+        if seen.insert(entry.id.clone()) {
+            out.push((entry, scope, source));
+        }
+    }
+}
+
+fn guide_applies_to(
+    entry: &MemoryEntry,
+    task_type: Option<&str>,
+    profile: Option<&str>,
+    stage: Option<&str>,
+    query_tokens: &HashSet<String>,
+) -> bool {
+    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
+    guide_filter_matches(applies.get("task_type"), task_type, query_tokens)
+        && guide_filter_matches(applies.get("profiles"), profile, query_tokens)
+        && guide_filter_matches(applies.get("stage"), stage, query_tokens)
+}
+
+fn guide_filter_matches(
+    filter: Option<&Value>,
+    actual: Option<&str>,
+    query_tokens: &HashSet<String>,
+) -> bool {
+    let values = guide_string_values(filter.unwrap_or(&Value::Null));
+    if values.is_empty() {
+        return true;
+    }
+    if let Some(actual) = actual.map(|value| value.to_ascii_lowercase()) {
+        if values
+            .iter()
+            .any(|value| value == "*" || value.eq_ignore_ascii_case(&actual))
+        {
+            return true;
+        }
+    }
+    values.iter().any(|value| {
+        query_tokens.contains(value)
+            || query_tokens.contains(&value.replace('_', "-"))
+            || query_tokens.contains(&value.replace('-', "_"))
+    })
+}
+
+fn score_feature_guide(
+    entry: &MemoryEntry,
+    task_type: Option<&str>,
+    profile: Option<&str>,
+    stage: Option<&str>,
+    query_tokens: &HashSet<String>,
+) -> usize {
+    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
+    let mut score = 0usize;
+    if !guide_string_values(applies.get("task_type").unwrap_or(&Value::Null)).is_empty()
+        && guide_filter_matches(applies.get("task_type"), task_type, query_tokens)
+    {
+        score += 5;
+    }
+    if !guide_string_values(applies.get("profiles").unwrap_or(&Value::Null)).is_empty()
+        && guide_filter_matches(applies.get("profiles"), profile, query_tokens)
+    {
+        score += 4;
+    }
+    if !guide_string_values(applies.get("stage").unwrap_or(&Value::Null)).is_empty()
+        && guide_filter_matches(applies.get("stage"), stage, query_tokens)
+    {
+        score += 2;
+    }
+
+    let haystack = guide_hit_haystack(entry);
+    let haystack_tokens = tokenize_skill_text(&haystack);
+    score += query_tokens
+        .iter()
+        .filter(|token| haystack_tokens.contains(*token) || haystack.contains(token.as_str()))
+        .count();
+    score
+}
+
+fn guide_has_restrictive_applies_to(entry: &MemoryEntry) -> bool {
+    let applies = entry.metadata.get("applies_to").unwrap_or(&Value::Null);
+    ["task_type", "profiles", "stage"]
+        .iter()
+        .any(|key| !guide_string_values(applies.get(*key).unwrap_or(&Value::Null)).is_empty())
+}
+
+fn guide_hit_haystack(entry: &MemoryEntry) -> String {
+    let metadata_keywords =
+        guide_string_values(entry.metadata.get("keywords").unwrap_or(&Value::Null));
+    let trigger_keywords = guide_string_values(
+        entry
+            .metadata
+            .get("trigger_keywords")
+            .unwrap_or(&Value::Null),
+    );
+    format!(
+        "{} {} {} {} {} {}",
+        entry.path,
+        entry.topic,
+        entry.summary,
+        entry.text,
+        entry.keywords.join(" "),
+        metadata_keywords
+            .into_iter()
+            .chain(trigger_keywords)
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .to_ascii_lowercase()
+}
+
+fn guide_string_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(raw) => vec![raw.trim().to_ascii_lowercase()],
+        Value::Array(items) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|raw| raw.trim().to_ascii_lowercase())
+            .filter(|raw| !raw.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn guide_hit_row(
+    entry: &MemoryEntry,
+    db_scope: DbScope,
+    source: &'static str,
+    score: usize,
+) -> Value {
+    let metadata = &entry.metadata;
+    json!({
+        "id": entry.id,
+        "db": db_scope.as_str(),
+        "source": source,
+        "path": entry.path,
+        "topic": if entry.topic.is_empty() { Value::Null } else { json!(entry.topic) },
+        "summary": if entry.summary.is_empty() { Value::Null } else { json!(entry.summary) },
+        "score": score,
+        "layer": metadata.get("layer").and_then(Value::as_str).unwrap_or("guide"),
+        "scope": metadata.get("scope").and_then(Value::as_str).unwrap_or(entry.scope.as_str()),
+        "authority": metadata.get("authority").and_then(Value::as_str).unwrap_or("advisory"),
+        "status": metadata.get("status").and_then(Value::as_str).unwrap_or("active"),
+        "applies_to": metadata.get("applies_to").cloned().unwrap_or(Value::Null),
+    })
+}
+
 fn strip_numbered_prefix(line: &str) -> Option<&str> {
     let digits_len = line.chars().take_while(|ch| ch.is_ascii_digit()).count();
     if digits_len == 0 {
@@ -399,14 +684,26 @@ pub(crate) async fn handle_tachi_wiki_write(
     // path-routing validation lets `/wiki/...` through on non-wiki DBs.
     // Audit B11: this metadata flag is the explicit opt-in required by
     // path_router::validate_path_for_db.
-    let mut wiki_metadata = json!({
-        "wiki": true,
-        "wiki_title": params.title,
-        "user_force": params.force,
-        "allow_cross_project": true,
-        "source_refs": params.references,
-    });
-    let _ = wiki_metadata.as_object_mut();
+    let references = params.references.clone();
+    let layer_metadata =
+        wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
+    let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
+    if !wiki_metadata.is_object() {
+        return Err("metadata must be a JSON object when supplied for wiki write".to_string());
+    }
+    if let Some(obj) = wiki_metadata.as_object_mut() {
+        obj.insert("wiki".to_string(), json!(true));
+        obj.insert("wiki_title".to_string(), json!(params.title.clone()));
+        obj.insert("user_force".to_string(), json!(params.force));
+        obj.insert("allow_cross_project".to_string(), json!(true));
+        obj.insert("source_refs".to_string(), json!(references));
+    }
+    if let (Some(target), Some(layer)) = (wiki_metadata.as_object_mut(), layer_metadata.as_object())
+    {
+        for (key, value) in layer {
+            target.insert(key.clone(), value.clone());
+        }
+    }
 
     let existing = with_existing_wiki_store(server, &project_name, use_named_project, |store| {
         find_wiki_entry_by_path_or_topic(store, &path, &topic)
@@ -777,6 +1074,15 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let skills = recommend_skills_light(server, &query, 5).unwrap_or_default();
     let routing = build_task_brief_routing(&query, &skills);
     let route_recommendation = feature_dispatch_recommendation(server, params, &query);
+    let current_stage = infer_feature_stage(&run_artifacts, &board);
+    let guide_hits = feature_guide_hits(
+        server,
+        params,
+        &query,
+        &current_stage,
+        &route_recommendation,
+        top_k,
+    );
     let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
     let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
@@ -792,7 +1098,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             "cwd": params.cwd,
             "include_global": params.include_global,
         },
-        "current_stage": infer_feature_stage(&run_artifacts, &board),
+        "current_stage": current_stage,
         "board_state": board,
         "canonical_docs": canonical_docs,
         "run_artifacts": run_artifacts,
@@ -805,6 +1111,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "route_recommendation": route_recommendation,
         "relevant_profiles": relevant_profiles,
         "suggested_dispatch": suggested_dispatch,
+        "guide_hits": guide_hits,
         "wiki_hits": compact_rows(wiki_rows, top_k),
         "memory_fragments": compact_rows(memory_rows, top_k),
         "eval_evidence": compact_rows(eval_rows, top_k.min(5)),
@@ -1304,12 +1611,24 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
             .and_then(Value::as_array),
         "No matching board tasks.",
     ));
+    let mut guide_rows = Vec::new();
+    if let Some(hits) = value.get("guide_hits").and_then(Value::as_array) {
+        guide_rows.extend(hits.iter().cloned());
+    }
+    if let Some(sops) = value
+        .get("guide_sop")
+        .and_then(|guide| guide.get("selected_sops"))
+        .and_then(Value::as_array)
+    {
+        guide_rows.extend(sops.iter().cloned());
+    }
     out.push(markdown_section(
         "Guide / SOP",
-        value
-            .get("guide_sop")
-            .and_then(|guide| guide.get("selected_sops"))
-            .and_then(Value::as_array),
+        if guide_rows.is_empty() {
+            None
+        } else {
+            Some(&guide_rows)
+        },
         "No SOP selected.",
     ));
     out.push(markdown_dispatch_recommendation(value));

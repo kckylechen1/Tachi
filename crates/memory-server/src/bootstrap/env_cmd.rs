@@ -3,7 +3,6 @@ use crate::cli::EnvAction;
 use memory_core::vault::VaultEntry;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 fn is_shell_env_name(name: &str) -> bool {
@@ -94,14 +93,13 @@ pub(super) async fn run_env_command(
         }
         Some(EnvAction::Export { cwd, json }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked =
-                unlock_cli_vault(
-                    global_db_path,
-                    stdin_password,
-                    keychain,
-                    password_file,
-                    insecure_password_file,
-                )?;
+            let unlocked = unlock_cli_vault(
+                global_db_path,
+                stdin_password,
+                keychain,
+                password_file,
+                insecure_password_file,
+            )?;
             let exports = filter_project_exports(
                 resolve_project_env_values(&unlocked, &cwd)?,
                 filter,
@@ -127,14 +125,13 @@ pub(super) async fn run_env_command(
             json,
         }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked =
-                unlock_cli_vault(
-                    global_db_path,
-                    stdin_password,
-                    keychain,
-                    password_file,
-                    insecure_password_file,
-                )?;
+            let unlocked = unlock_cli_vault(
+                global_db_path,
+                stdin_password,
+                keychain,
+                password_file,
+                insecure_password_file,
+            )?;
             let preview = dry_run || !apply;
             let report = sync_project_env(
                 &unlocked,
@@ -162,14 +159,13 @@ pub(super) async fn run_env_command(
         }
         Some(EnvAction::Run { cwd, command }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
-            let unlocked =
-                unlock_cli_vault(
-                    global_db_path,
-                    stdin_password,
-                    keychain,
-                    password_file,
-                    insecure_password_file,
-                )?;
+            let unlocked = unlock_cli_vault(
+                global_db_path,
+                stdin_password,
+                keychain,
+                password_file,
+                insecure_password_file,
+            )?;
             let exports = filter_project_exports(
                 resolve_project_env_values(&unlocked, &cwd)?,
                 filter,
@@ -216,8 +212,12 @@ fn unlock_cli_vault(
                 .to_string()
         })?;
 
-    let password =
-        super::vault_cli::read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
+    let password = super::vault_cli::read_vault_password(
+        stdin_password,
+        keychain,
+        password_file,
+        insecure_password_file,
+    )?;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let salt = B64
         .decode(&config.salt)
@@ -560,43 +560,8 @@ fn sync_project_env(
 }
 
 fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("env.generated"),
-        uuid::Uuid::new_v4().as_simple()
-    ));
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temp_path)?
-    };
-    #[cfg(not(unix))]
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
-    if let Err(err) = file.write_all(bytes).and_then(|_| file.sync_all()) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(Box::new(err));
-    }
-    drop(file);
-    if let Err(err) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(Box::new(err));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    crate::utils::write_owner_only_file_atomic(path, bytes)
+        .map_err(|err| Box::<dyn std::error::Error>::from(std::io::Error::other(err)))
 }
 
 fn run_with_project_env(
@@ -642,8 +607,12 @@ async fn run_legacy_env_export(
         })?;
 
     // 2. Resolve password from the requested portable source.
-    let password =
-        super::vault_cli::read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
+    let password = super::vault_cli::read_vault_password(
+        stdin_password,
+        keychain,
+        password_file,
+        insecure_password_file,
+    )?;
 
     // 3. Derive key and verify
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -894,6 +863,16 @@ PROJECT_POOL=vault:POOL_API_KEY
         assert!(content.contains("DO NOT COMMIT plaintext secrets"));
         assert!(content.contains("export PROJECT_DIRECT='direct-value'"));
         assert!(content.contains("export PROJECT_POOL='pool-value-1'"));
+        let leftovers: Vec<_> = std::fs::read_dir(generated.parent().unwrap())
+            .expect("read generated dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("env.generated.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "generated env writes should not leave temp files: {leftovers:?}"
+        );
 
         #[cfg(unix)]
         {

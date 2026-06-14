@@ -85,6 +85,7 @@ pub(crate) async fn handle_tachi_save(
                     .unwrap_or_else(|| "permanent".to_string()),
                 domain: params.domain.clone(),
                 project: params.project.clone(),
+                metadata: params.metadata.clone(),
                 force: params.force,
                 references: params.references.clone(),
             };

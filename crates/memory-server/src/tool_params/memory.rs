@@ -1064,6 +1064,10 @@ pub(crate) struct WikiWriteParams {
     #[serde(default)]
     pub project: Option<String>,
 
+    /// Optional JSON object merged into stored wiki metadata before provenance fields.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+
     /// Bypass noise filtering for short but intentional wiki entries.
     #[serde(default)]
     pub force: bool,

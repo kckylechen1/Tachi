@@ -1093,8 +1093,12 @@ pub(crate) fn record_access_with_updates(
     // Build a set of FTS hit IDs for O(1) lookup
     let fts_set: std::collections::HashSet<&str> = fts_hits.iter().map(String::as_str).collect();
     let mut updates = HashMap::with_capacity(ids.len());
+    let mut seen_ids = std::collections::HashSet::with_capacity(ids.len());
 
     for id in ids {
+        if !seen_ids.insert(id.as_str()) {
+            continue;
+        }
         // NOTE: do NOT bump `updated_at` or `revision` here — see original comment.
         tx.execute(
             "UPDATE memories

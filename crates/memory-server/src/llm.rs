@@ -2990,8 +2990,7 @@ mod tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _persist_guard =
-            EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+        let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
         let temp = tempfile::tempdir().expect("temp vault db");
         let db_path = temp.path().join("vault.db");
         let client =
@@ -3052,8 +3051,7 @@ mod tests {
         let _lock = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let _persist_guard =
-            EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+        let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
         let temp = tempfile::tempdir().expect("temp vault db");
         let db_path = temp.path().join("missing-parent").join("vault.db");
         let client =

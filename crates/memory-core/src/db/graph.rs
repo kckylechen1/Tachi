@@ -87,15 +87,16 @@ pub fn get_edges(
         })
     };
 
-    let edges: Vec<MemoryEdge> = if let Some(rel) = relation_filter {
-        stmt.query_map(params![memory_id, rel], row_mapper)?
-            .filter_map(|r| r.ok())
-            .collect()
+    let mut edges = Vec::new();
+    if let Some(rel) = relation_filter {
+        for row in stmt.query_map(params![memory_id, rel], row_mapper)? {
+            edges.push(row?);
+        }
     } else {
-        stmt.query_map(params![memory_id], row_mapper)?
-            .filter_map(|r| r.ok())
-            .collect()
-    };
+        for row in stmt.query_map(params![memory_id], row_mapper)? {
+            edges.push(row?);
+        }
+    }
 
     Ok(edges)
 }

@@ -120,8 +120,11 @@ impl MemoryServer {
             .to_string();
         let store = MemoryStore::open_with_label(db_str, &project_label)
             .map_err(|e| format!("open project db: {e}"))?;
+        let read_store = MemoryStore::open_read_only(db_str)
+            .map_err(|e| format!("open project read db: {e}"))?;
         let state = ProjectDbState {
             store: Arc::new(StdMutex::new(store)),
+            read_store: Arc::new(StdMutex::new(read_store)),
             rw_gate: Arc::new(StdRwLock::new(())),
             db_path: Arc::new(db_path),
         };
@@ -165,7 +168,7 @@ impl MemoryServer {
             .as_ref()
             .ok_or_else(|| "No hot-swapped project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "hot_project_rw_gate");
-        let mut store = Self::open_read_store(state.db_path.as_ref(), "hot_project")?;
+        let mut store = lock_or_recover(&state.read_store, "hot_project_read_store");
         f(&mut store)
     }
 
@@ -223,7 +226,7 @@ impl MemoryServer {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let mut store = Self::open_read_store(self.global_db_path.as_ref(), "global")?;
+        let mut store = lock_or_recover(&self.global_read_store, "global_read_store");
         f(&mut store)
     }
 
@@ -264,13 +267,13 @@ impl MemoryServer {
         {
             return self.with_hot_project_store_read(f);
         }
-        if let Some(ref db_path) = self.project_db_path {
+        if let Some(ref store_arc) = self.project_read_store {
             let gate = self
                 .project_rw_gate
                 .as_ref()
                 .ok_or_else(|| "No project lock available".to_string())?;
             let _gate = read_or_recover(gate, "project_rw_gate");
-            let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
+            let mut store = lock_or_recover(store_arc, "project_read_store");
             return f(&mut store);
         }
         Err("No project database available".to_string())
@@ -830,8 +833,7 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools").contains_key(tool_name)
         {
-            let args_obj = arguments
-                .map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
+            let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
             return self.call_skill_tool(tool_name, args_obj).await;
         }
 

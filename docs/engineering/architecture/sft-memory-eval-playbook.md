@@ -128,7 +128,8 @@ Live eval records are memory-first. `tachi_complete` writes them under
 `/eval/...` with `category="eval"`, and ordinary memory search should exclude
 them unless the caller explicitly scopes to `/eval`. Use
 `tachi_agent_eval(action="aggregate_live")` to aggregate production eval memory;
-use `action="aggregate"` only for fixture JSONL replay.
+use `action="aggregate"` only for local fixture JSONL replay with
+`TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
 
 For routing and UX workflow audits, inspect `performance_matrix` in the
 `aggregate_live` response. It separates leader rows from subagent rows and
@@ -145,7 +146,9 @@ Leader workflow:
 4. Run the real verification gate.
 5. Call `tachi_complete` with `subagents=[...]`.
 6. Use `tachi_agent_eval(action="aggregate_live")` to update routing policy
-   from live evidence, or `action="aggregate"` for fixture replay.
+   from live evidence. For local fixture replay, set
+   `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1` and call
+   `tachi_agent_eval(action="aggregate", fixture_path=...)`.
 
 Use fixture JSONL for benchmark replay. Keep fixture source explicit; never
 aggregate fixture rows with live `/eval/YYYY-MM-DD/...` records unless the

@@ -1,5 +1,7 @@
 use super::*;
 
+const MAX_APPEND_ONLY_JSONL_LINE_BYTES: usize = 256 * 1024;
+
 pub(super) fn is_active_global_rule(entry: &MemoryEntry) -> bool {
     entry
         .metadata
@@ -68,10 +70,139 @@ pub(super) fn write_owner_only_file(path: &std::path::Path, bytes: &[u8]) -> Res
             .map_err(|e| format!("open {}: {e}", path.display()))?;
         file.write_all(bytes)
             .map_err(|e| format!("write {}: {e}", path.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("fsync {}: {e}", path.display()))?;
     }
     #[cfg(not(unix))]
     {
         std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+/// Atomically replace a file by writing a synced same-directory temp file first.
+pub(super) fn write_owner_only_file_atomic(
+    path: &std::path::Path,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("tachi-file");
+    let tmp_path = path.with_file_name(format!(
+        "{file_name}.tmp.{}",
+        uuid::Uuid::new_v4().as_simple()
+    ));
+
+    let result = (|| {
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp_path)
+                .map_err(|e| format!("open temp {}: {e}", tmp_path.display()))?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+            .map_err(|e| format!("open temp {}: {e}", tmp_path.display()))?;
+
+        use std::io::Write;
+        file.write_all(bytes)
+            .map_err(|e| format!("write temp {}: {e}", tmp_path.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("fsync temp {}: {e}", tmp_path.display()))?;
+        drop(file);
+
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            format!(
+                "rename temp {} -> {}: {e}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
+        sync_parent_dir(path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+pub(super) fn sync_parent_dir(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| format!("open parent dir {}: {e}", parent.display()))?;
+            dir.sync_all()
+                .map_err(|e| format!("fsync parent dir {}: {e}", parent.display()))?;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+pub(super) fn append_owner_only_jsonl_line(
+    path: &std::path::Path,
+    line: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
+    }
+    let mut bytes = Vec::with_capacity(line.len() + 1);
+    bytes.extend_from_slice(line.as_bytes());
+    if !line.ends_with('\n') {
+        bytes.push(b'\n');
+    }
+    if bytes.len() > MAX_APPEND_ONLY_JSONL_LINE_BYTES {
+        return Err(format!(
+            "append-only JSONL line {} exceeds {} byte cap",
+            path.display(),
+            MAX_APPEND_ONLY_JSONL_LINE_BYTES
+        ));
+    }
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+
+    use std::io::Write;
+    file.write_all(&bytes)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    file.sync_all()
+        .map_err(|e| format!("fsync {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
 }
@@ -91,9 +222,10 @@ fn is_mcp_interpreter_basename(basename: &str) -> bool {
             return true;
         }
         if let Some(suffix) = basename.strip_prefix(interp) {
-            suffix.chars().next().is_none_or(|c| {
-                c.is_ascii_digit() || matches!(c, '.' | '-' | '@' | '_')
-            })
+            suffix
+                .chars()
+                .next()
+                .is_none_or(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '@' | '_'))
         } else {
             false
         }
@@ -436,6 +568,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn append_owner_only_jsonl_line_caps_size_and_restricts_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("events.jsonl");
+
+        append_owner_only_jsonl_line(&path, r#"{"event":"ok"}"#).expect("append event");
+        let raw = std::fs::read_to_string(&path).expect("read events");
+        assert_eq!(raw, "{\"event\":\"ok\"}\n");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        let huge = "x".repeat(MAX_APPEND_ONLY_JSONL_LINE_BYTES);
+        let err = append_owner_only_jsonl_line(&path, &huge).expect_err("huge line should fail");
+        assert!(
+            err.contains("byte cap"),
+            "expected JSONL line cap error, got: {err}"
+        );
+    }
+
+    #[test]
     fn compact_text_line_respects_limit_with_ellipsis() {
         assert_eq!(compact_text_line("hello world", 20), "hello world");
         assert_eq!(
@@ -509,6 +665,41 @@ mod tests {
             value["definition"]["headers"]["Authorization"],
             json!("[REDACTED]")
         );
+    }
+
+    #[test]
+    fn write_owner_only_file_atomic_replaces_file_without_temp_leftovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("status.json");
+        std::fs::write(&path, b"old").expect("seed old file");
+
+        write_owner_only_file_atomic(&path, br#"{"state":"ok"}"#).expect("atomic write");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read replaced file"),
+            r#"{"state":"ok"}"#
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("status.json.tmp."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic write should clean temp files: {leftovers:?}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     #[test]

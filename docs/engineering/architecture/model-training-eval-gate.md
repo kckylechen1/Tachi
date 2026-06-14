@@ -22,7 +22,8 @@ Allowed today:
 - `/sft/...` rows may be used as style-only prompt exemplars when explicitly
   requested by the dispatch prompt assembler.
 - Fixture JSONL may be used by `tachi_agent_eval(action="aggregate",
-  fixture_path=...)`.
+  fixture_path=...)` only for local replay with
+  `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
 - Live routing uses `tachi_agent_eval(action="aggregate_live")`,
   `tachi_task(action="recommend")`, `route_simulate`, and reviewed policy /
   profile-card proposals.

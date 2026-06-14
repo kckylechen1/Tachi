@@ -295,11 +295,7 @@ fn mission_dir(arena_id: &str, mission_id: &str) -> Result<PathBuf, String> {
 fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
     let serialized =
         serde_json::to_string_pretty(value).map_err(|e| format!("serialize json: {e}"))?;
-    let tmp_path = path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, format!("{serialized}\n"))
-        .map_err(|e| format!("write temp json {}: {e}", tmp_path.to_string_lossy()))?;
-    std::fs::rename(&tmp_path, path)
-        .map_err(|e| format!("rename temp json {}: {e}", path.to_string_lossy()))
+    crate::utils::write_owner_only_file_atomic(path, format!("{serialized}\n").as_bytes())
 }
 
 fn read_json_file(path: &Path) -> Result<Value, String> {
@@ -308,42 +304,9 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
 }
 
 fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
-    use std::io::Write;
     let path = run_dir.join("events.jsonl");
-    let line = format!(
-        "{}\n",
-        serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?
-    );
-    let mut f = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .mode(0o600)
-                .open(&path)
-                .map_err(|e| format!("open events.jsonl: {e}"))?
-        }
-        #[cfg(not(unix))]
-        {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| format!("open events.jsonl: {e}"))?
-        }
-    };
-    f.write_all(line.as_bytes())
-        .map_err(|e| format!("write events.jsonl: {e}"))?;
-    f.sync_all()
-        .map_err(|e| format!("fsync events.jsonl: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
+    crate::utils::append_owner_only_jsonl_line(&path, &line)
 }
 
 fn update_mission_status(arena_id: &str, mission_id: &str, patch: Value) -> Result<Value, String> {
@@ -653,13 +616,14 @@ fn handle_open(params: TachiArenaParams) -> Result<String, String> {
             "updated_at": now,
         }),
     )?;
-    std::fs::write(
-        dir.join("arena.md"),
+    crate::utils::write_owner_only_file_atomic(
+        &dir.join("arena.md"),
         render_arena_md(
             manifest["arena_id"].as_str().unwrap_or("arena"),
             manifest["title"].as_str().unwrap_or("Tachi Arena"),
             manifest["objective"].as_str().unwrap_or(""),
-        ),
+        )
+        .as_bytes(),
     )
     .map_err(|e| format!("write arena.md: {e}"))?;
     append_event(
@@ -728,14 +692,15 @@ async fn handle_spawn(server: &MemoryServer, params: TachiArenaParams) -> Result
     let feedback_rules_section =
         crate::feedback_rule_ops::render_feedback_rules_section(&feedback_rules);
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
-    std::fs::write(
+    crate::utils::write_owner_only_file_atomic(
         &prompt_path,
         render_prompt_md(
             &params,
             arena_id,
             &mission_id,
             feedback_rules_section.as_deref(),
-        ),
+        )
+        .as_bytes(),
     )
     .map_err(|e| format!("write prompt.md: {e}"))?;
     let status = json!({
@@ -989,15 +954,24 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
         let mut status_before = read_json_file(&dir.join("status.json"))?;
         refresh_linked_dispatch_fields(&mut status_before);
         let mut result = std::fs::read_to_string(&result_path).unwrap_or_default();
+        let mut result_source = if result.is_empty() {
+            "missing"
+        } else {
+            "mission_result"
+        };
         if result.trim().is_empty() {
             if let Some(dispatch_id) = status_before.get("dispatch_id").and_then(Value::as_str) {
                 let run_dir_hint = status_before.get("run_dir").and_then(Value::as_str);
                 if let Some(dispatch_result) =
                     read_linked_dispatch_result(dispatch_id, run_dir_hint)
                 {
-                    std::fs::write(&result_path, &dispatch_result)
-                        .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
+                    crate::utils::write_owner_only_file_atomic(
+                        &result_path,
+                        dispatch_result.as_bytes(),
+                    )
+                    .map_err(|e| format!("write linked dispatch result.md: {e}"))?;
                     result = dispatch_result;
+                    result_source = "linked_dispatch_result";
                 }
             }
         }
@@ -1015,6 +989,7 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
             json!({
                 "state": state,
                 "collected_at": Utc::now().to_rfc3339(),
+                "result_source": result_source,
                 "completion_draft": if result_written {
                     completion_draft_for_mission(&status_before, &result_path)
                 } else {
@@ -1027,6 +1002,7 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
             "state": state,
             "plan_written": plan_written,
             "result_written": result_written,
+            "result_source": result_source,
             "plan_path": plan_path,
             "result_path": result_path,
             "result": result,
@@ -1204,7 +1180,7 @@ fn handle_close(params: TachiArenaParams) -> Result<String, String> {
     }
     write_json_file(&dir.join("manifest.json"), &manifest)?;
     let summary = render_summary_md(arena_id, &missions);
-    std::fs::write(dir.join("summary.md"), summary)
+    crate::utils::write_owner_only_file_atomic(&dir.join("summary.md"), summary.as_bytes())
         .map_err(|e| format!("write summary.md: {e}"))?;
     append_event(
         &dir,
@@ -1566,6 +1542,11 @@ mod tests {
         let collected: Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(collected["missions"][0]["state"], "collected");
         assert_eq!(collected["missions"][0]["result_written"], true);
+        assert_eq!(collected["missions"][0]["result_source"], "mission_result");
+        assert_eq!(
+            collected["missions"][0]["status"]["result_source"],
+            "mission_result"
+        );
 
         let mut close = params("close");
         close.arena_id = Some(arena_id);
@@ -1786,6 +1767,14 @@ mod tests {
         let collected: Value =
             serde_json::from_str(&handle_tachi_arena(&server, collect).await.unwrap()).unwrap();
         assert_eq!(collected["missions"][0]["state"], json!("collected"));
+        assert_eq!(
+            collected["missions"][0]["result_source"],
+            json!("linked_dispatch_result")
+        );
+        assert_eq!(
+            collected["missions"][0]["status"]["result_source"],
+            json!("linked_dispatch_result")
+        );
         assert!(collected["missions"][0]["result"]
             .as_str()
             .unwrap()

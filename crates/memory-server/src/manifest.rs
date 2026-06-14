@@ -448,11 +448,12 @@ impl Manifest {
                 format!("manifest serialize: {e}"),
             )
         })?;
-        // Atomic-ish write via tmp + rename.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json.as_bytes())?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        crate::utils::write_owner_only_file_atomic(path, json.as_bytes()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("manifest atomic write: {e}"),
+            )
+        })
     }
 
     /// Populate from a doctor scan. Healthy + WalOrphan + LegacySchema get

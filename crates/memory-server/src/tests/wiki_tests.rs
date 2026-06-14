@@ -19,6 +19,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: true,
             references: vec!["relative/path.md".to_string()],
         }))
@@ -41,6 +42,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: true,
             references: vec![
                 "https://github.com/kckylechen1/tachi/issues/149".to_string(),
@@ -86,6 +88,7 @@ async fn tachi_wiki_write_allows_wiki_bucket_without_capture_gate_warning() {
             retention_policy: "permanent".to_string(),
             domain: Some("coding".to_string()),
             project: None,
+            metadata: None,
             force: false,
             references: vec![],
         }))
@@ -119,6 +122,7 @@ async fn tachi_wiki_write_generates_readable_cjk_path_without_domain_warning() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: false,
             references: vec![],
         }))
@@ -155,6 +159,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: true,
             references: vec![],
         }))
@@ -178,6 +183,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: true,
             references: vec![],
         }))
@@ -240,6 +246,7 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
             retention_policy: "permanent".to_string(),
             domain: None,
             project: None,
+            metadata: None,
             force: true,
             references: vec![],
         }))
@@ -378,6 +385,7 @@ async fn tachi_wiki_search_defaults_to_named_wiki_project() {
             scope: None,
             project: None,
             domain: None,
+            metadata: None,
             force: false,
         }))
         .await
@@ -422,6 +430,7 @@ async fn tachi_wiki_search_supports_explicit_markdown_format() {
             scope: None,
             project: None,
             domain: None,
+            metadata: None,
             force: false,
         }))
         .await
@@ -458,6 +467,7 @@ async fn tachi_wiki_write_supports_explicit_markdown_format() {
             scope: None,
             project: None,
             domain: Some("engineering".to_string()),
+            metadata: None,
             force: true,
         }))
         .await
@@ -469,6 +479,75 @@ async fn tachi_wiki_write_supports_explicit_markdown_format() {
         response.contains("/wiki/agent/tachi/facade-markdown-write"),
         "{response}"
     );
+}
+
+#[tokio::test]
+async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
+    let server = make_server();
+
+    let response = server
+        .tachi_wiki(Parameters(TachiWikiParams {
+            action: "write".to_string(),
+            format: None,
+            query: None,
+            category: Some("guide".to_string()),
+            top_k: None,
+            limit: None,
+            title: Some("AgentReview guide".to_string()),
+            text: Some(
+                "AgentReview outputs should be routed by destination layer and promotion intent."
+                    .to_string(),
+            ),
+            path: Some("/guide/global/workflows/agent-review".to_string()),
+            topic: Some("agent-review-guide".to_string()),
+            summary: Some("AgentReview routing guide".to_string()),
+            keywords: vec!["agent-review".to_string()],
+            entities: Vec::new(),
+            references: Vec::new(),
+            importance: None,
+            scope: Some("global".to_string()),
+            project: None,
+            domain: Some("docs".to_string()),
+            metadata: Some(json!({
+                "layer": "caller-should-not-override",
+                "applies_to": {
+                    "task_type": ["agent_review"],
+                    "profiles": ["codex_55_review"],
+                    "stage": ["review"]
+                }
+            })),
+            force: true,
+        }))
+        .await
+        .expect("guide wiki write should succeed");
+    let json: Value = serde_json::from_str(&response).expect("write JSON");
+    assert_eq!(
+        json["wiki_path"],
+        json!("/guide/global/workflows/agent-review")
+    );
+    let id = json["id"].as_str().expect("wiki id").to_string();
+
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get guide memory");
+    let entry: Value = serde_json::from_str(&fetched).expect("entry JSON");
+    assert_eq!(entry["path"], json!("/guide/global/workflows/agent-review"));
+    assert_eq!(entry["metadata"]["layer"], json!("guide"));
+    assert_eq!(entry["metadata"]["scope"], json!("global"));
+    assert_eq!(
+        entry["metadata"]["applies_to"]["task_type"],
+        json!(["agent_review"])
+    );
+    assert_eq!(
+        entry["metadata"]["applies_to"]["profiles"],
+        json!(["codex_55_review"])
+    );
+    assert_eq!(entry["metadata"]["applies_to"]["stage"], json!(["review"]));
 }
 
 #[tokio::test]
@@ -501,6 +580,7 @@ async fn tachi_wiki_read_and_browse_default_to_json() {
             scope: None,
             project: None,
             domain: None,
+            metadata: None,
             force: false,
         }))
         .await
@@ -532,6 +612,7 @@ async fn tachi_wiki_read_and_browse_default_to_json() {
             scope: None,
             project: None,
             domain: None,
+            metadata: None,
             force: false,
         }))
         .await

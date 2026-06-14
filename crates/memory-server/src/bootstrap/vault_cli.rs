@@ -641,6 +641,8 @@ pub(super) async fn run_vault_command(
 
         VaultAction::Get {
             name,
+            reveal,
+            json,
             stdin_password,
             keychain,
             password_file,
@@ -677,7 +679,7 @@ pub(super) async fn run_vault_command(
             let value = String::from_utf8(decrypted)
                 .map_err(|e| format!("Secret is not valid UTF-8: {e}"))?;
 
-            println!("{value}");
+            print!("{}", vault_get_output(&name, &value, reveal, json)?);
             Ok(())
         }
 
@@ -908,8 +910,12 @@ fn read_verified_vault_key(
 ) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-    let mut password =
-        read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
+    let mut password = read_vault_password(
+        stdin_password,
+        keychain,
+        password_file,
+        insecure_password_file,
+    )?;
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -937,8 +943,12 @@ fn decrypt_profile_secret_values(
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?
         .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-    let password =
-        read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
+    let password = read_vault_password(
+        stdin_password,
+        keychain,
+        password_file,
+        insecure_password_file,
+    )?;
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -1153,6 +1163,35 @@ fn print_lease_output(out: &str, json_output: bool) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+fn vault_get_output(
+    name: &str,
+    value: &str,
+    reveal: bool,
+    json_output: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if json_output {
+        let mut body = serde_json::json!({
+            "name": name,
+            "revealed": reveal,
+        });
+        if reveal {
+            body["value"] = serde_json::json!(value);
+        } else {
+            body["value"] = serde_json::json!("<redacted>");
+            body["hint"] = serde_json::json!("Pass --reveal to print the decrypted secret value.");
+        }
+        return Ok(format!("{}\n", serde_json::to_string_pretty(&body)?));
+    }
+
+    if reveal {
+        return Ok(format!("{value}\n"));
+    }
+
+    Ok(format!(
+        "Secret '{name}' exists; value hidden. Re-run with --reveal to print the decrypted value.\n"
+    ))
+}
+
 fn build_key_health_result(
     store: &memory_core::MemoryStore,
     logical_name: &str,
@@ -1275,7 +1314,11 @@ pub(super) fn read_vault_init_password(
     let (password, confirm) = if stdin_password {
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
-        read_vault_init_password_stdin_lines(&mut stdin, confirm_password_file, insecure_password_file)?
+        read_vault_init_password_stdin_lines(
+            &mut stdin,
+            confirm_password_file,
+            insecure_password_file,
+        )?
     } else if keychain || password_file.is_some() {
         let password = read_vault_password(false, keychain, password_file, insecure_password_file)?;
         let Some(path) = confirm_password_file else {
@@ -1393,6 +1436,34 @@ mod tests {
     }
 
     #[test]
+    fn vault_get_output_redacts_by_default() {
+        let out =
+            vault_get_output("GH_TOKEN", "ghp_secret_value", false, false).expect("format output");
+        assert!(out.contains("GH_TOKEN"));
+        assert!(out.contains("--reveal"));
+        assert!(
+            !out.contains("ghp_secret_value"),
+            "default get output must not reveal the secret: {out}"
+        );
+    }
+
+    #[test]
+    fn vault_get_output_reveals_only_when_requested() {
+        let plain =
+            vault_get_output("GH_TOKEN", "ghp_secret_value", true, false).expect("plain output");
+        assert_eq!(plain, "ghp_secret_value\n");
+
+        let json =
+            vault_get_output("GH_TOKEN", "ghp_secret_value", false, true).expect("json output");
+        assert!(json.contains("\"revealed\": false"));
+        assert!(json.contains("<redacted>"));
+        assert!(
+            !json.contains("ghp_secret_value"),
+            "redacted JSON must not reveal the secret: {json}"
+        );
+    }
+
+    #[test]
     fn noninteractive_init_password_file_requires_confirmation_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let password_file = dir.path().join("password.txt");
@@ -1414,16 +1485,26 @@ mod tests {
         make_owner_only(&password_file);
         make_owner_only(&confirm_file);
 
-        let err =
-            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file), false)
-                .expect_err("mismatched confirmation should fail");
+        let err = read_vault_init_password(
+            false,
+            false,
+            Some(&password_file),
+            Some(&confirm_file),
+            false,
+        )
+        .expect_err("mismatched confirmation should fail");
         assert!(err.to_string().contains("Passwords do not match"), "{err}");
 
         std::fs::write(&confirm_file, "correct horse battery staple\n").expect("confirm file");
         make_owner_only(&confirm_file);
-        let password =
-            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file), false)
-                .expect("matching confirmation should succeed");
+        let password = read_vault_init_password(
+            false,
+            false,
+            Some(&password_file),
+            Some(&confirm_file),
+            false,
+        )
+        .expect("matching confirmation should succeed");
         assert_eq!(password, "correct horse battery staple");
     }
 
@@ -1450,8 +1531,9 @@ mod tests {
         std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
         make_group_readable(&password_file);
 
-        let password = read_password_file(&password_file, true)
-            .expect("group-readable password file should be accepted with --insecure-password-file");
+        let password = read_password_file(&password_file, true).expect(
+            "group-readable password file should be accepted with --insecure-password-file",
+        );
         assert_eq!(password, "correct horse battery staple");
     }
 

@@ -5,7 +5,6 @@ use crate::tool_params::*;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::json;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub(crate) async fn handle_memory_progress(
@@ -89,12 +88,7 @@ fn progress_run_dir(flow_id: &str) -> Result<PathBuf, String> {
 fn append_jsonl(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     let line =
         serde_json::to_string(value).map_err(|e| format!("serialize progress event: {e}"))?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    writeln!(file, "{line}").map_err(|e| format!("write {}: {e}", path.display()))
+    crate::utils::append_owner_only_jsonl_line(path, &line)
 }
 
 fn update_progress_status(run_dir: &Path, line: &serde_json::Value) -> Result<(), String> {
@@ -121,17 +115,7 @@ fn update_progress_status(run_dir: &Path, line: &serde_json::Value) -> Result<()
         }
         let body =
             serde_json::to_string_pretty(&status).map_err(|e| format!("serialize status: {e}"))?;
-        // Atomic write: write to temp file then rename to avoid corruption on crash
-        let tmp_path = status_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, &body)
-            .map_err(|e| format!("write {}: {e}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &status_path).map_err(|e| {
-            format!(
-                "rename {} -> {}: {e}",
-                tmp_path.display(),
-                status_path.display()
-            )
-        })
+        crate::utils::write_owner_only_file_atomic(&status_path, body.as_bytes())
     })
 }
 

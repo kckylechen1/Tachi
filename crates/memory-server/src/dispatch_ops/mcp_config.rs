@@ -109,7 +109,7 @@ pub(super) async fn generate_mcp_config(
     let config_path = tmp_dir.join(format!("dispatch-{dispatch_id}-mcp.json"));
     let config_str = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize MCP config: {e}"))?;
-    crate::utils::write_owner_only_file(&config_path, config_str.as_bytes())
+    crate::utils::write_owner_only_file_atomic(&config_path, config_str.as_bytes())
         .map_err(|e| format!("Failed to write MCP config: {e}"))?;
 
     Ok(Some(config_path))

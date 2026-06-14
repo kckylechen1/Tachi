@@ -11,6 +11,68 @@ use crate::tool_params::{DistillTrajectoryParams, SaveMemoryParams, TachiComplet
 use crate::MemoryServer;
 use serde_json::json;
 
+fn scrub_eval_string(text: &str, redactions: &mut usize) -> String {
+    let (safe, count) = crate::memory_search_ops::scrub_secrets(text);
+    *redactions += count;
+    safe
+}
+
+fn eval_json_key_is_secretish(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("api_key")
+        || key.contains("apikey")
+        || key.contains("token")
+        || key.contains("secret")
+        || key.contains("password")
+        || key.contains("authorization")
+}
+
+fn scrub_eval_json_value(
+    key: Option<&str>,
+    value: serde_json::Value,
+    redactions: &mut usize,
+) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => {
+            let safe = scrub_eval_string(&text, redactions);
+            if safe != text {
+                serde_json::Value::String(safe)
+            } else if key.is_some_and(eval_json_key_is_secretish) && !text.trim().is_empty() {
+                *redactions += 1;
+                serde_json::Value::String("[REDACTED]".to_string())
+            } else {
+                serde_json::Value::String(text)
+            }
+        }
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(|item| scrub_eval_json_value(None, item, redactions))
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| {
+                    let value = scrub_eval_json_value(Some(&key), value, redactions);
+                    (key, value)
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn scrub_eval_json(value: serde_json::Value, redactions: &mut usize) -> serde_json::Value {
+    scrub_eval_json_value(None, value, redactions)
+}
+
+fn scrub_eval_strings(values: &[String], redactions: &mut usize) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| scrub_eval_string(value, redactions))
+        .collect()
+}
+
 pub(crate) async fn handle_tachi_complete(
     server: &MemoryServer,
     params: TachiCompleteParams,
@@ -28,6 +90,27 @@ pub(crate) async fn handle_tachi_complete(
     });
 
     let path = format!("/eval/{}/{}", date, task_id);
+    let mut secret_redactions = 0usize;
+    let safe_task = scrub_eval_string(&params.task, &mut secret_redactions);
+    let safe_agent = scrub_eval_string(&params.agent, &mut secret_redactions);
+    let safe_notes = params
+        .notes
+        .as_ref()
+        .map(|notes| scrub_eval_string(notes, &mut secret_redactions));
+    let safe_skills_used = scrub_eval_strings(&params.skills_used, &mut secret_redactions);
+    let safe_evidence_refs = scrub_eval_strings(&params.evidence_refs, &mut secret_redactions);
+    let safe_tests_run = scrub_eval_strings(&params.tests_run, &mut secret_redactions);
+    let safe_trajectory = params
+        .trajectory
+        .as_ref()
+        .map(|trajectory| scrub_eval_json(trajectory.clone(), &mut secret_redactions));
+    let safe_diff = params
+        .diff
+        .as_ref()
+        .map(|diff| scrub_eval_string(diff, &mut secret_redactions));
+    let safe_subagents = scrub_eval_json(json!(&params.subagents), &mut secret_redactions);
+    let safe_feedback_rules =
+        scrub_eval_strings(&params.feedback_rules_applied, &mut secret_redactions);
 
     let outcome_norm = params.outcome.to_ascii_lowercase();
     let outcome_emoji = match outcome_norm.as_str() {
@@ -60,11 +143,11 @@ pub(crate) async fn handle_tachi_complete(
 
     let mut summary_lines = vec![format!(
         "[{}] {} completed task in {}{}",
-        outcome_emoji, params.agent, duration_display, cost_display
+        outcome_emoji, safe_agent, duration_display, cost_display
     )];
-    summary_lines.push(format!("Task: {}", params.task));
-    if !params.skills_used.is_empty() {
-        summary_lines.push(format!("Skills: {}", params.skills_used.join(", ")));
+    summary_lines.push(format!("Task: {}", safe_task));
+    if !safe_skills_used.is_empty() {
+        summary_lines.push(format!("Skills: {}", safe_skills_used.join(", ")));
     }
     if let Some(profile) = params.profile.as_deref().filter(|s| !s.is_empty()) {
         summary_lines.push(format!("Profile: {}", profile));
@@ -81,7 +164,7 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(q) = params.quality_score {
         summary_lines.push(format!("Quality: {:.2}", q));
     }
-    if let Some(notes) = &params.notes {
+    if let Some(notes) = &safe_notes {
         if !notes.is_empty() {
             summary_lines.push(format!("Notes: {}", notes));
         }
@@ -89,10 +172,10 @@ pub(crate) async fn handle_tachi_complete(
     let text = summary_lines.join("\n");
 
     let mut keywords: Vec<String> = Vec::new();
-    keywords.push(params.agent.clone());
+    keywords.push(safe_agent.clone());
     keywords.push(outcome_norm.clone());
     keywords.push("eval".to_string());
-    for skill in &params.skills_used {
+    for skill in &safe_skills_used {
         keywords.push(skill.clone());
     }
     if let Some(profile) = params.profile.as_deref().filter(|s| !s.is_empty()) {
@@ -102,14 +185,14 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(risk) = params.risk.as_deref().filter(|s| !s.is_empty()) {
         keywords.push(format!("risk:{risk}"));
     }
-    let entities = params.skills_used.clone();
+    let entities = safe_skills_used.clone();
     if !params.subagents.is_empty() {
         keywords.push("subagent_eval".to_string());
     }
 
     let mut metadata_map = serde_json::Map::new();
     metadata_map.insert("task_id".into(), serde_json::json!(task_id));
-    metadata_map.insert("agent".into(), serde_json::json!(params.agent));
+    metadata_map.insert("agent".into(), serde_json::json!(safe_agent.clone()));
     metadata_map.insert("outcome".into(), serde_json::json!(outcome_norm));
     if let Some(task_type) = &params.task_type {
         if !task_type.is_empty() {
@@ -129,8 +212,11 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(ms) = params.duration_ms {
         metadata_map.insert("duration_ms".into(), serde_json::json!(ms));
     }
-    if !params.skills_used.is_empty() {
-        metadata_map.insert("skills_used".into(), serde_json::json!(params.skills_used));
+    if !safe_skills_used.is_empty() {
+        metadata_map.insert(
+            "skills_used".into(),
+            serde_json::json!(safe_skills_used.clone()),
+        );
     }
     if let Some(t) = params.cost_tokens {
         metadata_map.insert("cost_tokens".into(), serde_json::json!(t));
@@ -141,10 +227,10 @@ pub(crate) async fn handle_tachi_complete(
     if let Some(q) = params.quality_score {
         metadata_map.insert("quality_score".into(), serde_json::json!(q));
     }
-    if let Some(traj) = &params.trajectory {
+    if let Some(traj) = &safe_trajectory {
         metadata_map.insert("trajectory".into(), traj.clone());
     }
-    if let Some(diff) = &params.diff {
+    if let Some(diff) = &safe_diff {
         if !diff.is_empty() {
             metadata_map.insert("diff".into(), serde_json::json!(diff));
         }
@@ -163,7 +249,10 @@ pub(crate) async fn handle_tachi_complete(
         serde_json::json!(verification_present),
     );
     if let Some(wt) = &params.worktree {
-        metadata_map.insert("worktree".into(), serde_json::json!(wt));
+        metadata_map.insert(
+            "worktree".into(),
+            serde_json::json!(scrub_eval_string(wt, &mut secret_redactions)),
+        );
     }
     if !params.subagents.is_empty() {
         let roles: Vec<String> = params.subagents.iter().map(|s| s.role.clone()).collect();
@@ -182,12 +271,12 @@ pub(crate) async fn handle_tachi_complete(
         if !models.is_empty() {
             metadata_map.insert("subagent_models".into(), serde_json::json!(models));
         }
-        metadata_map.insert("subagents".into(), serde_json::json!(&params.subagents));
+        metadata_map.insert("subagents".into(), safe_subagents.clone());
     }
-    if !params.feedback_rules_applied.is_empty() {
+    if !safe_feedback_rules.is_empty() {
         metadata_map.insert(
             "feedback_rules_applied".into(),
-            serde_json::json!(params.feedback_rules_applied.clone()),
+            serde_json::json!(safe_feedback_rules.clone()),
         );
     }
     if let Some(did) = &params.dispatch_id {
@@ -208,22 +297,32 @@ pub(crate) async fn handle_tachi_complete(
             metadata_map.insert("pr_ref".into(), serde_json::json!(pr_ref));
         }
     }
-    if !params.evidence_refs.is_empty() {
+    if !safe_evidence_refs.is_empty() {
         metadata_map.insert(
             "evidence_refs".into(),
-            serde_json::json!(params.evidence_refs.clone()),
+            serde_json::json!(safe_evidence_refs.clone()),
         );
     }
-    if !params.tests_run.is_empty() {
+    if !safe_tests_run.is_empty() {
         metadata_map.insert(
             "tests_run".into(),
-            serde_json::json!(params.tests_run.clone()),
+            serde_json::json!(safe_tests_run.clone()),
+        );
+    }
+    if secret_redactions > 0 {
+        metadata_map.insert(
+            "secret_redactions".into(),
+            serde_json::json!(secret_redactions),
+        );
+        metadata_map.insert(
+            "secret_redaction_warning".into(),
+            serde_json::json!("Potential secrets were redacted before eval persistence."),
         );
     }
 
     let mem_params = SaveMemoryParams {
         text,
-        summary: format!("[{}] {} / {}", outcome_emoji, params.agent, params.task),
+        summary: format!("[{}] {} / {}", outcome_emoji, safe_agent, safe_task),
         path: path.clone(),
         importance: match outcome_norm.as_str() {
             "success" => 0.55,
@@ -233,7 +332,7 @@ pub(crate) async fn handle_tachi_complete(
             _ => 0.5,
         },
         category: "eval".to_string(),
-        topic: params.task.clone(),
+        topic: safe_task.clone(),
         keywords,
         persons: Vec::new(),
         entities,
@@ -272,14 +371,14 @@ pub(crate) async fn handle_tachi_complete(
         "post_complete_hooks": "pending",
     });
 
-    if let Some(ref trajectory) = params.trajectory {
+    if let Some(ref trajectory) = safe_trajectory {
         if let Some(trace_arr) = trajectory.as_array() {
             if !trace_arr.is_empty() && outcome_norm == "success" {
                 let server_clone = server.clone();
-                let task_desc = params.task.clone();
-                let agent = params.agent.clone();
+                let task_desc = safe_task.clone();
+                let agent = safe_agent.clone();
                 let trace = trace_arr.clone();
-                let skills_used = params.skills_used.clone();
+                let skills_used = safe_skills_used.clone();
                 let skill_path = if skills_used.is_empty() {
                     format!("/skills/auto/{}", task_id)
                 } else {
@@ -347,8 +446,8 @@ pub(crate) async fn handle_tachi_complete(
         (Some(flow_id), Some(dispatch_id)) => {
             let completion_payload = json!({
                 "task_id": task_id.clone(),
-                "task": params.task.clone(),
-                "agent": params.agent.clone(),
+                "task": safe_task.clone(),
+                "agent": safe_agent.clone(),
                 "outcome": outcome_norm.clone(),
                 "profile": params.profile.clone(),
                 "risk": params.risk.clone(),
@@ -356,11 +455,11 @@ pub(crate) async fn handle_tachi_complete(
                 "eval_path": path.clone(),
                 "verification_present": verification_present,
                 "diff_present": diff_present,
-                "evidence_refs": params.evidence_refs.clone(),
-                "tests_run": params.tests_run.clone(),
+                "evidence_refs": safe_evidence_refs.clone(),
+                "tests_run": safe_tests_run.clone(),
                 "subagent_count": params.subagents.len(),
-                "feedback_rules_applied": params.feedback_rules_applied.clone(),
-                "skills_used": params.skills_used.clone(),
+                "feedback_rules_applied": safe_feedback_rules.clone(),
+                "skills_used": safe_skills_used.clone(),
                 "issue_ref": params.issue_ref.clone(),
                 "pr_ref": params.pr_ref.clone(),
                 "duration_ms": params.duration_ms,
@@ -394,16 +493,16 @@ pub(crate) async fn handle_tachi_complete(
     // Dedup: if a similar lesson already exists (same task text or overlapping
     // skills + same outcome), bump its count instead of creating a duplicate.
     if matches!(outcome_norm.as_str(), "failure" | "partial") {
-        if let Some(ref notes) = params.notes {
+        if let Some(ref notes) = safe_notes {
             if !notes.is_empty() {
                 let lesson_scope_str = params
                     .scope
                     .clone()
                     .unwrap_or_else(|| "project".to_string());
                 let (lesson_db, _) = server.resolve_write_scope(&lesson_scope_str);
-                let task_lower = params.task.to_ascii_lowercase();
+                let task_lower = safe_task.to_ascii_lowercase();
                 let skills_set: std::collections::HashSet<&str> =
-                    params.skills_used.iter().map(|s| s.as_str()).collect();
+                    safe_skills_used.iter().map(|s| s.as_str()).collect();
                 let outcome_ref = outcome_norm.clone();
 
                 let dedup_hit = server
@@ -492,10 +591,10 @@ pub(crate) async fn handle_tachi_complete(
                     let lesson_path = format!("/eval/lessons/{}/{}", lesson_date, lesson_task_id);
                     let lesson_text = format!(
                         "Task: {}\nOutcome: {}\nAgent: {}\nSkills: {}\nDispatch ID: {}\n\nNotes:\n{}",
-                        params.task,
+                        safe_task,
                         outcome_norm,
-                        params.agent,
-                        params.skills_used.join(", "),
+                        safe_agent,
+                        safe_skills_used.join(", "),
                         params.dispatch_id.as_deref().unwrap_or("n/a"),
                         notes,
                     );
@@ -506,7 +605,7 @@ pub(crate) async fn handle_tachi_complete(
                         } else {
                             "~"
                         },
-                        params.task.chars().take(80).collect::<String>()
+                        safe_task.chars().take(80).collect::<String>()
                     );
                     let lesson_params = SaveMemoryParams {
                         text: lesson_text,
@@ -514,14 +613,14 @@ pub(crate) async fn handle_tachi_complete(
                         path: lesson_path,
                         importance: 0.75,
                         category: "lesson".to_string(),
-                        topic: params.task.clone(),
+                        topic: safe_task.clone(),
                         keywords: {
                             let mut kw = vec!["lesson".to_string(), outcome_norm.clone()];
-                            kw.extend(params.skills_used.iter().cloned());
+                            kw.extend(safe_skills_used.iter().cloned());
                             kw
                         },
                         persons: Vec::new(),
-                        entities: params.skills_used.clone(),
+                        entities: safe_skills_used.clone(),
                         location: String::new(),
                         scope: lesson_scope_str,
                         vector: None,
@@ -540,7 +639,7 @@ pub(crate) async fn handle_tachi_complete(
                             "outcome": outcome_norm,
                             "count": 1,
                             "last_seen": Utc::now().to_rfc3339(),
-                            "skills_used": params.skills_used,
+                            "skills_used": safe_skills_used.clone(),
                         })),
                     };
                     match handle_save_memory(server, lesson_params).await {
@@ -582,8 +681,8 @@ pub(crate) async fn handle_tachi_complete(
     let review_bundle = serde_json::json!({
         "recorded": true,
         "task_id": task_id,
-        "task": params.task,
-        "agent": params.agent,
+        "task": safe_task,
+        "agent": safe_agent,
         "path": path,
         "outcome": outcome_norm,
         "dispatch_id": params.dispatch_id,
@@ -593,14 +692,15 @@ pub(crate) async fn handle_tachi_complete(
         "flow_id": params.flow_id,
         "issue_ref": params.issue_ref,
         "pr_ref": params.pr_ref,
-        "evidence_refs": params.evidence_refs,
-        "tests_run": params.tests_run,
+        "evidence_refs": safe_evidence_refs,
+        "tests_run": safe_tests_run,
         "diff_present": diff_present,
         "subagent_count": params.subagents.len(),
-        "subagents": params.subagents,
+        "subagents": safe_subagents,
         "eval_entry": save_json,
         "next_steps": next_steps,
         "pipeline": pipeline_status,
+        "secret_redactions": secret_redactions,
     });
 
     serde_json::to_string(&review_bundle)

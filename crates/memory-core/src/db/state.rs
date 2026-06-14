@@ -40,6 +40,43 @@ pub fn set_state(
     Ok(version)
 }
 
+/// Insert a state row only when the key is currently absent.
+pub fn insert_state_if_absent(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+    value_json: &str,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    let changed = conn.execute(
+        "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(namespace, key) DO NOTHING",
+        params![namespace, key, value_json, &now],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Update a state row only when its version matches the caller's snapshot.
+pub fn set_state_if_version(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+    value_json: &str,
+    expected_version: u32,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    let changed = conn.execute(
+        "UPDATE hard_state
+         SET value_json = ?3,
+             version = version + 1,
+             updated_at = ?4
+         WHERE namespace = ?1 AND key = ?2 AND version = ?5",
+        params![namespace, key, value_json, &now, expected_version],
+    )?;
+    Ok(changed == 1)
+}
+
 /// Get a key-value pair from the hard_state table.
 pub fn get_state(
     conn: &Connection,
@@ -178,4 +215,72 @@ pub fn list_derived_by_source(
         out.push(r?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_state_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE hard_state (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+            "#,
+        )
+        .expect("state schema");
+        conn
+    }
+
+    #[test]
+    fn conditional_state_update_rejects_stale_versions() {
+        let conn = open_state_db();
+
+        let version =
+            set_state(&conn, "claim", "job", r#"{"status":"queued"}"#).expect("seed state");
+        assert_eq!(version, 1);
+
+        assert!(
+            set_state_if_version(&conn, "claim", "job", r#"{"status":"running"}"#, version)
+                .expect("fresh update")
+        );
+        assert!(
+            !set_state_if_version(&conn, "claim", "job", r#"{"status":"running-2"}"#, version)
+                .expect("stale update")
+        );
+
+        let (value, current_version) = get_state(&conn, "claim", "job")
+            .expect("load state")
+            .expect("state exists");
+        assert_eq!(current_version, 2);
+        assert_eq!(value, r#"{"status":"running"}"#);
+    }
+
+    #[test]
+    fn insert_state_if_absent_is_single_winner() {
+        let conn = open_state_db();
+
+        assert!(
+            insert_state_if_absent(&conn, "claim", "job", r#"{"status":"running"}"#)
+                .expect("insert first")
+        );
+        assert!(
+            !insert_state_if_absent(&conn, "claim", "job", r#"{"status":"running-2"}"#)
+                .expect("insert second")
+        );
+
+        let (value, version) = get_state(&conn, "claim", "job")
+            .expect("load state")
+            .expect("state exists");
+        assert_eq!(version, 1);
+        assert_eq!(value, r#"{"status":"running"}"#);
+    }
 }

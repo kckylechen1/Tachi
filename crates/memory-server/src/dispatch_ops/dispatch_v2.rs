@@ -245,7 +245,7 @@ pub(super) fn write_status_json(
     let path = run_dir.join("status.json");
     let body =
         serde_json::to_string_pretty(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string());
-    if let Err(e) = std::fs::write(&path, body) {
+    if let Err(e) = crate::utils::write_owner_only_file_atomic(&path, body.as_bytes()) {
         eprintln!("[dispatch-v2] failed to write {}: {e}", path.display());
     }
 }

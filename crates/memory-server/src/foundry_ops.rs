@@ -89,17 +89,15 @@ fn load_foundry_job_state(
     server: &MemoryServer,
     job_id: &str,
 ) -> Result<Option<serde_json::Value>, String> {
-    server.with_global_store(|store| {
-        match store.get_state_kv(FOUNDRY_JOB_NAMESPACE, job_id) {
-            Ok(Some((value, _version))) => {
-                serde_json::from_str(&value)
-                    .map(Some)
-                    .map_err(|e| format!("Failed to parse foundry job state: {e}"))
-            }
+    server.with_global_store(
+        |store| match store.get_state_kv(FOUNDRY_JOB_NAMESPACE, job_id) {
+            Ok(Some((value, _version))) => serde_json::from_str(&value)
+                .map(Some)
+                .map_err(|e| format!("Failed to parse foundry job state: {e}")),
             Ok(None) => Ok(None),
             Err(e) => Err(format!("Failed to load foundry job state: {e}")),
-        }
-    })
+        },
+    )
 }
 
 fn foundry_job_status(state: &serde_json::Value) -> &str {
@@ -119,9 +117,8 @@ fn foundry_job_updated_at(state: &serde_json::Value) -> Option<chrono::DateTime<
 
 fn foundry_running_job_is_stale(state: &serde_json::Value) -> bool {
     const STALE_AFTER_SECS: i64 = 30 * 60;
-    foundry_job_updated_at(state).is_some_and(|updated| {
-        (Utc::now() - updated).num_seconds() > STALE_AFTER_SECS
-    })
+    foundry_job_updated_at(state)
+        .is_some_and(|updated| (Utc::now() - updated).num_seconds() > STALE_AFTER_SECS)
 }
 
 fn foundry_job_is_active(state: &serde_json::Value) -> bool {
@@ -133,27 +130,42 @@ fn foundry_job_is_active(state: &serde_json::Value) -> bool {
 }
 
 fn try_claim_foundry_job(server: &MemoryServer, job: &memory_core::FoundryJobSpec) -> bool {
-    match load_foundry_job_state(server, &job.id) {
-        Ok(Some(state)) => {
-            let status = foundry_job_status(&state);
-            if status == "running" && !foundry_running_job_is_stale(&state) {
-                return false;
+    let claim = server.with_global_store(|store| {
+        let value_json = foundry_job_state_json(job, "running", json!({}))?;
+        match store
+            .get_state_kv(FOUNDRY_JOB_NAMESPACE, &job.id)
+            .map_err(|e| format!("Failed to load foundry job state: {e}"))?
+        {
+            Some((raw, version)) => {
+                let state: serde_json::Value = serde_json::from_str(&raw)
+                    .map_err(|e| format!("Failed to parse foundry job state: {e}"))?;
+                let status = foundry_job_status(&state);
+                if status == "running" && !foundry_running_job_is_stale(&state) {
+                    return Ok(false);
+                }
+                if status == "completed" || status == "failed" {
+                    return Ok(false);
+                }
+                store
+                    .set_state_if_version(FOUNDRY_JOB_NAMESPACE, &job.id, &value_json, version)
+                    .map_err(|e| format!("Failed to claim foundry job: {e}"))
             }
-            if status == "completed" || status == "failed" {
-                return false;
-            }
+            None => store
+                .insert_state_if_absent(FOUNDRY_JOB_NAMESPACE, &job.id, &value_json)
+                .map_err(|e| format!("Failed to claim new foundry job: {e}")),
         }
-        Ok(None) => {}
+    });
+
+    match claim {
+        Ok(claimed) => claimed,
         Err(err) => {
             eprintln!(
-                "[foundry-agent-evolution] failed to load job {} before claim: {err}",
+                "[foundry-agent-evolution] failed to claim job {}: {err}",
                 job.id
             );
-            return false;
+            false
         }
     }
-
-    save_foundry_job_state(server, job, "running", json!({})).is_ok()
 }
 
 fn build_foundry_job(
@@ -488,6 +500,20 @@ fn save_foundry_job_state(
     status: &str,
     extra: serde_json::Value,
 ) -> Result<(), String> {
+    let value_json = foundry_job_state_json(job, status, extra)?;
+    server.with_global_store(|store| {
+        store
+            .set_state(FOUNDRY_JOB_NAMESPACE, &job.id, &value_json)
+            .map_err(|e| format!("Failed to persist foundry job state: {e}"))?;
+        Ok(())
+    })
+}
+
+fn foundry_job_state_json(
+    job: &memory_core::FoundryJobSpec,
+    status: &str,
+    extra: serde_json::Value,
+) -> Result<String, String> {
     let mut payload = serde_json::Map::new();
     payload.insert("job".into(), json!(job));
     payload.insert("status".into(), json!(status));
@@ -497,14 +523,8 @@ fn save_foundry_job_state(
             payload.insert(key.clone(), value.clone());
         }
     }
-    let value_json = serde_json::to_string(&serde_json::Value::Object(payload))
-        .map_err(|e| format!("Failed to serialize foundry job state: {e}"))?;
-    server.with_global_store(|store| {
-        store
-            .set_state(FOUNDRY_JOB_NAMESPACE, &job.id, &value_json)
-            .map_err(|e| format!("Failed to persist foundry job state: {e}"))?;
-        Ok(())
-    })
+    serde_json::to_string(&serde_json::Value::Object(payload))
+        .map_err(|e| format!("Failed to serialize foundry job state: {e}"))
 }
 
 fn load_review_state(

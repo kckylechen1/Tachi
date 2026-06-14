@@ -2,9 +2,14 @@
 
 use super::*;
 use serde::{Deserialize, Serialize};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+
+const MAX_EVAL_FIXTURE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_EVAL_ROWS: usize = 10_000;
+const MAX_LIVE_EVAL_LIMIT: usize = 5_000;
+const AGENT_EVAL_FIXTURE_ENV: &str = "TACHI_AGENT_EVAL_ALLOW_FIXTURE";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -156,6 +161,23 @@ fn task_type_name(task_type: &TaskType) -> String {
 }
 
 pub(crate) fn load_eval_jsonl(path: &Path) -> Result<Vec<EvalRow>, String> {
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("stat eval file {}: {e}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "eval fixture {} must be a regular file",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_EVAL_FIXTURE_BYTES {
+        return Err(format!(
+            "eval fixture {} is too large ({} bytes > {} byte cap)",
+            path.display(),
+            metadata.len(),
+            MAX_EVAL_FIXTURE_BYTES
+        ));
+    }
+
     let file = File::open(path).map_err(|e| format!("open eval file {}: {e}", path.display()))?;
     let reader = BufReader::new(file);
     let mut rows = Vec::new();
@@ -165,11 +187,29 @@ pub(crate) fn load_eval_jsonl(path: &Path) -> Result<Vec<EvalRow>, String> {
         if trimmed.is_empty() {
             continue;
         }
+        if rows.len() >= MAX_EVAL_ROWS {
+            return Err(format!(
+                "eval fixture {} has more than {} rows",
+                path.display(),
+                MAX_EVAL_ROWS
+            ));
+        }
         let row: EvalRow = serde_json::from_str(trimmed)
             .map_err(|e| format!("parse eval line {}: {e}", line_no + 1))?;
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn capped_eval_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(500).clamp(1, MAX_LIVE_EVAL_LIMIT)
+}
+
+fn eval_fixture_replay_allowed() -> bool {
+    std::env::var(AGENT_EVAL_FIXTURE_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 pub(crate) fn aggregate_scores(rows: &[EvalRow]) -> Vec<AgentTaskScore> {
@@ -638,6 +678,11 @@ pub(crate) async fn handle_agent_eval(
     let action = params.action.trim().to_ascii_lowercase();
     match action.as_str() {
         "aggregate" => {
+            if !eval_fixture_replay_allowed() {
+                return Err(format!(
+                    "fixture replay is disabled by default; set {AGENT_EVAL_FIXTURE_ENV}=1 for local eval replay, or use aggregate_live"
+                ));
+            }
             let path = params
                 .fixture_path
                 .as_deref()
@@ -657,7 +702,7 @@ pub(crate) async fn handle_agent_eval(
             .map_err(|e| format!("serialize aggregate: {e}"))
         }
         "aggregate_live" => {
-            let rows = load_live_eval_rows(_server, params.limit.unwrap_or(500).max(1))?;
+            let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
             let performance_matrix = aggregate_performance_matrix(&rows);
@@ -671,7 +716,7 @@ pub(crate) async fn handle_agent_eval(
             .map_err(|e| format!("serialize aggregate_live: {e}"))
         }
         "telemetry" | "perf" => {
-            let rows = load_live_eval_rows(_server, params.limit.unwrap_or(500).max(1))?;
+            let rows = load_live_eval_rows(_server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);
             let subagent_scores = aggregate_subagent_scores(&rows);
             let performance_matrix = aggregate_performance_matrix(&rows);
@@ -694,6 +739,79 @@ pub(crate) async fn handle_agent_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, old }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_replay_requires_explicit_env_opt_in() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unset = EnvRestore::unset(AGENT_EVAL_FIXTURE_ENV);
+        assert!(!eval_fixture_replay_allowed());
+        drop(unset);
+
+        let _set = EnvRestore::set(AGENT_EVAL_FIXTURE_ENV, "1");
+        assert!(eval_fixture_replay_allowed());
+    }
+
+    #[test]
+    fn eval_limit_is_capped_for_live_queries() {
+        assert_eq!(capped_eval_limit(None), 500);
+        assert_eq!(capped_eval_limit(Some(0)), 1);
+        assert_eq!(capped_eval_limit(Some(42)), 42);
+        assert_eq!(
+            capped_eval_limit(Some(MAX_LIVE_EVAL_LIMIT + 1)),
+            MAX_LIVE_EVAL_LIMIT
+        );
+    }
+
+    #[test]
+    fn load_eval_jsonl_rejects_non_regular_and_oversized_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir_err = load_eval_jsonl(tmp.path()).expect_err("directory should be rejected");
+        assert!(
+            dir_err.contains("regular file"),
+            "expected regular-file error, got: {dir_err}"
+        );
+
+        let oversized = tmp.path().join("oversized.jsonl");
+        let file = std::fs::File::create(&oversized).expect("create oversized fixture");
+        file.set_len(MAX_EVAL_FIXTURE_BYTES + 1)
+            .expect("resize oversized fixture");
+        let size_err = load_eval_jsonl(&oversized).expect_err("oversized file should be rejected");
+        assert!(
+            size_err.contains("too large"),
+            "expected size cap error, got: {size_err}"
+        );
+    }
 
     #[test]
     fn aggregate_computes_rates() {

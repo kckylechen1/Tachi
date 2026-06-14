@@ -609,8 +609,9 @@ fn bridge_hypertachi_memory_columns(conn: &Connection) -> Result<(), MemoryError
 }
 
 fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let rows = {
-        let mut stmt = conn.prepare(
+        let mut stmt = tx.prepare(
             "SELECT id, timestamp, valid_from, valid_until FROM memories \
              WHERE valid_from = '' OR valid_from IS NULL",
         )?;
@@ -629,7 +630,6 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
         rows
     };
 
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     for (id, timestamp, valid_from, valid_until) in rows {
         let valid_from_raw = valid_from
             .as_deref()
@@ -687,8 +687,9 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         }
     }
 
-    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let migration_result = (|| -> Result<(), MemoryError> {
+        let conn = &tx;
         // ── Step 1: Normalize source ────────────────────────────────────────────
         // Empty/NULL → 'manual'
         conn.execute(
@@ -960,16 +961,9 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         Ok(())
     })();
 
-    match migration_result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(e)
-        }
-    }
+    migration_result?;
+    tx.commit()?;
+    Ok(())
 }
 
 fn fetch_ghost_source_batch(

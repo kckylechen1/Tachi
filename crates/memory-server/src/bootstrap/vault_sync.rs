@@ -125,7 +125,7 @@ fn ensure_cloud_export_allowed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !allow_cloud && vault_sync_path_requires_cloud_ack(output) {
         return Err(format!(
-            "Refusing to export Vault sync bundle to cloud-synced path {} without --allow-cloud. The bundle contains encrypted Vault entries plus password verifier material and is not integrity signed; choose --output outside cloud storage or re-run with --allow-cloud.",
+            "Refusing to export Vault sync bundle to cloud-synced path {} without --allow-cloud. The signed bundle still contains encrypted Vault entries plus password verifier material that enables offline password guessing; choose --output outside cloud storage or re-run with --allow-cloud.",
             output.display()
         )
         .into());
@@ -163,7 +163,7 @@ pub(super) fn import_vault_bundle(
     validate_bundle(&bundle)?;
     verify_bundle_signature(&bundle, verification_key, allow_unsigned)?;
 
-    let store = open_cli_store(global_db_path)?;
+    let mut store = open_cli_store(global_db_path)?;
     let local_config = store
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?;
@@ -173,18 +173,8 @@ pub(super) fn import_vault_bundle(
     }
 
     store
-        .vault_set_config(&bundle.vault_config)
-        .map_err(|e| format!("vault_set_config: {e}"))?;
-    for entry in &bundle.entries {
-        store
-            .vault_upsert_entry(entry)
-            .map_err(|e| format!("vault_upsert_entry({}): {e}", entry.name))?;
-    }
-    for rotation in &bundle.rotations {
-        store
-            .vault_set_rotation(rotation)
-            .map_err(|e| format!("vault_set_rotation({}): {e}", rotation.prefix))?;
-    }
+        .vault_import_bundle(&bundle.vault_config, &bundle.entries, &bundle.rotations)
+        .map_err(|e| format!("vault_import_bundle: {e}"))?;
 
     Ok(VaultSyncImportReport {
         path: input.display().to_string(),
@@ -515,6 +505,81 @@ mod tests {
         let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
             .expect_err("tampered bundle should fail integrity verification");
         assert!(err.to_string().contains("integrity"), "{err}");
+
+        let _ = std::fs::remove_file(source_db);
+        let _ = std::fs::remove_file(target_db);
+    }
+
+    #[test]
+    fn vault_sync_import_rolls_back_when_rotation_write_fails() {
+        let source_db = temp_db_path();
+        let target_db = temp_db_path();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = dir.path().join("vault.bundle.json");
+
+        let source = open_cli_store(&source_db).expect("source store");
+        source
+            .vault_set_config(&sample_config())
+            .expect("set source config");
+        source
+            .vault_upsert_entry(&VaultEntry {
+                name: "ROLLBACK_API_KEY_1".to_string(),
+                encrypted_value: "ciphertext".to_string(),
+                nonce: "nonce".to_string(),
+                secret_type: "api_key".to_string(),
+                description: "rollback import fixture".to_string(),
+                allowed_agents: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .expect("upsert source entry");
+        source
+            .vault_set_rotation(&VaultKeyRotation {
+                prefix: "ROLLBACK_API_KEY".to_string(),
+                current_index: 1,
+                total_keys: 1,
+                rotation_strategy: "round_robin".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                updated_at: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .expect("set source rotation");
+        export_vault_bundle(&source_db, &bundle_path, false, &[7u8; 32])
+            .expect("export vault sync bundle");
+
+        let target = open_cli_store(&target_db).expect("target store");
+        target
+            .connection()
+            .execute_batch(
+                r#"
+                DROP TRIGGER IF EXISTS block_vault_rotation_import;
+                CREATE TRIGGER block_vault_rotation_import
+                BEFORE INSERT ON vault_key_rotations
+                BEGIN
+                    SELECT RAISE(FAIL, 'blocked by test');
+                END;
+                "#,
+            )
+            .expect("install blocking trigger");
+        drop(target);
+
+        let err = import_vault_bundle(&target_db, &bundle_path, Some(&[7u8; 32]), false)
+            .expect_err("rotation failure should abort import");
+        assert!(err.to_string().contains("vault_import_bundle"), "{err}");
+
+        let target = open_cli_store_read_only(&target_db).expect("target read store");
+        assert!(
+            target.vault_get_config().expect("target config").is_none(),
+            "failed import must not initialize target vault config"
+        );
+        assert!(
+            target
+                .vault_get_entry("ROLLBACK_API_KEY_1")
+                .expect("target entry")
+                .is_none(),
+            "failed import must not leave imported entries behind"
+        );
 
         let _ = std::fs::remove_file(source_db);
         let _ = std::fs::remove_file(target_db);

@@ -12,6 +12,7 @@ use tokio::process::Command;
 mod board;
 mod dispatch;
 mod dispatch_v2;
+mod harness;
 mod kanban_helpers;
 mod mcp_config;
 mod merge;
@@ -25,9 +26,10 @@ pub(crate) use board::{collect_run_task_for_server, handle_tachi_board};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;
 pub(crate) use dispatch::handle_tachi_dispatch;
-pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
+pub(crate) use dispatch::recover_orphaned_dispatch_runs;
+pub(crate) use harness::{harness_server_attach_ready, probe_harness_server_status};
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;

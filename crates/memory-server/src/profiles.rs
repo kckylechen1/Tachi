@@ -916,6 +916,10 @@ mod tests {
                 test_tool("tachi_board"),
                 test_tool("vault_unlock"),
                 test_tool("vault_lock"),
+                test_tool("vault_get"),
+                test_tool("vault_lease_api_key"),
+                test_tool("vault_set_api_key_pool"),
+                test_tool("vault_record_key_result"),
             ],
             Some(ToolProfile::standard()),
             None,
@@ -965,6 +969,11 @@ mod tests {
                 test_tool("search_memory"),
                 // GH tools should be excluded even with token:
                 test_tool("tachi_gh"),
+                // Raw Vault tools must stay admin-only for delegates.
+                test_tool("vault_get"),
+                test_tool("vault_lease_api_key"),
+                test_tool("vault_set_api_key_pool"),
+                test_tool("vault_record_key_result"),
             ],
             Some(ToolProfile::delegate()),
             None,

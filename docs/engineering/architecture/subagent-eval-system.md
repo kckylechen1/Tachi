@@ -77,8 +77,8 @@ Current behavior:
 - Ordinary memory search excludes `/eval` / `category=eval`.
 - Explicit `/eval` scoped search can retrieve eval rows.
 - `tachi_agent_eval(action="aggregate_live")` aggregates live `/eval` memory.
-- `tachi_agent_eval(action="aggregate", fixture_path=...)` remains for replay
-  fixtures.
+- `tachi_agent_eval(action="aggregate", fixture_path=...)` is fixture replay for
+  local evaluation only and requires `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
 
 This keeps Tachi memory-first without creating an unmanaged JSONL double-write
 track. If production eval volume later becomes large, add a dedicated indexed

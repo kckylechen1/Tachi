@@ -131,15 +131,14 @@ use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
     categorize_error, dlq_mutation_is_unsafe, prune_expired_dead_letters,
-    push_dead_letter_with_limits, should_enqueue_dlq, slim_entry,
-    slim_entry_with_enrichment, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
+    push_dead_letter_with_limits, should_enqueue_dlq, slim_entry, slim_entry_with_enrichment,
+    slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, find_project_git_root, is_trusted_mcp_command,
-    lock_or_recover, parse_env_bool, parse_env_u64, read_or_recover,
-    render_skill_prompt_template, sanitize_safe_path_name, stable_hash, value_to_template_text,
-    write_or_recover,
+    find_git_root, find_project_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool,
+    parse_env_u64, read_or_recover, render_skill_prompt_template, sanitize_safe_path_name,
+    stable_hash, value_to_template_text, write_or_recover,
 };
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
@@ -387,6 +386,7 @@ pub(crate) struct ToolDiscovery {
 #[derive(Clone)]
 struct ProjectDbState {
     store: Arc<StdMutex<MemoryStore>>,
+    read_store: Arc<StdMutex<MemoryStore>>,
     rw_gate: Arc<StdRwLock<()>>,
     db_path: Arc<PathBuf>,
 }
@@ -431,7 +431,9 @@ pub(crate) struct FoundryRuntime {
 #[allow(dead_code)]
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
+    global_read_store: Arc<StdMutex<MemoryStore>>,
     project_store: Option<Arc<StdMutex<MemoryStore>>>,
+    project_read_store: Option<Arc<StdMutex<MemoryStore>>>,
     /// Read/write gate for global DB access. Read operations share the lock,
     /// write operations take exclusive lock.
     global_rw_gate: Arc<StdRwLock<()>>,
@@ -504,35 +506,43 @@ impl MemoryServer {
             )
         })?;
         let global_store = MemoryStore::open_with_label(global_db_str, "global")?;
+        let global_read_store = MemoryStore::open_read_only(global_db_str)?;
         let global_vec_available = global_store.vec_available;
 
-        let (project_store, project_rw_gate, project_db_path, project_vec_available) =
-            if let Some(ref p) = project_db_path {
-                let project_db_str = p.to_str().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("Project DB path contains invalid UTF-8: {}", p.display()),
-                    )
-                })?;
-                // Derive project label from parent directory name
-                // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
-                let project_label = p
-                    .parent()
-                    .and_then(|parent| parent.file_name())
-                    .and_then(|os| os.to_str())
-                    .unwrap_or("project")
-                    .to_string();
-                let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
-                let v = store.vec_available;
-                (
-                    Some(Arc::new(StdMutex::new(store))),
-                    Some(Arc::new(StdRwLock::new(()))),
-                    Some(Arc::new(p.clone())),
-                    v,
+        let (
+            project_store,
+            project_read_store,
+            project_rw_gate,
+            project_db_path,
+            project_vec_available,
+        ) = if let Some(ref p) = project_db_path {
+            let project_db_str = p.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Project DB path contains invalid UTF-8: {}", p.display()),
                 )
-            } else {
-                (None, None, None, false)
-            };
+            })?;
+            // Derive project label from parent directory name
+            // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
+            let project_label = p
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|os| os.to_str())
+                .unwrap_or("project")
+                .to_string();
+            let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
+            let read_store = MemoryStore::open_read_only(project_db_str)?;
+            let v = store.vec_available;
+            (
+                Some(Arc::new(StdMutex::new(store))),
+                Some(Arc::new(StdMutex::new(read_store))),
+                Some(Arc::new(StdRwLock::new(()))),
+                Some(Arc::new(p.clone())),
+                v,
+            )
+        } else {
+            (None, None, None, None, false)
+        };
 
         let llm = Arc::new(llm::LlmClient::new_with_vault_db(Some(
             global_db_path.as_path(),
@@ -576,21 +586,27 @@ impl MemoryServer {
         let hot_project_db = Arc::new(StdRwLock::new(
             match (
                 project_store.as_ref(),
+                project_read_store.as_ref(),
                 project_rw_gate.clone(),
                 project_db_path.clone(),
             ) {
-                (Some(store), Some(rw_gate), Some(db_path)) => Some(ProjectDbState {
-                    store: Arc::clone(store),
-                    rw_gate,
-                    db_path,
-                }),
+                (Some(store), Some(read_store), Some(rw_gate), Some(db_path)) => {
+                    Some(ProjectDbState {
+                        store: Arc::clone(store),
+                        read_store: Arc::clone(read_store),
+                        rw_gate,
+                        db_path,
+                    })
+                }
                 _ => None,
             },
         ));
 
         let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
+            global_read_store: Arc::new(StdMutex::new(global_read_store)),
             project_store,
+            project_read_store,
             global_rw_gate: Arc::new(StdRwLock::new(())),
             project_rw_gate,
             global_db_path: Arc::new(global_db_path),
@@ -653,64 +669,64 @@ impl MemoryServer {
             {
                 let replay_server = server.clone();
                 tokio::spawn(async move {
-                // Short delay to let the foundry worker start receiving
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    // Short delay to let the foundry worker start receiving
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                let mut replayed = 0usize;
+                    let mut replayed = 0usize;
 
-                // Helper: replay jobs from a store
-                let replay_from = |jobs: Vec<memory_core::PersistedFoundryJob>| -> usize {
-                    let mut count = 0;
-                    for job in jobs {
-                        let target_db = match job.target_db.as_str() {
-                            "project" => DbScope::Project,
-                            _ => DbScope::Global,
-                        };
-                        let item = FoundryMaintenanceItem {
-                            job: job.spec,
-                            target_db,
-                            named_project: job.named_project,
-                            db_path: None,
-                            path_prefix: job.path_prefix,
-                            memory_ids: job.memory_ids,
-                            counted_queue_slot: false,
-                        };
-                        if replay_server
-                            .foundry_lock()
-                            .foundry_tx
-                            .try_send(item)
-                            .is_ok()
-                        {
-                            count += 1;
+                    // Helper: replay jobs from a store
+                    let replay_from = |jobs: Vec<memory_core::PersistedFoundryJob>| -> usize {
+                        let mut count = 0;
+                        for job in jobs {
+                            let target_db = match job.target_db.as_str() {
+                                "project" => DbScope::Project,
+                                _ => DbScope::Global,
+                            };
+                            let item = FoundryMaintenanceItem {
+                                job: job.spec,
+                                target_db,
+                                named_project: job.named_project,
+                                db_path: None,
+                                path_prefix: job.path_prefix,
+                                memory_ids: job.memory_ids,
+                                counted_queue_slot: false,
+                            };
+                            if replay_server
+                                .foundry_lock()
+                                .foundry_tx
+                                .try_send(item)
+                                .is_ok()
+                            {
+                                count += 1;
+                            }
                         }
+                        count
+                    };
+
+                    let running_cutoff = (chrono::Utc::now()
+                        - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
+                    .to_rfc3339();
+
+                    // Replay from global DB
+                    if let Ok(jobs) = replay_server.with_global_store(|store| {
+                        memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
+                            .map_err(|e| format!("load pending foundry jobs (global): {e}"))
+                    }) {
+                        replayed += replay_from(jobs);
                     }
-                    count
-                };
 
-                let running_cutoff = (chrono::Utc::now()
-                    - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
-                .to_rfc3339();
+                    // Replay from project DB
+                    if let Ok(jobs) = replay_server.with_project_store(|store| {
+                        memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
+                            .map_err(|e| format!("load pending foundry jobs (project): {e}"))
+                    }) {
+                        replayed += replay_from(jobs);
+                    }
 
-                // Replay from global DB
-                if let Ok(jobs) = replay_server.with_global_store(|store| {
-                    memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
-                        .map_err(|e| format!("load pending foundry jobs (global): {e}"))
-                }) {
-                    replayed += replay_from(jobs);
-                }
-
-                // Replay from project DB
-                if let Ok(jobs) = replay_server.with_project_store(|store| {
-                    memory_core::load_pending_foundry_jobs(store.connection(), &running_cutoff)
-                        .map_err(|e| format!("load pending foundry jobs (project): {e}"))
-                }) {
-                    replayed += replay_from(jobs);
-                }
-
-                if replayed > 0 {
-                    eprintln!("[foundry] replayed {replayed} pending jobs from DB");
-                }
-            });
+                    if replayed > 0 {
+                        eprintln!("[foundry] replayed {replayed} pending jobs from DB");
+                    }
+                });
             }
         }
 

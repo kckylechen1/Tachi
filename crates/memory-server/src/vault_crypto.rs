@@ -100,6 +100,12 @@ pub fn decrypt(key: &[u8; 32], ciphertext_b64: &str, nonce_b64: &str) -> Result<
     let nonce_bytes = B64
         .decode(nonce_b64)
         .map_err(|e| format!("Bad nonce base64: {e}"))?;
+    if nonce_bytes.len() != AES_GCM_NONCE_LEN {
+        return Err(format!(
+            "Bad nonce length: {} (expected {AES_GCM_NONCE_LEN})",
+            nonce_bytes.len()
+        ));
+    }
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Nonce::from_slice(&nonce_bytes);
     cipher
@@ -251,6 +257,13 @@ mod tests {
         let (ciphertext_b64, nonce_b64) = encrypt(&key1, plaintext).unwrap();
         let result = decrypt(&key2, &ciphertext_b64, &nonce_b64);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decrypt_rejects_bad_nonce_length() {
+        let err = decrypt(&[0u8; 32], "", &B64.encode([0u8; 11]))
+            .expect_err("bad nonce length should be rejected before AEAD decrypt");
+        assert!(err.contains("Bad nonce length"), "{err}");
     }
 
     #[test]

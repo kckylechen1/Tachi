@@ -308,11 +308,7 @@ impl ServerHandler for MemoryServer {
             // ─── Dead Letter Queue: capture failures ─────────────────────
             if let Err(ref err) = result {
                 let is_native = self.tool_router.has_route(&tool_name_owned);
-                if should_enqueue_dlq(
-                    &tool_name_owned,
-                    tool_args_for_dlq.as_ref(),
-                    is_native,
-                ) {
+                if should_enqueue_dlq(&tool_name_owned, tool_args_for_dlq.as_ref(), is_native) {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
 

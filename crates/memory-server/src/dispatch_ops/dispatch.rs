@@ -27,6 +27,8 @@ use crate::vault_ops::read_unlocked_vault_secret;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
+
 // ─── Dispatch result ─────────────────────────────────────────────────────────
 
 pub(crate) struct DispatchResult {
@@ -95,6 +97,37 @@ fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
     ) || status.get("exit_code").is_some()
 }
 
+fn dispatch_dedupe_lock_is_stale(existing: &serde_json::Value, dispatch_id: &str) -> bool {
+    let status_path = dispatch_runs_root().join(dispatch_id).join("status.json");
+    if status_path.exists() {
+        return false;
+    }
+    let Some(created_at) = existing
+        .get("created_at")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return false;
+    };
+    let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    Utc::now().signed_duration_since(created_at.with_timezone(&Utc))
+        > chrono::Duration::seconds(DISPATCH_DEDUPE_STALE_LOCK_SECS)
+}
+
+fn dispatch_dedupe_lock_file_is_stale(lock_path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(lock_path) else {
+        return true;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    age > std::time::Duration::from_secs(DISPATCH_DEDUPE_STALE_LOCK_SECS as u64)
+}
+
 fn dispatch_dedupe_root() -> PathBuf {
     dispatch_runs_root().join(".dispatch-dedupe")
 }
@@ -122,24 +155,55 @@ fn reserve_dispatch_dedupe_lock(
     let payload =
         serde_json::to_vec_pretty(&payload).map_err(|e| format!("serialize dedupe lock: {e}"))?;
 
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock_path)
+    let mut lock_options = std::fs::OpenOptions::new();
+    lock_options.write(true).create_new(true);
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        lock_options.mode(0o600);
+    }
+
+    match lock_options.open(&lock_path) {
         Ok(mut file) => {
             use std::io::Write;
-            file.write_all(&payload)
-                .map_err(|e| format!("write dispatch dedupe lock: {e}"))?;
+            let write_result = (|| -> Result<(), String> {
+                file.write_all(&payload)
+                    .map_err(|e| format!("write dispatch dedupe lock: {e}"))?;
+                file.sync_all()
+                    .map_err(|e| format!("fsync dispatch dedupe lock: {e}"))?;
+                crate::utils::sync_parent_dir(&lock_path)
+            })();
+            if let Err(err) = write_result {
+                let _ = std::fs::remove_file(&lock_path);
+                return Err(err);
+            }
             Ok(lock_path)
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = crate::task_lifecycle::read_json_file(&lock_path)?.unwrap_or(json!({}));
+            let existing = match crate::task_lifecycle::read_json_file(&lock_path) {
+                Ok(Some(existing)) => existing,
+                Ok(None) => json!({}),
+                Err(err) if dispatch_dedupe_lock_file_is_stale(&lock_path) => {
+                    let _ = std::fs::remove_file(&lock_path);
+                    return reserve_dispatch_dedupe_lock(
+                        lock_dir,
+                        scope,
+                        task,
+                        dispatch_id,
+                        flow_id,
+                    );
+                }
+                Err(err) => return Err(err),
+            };
             let existing_dispatch_id = existing
                 .get("dispatch_id")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("<unknown>");
             if dispatch_status_is_terminal(existing_dispatch_id) {
+                let _ = std::fs::remove_file(&lock_path);
+                return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
+            }
+            if dispatch_dedupe_lock_is_stale(&existing, existing_dispatch_id) {
                 let _ = std::fs::remove_file(&lock_path);
                 return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
             }
@@ -164,18 +228,11 @@ fn reserve_flow_dispatch_slot(
         return Ok(None);
     };
     let lock_dir = run_dir.join(".dispatch-dedupe");
-    reserve_dispatch_dedupe_lock(&lock_dir, "flow", task, dispatch_id, Some(flow_id))
-        .map(Some)
+    reserve_dispatch_dedupe_lock(&lock_dir, "flow", task, dispatch_id, Some(flow_id)).map(Some)
 }
 
 fn reserve_global_dispatch_slot(task: &str, dispatch_id: &str) -> Result<PathBuf, String> {
-    reserve_dispatch_dedupe_lock(
-        &dispatch_dedupe_root(),
-        "global",
-        task,
-        dispatch_id,
-        None,
-    )
+    reserve_dispatch_dedupe_lock(&dispatch_dedupe_root(), "global", task, dispatch_id, None)
 }
 
 fn reserve_dispatch_slot(
@@ -557,8 +614,7 @@ pub(crate) async fn handle_tachi_dispatch(
     let plan_path = workspace_dir.join("plan.md");
     // V1 writes the assembled prompt as a placeholder plan.md (legacy);
     // V2 will overwrite this with the real LLM-generated plan below.
-    tokio::fs::write(&plan_path, &base_prompt)
-        .await
+    crate::utils::write_owner_only_file_atomic(&plan_path, base_prompt.as_bytes())
         .map_err(|e| format!("Failed to write plan file: {e}"))?;
 
     // Write prompt.md (full assembled prompt for tracked run)
@@ -782,7 +838,7 @@ pub(crate) async fn handle_tachi_dispatch(
         };
 
         // Persist plan.md (overwrites the V1 placeholder).
-        std::fs::write(&plan_path, &plan_outcome.plan_md)
+        crate::utils::write_owner_only_file_atomic(&plan_path, plan_outcome.plan_md.as_bytes())
             .map_err(|e| format!("Failed to write plan.md: {e}"))?;
         let sections = parse_plan_sections(&plan_outcome.plan_md);
 
@@ -1110,7 +1166,26 @@ pub(crate) async fn handle_tachi_dispatch(
         // Save full output to result.md for orchestrator eval
         {
             let result_path = workspace_dir.join("result.md");
-            let _ = std::fs::write(&result_path, &full_output);
+            if let Err(err) =
+                crate::utils::write_owner_only_file_atomic(&result_path, full_output.as_bytes())
+            {
+                tracing::warn!(
+                    dispatch_id = %d_id,
+                    path = %result_path.display(),
+                    error = %err,
+                    "failed to persist dispatch result artifact"
+                );
+                append_trajectory_event(
+                    &traj_path_for_spawn,
+                    json!({
+                        "event": "result_persist_failed",
+                        "dispatch_id": d_id,
+                        "timestamp": Utc::now().to_rfc3339(),
+                        "path": result_path.to_string_lossy(),
+                        "error": err,
+                    }),
+                );
+            }
         }
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
@@ -1373,9 +1448,7 @@ fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool {
         return false;
     }
     match status.get("state").and_then(serde_json::Value::as_str) {
-        Some(
-            "TASK_STATE_WORKING" | "TASK_STATE_PENDING" | "TASK_STATE_RUNNING",
-        ) => true,
+        Some("TASK_STATE_WORKING" | "TASK_STATE_PENDING" | "TASK_STATE_RUNNING") => true,
         Some(_) => false,
         None => true,
     }
@@ -1428,11 +1501,16 @@ pub(crate) fn recover_orphaned_dispatch_runs() -> Vec<String> {
         write_status_json(
             &run_dir,
             &dispatch_id,
-            status.get("v2").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            status
+                .get("v2")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
             status
                 .get("plan_generated_at")
                 .and_then(serde_json::Value::as_str),
-            status.get("executed_at").and_then(serde_json::Value::as_str),
+            status
+                .get("executed_at")
+                .and_then(serde_json::Value::as_str),
             status
                 .get("plan_review_status")
                 .and_then(serde_json::Value::as_str)
@@ -1477,11 +1555,25 @@ mod tests {
             .expect("config path");
 
         assert!(path.exists());
+        let temp_leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("config parent"))
+            .expect("read config parent")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("dispatch-test-perms-mcp.json.tmp."))
+            .collect();
+        assert!(
+            temp_leftovers.is_empty(),
+            "MCP config atomic write should not leave temp files: {temp_leftovers:?}"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "MCP config mode should be 0o600, got {:#o}", mode);
+            assert_eq!(
+                mode, 0o600,
+                "MCP config mode should be 0o600, got {:#o}",
+                mode
+            );
         }
 
         if let Some(value) = original_home {
@@ -1533,7 +1625,10 @@ mod tests {
         .expect("status");
 
         let recovered = recover_orphaned_dispatch_runs();
-        assert_eq!(recovered, vec!["20260614T000000Z-claude-deadbeef".to_string()]);
+        assert_eq!(
+            recovered,
+            vec!["20260614T000000Z-claude-deadbeef".to_string()]
+        );
 
         let status: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
@@ -1636,6 +1731,60 @@ mod tests {
             std::env::set_var("TACHI_HOME", value);
         } else {
             std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
+    fn flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runs_root = tempfile::tempdir().expect("temp runs root");
+        let original_run_root = std::env::var_os("TACHI_RUN_ROOT");
+        std::env::set_var("TACHI_RUN_ROOT", runs_root.path());
+
+        let flow_id = format!(
+            "flow_20260610T000001Z_stale_slot_{}",
+            uuid::Uuid::new_v4().as_simple()
+        );
+        let task = "same task";
+        let old_dispatch_id = "dispatch-stale-lock";
+        let new_dispatch_id = "dispatch-new-lock";
+        let run_dir = crate::shell_ops::run_dir_for_flow_id(&flow_id).expect("flow run dir");
+        let lock_dir = run_dir.join(".dispatch-dedupe");
+        std::fs::create_dir_all(&lock_dir).expect("create lock dir");
+        let task_hash = crate::utils::stable_hash(task);
+        let stale_created_at = (Utc::now()
+            - chrono::Duration::seconds(DISPATCH_DEDUPE_STALE_LOCK_SECS + 1))
+        .to_rfc3339();
+        crate::utils::write_owner_only_file_atomic(
+            &lock_dir.join(format!("{task_hash}.json")),
+            serde_json::to_vec_pretty(&json!({
+                "scope": "flow",
+                "task_hash": task_hash,
+                "dispatch_id": old_dispatch_id,
+                "task": task,
+                "flow_id": flow_id,
+                "created_at": stale_created_at,
+            }))
+            .expect("serialize stale lock")
+            .as_slice(),
+        )
+        .expect("write stale lock");
+
+        let reserved = reserve_flow_dispatch_slot(Some(&flow_id), task, new_dispatch_id)
+            .expect("stale lock should be reclaimed")
+            .expect("slot path");
+        let lock: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&reserved).expect("read lock"))
+                .expect("parse lock");
+        assert_eq!(lock["dispatch_id"], json!(new_dispatch_id));
+
+        release_flow_dispatch_slot(Some(reserved));
+        if let Some(value) = original_run_root {
+            std::env::set_var("TACHI_RUN_ROOT", value);
+        } else {
+            std::env::remove_var("TACHI_RUN_ROOT");
         }
     }
 }

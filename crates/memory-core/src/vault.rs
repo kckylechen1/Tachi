@@ -32,11 +32,11 @@ impl std::str::FromStr for VaultCipher {
 /// Vault configuration stored in vault_config table (exactly one row).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultConfig {
-    pub salt: String,           // base64-encoded 32 bytes
-    pub verifier: String,       // base64-encoded encrypted verifier
-    pub kdf_algorithm: String,  // "argon2id"
-    pub kdf_params: String,     // JSON: {"m":65536,"t":3,"p":4}
-    pub cipher: VaultCipher,    // only aes-256-gcm is supported
+    pub salt: String,          // base64-encoded 32 bytes
+    pub verifier: String,      // base64-encoded encrypted verifier
+    pub kdf_algorithm: String, // "argon2id"
+    pub kdf_params: String,    // JSON: {"m":65536,"t":3,"p":4}
+    pub cipher: VaultCipher,   // only aes-256-gcm is supported
     pub created_at: String,
     pub updated_at: String,
 }

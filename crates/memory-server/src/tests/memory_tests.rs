@@ -1,6 +1,40 @@
 use super::*;
 
 #[tokio::test]
+async fn cached_global_read_store_sees_writes_and_stays_read_only() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&make_entry("cached-read-visible"))
+                .map_err(|e| format!("upsert failed: {e}"))
+        })
+        .expect("seed after cached read store startup");
+
+    let found = server
+        .with_global_store_read(|store| {
+            store
+                .get("cached-read-visible")
+                .map_err(|e| format!("cached read get failed: {e}"))
+        })
+        .expect("cached read should see committed write");
+    assert_eq!(found.expect("entry exists").id, "cached-read-visible");
+
+    let write_err = server
+        .with_global_store_read(|store| {
+            store
+                .upsert(&make_entry("cached-read-write-blocked"))
+                .map_err(|e| format!("cached read write failed: {e}"))
+        })
+        .expect_err("cached read store must reject writes");
+    assert!(
+        write_err.contains("cached read write failed"),
+        "{write_err}"
+    );
+}
+
+#[tokio::test]
 async fn sync_memories_errors_if_agent_state_persist_fails() {
     let server = make_server();
 
@@ -815,7 +849,10 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
         .expect("get_memory should succeed");
     let fetched_json: serde_json::Value = serde_json::from_str(&fetched).expect("get JSON");
     assert!(fetched_json.get("location").is_none());
-    assert_eq!(fetched_json["metadata"]["legacy_location"], json!("Shanghai"));
+    assert_eq!(
+        fetched_json["metadata"]["legacy_location"],
+        json!("Shanghai")
+    );
 }
 
 #[tokio::test]
@@ -1147,6 +1184,44 @@ async fn memory_graph_returns_seed_nodes_and_edges() {
     assert_eq!(json["status"], json!("completed"));
     assert!(json["node_count"].as_u64().unwrap_or(0) >= 2);
     assert!(json["edge_count"].as_u64().unwrap_or(0) >= 1);
+}
+
+#[tokio::test]
+async fn memory_graph_caps_query_seed_top_k() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            for idx in 0..(crate::MAX_SEARCH_TOP_K + 25) {
+                let mut entry = make_entry(&format!("graph_cap_{idx}"));
+                entry.path = format!("/graph/cap/{idx}");
+                entry.topic = "graph cap sentinel".to_string();
+                entry.summary = format!("graph cap sentinel summary {idx}");
+                entry.text = format!("graph cap sentinel searchable row {idx}");
+                entry.keywords = vec!["graph".to_string(), "cap".to_string()];
+                store.upsert(&entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed graph cap memories");
+
+    let result = server
+        .memory_graph(Parameters(MemoryGraphParams {
+            memory_id: None,
+            query: Some("graph cap sentinel".to_string()),
+            path_prefix: Some("/graph/cap".to_string()),
+            project: None,
+            top_k: 10_000,
+            depth: 1,
+        }))
+        .await
+        .expect("memory_graph query should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    assert_eq!(json["status"], json!("completed"));
+    assert_eq!(
+        json["node_count"].as_u64(),
+        Some(crate::MAX_SEARCH_TOP_K as u64)
+    );
 }
 
 #[tokio::test]

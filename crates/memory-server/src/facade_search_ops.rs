@@ -54,6 +54,7 @@ pub(crate) async fn collect_tachi_search_sections(
     server: &MemoryServer,
     params: &TachiSearchParams,
 ) -> (Vec<(String, Value)>, bool, String) {
+    let top_k = crate::clamp_facade_top_k(params.top_k);
     let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
         "wiki" | "memory" | "all" | "sft" => scope.as_str(),
@@ -66,7 +67,7 @@ pub(crate) async fn collect_tachi_search_sections(
         let mem_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
-            top_k: params.top_k.saturating_mul(3).max(params.top_k),
+            top_k: top_k.saturating_mul(3).max(top_k),
             path_prefix: if effective_scope == "sft" {
                 Some("/sft".to_string())
             } else {
@@ -89,7 +90,7 @@ pub(crate) async fn collect_tachi_search_sections(
             include_metadata: false,
         };
         match handle_search_memory(server, mem_params, false).await {
-            Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, params.top_k))),
+            Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, top_k))),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
@@ -105,11 +106,11 @@ pub(crate) async fn collect_tachi_search_sections(
         let wiki_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
-            top_k: params.top_k,
+            top_k,
             path_prefix: Some(wiki_path_prefix),
             include_training: params.include_training,
             include_archived: params.include_archived,
-            candidates_per_channel: params.top_k.max(20),
+            candidates_per_channel: top_k.max(20),
             mmr_threshold: Some(0.85),
             graph_expand_hops: 1,
             graph_relation_filter: None,

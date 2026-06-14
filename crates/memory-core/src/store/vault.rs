@@ -57,6 +57,29 @@ impl MemoryStore {
         Ok(removed_members)
     }
 
+    /// Import a Vault sync bundle atomically.
+    ///
+    /// A sync bundle spans the singleton config row, encrypted entries, and
+    /// rotation rows. Import callers must not leave a target Vault half-initialized
+    /// if a later row fails validation or persistence.
+    pub fn vault_import_bundle(
+        &mut self,
+        config: &VaultConfig,
+        entries: &[VaultEntry],
+        rotations: &[VaultKeyRotation],
+    ) -> Result<(), MemoryError> {
+        let tx = self.conn.transaction()?;
+        db::vault_set_config(&tx, config)?;
+        for entry in entries {
+            db::vault_upsert_entry(&tx, entry)?;
+        }
+        for rotation in rotations {
+            db::vault_set_rotation(&tx, rotation)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Get a secret by name (returns None if not found).
     pub fn vault_get_entry(&self, name: &str) -> Result<Option<VaultEntry>, MemoryError> {
         db::vault_get_entry(&self.conn, name)

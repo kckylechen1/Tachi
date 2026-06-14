@@ -399,13 +399,13 @@ async fn run_truth_maintenance_for_target(
             [],
             |r| r.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|e| format!("count active memories {}: {e}", target.label))?;
     let consolidated_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE archived = 0 AND tier IN ('consolidated','pattern')",
             [], |r| r.get(0),
         )
-        .unwrap_or(0);
+        .map_err(|e| format!("count consolidated memories {}: {e}", target.label))?;
     let health_ratio = if total_active > 0 {
         consolidated_count as f64 / total_active as f64
     } else {
@@ -426,7 +426,7 @@ async fn run_truth_maintenance_for_target(
                    AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
                 [],
             )
-            .unwrap_or(0);
+            .map_err(|e| format!("self-heal promote raw memories {}: {e}", target.label))?;
         if promoted > 0 {
             eprintln!(
                 "[daily_pipeline] self-heal {}: promoted {promoted} raw → consolidated (ratio was {health_ratio:.2})",
@@ -451,13 +451,13 @@ async fn run_truth_maintenance_for_target(
         let ids: Vec<String> = stmt
             .query_map([], |r| r.get(0))
             .map_err(|e| format!("query embedding scan {}: {e}", target.label))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read embedding scan row {}: {e}", target.label))?;
         ids
     };
     if !needs_embed_ids.is_empty() {
-        let candidates =
-            memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false).unwrap_or_default();
+        let candidates = memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false)
+            .map_err(|e| format!("fetch embedding candidates {}: {e}", target.label))?;
         for entry in candidates.values() {
             let _ = server.enrichment_lock().enrich_tx.try_send(
                 crate::enrichment::build_enrichment_item(
@@ -487,8 +487,8 @@ async fn run_truth_maintenance_for_target(
     let ids = stmt
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|e| format!("query promotion scan {}: {e}", target.label))?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read promotion scan row {}: {e}", target.label))?;
     let entries = memory_core::db::fetch_by_ids(conn, &ids, false)
         .map_err(|e| format!("fetch promotion candidates {}: {e}", target.label))?;
 
@@ -499,7 +499,7 @@ async fn run_truth_maintenance_for_target(
                 rusqlite::params![entry.id],
                 |row| row.get::<_, usize>(0),
             )
-            .unwrap_or(0);
+            .map_err(|e| format!("count access days for {}: {e}", entry.id))?;
         if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
             continue;
         }
@@ -711,7 +711,16 @@ async fn run_agent_evolution_stage(
         }
     };
 
-    let eval_rows = collect_recent_eval_rows(server, 100).unwrap_or_default();
+    let eval_rows = match collect_recent_eval_rows(server, 100) {
+        Ok(rows) => rows,
+        Err(e) => {
+            return DailyStageReport {
+                status: "failed".to_string(),
+                summary: format!("Could not load recent eval evidence: {e}"),
+                details: json!({ "error": e }),
+            };
+        }
+    };
     let mut results = Vec::new();
     let mut completed = 0usize;
     let mut skipped = 0usize;
@@ -1037,11 +1046,14 @@ fn collect_eval_rows_30d(server: &MemoryServer) -> Result<Vec<EvalEvidenceRow>, 
         Ok(out)
     };
 
-    let mut rows = server.with_global_store_read(collect)?;
+    let mut rows = server
+        .with_global_store_read(collect)
+        .map_err(|e| format!("collect global eval evidence: {e}"))?;
     if server.has_project_db() {
-        if let Ok(mut project_rows) = server.with_project_store_read(collect) {
-            rows.append(&mut project_rows);
-        }
+        let mut project_rows = server
+            .with_project_store_read(collect)
+            .map_err(|e| format!("collect project eval evidence: {e}"))?;
+        rows.append(&mut project_rows);
     }
     Ok(rows)
 }
@@ -1082,11 +1094,14 @@ fn collect_recent_eval_rows(
         Ok(out)
     };
 
-    let mut rows = server.with_global_store_read(collect)?;
+    let mut rows = server
+        .with_global_store_read(collect)
+        .map_err(|e| format!("collect global recent eval evidence: {e}"))?;
     if server.has_project_db() {
-        if let Ok(mut project_rows) = server.with_project_store_read(collect) {
-            rows.append(&mut project_rows);
-        }
+        let mut project_rows = server
+            .with_project_store_read(collect)
+            .map_err(|e| format!("collect project recent eval evidence: {e}"))?;
+        rows.append(&mut project_rows);
     }
     Ok(rows)
 }

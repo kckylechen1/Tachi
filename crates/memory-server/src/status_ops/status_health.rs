@@ -679,11 +679,9 @@ pub(crate) fn write_provider_probe_cache_report(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create probe cache dir: {e}"))?;
     }
-    let tmp = path.with_extension("json.tmp");
     let serialized = serde_json::to_string_pretty(&cache)
         .map_err(|e| format!("serialize provider probe cache: {e}"))?;
-    std::fs::write(&tmp, serialized).map_err(|e| format!("write provider probe cache: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename provider probe cache: {e}"))?;
+    crate::utils::write_owner_only_file_atomic(&path, serialized.as_bytes())?;
     Ok(cache)
 }
 

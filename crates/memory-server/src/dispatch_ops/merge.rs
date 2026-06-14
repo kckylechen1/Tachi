@@ -99,6 +99,13 @@ struct CleanerRemoveReport {
     errors: Vec<String>,
 }
 
+struct MergePreviewResult {
+    can_merge: bool,
+    merge_output: String,
+    error: Option<String>,
+    diff_stat: Option<String>,
+}
+
 pub(crate) fn resolve_tachi_clean_bin() -> std::path::PathBuf {
     if let Some(bin) = std::env::var_os("TACHI_CLEAN_BIN") {
         return std::path::PathBuf::from(bin);
@@ -296,6 +303,64 @@ async fn remove_worktree_with_cleaner(worktree: &str) -> Result<CleanerRemoveRep
     }
 }
 
+async fn preview_merge_without_touching_worktree(
+    repo_root: &str,
+    branch: &str,
+) -> Result<MergePreviewResult, String> {
+    let merge_out = Command::new("git")
+        .args([
+            "-C",
+            repo_root,
+            "merge-tree",
+            "--write-tree",
+            "HEAD",
+            branch,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Merge preview failed: {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&merge_out.stdout)
+        .trim()
+        .to_string();
+    let stderr = String::from_utf8_lossy(&merge_out.stderr)
+        .trim()
+        .to_string();
+
+    if !merge_out.status.success() {
+        let error = if stderr.is_empty() {
+            stdout.clone()
+        } else {
+            stderr
+        };
+        return Ok(MergePreviewResult {
+            can_merge: false,
+            merge_output: stdout,
+            error: Some(error),
+            diff_stat: None,
+        });
+    }
+
+    let tree = stdout.lines().next().unwrap_or("").trim();
+    let diff_stat = if tree.is_empty() {
+        None
+    } else {
+        let diff_out = Command::new("git")
+            .args(["-C", repo_root, "diff", "--stat", "HEAD", tree])
+            .output()
+            .await
+            .map_err(|e| format!("Merge preview diff failed: {e}"))?;
+        Some(String::from_utf8_lossy(&diff_out.stdout).trim().to_string())
+    };
+
+    Ok(MergePreviewResult {
+        can_merge: true,
+        merge_output: stdout,
+        error: None,
+        diff_stat,
+    })
+}
+
 pub(crate) async fn handle_approve_merge(
     params: crate::TachiApproveMergeParams,
 ) -> Result<String, String> {
@@ -352,72 +417,20 @@ pub(crate) async fn handle_approve_merge(
     let requires_human_review = safety.requires_human_review;
 
     if !params.confirm {
-        let merge_out = Command::new("git")
-            .args([
-                "-C",
-                &repo_root,
-                "merge",
-                "--strategy",
-                strategy,
-                "--no-commit",
-                "--no-ff",
-                "--",
-                &branch,
-            ])
-            .output()
-            .await
-            .map_err(|e| format!("Merge preview failed: {e}"))?;
+        let preview = preview_merge_without_touching_worktree(&repo_root, &branch).await?;
 
-        let merge_stdout = String::from_utf8_lossy(&merge_out.stdout).to_string();
-        let merge_stderr = String::from_utf8_lossy(&merge_out.stderr).to_string();
-
-        if !merge_out.status.success() {
-            let abort_out = Command::new("git")
-                .args(["-C", &repo_root, "merge", "--abort"])
-                .output()
-                .await;
-            let abort_error = abort_out
-                .ok()
-                .filter(|out| !out.status.success())
-                .map(|out| String::from_utf8_lossy(&out.stderr).trim().to_string());
+        if !preview.can_merge {
             return serde_json::to_string(&json!({
                 "preview": true,
                 "can_merge": false,
                 "branch": branch,
-                "error": merge_stderr,
-                "abort_error": abort_error,
+                "error": preview.error.unwrap_or_else(|| "merge preview failed".to_string()),
                 "repo_root": repo_root,
+                "preview_engine": "git merge-tree --write-tree",
+                "requested_strategy": strategy,
+                "preview_strategy": "git merge-tree default",
                 "safety_warnings": safety_warnings,
                 "requires_human_review": requires_human_review,
-            }))
-            .map_err(|e| format!("serialize: {e}"));
-        }
-
-        let diff_out = Command::new("git")
-            .args(["-C", &repo_root, "diff", "--stat", "HEAD"])
-            .output()
-            .await;
-        let diff_stat = diff_out
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-            .unwrap_or_default();
-
-        let abort_out = Command::new("git")
-            .args(["-C", &repo_root, "merge", "--abort"])
-            .output()
-            .await;
-        if !abort_out.map(|out| out.status.success()).unwrap_or(false) {
-            return serde_json::to_string(&json!({
-                "preview": true,
-                "can_merge": true,
-                "branch": branch,
-                "repo_root": repo_root,
-                "merge_output": merge_stdout.trim(),
-                "diff_stat": diff_stat.trim(),
-                "safety_warnings": safety_warnings,
-                "requires_human_review": true,
-                "delete_worktree_requested": params.delete_worktree,
-                "delete_worktree_allowed": false,
-                "error": "Merge preview succeeded but git merge --abort failed; repository may still be in a merge state. Resolve manually before retrying.",
             }))
             .map_err(|e| format!("serialize: {e}"));
         }
@@ -427,8 +440,11 @@ pub(crate) async fn handle_approve_merge(
             "can_merge": true,
             "branch": branch,
             "repo_root": repo_root,
-            "merge_output": merge_stdout.trim(),
-            "diff_stat": diff_stat.trim(),
+            "merge_output": preview.merge_output,
+            "diff_stat": preview.diff_stat.unwrap_or_default(),
+            "preview_engine": "git merge-tree --write-tree",
+            "requested_strategy": strategy,
+            "preview_strategy": "git merge-tree default",
             "safety_warnings": safety_warnings,
             "requires_human_review": requires_human_review,
             "delete_worktree_requested": params.delete_worktree,

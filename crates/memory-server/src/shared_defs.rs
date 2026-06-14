@@ -345,10 +345,7 @@ mod dlq_tests {
     fn dlq_mutation_is_unsafe_for_write_tools_and_hub_call() {
         assert!(dlq_mutation_is_unsafe("save_memory", None));
         assert!(dlq_mutation_is_unsafe("hub_call", None));
-        assert!(dlq_mutation_is_unsafe(
-            "remote__save_memory",
-            None
-        ));
+        assert!(dlq_mutation_is_unsafe("remote__save_memory", None));
         assert!(dlq_mutation_is_unsafe(
             "tachi_memory",
             Some(&serde_json::Map::from_iter([(

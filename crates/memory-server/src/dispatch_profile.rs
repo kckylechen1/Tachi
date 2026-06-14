@@ -450,6 +450,8 @@ pub(crate) fn handle_dispatch_recommendation(
     } else {
         "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
     };
+    let (recommended_transport, transport_readiness) =
+        recommended_transport_for_profile(best_profile);
 
     serde_json::to_string(&json!({
         "task": task,
@@ -461,7 +463,8 @@ pub(crate) fn handle_dispatch_recommendation(
         "recommended_profile": best.profile,
         "recommended_agent": best.agent,
         "recommended_model": best_profile.model,
-        "recommended_transport": if best_profile.backend == "custom" { "opencode_cli_or_serve" } else { "native_cli" },
+        "recommended_transport": recommended_transport,
+        "transport_readiness": transport_readiness,
         "role": best.role,
         "tool_profile": best_profile.tool_profile,
         "evidence_required": profile_evidence_required_for_server(server, best_profile)?,
@@ -482,6 +485,47 @@ pub(crate) fn handle_dispatch_recommendation(
         "candidates": candidates,
     }))
     .map_err(|e| format!("serialize recommendation: {e}"))
+}
+
+fn recommended_transport_for_profile(profile: &DispatchProfileDef) -> (String, Value) {
+    if profile.backend != "custom" {
+        return (
+            "native_cli".to_string(),
+            json!({ "requested": "native_cli", "readiness": "not_applicable" }),
+        );
+    }
+
+    let requested = std::env::var("TACHI_OPENCODE_TRANSPORT")
+        .unwrap_or_else(|_| "cli".to_string())
+        .to_ascii_lowercase();
+    if matches!(requested.as_str(), "serve" | "opencode_serve" | "server") {
+        let server_url = std::env::var("TACHI_OPENCODE_SERVER_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:4321".to_string());
+        let status = crate::dispatch_ops::probe_harness_server_status(Some(&server_url));
+        let attach_ready = status
+            .get("attach_ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let transport = if attach_ready {
+            "opencode_serve"
+        } else {
+            "opencode_cli"
+        };
+        return (
+            transport.to_string(),
+            json!({
+                "requested": "opencode_serve",
+                "server_url": server_url,
+                "fallback": if attach_ready { Value::Null } else { json!("opencode_cli") },
+                "harness_server_status": status,
+            }),
+        );
+    }
+
+    (
+        "opencode_cli".to_string(),
+        json!({ "requested": "opencode_cli", "readiness": "cli" }),
+    )
 }
 
 pub(crate) fn handle_route_simulation(
@@ -1291,33 +1335,48 @@ fn resolve_and_apply_dispatch_profile_inner(
                         .clone()
                         .or_else(|| std::env::var("TACHI_OPENCODE_SERVER_URL").ok())
                         .unwrap_or_else(|| "http://127.0.0.1:4321".to_string());
-                    let directory = params
-                        .cwd
-                        .clone()
-                        .or_else(|| {
-                            std::env::current_dir()
-                                .ok()
-                                .map(|path| path.to_string_lossy().to_string())
-                        })
-                        .unwrap_or_else(|| ".".to_string());
-                    params.harness_transport = Some("opencode_serve".to_string());
-                    params.harness_server_url = Some(server_url.clone());
-                    params.command = vec![
-                        "opencode".to_string(),
-                        "run".to_string(),
-                        "--attach".to_string(),
-                        server_url,
-                        "--dir".to_string(),
-                        directory,
-                        "--agent".to_string(),
-                        profile.role.to_string(),
-                        "--model".to_string(),
-                        model.to_string(),
-                    ];
-                    route_explanation.push(format!(
-                        "profile selected opencode serve transport for model '{}'",
-                        model
-                    ));
+                    if crate::dispatch_ops::harness_server_attach_ready(&server_url) {
+                        let directory = params
+                            .cwd
+                            .clone()
+                            .or_else(|| {
+                                std::env::current_dir()
+                                    .ok()
+                                    .map(|path| path.to_string_lossy().to_string())
+                            })
+                            .unwrap_or_else(|| ".".to_string());
+                        params.harness_transport = Some("opencode_serve".to_string());
+                        params.harness_server_url = Some(server_url.clone());
+                        params.command = vec![
+                            "opencode".to_string(),
+                            "run".to_string(),
+                            "--attach".to_string(),
+                            server_url,
+                            "--dir".to_string(),
+                            directory,
+                            "--agent".to_string(),
+                            profile.role.to_string(),
+                            "--model".to_string(),
+                            model.to_string(),
+                        ];
+                        route_explanation.push(format!(
+                            "profile selected opencode serve transport for model '{}'",
+                            model
+                        ));
+                    } else {
+                        params.harness_transport = Some("opencode_cli".to_string());
+                        params.harness_server_url = Some(server_url.clone());
+                        params.command = vec![
+                            "opencode".to_string(),
+                            "--pure".to_string(),
+                            "run".to_string(),
+                            "--model".to_string(),
+                            model.to_string(),
+                        ];
+                        route_explanation.push(format!(
+                            "requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"
+                        ));
+                    }
                 } else {
                     params.command = vec![
                         "opencode".to_string(),
@@ -3492,6 +3551,19 @@ fn round4(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    const OPENCODE_DOC_FIXTURE: &str = r#"{
+        "openapi":"3.1.0",
+        "info":{"title":"opencode","version":"1.0.0"},
+        "paths":{
+            "/api/session":{"post":{}},
+            "/api/session/{sessionID}/prompt":{"post":{}},
+            "/api/session/{sessionID}/wait":{"post":{}},
+            "/api/model":{"get":{}},
+            "/api/provider":{"get":{}}
+        }
+    }"#;
 
     #[test]
     fn route_policy_simulation_sinks_non_finite_scores() {
@@ -3575,6 +3647,56 @@ mod tests {
             auto_capability_bundle: None,
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
+        }
+    }
+
+    fn spawn_probe_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind probe server");
+        let port = listener.local_addr().expect("local addr").port();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept probe");
+                let mut buf = [0_u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]);
+                let body = if request.starts_with("GET /doc ") {
+                    OPENCODE_DOC_FIXTURE
+                } else {
+                    "<title>OpenCode</title>"
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    struct EnvRestore {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvRestore {
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            if let Some(old) = &self.old {
+                std::env::set_var(self.key, old);
+            } else {
+                std::env::remove_var(self.key);
+            }
         }
     }
 
@@ -3718,13 +3840,45 @@ mod tests {
     }
 
     #[test]
+    fn recommendation_transport_reports_opencode_serve_fallback() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        let _transport = EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "serve");
+        let _server_url = EnvRestore::set(
+            "TACHI_OPENCODE_SERVER_URL",
+            &format!("http://127.0.0.1:{port}"),
+        );
+
+        let profile = resolve_dispatch_profile("opencode_builder").unwrap();
+        let (transport, readiness) = recommended_transport_for_profile(profile);
+
+        assert_eq!(transport, "opencode_cli");
+        assert_eq!(readiness["requested"], json!("opencode_serve"));
+        assert_eq!(readiness["fallback"], json!("opencode_cli"));
+        assert_eq!(
+            readiness["harness_server_status"]["reachable"],
+            json!(false)
+        );
+    }
+
+    #[test]
     fn custom_profile_can_attach_to_opencode_serve() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _password = EnvRestore::set("OPENCODE_SERVER_PASSWORD", "test-password");
+        let (server_url, server) = spawn_probe_server();
         let mut params = params();
         params.profile = Some("deepseek_explore".to_string());
         params.cwd = Some("/tmp/tachi-opencode-project".to_string());
         params.harness_transport = Some("opencode_serve".to_string());
-        params.harness_server_url = Some("http://127.0.0.1:4321".to_string());
+        params.harness_server_url = Some(server_url.clone());
         let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+        server.join().expect("probe server thread");
 
         assert_eq!(resolved.agent, "custom");
         assert_eq!(
@@ -3733,7 +3887,7 @@ mod tests {
                 "opencode".to_string(),
                 "run".to_string(),
                 "--attach".to_string(),
-                "http://127.0.0.1:4321".to_string(),
+                server_url,
                 "--dir".to_string(),
                 "/tmp/tachi-opencode-project".to_string(),
                 "--agent".to_string(),
@@ -3746,6 +3900,36 @@ mod tests {
             .route_explanation
             .iter()
             .any(|line| line.contains("opencode serve transport")));
+    }
+
+    #[test]
+    fn custom_profile_falls_back_to_cli_when_opencode_serve_is_unreachable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let mut params = params();
+        params.profile = Some("deepseek_explore".to_string());
+        params.harness_transport = Some("opencode_serve".to_string());
+        params.harness_server_url = Some(format!("http://127.0.0.1:{port}"));
+        let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+        assert_eq!(resolved.agent, "custom");
+        assert_eq!(params.harness_transport.as_deref(), Some("opencode_cli"));
+        assert_eq!(
+            params.command,
+            vec![
+                "opencode".to_string(),
+                "--pure".to_string(),
+                "run".to_string(),
+                "--model".to_string(),
+                "deepseek/deepseek-v4-flash".to_string()
+            ]
+        );
+        assert!(resolved
+            .route_explanation
+            .iter()
+            .any(|line| line.contains("falling back to opencode CLI")));
     }
 
     #[test]

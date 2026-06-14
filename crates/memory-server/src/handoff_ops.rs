@@ -341,7 +341,7 @@ fn upsert_promoted_entry(
     metadata.insert("promoted".into(), json!(true));
     metadata.insert("acknowledged".into(), json!(true));
     metadata.insert("handoff".into(), json!(memo));
-    entry.retention_policy = Some("durable".to_string());
+    entry.retention_policy = Some(memory_core::RetentionPolicy::Pinned.as_str().to_string());
     entry.vector = None;
     store
         .upsert(&entry)
@@ -356,9 +356,7 @@ fn supersede_pending_handoffs(
     let pending = pending_handoff_entries(store)?;
     for old_entry in pending {
         let old_memo = memo_from_entry(&old_entry);
-        if old_memo.from_agent == memo.from_agent
-            && old_memo.target_agent == memo.target_agent
-        {
+        if old_memo.from_agent == memo.from_agent && old_memo.target_agent == memo.target_agent {
             let mut old_entry_mut = old_entry.clone();
             old_entry_mut.archived = true;
             old_entry_mut.vector = None;
@@ -368,9 +366,7 @@ fn supersede_pending_handoffs(
                     serde_json::Value::String("superseded".to_string()),
                 );
             }
-            store
-                .upsert(&old_entry_mut)
-                .map_err(|e| format!("{e}"))?;
+            store.upsert(&old_entry_mut).map_err(|e| format!("{e}"))?;
             store
                 .supersede_memory(&old_entry.id, &entry.id)
                 .map_err(|e| format!("{e}"))?;
@@ -1123,7 +1119,10 @@ mod tests {
         assert_eq!(stored.metadata["github"]["issue_number"], json!(1000));
         assert_eq!(stored.metadata["acknowledged"], json!(true));
         assert_eq!(stored.metadata["handoff"]["acknowledged"], json!(true));
-        assert_eq!(stored.retention_policy.as_deref(), Some("durable"));
+        assert_eq!(
+            stored.retention_policy.as_deref(),
+            Some(memory_core::RetentionPolicy::Pinned.as_str())
+        );
 
         let status = std::fs::read_to_string(run_root.join(flow_id).join("status.json"))
             .expect("read status");
@@ -1550,8 +1549,7 @@ mod tests {
 
         // Seed a pending handoff entry.
         {
-            let mut store =
-                MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+            let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
             let memo = HandoffMemo {
                 id: "memo-1".to_string(),
                 from_agent: "agent-a".to_string(),
@@ -1567,8 +1565,7 @@ mod tests {
 
         // Reopen the store, then hold a RESERVED lock on the DB so the
         // supersede write fails instead of being swallowed.
-        let mut store =
-            MemoryStore::open(db_path.to_str().unwrap()).expect("reopen store");
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("reopen store");
         let lock_path = db_path.clone();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();

@@ -173,7 +173,11 @@ fn collect_sft_candidates(server: &MemoryServer) -> Result<Vec<MemoryEntry>, Str
                 memory_core::row_to_entry,
             )
             .map_err(|e| format!("query SFT candidates: {e}"))?;
-        Ok(rows.filter_map(|r| r.ok()).collect::<Vec<_>>())
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row.map_err(|e| format!("read SFT candidate row: {e}"))?);
+        }
+        Ok(candidates)
     })
     .map_err(|e| format!("SFT candidate collection: {e}"))
 }

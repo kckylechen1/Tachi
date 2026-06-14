@@ -1004,6 +1004,12 @@ pub(crate) enum VaultAction {
     Get {
         /// Secret name.
         name: String,
+        /// Print the decrypted secret value. Without this flag, get only confirms the entry exists.
+        #[arg(long)]
+        reveal: bool,
+        /// Emit JSON. Without --reveal the value is redacted.
+        #[arg(long)]
+        json: bool,
         /// Read password from stdin.
         #[arg(long)]
         stdin_password: bool,

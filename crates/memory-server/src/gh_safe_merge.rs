@@ -192,6 +192,9 @@ pub enum ChecksState {
     None,
     /// At least one check is still pending and none have failed.
     Pending,
+    /// GitHub reported checks, but every completed check was skipped. This is
+    /// distinct from a passed suite because no required verification actually ran.
+    Skipped,
     /// Every check has completed with a successful conclusion.
     Success,
     /// At least one required check has a failure / cancelled / timed-out
@@ -221,19 +224,24 @@ impl ChecksState {
             return ChecksState::None;
         }
         let mut any_pending = false;
+        let mut any_ran_successfully = false;
+        let mut any_skipped = false;
         for run in runs {
             if run.status != "completed" {
                 any_pending = true;
                 continue;
             }
             match run.conclusion.as_deref() {
-                Some("success") | Some("neutral") | Some("skipped") => {}
+                Some("success") | Some("neutral") => any_ran_successfully = true,
+                Some("skipped") => any_skipped = true,
                 Some(_other) => return ChecksState::Failure,
                 None => any_pending = true,
             }
         }
         if any_pending {
             ChecksState::Pending
+        } else if any_skipped && !any_ran_successfully {
+            ChecksState::Skipped
         } else {
             ChecksState::Success
         }
@@ -329,6 +337,11 @@ pub fn evaluate_merge_gate_with_policy(pr: &PrState, policy: MergeGatePolicy) ->
     match pr.checks {
         ChecksState::Failure => blocked.push("checks:failure".to_string()),
         ChecksState::Pending => pending.push("checks:pending".to_string()),
+        ChecksState::Skipped => {
+            if policy.require_checks && !policy.allow_missing_checks {
+                pending.push("checks:skipped".to_string());
+            }
+        }
         ChecksState::Success => {}
         ChecksState::None => {
             if policy.require_checks && !policy.allow_missing_checks {
@@ -634,6 +647,29 @@ mod tests {
     }
 
     #[test]
+    fn gate_policy_modes_for_skipped_checks() {
+        let mut pr = open_pr();
+        pr.checks = ChecksState::Skipped;
+
+        assert_eq!(
+            evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::permissive()),
+            MergeDecision::Ready
+        );
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "checks:skipped"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+        match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::strict()) {
+            MergeDecision::Pending { waiting_on } => {
+                assert!(waiting_on.iter().any(|r| r == "checks:skipped"));
+            }
+            other => panic!("expected pending, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn gate_policy_modes_for_missing_review_decision() {
         let mut pr = open_pr();
         pr.review_decision = None;
@@ -854,13 +890,22 @@ mod tests {
     }
 
     #[test]
-    fn checks_aggregate_treats_neutral_and_skipped_as_success() {
+    fn checks_aggregate_success_with_neutral_or_partial_skips_is_success() {
         let runs = vec![
             check("ci", "completed", Some("success")),
             check("optional", "completed", Some("neutral")),
             check("conditional", "completed", Some("skipped")),
         ];
         assert_eq!(ChecksState::aggregate(&runs), ChecksState::Success);
+    }
+
+    #[test]
+    fn checks_aggregate_all_skipped_is_skipped_not_success() {
+        let runs = vec![
+            check("ci", "completed", Some("skipped")),
+            check("lint", "completed", Some("skipped")),
+        ];
+        assert_eq!(ChecksState::aggregate(&runs), ChecksState::Skipped);
     }
 
     #[test]

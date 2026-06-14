@@ -598,6 +598,155 @@ fn infer_future_rule(category: &str, path: Option<&str>, body: &str) -> String {
     }
 }
 
+fn review_project_base_path(layer: &str, repo: &str) -> String {
+    let repo = repo.trim_matches('/');
+    format!("/{layer}/projects/{repo}")
+}
+
+fn review_route_for_item(
+    repo: &str,
+    pr_number: u64,
+    category: &str,
+    path: Option<&str>,
+    summary: &str,
+    future_rule: &str,
+) -> Value {
+    let actionable = matches!(
+        category,
+        "security" | "correctness" | "tests" | "api-contract"
+    );
+    let reusable = matches!(
+        category,
+        "security" | "correctness" | "tests" | "api-contract" | "maintainability"
+    );
+    let primary_destination = if actionable {
+        "github_issue"
+    } else if reusable {
+        "project_wiki"
+    } else {
+        "pr_comment"
+    };
+    let mut destinations = vec![json!({
+        "destination": "pr_comment",
+        "layer": "github_ref",
+        "authority": "project_work_record",
+        "when": "reply, resolve, or mark false-positive on the PR after leader verdict",
+        "target_ref": format!("{repo}#{pr_number}"),
+    })];
+
+    if actionable {
+        destinations.push(json!({
+            "destination": "github_issue",
+            "layer": "github_ref",
+            "authority": "project_work_record",
+            "when": "valid actionable project bug/task remains after the PR review pass",
+            "title_hint": summary,
+            "source_ref": format!("{repo}#{pr_number}"),
+            "path": path,
+        }));
+    }
+
+    if reusable {
+        destinations.push(json!({
+            "destination": "feedback_rule",
+            "layer": "feedback_rule",
+            "authority": "behavior_patch",
+            "when": "the finding is a reusable prompt/process correction for future workers",
+            "path_hint": format!("{}/review/{}", review_project_base_path("feedback", repo), category),
+            "rule": future_rule,
+        }));
+        destinations.push(json!({
+            "destination": "guide",
+            "layer": "guide",
+            "authority": "playbook",
+            "when": "the finding changes reusable AgentReview or workflow SOP",
+            "path_hint": "/guide/global/workflows/agent-review",
+        }));
+    }
+
+    if !matches!(category, "style" | "unclassified") {
+        destinations.push(json!({
+            "destination": "project_wiki",
+            "layer": "wiki",
+            "authority": "advisory",
+            "when": "the finding is a project-specific durable lesson after close_loop",
+            "path_hint": format!("{}/lessons/pr-{pr_number}", review_project_base_path("wiki", repo)),
+            "source_ref": format!("{repo}#{pr_number}"),
+        }));
+    }
+
+    if category == "api-contract"
+        || path.is_some_and(|path| path.starts_with("docs/") || path.starts_with("spec"))
+    {
+        destinations.push(json!({
+            "destination": "repo_doc_ref",
+            "layer": "repo_doc_ref",
+            "authority": "canonical",
+            "when": "the accepted fix changes canonical design, API, or spec truth",
+            "path": path,
+        }));
+    }
+
+    destinations.push(json!({
+        "destination": "eval",
+        "layer": "eval",
+        "authority": "evidence",
+        "when": "after leader verdict, record reviewer usefulness/false-positive signal",
+        "source_ref": format!("{repo}#{pr_number}"),
+    }));
+
+    json!({
+        "primary_destination": primary_destination,
+        "promotion_requires": "leader_verdict",
+        "destinations": destinations,
+    })
+}
+
+fn review_routing_plan(items: &[Value]) -> Value {
+    let mut destination_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut routed_items = Vec::new();
+    for item in items {
+        let Some(routing) = item.get("routing") else {
+            continue;
+        };
+        let routes = routing
+            .get("destinations")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for route in &routes {
+            if let Some(destination) = route.get("destination").and_then(Value::as_str) {
+                *destination_counts
+                    .entry(destination.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+        routed_items.push(json!({
+            "category": item.get("category").cloned().unwrap_or(Value::Null),
+            "summary": item.get("summary").cloned().unwrap_or(Value::Null),
+            "primary_destination": routing.get("primary_destination").cloned().unwrap_or(Value::Null),
+            "destinations": routes
+                .iter()
+                .filter_map(|route| route.get("destination").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+        }));
+    }
+
+    json!({
+        "status": if routed_items.is_empty() { "empty" } else { "needs_leader_verdict" },
+        "authority_order": [
+            "github_ref",
+            "repo_doc_ref",
+            "wiki",
+            "guide",
+            "feedback_rule",
+            "eval"
+        ],
+        "destination_counts": destination_counts,
+        "items": routed_items,
+    })
+}
+
 fn build_pr_review_digest(
     repo: &str,
     pr_number: u64,
@@ -623,6 +772,14 @@ fn build_pr_review_digest(
         *counts.entry(category.to_string()).or_insert(0) += 1;
         let summary = first_meaningful_line(&body);
         let future_rule = infer_future_rule(category, path.as_deref(), &body);
+        let routing = review_route_for_item(
+            repo,
+            pr_number,
+            category,
+            path.as_deref(),
+            &summary,
+            &future_rule,
+        );
         let source = json!({
             "kind": comment.get("kind").cloned().unwrap_or(Value::Null),
             "id": comment.get("id").cloned().unwrap_or(Value::Null),
@@ -640,6 +797,7 @@ fn build_pr_review_digest(
             "summary": summary,
             "body": body,
             "future_rule": future_rule,
+            "routing": routing,
         });
 
         memory_candidates.push(json!({
@@ -672,6 +830,8 @@ fn build_pr_review_digest(
         items.push(item);
     }
 
+    let routing_plan = review_routing_plan(&items);
+
     json!({
         "repo": repo,
         "pr_number": pr_number,
@@ -679,6 +839,7 @@ fn build_pr_review_digest(
         "comment_count": items.len(),
         "counts": counts,
         "items": items,
+        "routing_plan": routing_plan,
         "memory_candidates": memory_candidates,
         "handbook_candidates": handbook_candidates,
         "promotion_policy": {
@@ -712,6 +873,18 @@ fn render_pr_review_digest_markdown(digest: &Value) -> String {
         for (category, count) in counts {
             out.push_str(&format!("- `{category}`: {count}\n"));
         }
+    }
+
+    out.push_str("\n## Review Output Routing\n\n");
+    if let Some(counts) = digest
+        .pointer("/routing_plan/destination_counts")
+        .and_then(Value::as_object)
+    {
+        for (destination, count) in counts {
+            out.push_str(&format!("- `{destination}`: {count}\n"));
+        }
+    } else {
+        out.push_str("- No route candidates.\n");
     }
 
     out.push_str("\n## Items\n\n");
@@ -751,6 +924,12 @@ fn render_pr_review_digest_markdown(digest: &Value) -> String {
             }
             out.push_str(&format!("Summary: {summary}\n\n"));
             out.push_str(&format!("Future rule candidate: {future_rule}\n\n"));
+            if let Some(primary) = item
+                .pointer("/routing/primary_destination")
+                .and_then(Value::as_str)
+            {
+                out.push_str(&format!("Primary route: `{primary}`\n\n"));
+            }
         }
     }
     out
@@ -774,9 +953,13 @@ fn write_pr_review_digest_artifacts(digest: &Value) -> Result<Value, String> {
     let digest_md_path = dir.join("digest.md");
     let serialized =
         serde_json::to_string_pretty(digest).map_err(|e| format!("serialize digest: {e}"))?;
-    std::fs::write(&digest_json_path, format!("{serialized}\n"))
-        .map_err(|e| format!("write {}: {e}", digest_json_path.display()))?;
-    std::fs::write(&digest_md_path, render_pr_review_digest_markdown(digest))
+    crate::utils::write_owner_only_file_atomic(
+        &digest_json_path,
+        format!("{serialized}\n").as_bytes(),
+    )
+    .map_err(|e| format!("write {}: {e}", digest_json_path.display()))?;
+    let markdown = render_pr_review_digest_markdown(digest);
+    crate::utils::write_owner_only_file_atomic(&digest_md_path, markdown.as_bytes())
         .map_err(|e| format!("write {}: {e}", digest_md_path.display()))?;
     Ok(json!({
         "digest_dir": dir,
@@ -1619,6 +1802,7 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
             "state": match pr.checks {
                 ChecksState::None => "none",
                 ChecksState::Pending => "pending",
+                ChecksState::Skipped => "skipped",
                 ChecksState::Success => "success",
                 ChecksState::Failure => "failure",
             },
@@ -1712,6 +1896,13 @@ mod safe_merge_tests {
     fn pending_pr() -> PrState {
         PrState {
             mergeable: Mergeable::Unknown,
+            ..ready_pr()
+        }
+    }
+
+    fn skipped_checks_pr() -> PrState {
+        PrState {
+            checks: ChecksState::Skipped,
             ..ready_pr()
         }
     }
@@ -1816,6 +2007,30 @@ mod safe_merge_tests {
             .as_str()
             .unwrap()
             .contains("regression coverage"));
+        let destinations = digest["routing_plan"]["items"][0]["destinations"]
+            .as_array()
+            .unwrap();
+        for expected in [
+            "pr_comment",
+            "github_issue",
+            "feedback_rule",
+            "guide",
+            "project_wiki",
+            "eval",
+        ] {
+            assert!(
+                destinations.iter().any(|value| value == expected),
+                "missing {expected} in {destinations:#?}"
+            );
+        }
+        assert_eq!(
+            digest["items"][0]["routing"]["primary_destination"],
+            json!("github_issue")
+        );
+        assert_eq!(
+            digest["routing_plan"]["destination_counts"]["feedback_rule"],
+            1
+        );
     }
 
     #[test]
@@ -1834,6 +2049,19 @@ mod safe_merge_tests {
         assert_eq!(digest["counts"]["style"], 1);
         assert_eq!(digest["memory_candidates"].as_array().unwrap().len(), 1);
         assert_eq!(digest["handbook_candidates"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            digest["items"][0]["routing"]["primary_destination"],
+            json!("pr_comment")
+        );
+        let destinations = digest["routing_plan"]["items"][0]["destinations"]
+            .as_array()
+            .unwrap();
+        assert!(destinations.iter().any(|value| value == "pr_comment"));
+        assert!(destinations.iter().any(|value| value == "eval"));
+        assert!(!destinations.iter().any(|value| value == "feedback_rule"));
+        assert!(digest["routing_plan"]["destination_counts"]
+            .get("feedback_rule")
+            .is_none());
     }
 
     #[test]
@@ -1860,7 +2088,21 @@ mod safe_merge_tests {
         assert!(json_path.exists());
         let markdown = std::fs::read_to_string(md_path).unwrap();
         assert!(markdown.contains("Triage Contract"));
+        assert!(markdown.contains("Review Output Routing"));
+        assert!(markdown.contains("Primary route:"));
         assert!(markdown.contains("needs_leader_verdict"));
+        let leftovers: Vec<_> = std::fs::read_dir(json_path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| {
+                name.starts_with("digest.json.tmp.") || name.starts_with("digest.md.tmp.")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "digest artifact writes should not leave temp files: {leftovers:?}"
+        );
         if let Some(v) = original {
             std::env::set_var("TACHI_REVIEW_ROOT", v);
         } else {
@@ -2009,6 +2251,41 @@ mod safe_merge_tests {
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["merge_state"], "pending");
         assert_eq!(v["event"]["kind"], "github_checks_polled");
+        assert!(client.merge_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn safe_merge_skipped_checks_waits_and_labels_check_state() {
+        let client = MockGhClient::new()
+            .with_pr("o/r", skipped_checks_pr())
+            .with_checks(
+                "o/r",
+                42,
+                vec![CheckRun {
+                    name: "conditional-ci".to_string(),
+                    status: "completed".to_string(),
+                    conclusion: Some("skipped".to_string()),
+                }],
+            );
+        let out = handle_github_safe_merge(
+            &client,
+            "o/r",
+            42,
+            MergeStrategy::Squash,
+            false,
+            None,
+            MergeGatePolicy::standard(),
+        )
+        .await
+        .expect("ok");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["merge_state"], "pending");
+        assert_eq!(v["status_patch"]["checks"]["state"], "skipped");
+        assert!(v["decision"]["waiting_on"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "checks:skipped"));
         assert!(client.merge_calls().is_empty());
     }
 

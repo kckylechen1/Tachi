@@ -287,7 +287,6 @@ fn with_vault_key<T>(
     result
 }
 
-
 fn ensure_vault_unlocked(server: &MemoryServer) -> Result<(), String> {
     with_vault_key(server, |_| Ok(()))
 }
@@ -495,6 +494,21 @@ fn load_unlocked_vault_secrets(
 pub(super) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
 ) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
+    load_unlocked_api_key_secret_pools_filtered(server, None)
+}
+
+fn load_unlocked_api_key_secret_pool(
+    server: &MemoryServer,
+    logical_name: &str,
+) -> Result<Vec<crate::llm::ProviderSecret>, String> {
+    load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))
+        .map(|mut pools| pools.remove(logical_name).unwrap_or_default())
+}
+
+fn load_unlocked_api_key_secret_pools_filtered(
+    server: &MemoryServer,
+    only_logical_name: Option<&str>,
+) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
     with_vault_key(server, |key| {
         let (entries, rotations, key_health_rows) = server
             .with_global_store(|store| {
@@ -566,6 +580,9 @@ pub(super) fn load_unlocked_api_key_secret_pools(
             };
 
         for rotation in rotations {
+            if only_logical_name.is_some_and(|logical_name| logical_name != rotation.prefix) {
+                continue;
+            }
             let mut matching = collect_rotation_entries(entries.clone(), &rotation.prefix);
             if matching.is_empty() {
                 continue;
@@ -621,6 +638,9 @@ pub(super) fn load_unlocked_api_key_secret_pools(
         }
 
         for entry in entries {
+            if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
+                continue;
+            }
             if entry.secret_type != "api_key"
                 || !entry.name.ends_with("_API_KEY")
                 || rotation_members.contains(&entry.name)
@@ -1581,6 +1601,7 @@ pub(crate) async fn handle_vault_lease_api_key(
     params: VaultLeaseApiKeyParams,
 ) -> Result<String, String> {
     let requested_name = params.name.clone();
+    let mut success_audit_detail = None;
     let result = (|| {
         let env_name = params
             .env_name
@@ -1593,16 +1614,13 @@ pub(crate) async fn handle_vault_lease_api_key(
             ));
         }
 
-        let pools = load_unlocked_api_key_secret_pools(server)?;
-        let selected = pools
-            .get(&params.name)
-            .and_then(|entries| entries.first())
-            .ok_or_else(|| {
-                format!(
-                    "No usable API key available for '{}'. Vault may be locked, missing, or all keys are disabled/auth-failed/rate-limited.",
-                    params.name
-                )
-            })?;
+        let pool = load_unlocked_api_key_secret_pool(server, &params.name)?;
+        let selected = pool.first().ok_or_else(|| {
+            format!(
+                "No usable API key available for '{}'. Vault may be locked, missing, or all keys are disabled/auth-failed/rate-limited.",
+                params.name
+            )
+        })?;
 
         advance_rotation_after_key(server, &params.name, &selected.key_id)?;
         let access_count = server
@@ -1612,6 +1630,16 @@ pub(crate) async fn handle_vault_lease_api_key(
                     .map_err(|e| e.to_string())
             })
             .unwrap_or(0);
+
+        success_audit_detail = Some(
+            json!({
+                "logical_name": params.name.clone(),
+                "key_id": selected.key_id.clone(),
+                "env_name": env_name.clone(),
+                "agent_id": params.agent_id.clone(),
+            })
+            .to_string(),
+        );
 
         serde_json::to_string(&json!({
             "leased": true,
@@ -1627,12 +1655,16 @@ pub(crate) async fn handle_vault_lease_api_key(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
+    let audit_detail = match result.as_ref() {
+        Ok(_) => success_audit_detail.as_deref(),
+        Err(err) => Some(err.as_str()),
+    };
     let audit_result = record_vault_audit(
         server,
         "vault_lease_api_key",
         Some(&requested_name),
         result.is_ok(),
-        result.as_ref().err().map(String::as_str),
+        audit_detail,
     );
     result_with_vault_audit_warning(result, audit_result)
 }
@@ -1696,7 +1728,6 @@ pub(crate) async fn handle_vault_record_key_result(
     );
     result_with_vault_audit_warning(result, audit_result)
 }
-
 
 #[cfg(test)]
 mod vault_key_tests {
@@ -1872,4 +1903,3 @@ mod vault_key_tests {
         }
     }
 }
-

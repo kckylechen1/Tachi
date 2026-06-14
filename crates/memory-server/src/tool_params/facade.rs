@@ -760,9 +760,10 @@ pub(crate) struct TachiApproveMergeParams {
     #[serde(default = "default_true")]
     pub delete_worktree: bool,
 
-    /// Set to true to execute the merge. When false (default), runs a dry-run
-    /// preview (git merge --no-commit --no-ff) and returns the diff without
-    /// committing. Callers should preview first, then confirm with confirm=true.
+    /// Set to true to execute the merge. When false (default), computes a
+    /// non-mutating merge-tree preview with Git's default merge algorithm and
+    /// returns the diff stat. Callers should preview first, then confirm with
+    /// confirm=true.
     #[serde(default)]
     pub confirm: bool,
 }
@@ -1038,6 +1039,9 @@ pub(crate) struct TachiWikiParams {
     #[serde(default)]
     #[schemars(description = "Optional area tag on the wiki entry.")]
     pub domain: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional JSON object merged into wiki metadata before provenance.")]
+    pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub force: bool,
 
@@ -1784,7 +1788,8 @@ pub(crate) struct TachiOrchestratorParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiAgentEvalParams {
-    /// aggregate | aggregate_live
+    /// aggregate_live | telemetry | perf. aggregate replays a local JSONL fixture only when
+    /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
     pub action: String,
     #[serde(default)]
     pub fixture_path: Option<String>,

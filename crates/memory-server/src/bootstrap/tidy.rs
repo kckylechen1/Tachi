@@ -741,16 +741,13 @@ fn migrate_single_db(
     }
 
     let mut target_store = open_cli_store(&target_path)?;
-    let rows_before = target_store
-        .stats(true)
-        .map(|s| s.total as usize)
-        .unwrap_or(0);
+    let rows_before = target_store.stats(true)?.total as usize;
 
     let existing_target_ids: HashSet<String> = {
         let conn = target_store.connection();
         let mut stmt = conn.prepare("SELECT id FROM memories")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        rows.filter_map(Result::ok).collect()
+        rows.collect::<Result<Vec<_>, _>>()?.into_iter().collect()
     };
 
     let mut copied = 0usize;
@@ -802,10 +799,7 @@ fn migrate_single_db(
         });
     }
 
-    let rows_after = target_store
-        .stats(true)
-        .map(|s| s.total as usize)
-        .unwrap_or(rows_before);
+    let rows_after = target_store.stats(true)?.total as usize;
     drop(target_store);
 
     // Archive the source DB file. Move (rename) when possible; fall back to
