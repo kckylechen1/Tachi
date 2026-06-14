@@ -51,7 +51,64 @@ pub(super) fn find_project_git_root() -> Option<PathBuf> {
 }
 
 /// Check if a command is in the trusted allowlist for MCP server spawning.
-/// Trusted: common package runners, interpreters, and brew-installed binaries.
+///
+/// Interpreters and package runners (node, python, npx, bun, deno, uv,
+/// cargo, rustup, etc.) are intentionally NOT auto-approved for MCP
+/// registration; they require capability-level approval. Only
+/// container/platform runtimes and explicitly known binaries are trusted by
+/// path or basename for auto-enabled stdio MCP servers.
+pub(super) fn is_trusted_mcp_command(cmd: &str) -> bool {
+    let basename = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd);
+
+    // Interpreters must never be trusted for auto-approved MCP servers.
+    const INTERPRETER_BASENAMES: &[&str] = &[
+        "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup",
+    ];
+    if INTERPRETER_BASENAMES.contains(&basename) {
+        return false;
+    }
+
+    const TRUSTED_BASENAMES: &[&str] = &["docker", "podman", "tachi", "opencode"];
+
+    if TRUSTED_BASENAMES.contains(&basename) {
+        return true;
+    }
+
+    // Allow absolute paths under Homebrew and local package managers.
+    const TRUSTED_PREFIXES: &[&str] = &["/opt/homebrew/", "/usr/local/bin/"];
+
+    for prefix in TRUSTED_PREFIXES {
+        if cmd.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Allow paths under user's home .cargo/bin, .local/bin, .nvm, .bun
+    if let Ok(home) = std::env::var("HOME") {
+        let home_prefixes = [
+            format!("{}/.cargo/bin/", home),
+            format!("{}/.local/bin/", home),
+            format!("{}/.nvm/", home),
+            format!("{}/.bun/bin/", home),
+        ];
+        for prefix in &home_prefixes {
+            if cmd.starts_with(prefix.as_str()) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Trusted command list for `agent=custom` dispatch.
+///
+/// This retains interpreters because the command is caller-supplied: the
+/// caller already decided to run it. MCP auto-registration is the stricter
+/// path (see [`is_trusted_mcp_command`]).
 pub(super) fn is_trusted_command(cmd: &str) -> bool {
     let basename = std::path::Path::new(cmd)
         .file_name()
@@ -408,5 +465,42 @@ mod tests {
             value["definition"]["headers"]["Authorization"],
             json!("[REDACTED]")
         );
+    }
+
+    #[test]
+    fn mcp_interpreters_are_not_auto_approved() {
+        for cmd in ["python3", "python", "node", "npx", "bun", "deno", "uv", "cargo", "rustup"] {
+            assert!(
+                !is_trusted_mcp_command(cmd),
+                "{cmd} should require capability-level approval for MCP"
+            );
+            assert!(
+                !is_trusted_mcp_command(&format!("/usr/local/bin/{cmd}")),
+                "absolute {cmd} should also be rejected for MCP"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_interpreters_remain_trusted_for_caller_supplied_commands() {
+        assert!(is_trusted_command("python3"));
+        assert!(is_trusted_command("/usr/local/bin/node"));
+    }
+
+    #[test]
+    fn mcp_container_and_platform_runtimes_remain_trusted() {
+        for cmd in ["docker", "podman", "tachi", "opencode"] {
+            assert!(
+                is_trusted_mcp_command(cmd),
+                "{cmd} should be trusted by basename for MCP"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_trusted_prefixes_still_allow_non_interpreters() {
+        assert!(is_trusted_mcp_command("/opt/homebrew/bin/opencode"));
+        assert!(!is_trusted_mcp_command("/usr/bin/python3"));
+        assert!(!is_trusted_mcp_command("/bin/bash"));
     }
 }

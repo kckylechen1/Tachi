@@ -233,7 +233,7 @@ pub(super) fn evaluate_cli_capability_enabled(
     }
 
     match def["command"].as_str() {
-        Some(cmd) if is_trusted_command(cmd) => Ok((true, None)),
+        Some(cmd) if is_trusted_mcp_command(cmd) => Ok((true, None)),
         Some(cmd) => Ok((
             false,
             Some(format!(

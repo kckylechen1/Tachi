@@ -45,10 +45,11 @@ pub(crate) async fn handle_hub_register(
         def["tool_exposure"] = json!(tool_exposure_mode.as_str());
         resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));
 
-        // Security: validate MCP server commands against allowlist
+        // Security: validate MCP server commands against the stricter MCP
+        // allowlist. Interpreters/package runners are NOT auto-approved.
         let auto_enabled = if transport_type == "stdio" {
             if let Some(cmd) = def["command"].as_str() {
-                is_trusted_command(cmd)
+                is_trusted_mcp_command(cmd)
             } else {
                 false
             }

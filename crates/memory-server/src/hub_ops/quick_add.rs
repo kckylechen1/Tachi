@@ -11,8 +11,8 @@
 //!     only when:
 //!       - cap_type != "mcp" (skills/plugins are governance-approved by default), OR
 //!       - cap_type == "mcp" AND transport != "stdio" (no local exec risk), OR
-//!       - cap_type == "mcp" AND transport == "stdio" AND `is_trusted_command(cmd)`
-//!         returns true (i.e. the command is in the explicit allowlist).
+//!       - cap_type == "mcp" AND transport == "stdio" AND `is_trusted_mcp_command(cmd)`
+//!         returns true (i.e. the command is in the explicit MCP allowlist).
 //!   * For an UNTRUSTED stdio MCP command, `auto_approve` is silently ignored
 //!     and a warning is appended to the response. The capability is left in
 //!     `pending` review state exactly as plain `hub_register` would leave it.
