@@ -67,7 +67,7 @@ impl Drop for TempHomeGuard {
     }
 }
 
-fn make_server() -> MemoryServer {
+pub(crate) fn make_server() -> MemoryServer {
     ensure_test_env();
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-test-{}.sqlite",

@@ -379,6 +379,35 @@ fn capability_bundle_summary(
     })
 }
 
+/// Scope guard that deletes a temporary MCP config file when dropped.
+/// Logs a warning if cleanup fails so leaking temp files is observable.
+struct McpCleanup(Option<PathBuf>);
+
+impl Drop for McpCleanup {
+    fn drop(&mut self) {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::remove_file(&path) {
+            tracing::warn!(
+                "failed to remove temporary MCP config file {}: {}",
+                path.display(),
+                e
+            );
+            return;
+        }
+        if path.exists() {
+            tracing::warn!(
+                "temporary MCP config file {} still exists after removal",
+                path.display()
+            );
+        }
+    }
+}
+
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 
 pub(crate) async fn handle_tachi_dispatch(
@@ -976,16 +1005,6 @@ pub(crate) async fn handle_tachi_dispatch(
     let harness_server_url_for_spawn = harness_server_url.clone();
     let flow_dispatch_slot_for_spawn = flow_dispatch_slot.clone();
 
-    // Scope guard for MCP config cleanup (moved into spawned task)
-    struct McpCleanup(Option<PathBuf>);
-    impl Drop for McpCleanup {
-        fn drop(&mut self) {
-            if let Some(ref path) = self.0 {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-
     tokio::task::spawn(async move {
         let _mcp_cleanup = McpCleanup(mcp_config_path);
 
@@ -1311,6 +1330,56 @@ pub(crate) async fn handle_tachi_dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn generate_mcp_config_sets_owner_only_permissions() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("TACHI_HOME");
+
+        let server = crate::tests::make_server();
+        let path = generate_mcp_config(&server, "test-perms", true, false, None, &[])
+            .await
+            .expect("generate mcp config")
+            .expect("config path");
+
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "MCP config mode should be 0o600, got {:#o}", mode);
+        }
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = original_tachi_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
+    fn mcp_cleanup_removes_temp_config_on_drop() {
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let path = temp_home.path().join("dispatch-test-mcp.json");
+        std::fs::write(&path, b"{}").expect("write temp config");
+        assert!(path.exists());
+        {
+            let _cleanup = McpCleanup(Some(path.clone()));
+        }
+        assert!(!path.exists(), "MCP config should be removed on drop");
+    }
 
     #[test]
     fn flow_dispatch_slot_blocks_duplicate_active_task() {
