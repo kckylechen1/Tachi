@@ -596,9 +596,6 @@ fn tachi_task_action_schema_declares_feature_briefing() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_memory_progress_writes_append_only_jsonl() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
     let (server, temp_home) = make_server_with_temp_home();
     let run_root = temp_home.temp_home.join("runs");
     let original_run_root = std::env::var_os("TACHI_RUN_ROOT");

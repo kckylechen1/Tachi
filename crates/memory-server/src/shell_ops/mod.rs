@@ -1116,8 +1116,7 @@ pub(crate) use shell_github::*;
 /// All test modules that set this env var must acquire this lock to avoid races.
 #[cfg(test)]
 pub(crate) fn tachi_run_root_env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    crate::utils::global_test_lock()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

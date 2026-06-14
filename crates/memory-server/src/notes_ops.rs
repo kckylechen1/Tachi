@@ -12,15 +12,9 @@ const NOTE_SUBDIRS: &[&str] = &[
     "proposals",
 ];
 
-/// Resolve the notes root directory: `$TACHI_HOME/notes/` or `~/.tachi/notes/`
+/// Resolve the notes root directory under the active Tachi home.
 pub(crate) fn notes_root() -> PathBuf {
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        PathBuf::from(home).join("notes")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".tachi").join("notes")
-    } else {
-        std::env::temp_dir().join("tachi").join("notes")
-    }
+    crate::path_utils::tachi_home().join("notes")
 }
 
 /// Ensure standard subdirectories exist under the notes root.

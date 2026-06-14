@@ -15,6 +15,7 @@ fn ensure_test_env() {
         std::env::set_var("SILICONFLOW_MODEL", "test-model");
         std::env::set_var("SUMMARY_MODEL", "test-summary-model");
         std::env::set_var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        std::env::set_var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE", "1");
         // Tests use a single global DB and seed paths across the canonical
         // layout (wiki, project, etc.). Disable path-routing validation so
         // those fixtures don't have to opt into cross-project routing.
@@ -35,22 +36,30 @@ fn acquire_real_home_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 struct TempHomeGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<std::ffi::OsString>,
+    original_tachi_home: Option<std::ffi::OsString>,
+    original_sigil_home: Option<std::ffi::OsString>,
     temp_home: std::path::PathBuf,
 }
 
 impl TempHomeGuard {
     fn new() -> Self {
-        let guard = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
         let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        let original_sigil_home = std::env::var_os("SIGIL_HOME");
         let temp_home =
             std::env::temp_dir().join(format!("tachi-test-home-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_home).expect("create temp home");
         std::env::set_var("HOME", &temp_home);
+        std::env::set_var("TACHI_HOME", temp_home.join(".tachi"));
+        std::env::remove_var("SIGIL_HOME");
         Self {
-            _guard: guard,
+            _lock: lock,
             original_home,
+            original_tachi_home,
+            original_sigil_home,
             temp_home,
         }
     }
@@ -62,6 +71,16 @@ impl Drop for TempHomeGuard {
             std::env::set_var("HOME", home);
         } else {
             std::env::remove_var("HOME");
+        }
+        if let Some(value) = self.original_tachi_home.as_ref() {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+        if let Some(value) = self.original_sigil_home.as_ref() {
+            std::env::set_var("SIGIL_HOME", value);
+        } else {
+            std::env::remove_var("SIGIL_HOME");
         }
         let _ = std::fs::remove_dir_all(&self.temp_home);
     }

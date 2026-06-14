@@ -471,6 +471,22 @@ struct MemoryServer {
 
 // MCP client pool types are in mcp_pool.rs
 
+fn test_background_workers_enabled() -> bool {
+    #[cfg(test)]
+    {
+        matches!(
+            std::env::var("TACHI_TEST_ENABLE_BACKGROUND_WORKERS")
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true") | Some("TRUE") | Some("yes")
+        )
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 impl MemoryServer {
     fn new(
         global_db_path: PathBuf,
@@ -621,20 +637,21 @@ impl MemoryServer {
             })),
         };
 
-        // Spawn the enrichment batcher worker
-        {
-            let batcher_server = server.clone();
-            tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
-        }
-        {
-            let foundry_server = server.clone();
-            tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
-        }
+        if test_background_workers_enabled() {
+            // Spawn the enrichment batcher worker
+            {
+                let batcher_server = server.clone();
+                tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
+            }
+            {
+                let foundry_server = server.clone();
+                tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
+            }
 
-        // Replay pending foundry jobs from DB (survive process restart)
-        {
-            let replay_server = server.clone();
-            tokio::spawn(async move {
+            // Replay pending foundry jobs from DB (survive process restart)
+            {
+                let replay_server = server.clone();
+                tokio::spawn(async move {
                 // Short delay to let the foundry worker start receiving
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -693,6 +710,7 @@ impl MemoryServer {
                     eprintln!("[foundry] replayed {replayed} pending jobs from DB");
                 }
             });
+            }
         }
 
         seed_builtin_capabilities(&server)

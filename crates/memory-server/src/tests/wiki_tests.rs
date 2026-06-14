@@ -674,7 +674,7 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // serializes HOME/TACHI_HOME across async mock LLM + REM run
 async fn rem_wiki_evolver_writes_pending_drafts_to_wiki_project() {
-    let _guard = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
 
     use axum::{routing::post, Json, Router};
     let app = Router::new().route(

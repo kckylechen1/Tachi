@@ -602,7 +602,7 @@ fn write_note_file_falls_back_when_slug_has_no_ascii_tokens() {
 #[tokio::test]
 async fn tachi_save_note_rejects_symlink_leaf() {
     let (server, temp_home) = make_server_with_temp_home();
-    let notes_dir = temp_home.temp_home.join(".tachi/notes/brainstorm");
+    let notes_dir = crate::notes_ops::notes_root().join("brainstorm");
     std::fs::create_dir_all(&notes_dir).expect("create notes dir");
     let outside = temp_home.temp_home.join("outside.md");
     std::fs::write(&outside, "outside").expect("write outside target");

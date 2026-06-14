@@ -2984,8 +2984,14 @@ mod tests {
         assert!(status.persist_last_error.is_none());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn provider_key_health_persists_off_async_runtime_thread() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _persist_guard =
+            EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
         let temp = tempfile::tempdir().expect("temp vault db");
         let db_path = temp.path().join("vault.db");
         let client =
@@ -3039,8 +3045,14 @@ mod tests {
         assert!(status.persist_last_error.is_none());
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn provider_key_health_persist_errors_are_visible_in_status() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _persist_guard =
+            EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
         let temp = tempfile::tempdir().expect("temp vault db");
         let db_path = temp.path().join("missing-parent").join("vault.db");
         let client =

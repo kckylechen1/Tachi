@@ -2882,9 +2882,6 @@ fn tachi_task_dispatch_completion_marker_updates_card_and_status_idempotently() 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, _temp_home) = make_server_with_temp_home();
     let tmp = tempfile::tempdir().expect("temp dispatch cwd");
     let flow_id = "flow_20260608T000008Z_dispatch_card_test";
@@ -2980,11 +2977,15 @@ async fn dispatch_run_dir_is_created_with_0o700() {
     let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
 
-    let home = std::env::var("HOME").expect("HOME set by TempHomeGuard");
-    let run_dir = std::path::PathBuf::from(home)
-        .join(".tachi")
-        .join("runs")
-        .join(dispatch_id);
+    let tachi_home = std::env::var("TACHI_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(
+                std::env::var("HOME").expect("HOME set by TempHomeGuard"),
+            )
+            .join(".tachi")
+        });
+    let run_dir = tachi_home.join("runs").join(dispatch_id);
     assert!(run_dir.exists(), "run dir should exist: {run_dir:?}");
     let mode = std::fs::metadata(&run_dir)
         .expect("run dir metadata")
@@ -3000,9 +3001,6 @@ async fn dispatch_run_dir_is_created_with_0o700() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000002Z_complete_link_test";
     let dispatch_id = "20260609T000002Z-custom-complete-link";
@@ -3094,9 +3092,6 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, _temp_home) = make_server_with_temp_home();
     let flow_id = "flow_20260609T000004Z_complete_defaults_test";
     let dispatch_id = "20260609T000004Z-custom-defaults";
@@ -5096,9 +5091,6 @@ async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_prof
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn board_surfaces_dispatch_run_ledger() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "99991231T235959Z-test-run-ledger-{}",
@@ -5158,9 +5150,6 @@ async fn board_surfaces_dispatch_run_ledger() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn board_marks_abandoned_working_run_as_failed() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "20260608T000000Z-stale-run-ledger-{}",
@@ -5237,9 +5226,6 @@ async fn board_marks_abandoned_working_run_as_failed() {
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn board_caps_corrupt_huge_timeout_before_duration_math() {
-    let _lock = crate::shell_ops::tachi_run_root_env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(
         "20260608T000001Z-huge-timeout-run-ledger-{}",

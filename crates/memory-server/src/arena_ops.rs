@@ -1666,8 +1666,12 @@ mod tests {
         assert_eq!(mission["result_written"], true);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _root = temp_arena_root();
         let temp_home = tempfile::tempdir().expect("temp tachi home");
         let fake_bin = tempfile::tempdir().expect("fake bin");
