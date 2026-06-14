@@ -265,7 +265,9 @@ fn relocate_location_rows(conn: &Connection) -> Result<usize, MemoryError> {
             )?;
             relocated += 1;
         }
-        after_id = rows.last().expect("non-empty batch").0.clone();
+        if let Some(last) = rows.last() {
+            after_id = last.0.clone();
+        }
     }
     Ok(relocated)
 }
@@ -969,5 +971,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn v9_relocate_location_rows_handles_empty_batch() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL DEFAULT '/',
+                location TEXT NOT NULL DEFAULT '',
+                metadata TEXT NOT NULL DEFAULT '{}'
+            );",
+        )
+        .unwrap();
+
+        let relocated = relocate_location_rows(&conn).unwrap();
+        assert_eq!(relocated, 0);
     }
 }
