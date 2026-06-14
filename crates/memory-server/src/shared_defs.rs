@@ -101,41 +101,6 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
-#[cfg(test)]
-mod dlq_tests {
-    use super::*;
-
-    fn dead_letter(id: &str, timestamp: String) -> DeadLetter {
-        DeadLetter {
-            id: id.to_string(),
-            tool_name: "test_tool".to_string(),
-            arguments: None,
-            error: "boom".to_string(),
-            error_category: "internal".to_string(),
-            timestamp,
-            retry_count: 0,
-            max_retries: 3,
-            status: "pending".to_string(),
-        }
-    }
-
-    #[test]
-    fn push_dead_letter_prunes_expired_entries_before_enqueue() {
-        let now = Utc::now();
-        let stale = (now - chrono::Duration::seconds(DLQ_TTL_SECS as i64 + 1)).to_rfc3339();
-        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339();
-        let mut dlq = std::collections::VecDeque::from([
-            dead_letter("stale", stale),
-            dead_letter("fresh", fresh),
-        ]);
-
-        push_dead_letter_with_limits(&mut dlq, dead_letter("new", now.to_rfc3339()), now);
-
-        let ids = dlq.iter().map(|dl| dl.id.as_str()).collect::<Vec<_>>();
-        assert_eq!(ids, vec!["fresh", "new"]);
-    }
-}
-
 /// Like `slim_entry` but additionally surfaces enrichment status fields:
 ///   - `embedding_pending`: true when no vector has been written yet
 ///   - `summary_pending`:   true when no summary has been written yet
@@ -267,4 +232,39 @@ pub(super) fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value
         "summary": summary,
         "l0_rule": true,
     })
+}
+
+#[cfg(test)]
+mod dlq_tests {
+    use super::*;
+
+    fn dead_letter(id: &str, timestamp: String) -> DeadLetter {
+        DeadLetter {
+            id: id.to_string(),
+            tool_name: "test_tool".to_string(),
+            arguments: None,
+            error: "boom".to_string(),
+            error_category: "internal".to_string(),
+            timestamp,
+            retry_count: 0,
+            max_retries: 3,
+            status: "pending".to_string(),
+        }
+    }
+
+    #[test]
+    fn push_dead_letter_prunes_expired_entries_before_enqueue() {
+        let now = Utc::now();
+        let stale = (now - chrono::Duration::seconds(DLQ_TTL_SECS as i64 + 1)).to_rfc3339();
+        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let mut dlq = std::collections::VecDeque::from([
+            dead_letter("stale", stale),
+            dead_letter("fresh", fresh),
+        ]);
+
+        push_dead_letter_with_limits(&mut dlq, dead_letter("new", now.to_rfc3339()), now);
+
+        let ids = dlq.iter().map(|dl| dl.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["fresh", "new"]);
+    }
 }
