@@ -988,11 +988,14 @@ pub(crate) async fn handle_wiki_ingest(
                 valid_from: String::new(),
                 valid_to: None,
             };
-            let _ = server.with_named_project_store("wiki", |store| {
+            if let Err(e) = server.with_named_project_store("wiki", |store| {
                 store
                     .add_edge(&edge)
                     .map_err(|e| format!("wiki ingest edge: {e}"))
-            });
+            }) {
+                tracing::warn!("wiki ingest edge write failed: {e}");
+                return Err(e);
+            }
         }
     }
 
