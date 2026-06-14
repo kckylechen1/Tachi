@@ -1,56 +1,60 @@
-<!-- TACHI:BEGIN v0.16 -->
+<!-- TACHI:BEGIN v1.5.3 -->
 # Tachi 使用指南 / Tachi Usage Addendum
 
-> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v0.16。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
+> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v1.5.3。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
 
 ## 角色
 
 | 你 | 工具 |
 |---|---|
-| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi-*` MCP 工具集 + `tachi hub` CLI |
+| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi_*` MCP facade 工具集 + `tachi` CLI |
 
 ## 三条铁律
 
-1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_search_memory`。命中就引用，未命中再 `tachi_save_memory`。
-2. **结构化保存**。`save_memory` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 distill 误吞。
-3. **Skill 优先**。复杂任务先 `tachi_recommend_skill` / `tachi_run_skill`，不要自己重写 prompt。
+1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_search`。命中就引用，未命中再 `tachi_save`。
+2. **结构化保存**。`tachi_save` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
+3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
 
 ## 常用工具速查
 
 | 场景 | 工具 | 备注 |
 |---|---|---|
-| 检索历史 | `tachi_search_memory` | 默认 hybrid（vector+FTS+symbolic）。指定 `path_prefix` 可大幅提速。 |
-| 抽取事实 | `tachi_extract_facts` | LLM 自动从一段对话抽 fact 入库。比手动 save 更省 token。 |
-| 写入事实 | `tachi_save_memory` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
-| 查关联 | `tachi_memory_graph` | 给 memory_id 或 query，返回邻居 + 边。 |
-| 跨 Agent 投递 | `tachi_post_card` / `tachi_check_inbox` | Kanban 模式，比 ghost 重，适合"任务交接"。 |
-| 实时广播 | `tachi_ghost_publish` / `tachi_ghost_subscribe` | 轻量 pub/sub。`tachi_ghost_whisper` 是别名。 |
-| 跨 session 交接 | `tachi_handoff_leave` / `tachi_handoff_check` | session 开头先 check。 |
-| 找技能 | `tachi_recommend_skill` `tachi_recommend_capability` `tachi_recommend_toolchain` | 按自然语言任务找技能。 |
-| 执行技能 | `tachi_run_skill` | 入参 `skill_id` + `args`。 |
+| 检索历史 | `tachi_search` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
+| 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
+| 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
+| 任务调度 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `dispatch` / `complete` / `board` / `merge` / `pr_status`。 |
+| 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
+| 工作 arena | `tachi_arena(action=...)` | `open` / `spawn` / `board` / `collect` / `close`，跟踪已派外部 Agent。 |
+| 评估反馈 | `tachi_agent_eval(action=...)` | 输出 scorecard 和 performance matrix，反哺路由。 |
+| 查关联 | `tachi_memory(action="ask")` 或底层 `memory_graph` | 给 memory_id 或 query，返回邻居 + 边。 |
+| 跨 Agent 投递 | `tachi_task(action="card")` 或底层 `post_card` / `check_inbox` | Kanban 模式，适合任务交接。 |
+| 实时广播 | `ghost_publish` / `ghost_subscribe` | 轻量 pub/sub；`ghost_whisper` 是别名。 |
+| 跨 session 交接 | `handoff_leave` / `handoff_check` | session 开头先 check。 |
+| 找技能 | `recommend_skill` / `recommend_capability` / `recommend_toolchain` | 按自然语言任务找技能。 |
+| 执行技能 | `run_skill` | 入参 `skill_id` + `args`。 |
 | 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |
 
-## save_memory 范式
+## tachi_save 范式
 
 ```jsonc
 // ✅ 好
 {
-  "text": "Sigil v0.16 引入 coherent_distill_buckets，按 topic/entity 分桶蒸馏。",
-  "path": "/sigil/architecture/distill",
-  "topic": "foundry-distill",
+  "text": "Tachi v1.5 引入 tachi_verify，用于记录后台验证证据并供 safe_merge gate 消费。",
+  "path": "/tachi/workflow/verification",
+  "topic": "verify-ledger",
   "category": "decision",
-  "entities": ["coherent_distill_buckets", "process_memory_distill_job"],
-  "keywords": ["distill", "foundry", "coherence"],
+  "entities": ["tachi_verify", "safe_merge", "verification.json"],
+  "keywords": ["verify", "merge", "evidence"],
   "importance": 0.8
 }
 
-// ❌ 坏（会被 GC / distill 误处理）
+// ❌ 坏（会被 capture gate 拦截或 GC / distill 误处理）
 { "text": "fixed it" }
 ```
 
-## `tachi hub` CLI
+## `tachi` CLI
 
-用 `tachi hub` 子命令不开 MCP 查技能/包/虚拟绑定（只有一个 `tachi` 可执行文件）。
+用 `tachi` 子命令不开 MCP 也能巡检万宝楼、管理库、触发维护：
 
 ```bash
 tachi hub list                  # 列全部已注册技能/插件/MCP
@@ -58,33 +62,52 @@ tachi hub list --type skill     # 只看 skill
 tachi hub show skill:code-review
 tachi hub packs                 # 已安装的 pack
 tachi hub stats                 # 总量统计
-tachi hub doctor                # 轻量 schema 巡检（与 `tachi doctor` v2 不同）
+tachi doctor                    # 巡检 SQLite 藏库健康
+tachi env plan                  # 查看 .tachi/vault.env 绑定（不解密）
+tachi env sync --keychain       # 预览 env.generated（默认不写盘）
+tachi env sync --apply --keychain  # 写入 .tachi/env.generated（0600）
+tachi backfill-vectors --db ~/.tachi/global/memory.db
+tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry-run）
 ```
 
-输出与 `tachi_recommend_*` MCP 工具一致；CLI 走的是 `~/.tachi/global/memory.db`。
+输出与 `recommend_*` MCP 工具一致；CLI 默认走 `~/.tachi/global/memory.db`。
 
 ## Path 命名约定
 
-- `/<project>/<topic>/...` — 项目内事实（hapi、quant、sigil、openclaw、tachi、antigravity、hyperion、wiki）
+- `/<project>/<topic>/...` — 项目内事实（tachi、sigil、openclaw、hapi、quant、hyperion、antigravity、wiki）
 - `/user/<topic>` — 用户层级 preference / credential
 - `/ghost/messages/...` — Ghost 消息（不要手动写）
-- `/foundry/...` — **保留给 foundry 自己**，外部不要写。v0.16 之前误写的 47 条已硬删。
+- `/foundry/...` — **保留给 foundry 自己**，外部不要写
+- `/handoff/...` / `/kanban/...` — 协调上下文，retention 自动 pinned
 
 ## 反模式（别犯）
 
 - 不要往 `/foundry/*` 手动写。
 - 不要 `path = "/"` + `topic = ""`。
-- 不要把整段对话当 text 塞进 save_memory；用 `extract_facts` 或 `ingest_event`。
+- 不要把整段对话当 text 塞进 `tachi_save`；用 `extract_facts` 或 `ingest_event`。
 - 不要在 ghost topic 上 publish 后立刻自己 subscribe 同一 topic 自我喂养。
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
+- 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。
+- **`tachi env sync` 必须加 `--apply` 才写盘**；默认只是 preview。`.tachi/env.generated` 含明文，勿 commit。
+- **`queue_agent_evolution` 同输入会去重**；重复 queue 会返回 `deduped`，不要靠反复 queue 来“重试”。
 
 ## 出错怎么办
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `no such column: retention_policy` | 老库 schema drift | `tachi hub doctor --fix` 或重启 memory-server（启动会 migrate） |
+| `no such column: retention_policy` | 老库 schema drift | 重启 memory-server（启动会 migrate），或 `tachi doctor --fix` |
 | `vec0 module not loaded` | sqlite-vec 扩展未装 | brew 安装的二进制自带；裸 `sqlite3` CLI 没有 |
 | `distill produced empty` | bucket 不满 `FOUNDRY_DISTILL_MIN_BATCH=3` | 正常，等够 3 条同 topic/entity 的记忆再触发 |
-| `VOYAGE_RERANK_API_KEY missing` | 未配置 rerank | 可选项，不配置不影响核心检索 |
+| `tool not found` | Profile 隐藏了该工具 | 检查 `TACHI_PROFILE`，必要时切 `admin` 或加 `TACHI_EXTRA_TOOLS` |
+| `database is locked` | 多实例同时写同一 DB | 确保每个 DB 只有一个 Tachi 进程 |
 
-<!-- TACHI:END v0.16 -->
+## 模型栈（Phase 2）
+
+日常部署只需两把钥匙：
+
+- `VOYAGE_API_KEY` — 嵌入 / rerank
+- `SILICONFLOW_API_KEY` — 抽取、摘要、蒸馏（`Qwen/Qwen3.5-27B`）
+
+后台 skill / foundry 调用优先走 **Claude CLI pool**，失败时回退到 `SILICONFLOW_*`。`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
+
+<!-- TACHI:END v1.5.3 -->

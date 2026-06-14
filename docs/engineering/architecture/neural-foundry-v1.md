@@ -278,6 +278,7 @@ Already done:
 
 - `synthesize_agent_evolution` now persists proposal artifacts into Foundry proposal storage
 - `queue_agent_evolution` can run synthesis in the background and persist job state
+- **`queue_agent_evolution` idempotency**: job ids are deterministic from input fingerprint; re-queue with the same inputs returns `deduped` for active or terminal jobs instead of spawning duplicate synthesis. Stale `running` jobs (>30 minutes) can be reclaimed before retry.
 - `list_agent_evolution_proposals` exposes stored proposals for operator review
 - `review_agent_evolution_proposal` adds approval / rejection / applied review state
 

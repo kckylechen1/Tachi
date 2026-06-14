@@ -33,7 +33,11 @@ organize: true
 ## 3. CLI 与「把 Key 放进 Vault」
 
 - **当前没有** `tachi vault set` 这类纯 CLI 子命令；**写 Vault** 的标准路径是 MCP：`vault_init` / `vault_unlock` / `vault_set`（`tachi serve` 期间）。
-- **`tachi env`**：只读打开库 + 主密码，导出 `export ...` 行；见 `bootstrap.rs` 中 `run_env_command`。
+- **`tachi env`**：只读打开库 + 主密码，导出 `export ...` 行；见 `bootstrap/env_cmd.rs` 中 `run_env_command`。
+  - **`tachi env plan`**：查看 `.tachi/vault.env` 绑定，不解密。
+  - **`tachi env export`**：stdout 输出 shell exports（适合 `eval "$(tachi env export --keychain)"`）。
+  - **`tachi env sync`**：默认 **preview only**；必须 `--apply` 才写入 `.tachi/env.generated`（0600，含 DO NOT COMMIT 头）。
+  - **`tachi env run -- <cmd>`**：在注入项目 secrets 的 env 下执行命令。
 - **自研 Go TUI**：最稳妥是与 **MCP 客户端** 一样调上述工具；或在应用内复刻加密与表结构（成本高，需与 Rust 行为字节级一致）。
 
 ---

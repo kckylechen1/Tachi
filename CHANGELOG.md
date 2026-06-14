@@ -5,9 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Quick Navigation
+
+- [Unreleased](#unreleased)
+- [1.5.x](#153---2026-06-08) — verification-led merge gates and agent workflow hardening
+- [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
+- [1.3.x](#130---2026-05-30) — search quality, memory lifecycle, and audit hardening
+- [1.2.0](#120---2026-05-25) — shell orchestration, dispatch v2, daily distill
+- [1.1.0](#110---2026-05-04) — truth-maintenance security fixes
+- [1.0.1](#101---2026-05-02) — default profile changed to `standard`
+- [1.0.0](#100---2026-05-01) — Tool Surface v2 and facade tools
+- [0.16.x](#0164---2026-04-28) — memory governance, rescue, and coherent distill
+- [0.15.x](#0150---2026-04-06) — retention policy and domain-aware routing
+- [0.14.0](#0140---2026-04-03) — agent install guide and security hardening
+- [0.13.0](#0130---2026-04-03) — Neural Foundry V1 and capability recommendations
+- [0.12.0](#0120---2026-03-27) — Vault hardening and Kanban GC
+- [0.11.0](#0110---2026-03-26) — multi-agent orchestration layer
+- [0.10.0](#0100---2026-03-26) — Virtual Capabilities and governance
+- [0.9.0](#090---2026-03-25) — Agent Kanban communication board
+- [0.8.0](#080---2026-03-24) — memory infrastructure and MCP proxy hardening
+- [0.7.0](#070---2026-03-23) — MCP Client Proxy Phase 2
+- [0.6.0](#060---2026-03-23) — project renamed to Tachi
+- [0.5.0](#050---2026-03-23) — Dual-DB architecture (global + project)
+- [0.4.0](#040---2026-03-18) — native Rust MCP server
+- [0.3.0](#030---2026-03-14) — `hard_state` and derived-item isolation
+- [0.2.0](#020---2026-03-08) — causal worker pipeline
+- [0.1.0](#010---2026-03-05) — initial Sigil release
+
 ## [Unreleased]
 
-## [1.5.3] - 2026-06-08
+> **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+### Security & idempotency hardening
+
+Post–Gemini review hardening landed on `main` after v1.5.3 (PRs #359–#376 security batch, #377 idempotency follow-up).
+
+#### Added
+
+- **`tachi env sync --apply`**: project env materialization is preview-only by default. Pass `--apply` to write `.tachi/env.generated`; `--dry-run` remains an explicit preview alias.
+- **Foundry queue dedupe**: `queue_agent_evolution` derives a deterministic job id from input fingerprint; active or terminal jobs return `deduped` instead of spawning duplicate synthesis. Stale `running` jobs (>30 minutes) can be reclaimed.
+- **Global dispatch dedupe**: bare `tachi_dispatch` calls without `flow_id` dedupe via `~/.tachi/runs/.dispatch-dedupe/` fingerprint locks.
+- **Dispatch crash recovery**: daemon startup runs `recover_orphaned_dispatch_runs()` for orphaned in-flight dispatches.
+
+#### Changed
+
+- **DLQ safety**: failed tool calls enqueue to DLQ only when replay is considered safe. `dlq_retry` rejects native tools and non-idempotent mutating replays (`hub_call`, write tools, mutating facade actions).
+- **MCP remote URL validation**: expand-then-validate hostnames, block private/link-local targets (including IPv4-mapped IPv6), and resolve DNS asynchronously before SSE MCP connections.
+- **Secret file creation**: MCP config, Claude pool state, and bootstrap env exports use atomic `0o600` file creation where supported.
+- **`tachi env sync` CLI default**: no longer writes unless `--apply` is passed (breaking change for scripts that relied on implicit writes).
+
+#### Fixed
+
+- **MCP SSRF**: remote MCP URLs are validated after hostname expansion and DNS resolution, not only on the literal input string.
+- **Interpreter bypass**: MCP launcher commands must resolve to approved interpreter basenames.
+- **Subprocess allowlist injection**: Codex/Grok/Kimi dispatch profiles reject caller-supplied `allowlist` overrides.
+- **TOCTOU on config writes**: sensitive runtime config files are written via create-new + rename instead of truncate-in-place.
+
+## [1.5.3] - 2026-06-08 — 🔒 Verification-ledger merge gates
 
 Patch release for verification-ledger merge gates and background-check workflow integration.
 
@@ -28,7 +82,7 @@ Patch release for verification-ledger merge gates and background-check workflow 
 - Missing, mismatched, or skipped required verification items without matching `head_sha` are treated as stale instead of green for merge gates.
 - Recent verification summaries cap metadata-sorted candidate scans before parsing ledger JSON.
 
-## [1.5.2] - 2026-06-08
+## [1.5.2] - 2026-06-08 — 🔒 Safe merge gate correctness
 
 Patch release for safe merge gate correctness and agent-facing merge workflow clarity.
 
@@ -45,7 +99,7 @@ Patch release for safe merge gate correctness and agent-facing merge workflow cl
 - Safe merge no longer reports head consistency as proven when GitHub does not expose independent check/review head SHAs.
 - Strict safe-merge policy accepts either an explicit Tachi `flow_id` or GitHub closing issue reference, rather than requiring both.
 
-## [1.5.1] - 2026-06-08
+## [1.5.1] - 2026-06-08 — 🛡️ Post-1.5.0 MCP and agent hardening
 
 Patch release for post-1.5.0 MCP and agent workflow hardening.
 
@@ -71,7 +125,7 @@ Patch release for post-1.5.0 MCP and agent workflow hardening.
 - Vault env materialization uses already decrypted pool entries instead of triggering DB-writing reads while preparing child env.
 - Vault sync bundle export creates temporary bundle files with private `0600` permissions before writing bytes.
 
-## [1.5.0] - 2026-06-07
+## [1.5.0] - 2026-06-07 — 🚀 Agent engineering control plane
 
 Release focused on turning Tachi into a more complete agent engineering surface: native multi-agent coordination, auditable worker runs, skill policy, cleanup utilities, runtime observability, and release-ready package alignment.
 
@@ -103,7 +157,7 @@ Release focused on turning Tachi into a more complete agent engineering surface:
 
 - Legacy `memory-python` PyO3 crate and dead/zombie code paths that were no longer part of the active Tachi architecture.
 
-## [1.4.3] - 2026-06-02
+## [1.4.3] - 2026-06-02 — ✨ MCP UX polish
 
 Polish release plus MCP UX fixes from hands-on testing: briefing compact mode, kanban metadata, wiki multi-store reads, ask cross-store hints, status warnings with DB names, Voyage rerank empty-document guard, and install URL pinning.
 
@@ -130,7 +184,7 @@ Polish release plus MCP UX fixes from hands-on testing: briefing compact mode, k
 
 - `rustfmt` normalization on `bootstrap/tidy.rs`, `docs_ops.rs`, `facade_save_ops.rs`, `utils.rs`, and `tests/docs_tests.rs`. No semantic changes; 497 tests still pass, `cargo clippy -- -D warnings` clean.
 
-## [1.4.2] - 2026-06-01
+## [1.4.2] - 2026-06-01 — 📝 `tachi_memory` format contract
 
 Final format-contract patch for the `tachi_memory` facade.
 
@@ -146,7 +200,7 @@ Final format-contract patch for the `tachi_memory` facade.
 
 - `tachi watcher status --json` now reads the passive watcher status directly instead of parsing Markdown briefing output.
 
-## [1.4.1] - 2026-06-01
+## [1.4.1] - 2026-06-01 — 🔧 Plan C, daemon safety, and GC hardening
 
 Patch release: post-1.4.0 hardening for Plan C, daemon safety, GC, and Linux release builds.
 
@@ -164,7 +218,7 @@ Patch release: post-1.4.0 hardening for Plan C, daemon safety, GC, and Linux rel
 
 - `tachi_memory` facade actions (`save`, `checkpoint`, `ask`, `consolidate`, `readiness`, `progress`, `extract_facts`) return Markdown for human/LLM reading; `tachi_save` / `save_memory` / `remember` still return JSON. Programmatic clients must not assume JSON on those facade actions.
 
-## [1.4.0] - 2026-06-01
+## [1.4.0] - 2026-06-01 — 🏗️ Plan C project DB and SFT factory
 
 Plan C project DB, memory lifecycle / SFT factory, and facade module split.
 
@@ -189,7 +243,7 @@ Plan C project DB, memory lifecycle / SFT factory, and facade module split.
 - Plan C symlink uses sanitized project dir name; non-Unix hosts get an explicit note in the init response.
 - Align `crates/memory-node/package.json` to 1.4.0 for release version checks.
 
-## [1.3.1] - 2026-05-31
+## [1.3.1] - 2026-05-31 — 🔧 #137 follow-up fixes
 
 Patch release for #137 follow-up fixes after code review.
 
@@ -203,7 +257,7 @@ Patch release for #137 follow-up fixes after code review.
 
 - Ignore local `bin/` build outputs in git.
 
-## [1.3.0] - 2026-05-30
+## [1.3.0] - 2026-05-30 — 🔍 Search quality and memory lifecycle hardening
 
 Twenty commits since v1.2.0. Major themes: search quality improvements, memory lifecycle hardening, MCP numeric coercion fixes, wiki read/browse refactor, docs organizer, and comprehensive audit fixes.
 
@@ -259,7 +313,7 @@ Twenty commits since v1.2.0. Major themes: search quality improvements, memory l
 - **P0/P1/P2 tech debt** (PR #113): 19 new regression and integration tests; silent error paths in enrichment, contradiction, and graph operations hardened.
 - **Gemini review rollup** (PR #128): `tokio::spawn` hot-path in enrichment replaced with spawn-blocking; thousands-separator regex corrected; `WHERE` clause and transaction wrapper added to `normalize_memory_validity_columns`; `push_unique` prevents duplicate FTS expansion terms; noisy-OR accumulation corrected in graph spreading activation; `avg_importance` hoisted above topic guard in insight inference; null filter and `evidence_ref` fallback added to synthesis scaffolding.
 
-## [1.2.0] - 2026-05-25
+## [1.2.0] - 2026-05-25 — 🐚 Shell orchestration, dispatch v2, and daily distill
 
 Forty-eight commits since v1.1.1. Major themes: shell orchestration, dispatch v2, daily distill, health/observability, search/wiki hygiene, guide layer, and OpenClaw per-agent routing.
 
@@ -286,7 +340,7 @@ Forty-eight commits since v1.1.1. Major themes: shell orchestration, dispatch v2
 - **`tachi_memory` facade** unifies search/save; GH merge worktree safety hardened.
 - **Release alignment**: Rust crates, `@chaoxlabs/tachi-node`, OpenClaw plugin, and install docs unified on `1.2.0`.
 
-## [1.1.0] - 2026-05-04
+## [1.1.0] - 2026-05-04 — 🛡️ Truth-maintenance security fixes
 
 Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v2 branch are fixed. No public CLI/tool surface changes, but several defaults are now safer.
 
@@ -308,7 +362,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 
 - `repair::tests::r5_integrity_detects_corruption` is now deterministic — it pins `page_size=4096`, VACUUMs, and stomps the entirety of page 2 with `0xFF`. Verified 20/20 consecutive passes.
 
-## [1.0.1] - 2026-05-02
+## [1.0.1] - 2026-05-02 — 🔧 Default profile changed to `standard`
 
 ### ⚠️ BREAKING
 
@@ -343,7 +397,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - `cargo test -p memory-server -- profiles::tests` (14 tests)
 - `cargo test -p memory-server -- standard_profile_direct_add_edge` (1 integration test)
 
-## [1.0.0] - 2026-05-01
+## [1.0.0] - 2026-05-01 — 🎭 Tool Surface v2 and facade tools
 
 ### Added
 - **Tool Surface v2**: added compact facade tools (`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`) plus delegate/eval tools (`tachi_dispatch`, `approve_merge`, `tachi_complete`).
@@ -366,7 +420,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - `cargo test -p memory-server`
 - `cargo check -p memory-server`
 
-## [0.16.4] - 2026-04-28
+## [0.16.4] - 2026-04-28 — 🔍 FTS maintenance CLI
 
 ### Added
 - **FTS maintenance CLI**: `tachi backfill-fts [--db PATH] [--dry-run] [--full]` now reports, backfills, or fully rebuilds the `memories_fts` index for local stores.
@@ -375,7 +429,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Stale-branch safety patches recovered**: `sync_memories` now reads legacy project-scoped agent known-state before classifying entries as new, and the noise filter catches additional low-signal assistant boilerplate.
 - **Release alignment**: Crate/package versions, OpenClaw client version, install docs, GitHub release, and Homebrew tap are aligned on `0.16.4`.
 
-## [0.16.3] - 2026-04-28
+## [0.16.3] - 2026-04-28 — 🛡️ Memory governance suite
 
 ### Added
 - **Memory governance suite**: doctor v2, manifest v1, manifest-aware write guards/resolvers, save-time capture gate validation, Foundry job lifecycle hardening, and antigravity multi-project rescue tooling.
@@ -384,7 +438,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Changed
 - **Antigravity rescue flow**: mixed antigravity memory rows can now be split into project DBs with provenance and quarantine-style source backup instead of deletion.
 
-## [0.16.1] - 2026-04-23
+## [0.16.1] - 2026-04-23 — 🔧 Distill scheduler and release chain fixes
 
 ### Fixed
 - **Distill scheduler/executor drift**: scheduled distill jobs now key on `/<root>#<coherence_key>` instead of only the top-level path segment, and the worker only processes the exact `memory_ids` selected by the scheduler. This closes the gap where a queued `/hapi` job could later re-scan the whole path window and distill a different bucket than the one originally chosen.
@@ -392,7 +446,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **`tachi-hub` formula packaging**: `scripts/update_homebrew_formula.py` now upgrades the tap formula structure as part of every release, so Homebrew installs and tests both `tachi` and `tachi-hub` instead of leaving the new binary out of the bottle.
 - **License metadata alignment**: the repo is AGPLv3, so crate manifests and the `@chaoxlabs/tachi-node` / OpenClaw package metadata now declare `AGPL-3.0-only` instead of stale `MIT` values.
 
-## [0.16.0] - 2026-04-23
+## [0.16.0] - 2026-04-23 — 🧠 Coherent distill and tool surface bundles
 
 ### Fixed
 - **Coherent foundry distill**: `process_memory_distill_job` now buckets candidate memories by `topic:` / `entity:` before invoking the LLM. Previously the worker passed every record under a `path` prefix to the model, producing "缝合怪" (frankenstein) summaries that mixed unrelated topics. Memories without a topic or entity are skipped; the largest coherent bucket wins, and distilled output is tagged with a `coherence_key` for traceability. (`crates/memory-server/src/foundry_runtime_ops/maintenance.rs`)
@@ -408,14 +462,12 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 
 ### Changed
 - **`integrations/openclaw`**, **all four core crates**, and the brew formula bumped to `0.16.0`.
-
-### Changed
 - **Tool surface bundles**: Replaced mutually exclusive tool profiles with additive surface bundles: `observe`, `remember`, `coordinate`, `operate`, and `admin`.
 - **Compatibility default**: Tachi still keeps `admin` as the implicit no-profile default, but host aliases and docs now steer new integrations toward explicit least-privilege bundles.
 - **Host alias mapping**: `antigravity` now resolves to the coordination surface, while `openclaw` resolves to the runtime/operator surface. OpenClaw’s embedded client now sets `TACHI_PROFILE=openclaw`.
 - **Capability-first agent surface**: `run_skill` is now part of the normal agent-facing write surface, while raw hub/pack/vault/vc governance tools remain admin-only.
 
-## [0.15.1] - 2026-04-08
+## [0.15.1] - 2026-04-08 — 🔍 Search and Hub hardening
 
 ### Fixed
 - **Hub feedback truthfulness**: `hub_record_feedback` now returns whether a capability record was actually updated. Missing hub items correctly surface `"recorded": false` instead of silently reporting success.
@@ -432,7 +484,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Tests
 - **Regression coverage expanded**: added tests for hub-feedback misses, importance clamping, nested code-fence stripping, `persons` / `entities` extraction, FTS `path_prefix` filtering, and new noise-denial patterns.
 
-## [0.15.0] - 2026-04-06
+## [0.15.0] - 2026-04-06 — 🏷️ Retention policy and domain-aware routing
 
 ### Added
 - **Memory Retention Policy** (#38): New `RetentionPolicy` enum with four variants — `Ephemeral`, `Durable` (default), `Permanent`, and `Pinned`. Stored as TEXT in the `memories` table (`NULL` = durable). `Permanent` and `Pinned` entries are exempt from garbage collection. The `retention_policy` field is accepted on `save_memory` and returned on all read paths.
@@ -451,7 +503,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Tests
 - **147 tests passing** (up from ~134): New coverage for retention policy variants, domain CRUD operations, GC config externalization, and retention-aware archival logic.
 
-## [0.14.0] - 2026-04-03
+## [0.14.0] - 2026-04-03 — 📖 Agent install guide and security hardening
 
 ### Added
 - **Agent-first installation guide** (`docs/INSTALL.md`): A standalone document that any AI agent can read to autonomously install and configure Tachi — no human intervention needed. All three READMEs now link to this guide as the primary install path.
@@ -475,7 +527,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Homebrew tap CI**: The "Update Homebrew Tap" GitHub Actions workflow requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret to be configured in the repository settings. This is a manual step.
 - **Low-severity items deferred**: Various `.unwrap()` calls in non-critical paths, unbounded `proxy_tools` vec, `hub_ops/export.rs` clean mode may delete non-tachi files, and extensive `#[allow(dead_code)]` annotations remain for a future cleanup pass.
 
-## [0.13.1] - 2026-04-03
+## [0.13.1] - 2026-04-03 — 🔧 Lane wiring and lockfile consistency
 
 ### Changed
 - **MiniMax lane wiring clarified**: documented and configured `MiniMax M2.7` as the default `DISTILL` and `SUMMARY` target using its OpenAI-compatible `chat/completions` endpoint, instead of treating it as a future gateway-only option.
@@ -485,7 +537,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Fixed
 - **Post-tag release cleanup**: followed up the initial `0.13.0` lane-config release with lockfile/version consistency fixes and direct MiniMax endpoint guidance.
 
-## [0.13.0] - 2026-04-03
+## [0.13.0] - 2026-04-03 — 🏭 Neural Foundry V1 and capability recommendations
 
 ### Added
 - **Neural Foundry V1 runtime**: introduced server-owned `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, and `compact_session_memory` so memory capture, context compaction, and durable session artifacts live in Tachi instead of host adapters.
@@ -508,7 +560,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **`memory-server` suite**: `cargo test -p memory-server` now passes with 99 tests after the module split and Foundry lane work.
 - **OpenClaw build**: `npm --prefix integrations/openclaw run build` passes against the thin-adapter plugin.
 
-## [0.12.3] - 2026-04-01
+## [0.12.3] - 2026-04-01 — 🎯 Named project targeting
 
 ### Added
 - **Named project targeting for core memory APIs**: `save_memory`, `search_memory`, and `get_memory` now accept an optional `project` parameter so callers can explicitly target `~/.tachi/projects/<name>/memory.db` instead of relying only on the daemon’s current default project DB.
@@ -521,7 +573,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Tests
 - **Expanded coverage for named project params**: test suite updated so `get_memory` / `save_memory` round-trips include the new `project` field, plus regression coverage for the new server-side path.
 
-## [0.12.2] - 2026-03-30
+## [0.12.2] - 2026-03-30 — 📦 Release reproducibility (Cargo.lock)
 
 ### Fixed
 - **Homebrew/release reproducibility**: started tracking the workspace `Cargo.lock` so release tarballs build against the tested dependency graph instead of drifting to newer incompatible crates during package installs.
@@ -529,7 +581,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Changed
 - **Patch release for packaging only**: no runtime behavior changes beyond restoring deterministic builds for `cargo build` consumers such as Homebrew.
 
-## [0.12.1] - 2026-03-30
+## [0.12.1] - 2026-03-30 — 📊 Vector backfill and write provenance
 
 ### Added
 
@@ -550,7 +602,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 ### Tests
 - **57 tests** (up from 55): 2 new provenance tests covering `save_memory` and `post_card` metadata injection.
 
-## [0.12.0] - 2026-03-27
+## [0.12.0] - 2026-03-27 — 🔐 Vault hardening and Kanban GC
 
 ### Added
 
@@ -586,7 +638,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
   - `vault_operations_record_audit_entries`: Audit rows for init/set/get/lock/unlock(both success+fail)/remove
   - `memory_gc_prunes_expired_resolved_kanban_cards`: Resolved card older than 30 days gets deleted
 
-## [0.11.1] - 2026-03-26
+## [0.11.1] - 2026-03-26 — 👻 Ghost aliases, persistence, and governance
 
 ### Added
 
@@ -621,7 +673,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Call outcome persistence**: `hub_call` records success/failure outcomes to `hub_capabilities.fail_streak`, `last_error_at`, and `last_success_at` after every invocation.
 - **Bootstrap initializers updated**: New capabilities registered at startup are initialized with `review_status=approved` and `health_status=healthy` to avoid breaking existing workflows.
 
-## [0.11.0] - 2026-03-26
+## [0.11.0] - 2026-03-26 — 🤝 Multi-agent orchestration layer
 
 ### Added
 
@@ -661,7 +713,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **M-2: VC auto-approval undocumented**: Added comment explaining why VCs skip `hub_review` (logical routing abstractions, not executable code).
 - **MemoryEntry construction**: Handoff memo persistence now constructs `MemoryEntry` with all required fields instead of relying on missing `Default` impl.
 
-## [0.10.0] - 2026-03-26
+## [0.10.0] - 2026-03-26 — 🔮 Virtual Capabilities and governance
 
 ### Added
 
@@ -680,7 +732,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Desktop API resilience**: `api.ts` now tries multiple base URLs (`VITE_TACHI_BASE_URL`, proxy, localhost) with automatic failover.
 - **Desktop proxy fix**: `vite.config.ts` proxy configuration corrected for daemon communication.
 
-## [0.9.0] - 2026-03-25
+## [0.9.0] - 2026-03-25 — 📋 Agent Kanban communication board
 
 ### Added
 
@@ -704,7 +756,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Error recovery visibility**: replaced silent fallbacks in key paths with explicit warnings for invalid definitions/tool payloads and poisoned-mutex recovery.
 - **Config validation hardening**: MCP `env`/`args` definition parsing is now stricter to prevent malformed runtime config from being silently accepted.
 
-## [0.8.0] - 2026-03-24
+## [0.8.0] - 2026-03-24 — 🧩 Memory infrastructure and MCP proxy hardening
 
 ### Added
 
@@ -739,7 +791,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Scoped Graph Persistence**: Graph edges are now correctly persisted within the appropriate database scope (project vs. global).
 - **Proxy Discovery Safety**: `hub_register(type=mcp)` now applies discovery timeouts before finalizing capability state and records failed discovery as disabled metadata instead of leaving a silently-enabled broken proxy.
 
-## [0.7.2] - 2026-03-24
+## [0.7.2] - 2026-03-24 — 🔒 Proxy hardening and audit safety
 
 ### Added
 - **`hub_disconnect` Tool**: New MCP tool to forcefully drop cached child MCP server processes from the proxy pool, allowing immediate reconnects with refreshed environment variables.
@@ -754,7 +806,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Deterministic Sandbox Routing**: Path matching for Sandbox semantic validation now scales strictly via mathematical matching specificity (`ORDER BY LENGTH(path_pattern) DESC`).
 - **Retry Dispatch Router**: Centralized dynamic routing via `retry_dispatch` wrapper to consistently retry Native, Proxy, and Skill tool invocations within the Dead Letter Queue.
 
-## [0.7.0] - 2026-03-23
+## [0.7.0] - 2026-03-23 — 🔌 MCP Client Proxy Phase 2
 
 ### Added
 - **MCP Client Proxy (Phase 2)**: Tachi now acts as both MCP server and client. Register child MCP servers via `hub_register(type=mcp)`, their tools appear transparently in `tools/list` with `server__tool` prefix. Agents call them directly — Tachi handles spawn, connection, forwarding, and cleanup.
@@ -778,7 +830,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Call Dispatch Order**: Native tools → Skill tools → Proxy tools (prevents future name shadowing).
 - **Project MCP Security**: Project-scope MCP capabilities with untrusted commands default to `enabled=false`.
 
-## [0.6.0] - 2026-03-23
+## [0.6.0] - 2026-03-23 — 🏷️ Project renamed to Tachi
 
 ### Changed
 - **Renamed to Tachi (塔奇)**: Project identity renamed from Sigil to Tachi, inspired by Ghost in the Shell's Tachikoma — AI units that evolve through shared memory. Binary now prints `tachi <version>` on `--version`/`-V`.
@@ -786,7 +838,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **`--version` flag**: Added CLI version flag before async runtime initialization.
 - **MCP config**: Binary installs as `tachi` instead of `memory-server`. Config: `{"mcpServers": {"tachi": {"command": "tachi"}}}`.
 
-## [0.5.2] - 2026-03-23
+## [0.5.2] - 2026-03-23 — 🎯 Sigil Hub Phase 1 (capability registry)
 
 ### Added
 - **Sigil Hub Phase 1 — Capability Registry + Discovery**: A unified catalog for Skills, Plugins, and MCP Servers. Any agent connecting to Sigil can discover and retrieve all registered capabilities.
@@ -801,7 +853,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **`memory-core` public API**: Added `pub mod hub` and re-exported `HubCapability`. Added 7 Hub methods to `MemoryStore` (hub_register, hub_get, hub_list, hub_search, hub_set_enabled, hub_record_feedback, hub_delete).
 - **MCP tool list**: Server now exposes 15 tools (10 memory + 5 hub).
 
-## [0.5.0] - 2026-03-23
+## [0.5.0] - 2026-03-23 — 🗄️ Dual-DB architecture (global + project)
 
 ### Added
 - **Dual-DB Architecture (Global + Project)**: Memory server now maintains two separate SQLite databases — a global DB (`~/.sigil/global/memory.db`) for cross-project knowledge (user preferences, universal facts) and a per-project DB (`.sigil/memory.db` at git root) for project-scoped memories (architecture decisions, codebase patterns). This is the foundation for multi-agent shared memory.
@@ -824,7 +876,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Single-DB `with_store` helper**: Replaced by `with_global_store`, `with_project_store`, and `with_store_for_scope`.
 - **Pipeline module**: Removed in prior commit (server is now pure MCP handler).
 
-## [0.4.0] - 2026-03-18
+## [0.4.0] - 2026-03-18 — ⚙️ Native Rust MCP server
 
 ### Added
 - **NEW: Native Rust MCP Server (`memory-server` crate)**: Complete replacement for the Python `mcp/server.py`. Single 5.2MB ARM64 binary with 10 MCP tools, built with `rmcp` SDK. Eliminates Python runtime dependency for the MCP server.
@@ -848,7 +900,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **Search Output Format**: `search_memory` returns human-readable summaries instead of raw JSON.
 - **State Management**: Proper `hard_state` table replaces hacky MemoryEntry-based state storage.
 
-## [0.3.0] - 2026-03-14
+## [0.3.0] - 2026-03-14 — 🧱 `hard_state` and derived-item isolation
 
 ### Added
 - **Core/MCP**: Introduced `hard_state` table and corresponding `set_state` / `get_state` endpoints to store rigid KV data distinct from semantic mappings. This resolves data hallucination for strict key values like dynamic watchlists.
@@ -863,14 +915,14 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **MCP**: Eliminated `Voyage-Rerank-2.5` dependency from standard hybrid searches. Core Rust pipeline handles similarity filtering accurately enough, boosting response time natively via KNN & FTS5 mechanisms alone.
 - **Scrap**: Cleaned up legacy unmaintained prototype directories `memory-mcp/` and `memory-core-rs/` from local `scratch` areas.
 
-## [0.2.1] - 2026-03-13
+## [0.2.1] - 2026-03-13 — 🔧 Deduplication and timeout fixes
 
 ### Fixed
 - **MCP/Extractor**: Fixed `httpx.ReadTimeout` empty error bug in `extract_facts` and added 3-round exponential backoff (2s/4s/8s) for Siliconflow API calls to improve retry resilience against transient network failures.
 - **Config**: Fixed `config.ts` environmental variable parsing where `MEMORY_DB_PATH` was not expanding `~` to home directory. Additionally ensured `install_openclaw_ext.sh` creates the necessary `data` directory.
 - **Memory Deduplication** (PR #4): Merged two-stage memory deduplication (`HARD_SKIP` vs `EVOLVE`) with upsert indentation bug fix. This resolves the issue of over-aggressive memory deduplication. Tests confirmed this mathematical threshold approach is more robust than LLM-based (GLM-4/Qwen/DeepSeek) deduplication judgments for this specific pipeline.
 
-## [0.2.0] - 2026-03-08
+## [0.2.0] - 2026-03-08 — 🌊 Causal worker pipeline
 
 ### Added
 - **MCP/Workers**: Activated causal worker pipeline for asynchronous extraction of cause-and-effect relationships.
@@ -891,7 +943,7 @@ Eight P0/P1 findings from a four-LLM code review pass on the truth-maintenance-v
 - **OpenClaw Plugin**: Ensure `installer` reliably builds bindings and loads the plugin successfully.
 - **Python MCP**: Resolved code smells during fact extraction and migrations.
 
-## [0.1.0] - 2026-03-05
+## [0.1.0] - 2026-03-05 — 🎉 Initial Sigil release
 
 ### Added
 - Initial release of the Sigil Memory System.
