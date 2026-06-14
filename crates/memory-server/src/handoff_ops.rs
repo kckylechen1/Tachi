@@ -348,6 +348,41 @@ fn upsert_promoted_entry(
         .map_err(|e| format!("Failed to update promoted handoff memory: {e}"))
 }
 
+fn supersede_pending_handoffs(
+    store: &mut MemoryStore,
+    memo: &HandoffMemo,
+    entry: &MemoryEntry,
+) -> Result<(), String> {
+    let pending = if let Ok(pending) = pending_handoff_entries(store) {
+        pending
+    } else {
+        return Ok(());
+    };
+    for old_entry in pending {
+        let old_memo = memo_from_entry(&old_entry);
+        if old_memo.from_agent == memo.from_agent
+            && old_memo.target_agent == memo.target_agent
+        {
+            let mut old_entry_mut = old_entry.clone();
+            old_entry_mut.archived = true;
+            old_entry_mut.vector = None;
+            if let Some(obj) = old_entry_mut.metadata.as_object_mut() {
+                obj.insert(
+                    "status".to_string(),
+                    serde_json::Value::String("superseded".to_string()),
+                );
+            }
+            store
+                .upsert(&old_entry_mut)
+                .map_err(|e| format!("{e}"))?;
+            store
+                .supersede_memory(&old_entry.id, &entry.id)
+                .map_err(|e| format!("{e}"))?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_handoff_leave(
     server: &MemoryServer,
     params: HandoffLeaveParams,
@@ -370,26 +405,7 @@ pub(crate) async fn handle_handoff_leave(
     let entry = memo_to_memory_entry(server, &memo);
 
     server.with_global_store(|store| {
-        if let Ok(pending) = pending_handoff_entries(store) {
-            for old_entry in pending {
-                let old_memo = memo_from_entry(&old_entry);
-                if old_memo.from_agent == memo.from_agent
-                    && old_memo.target_agent == memo.target_agent
-                {
-                    let mut old_entry_mut = old_entry.clone();
-                    old_entry_mut.archived = true;
-                    old_entry_mut.vector = None;
-                    if let Some(obj) = old_entry_mut.metadata.as_object_mut() {
-                        obj.insert(
-                            "status".to_string(),
-                            serde_json::Value::String("superseded".to_string()),
-                        );
-                    }
-                    let _ = store.upsert(&old_entry_mut);
-                    let _ = store.supersede_memory(&old_entry.id, &entry.id);
-                }
-            }
-        }
+        supersede_pending_handoffs(store, &memo, &entry)?;
         store.upsert(&entry).map_err(|e| format!("{e}"))
     })?;
 
@@ -1525,5 +1541,72 @@ mod tests {
             .unwrap();
 
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn supersede_pending_handoffs_propagates_db_errors() {
+        use rusqlite::Connection;
+
+        let db_path = std::env::temp_dir().join(format!(
+            "handoff-supersede-db-error-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+
+        // Seed a pending handoff entry.
+        {
+            let mut store =
+                MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+            let memo = HandoffMemo {
+                id: "memo-1".to_string(),
+                from_agent: "agent-a".to_string(),
+                target_agent: Some("agent-b".to_string()),
+                summary: "pending".to_string(),
+                next_steps: vec![],
+                context: None,
+                created_at: Utc::now().to_rfc3339(),
+                acknowledged: false,
+            };
+            store.upsert(&test_entry(memo)).expect("seed pending");
+        }
+
+        // Reopen the store, then hold a RESERVED lock on the DB so the
+        // supersede write fails instead of being swallowed.
+        let mut store =
+            MemoryStore::open(db_path.to_str().unwrap()).expect("reopen store");
+        let lock_path = db_path.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let lock_handle = std::thread::spawn(move || {
+            let conn = Connection::open(&lock_path).expect("open lock connection");
+            conn.execute_batch("BEGIN IMMEDIATE;")
+                .expect("begin immediate");
+            let _ = acquired_tx.send(());
+            let _ = release_rx.recv();
+        });
+        acquired_rx.recv().expect("lock acquired");
+
+        let new_memo = HandoffMemo {
+            id: "memo-2".to_string(),
+            from_agent: "agent-a".to_string(),
+            target_agent: Some("agent-b".to_string()),
+            summary: "new".to_string(),
+            next_steps: vec![],
+            context: None,
+            created_at: Utc::now().to_rfc3339(),
+            acknowledged: false,
+        };
+        let new_entry = test_entry(new_memo.clone());
+
+        let result = supersede_pending_handoffs(&mut store, &new_memo, &new_entry);
+        assert!(
+            result.is_err(),
+            "expected supersede DB error to propagate, got {result:?}"
+        );
+
+        let _ = release_tx.send(());
+        let _ = lock_handle.join();
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(db_path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(db_path.with_extension("sqlite-shm"));
     }
 }
