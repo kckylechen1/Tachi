@@ -5290,6 +5290,7 @@ async fn v2_two_stage_smoke() {
     // Activate V2 + isolate.
     std::env::set_var("TACHI_HOME", &temp_home);
     std::env::set_var("CLAUDE_BIN", &fake_claude);
+    std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", "true");
     std::env::set_var("DISPATCH_V2_ENABLED", "true");
     std::env::set_var("DISPATCH_V2_PLAN_REVIEW", "false");
 

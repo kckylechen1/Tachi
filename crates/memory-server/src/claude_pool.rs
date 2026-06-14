@@ -5,12 +5,12 @@
 //!   * acquires a semaphore permit (cap concurrent CLI invocations);
 //!   * writes `prompt.md` / `result.md` / `status.json` under
 //!     `~/.tachi/foundry-runs/<label>-<UTCts>/`;
-//!   * spawns `claude -p --output-format json --dangerously-skip-permissions`
-//!     with the prompt on stdin — this is the intentional default because
-//!     Claude CLI's interactive permission prompts would hang daemon-driven
-//!     callers (Foundry distill, Hub evolve). Set
-//!     `TACHI_CLAUDE_SKIP_PERMISSIONS=false` to restore prompts for
-//!     non-daemon use;
+//!   * spawns `claude -p --output-format json` by default; adds
+//!     `--dangerously-skip-permissions` only when
+//!     `TACHI_CLAUDE_SKIP_PERMISSIONS=true` (or `1`) is set. Daemon-driven
+//!     callers (Foundry distill, Hub evolve) should export that variable
+//!     explicitly. Leave it unset for interactive use so Claude's permission
+//!     prompts are preserved;
 //!   * enforces a wall-clock timeout (default 180s, env
 //!     `CLAUDE_POOL_TIMEOUT_SECS`) and kills timed-out children on drop.
 //!
@@ -154,14 +154,13 @@ impl ClaudePool {
 
     /// Spawn `claude -p --output-format json [--dangerously-skip-permissions]`
     /// with the prompt on stdin. Honors `TACHI_CLAUDE_SKIP_PERMISSIONS`:
-    /// true (default, daemon-safe) | false (restore interactive prompts).
-    /// The default is true because this pool serves non-interactive callers
-    /// (Foundry distill, dispatch V2 plan, Hub evolve/security scan) where
-    /// a permission prompt would hang indefinitely.
+    /// `true`/`1` enables `--dangerously-skip-permissions`; any other value,
+    /// or an unset variable, leaves interactive permission prompts enabled.
+    /// Non-interactive callers must opt in explicitly.
     async fn run_claude_cli(&self, prompt: &str) -> Result<String, String> {
         let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+            .unwrap_or(false);
         let binary = self.binary.as_ref().map_err(|err| err.clone())?;
         let mut cmd = Command::new(binary);
         cmd.arg("-p").arg("--output-format").arg("json");
@@ -698,14 +697,14 @@ mod tests {
     }
 
     #[test]
-    fn skip_permissions_defaults_to_true_when_env_unset() {
-        // clear the env var so .unwrap_or(true) fires.
+    fn skip_permissions_defaults_to_false_when_env_unset() {
+        // clear the env var so .unwrap_or(false) fires.
         let prev = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS").ok();
         std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS");
         let skip = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
-        assert!(skip, "default should be true (daemon-safe)");
+            .unwrap_or(false);
+        assert!(!skip, "default should be false (preserve interactive prompts)");
         match prev {
             Some(v) => std::env::set_var("TACHI_CLAUDE_SKIP_PERMISSIONS", v),
             None => std::env::remove_var("TACHI_CLAUDE_SKIP_PERMISSIONS"),
