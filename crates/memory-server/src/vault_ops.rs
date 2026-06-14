@@ -4,7 +4,7 @@ use super::*;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
+use memory_core::vault::{VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1046,7 +1046,7 @@ pub(crate) async fn handle_vault_init(
             verifier,
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
-            cipher: "aes-256-gcm".to_string(),
+            cipher: VaultCipher::Aes256Gcm,
             created_at: now.clone(),
             updated_at: now,
         };

@@ -2,7 +2,7 @@
 
 use super::common::now_utc_iso;
 use crate::error::MemoryError;
-use crate::vault::{VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
+use crate::vault::{VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
 use rusqlite::{params, Connection};
 
 fn parse_allowed_agents(raw: Option<String>) -> Result<Option<Vec<String>>, MemoryError> {
@@ -19,12 +19,19 @@ pub fn vault_get_config(conn: &Connection) -> Result<Option<VaultConfig>, Memory
     )?;
 
     let config = stmt.query_row([], |row| {
+        let cipher_str: String = row.get(4)?;
         Ok(VaultConfig {
             salt: row.get(0)?,
             verifier: row.get(1)?,
             kdf_algorithm: row.get(2)?,
             kdf_params: row.get(3)?,
-            cipher: row.get(4)?,
+            cipher: VaultCipher::from_str(&cipher_str).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+                )
+            })?,
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
         })
@@ -53,7 +60,7 @@ pub fn vault_set_config(conn: &Connection, config: &VaultConfig) -> Result<(), M
             config.verifier,
             config.kdf_algorithm,
             config.kdf_params,
-            config.cipher,
+            config.cipher.as_str(),
             config.created_at,
             config.updated_at,
         ],

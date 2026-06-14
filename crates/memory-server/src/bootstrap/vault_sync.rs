@@ -387,7 +387,7 @@ mod tests {
             verifier: "verifier".to_string(),
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: r#"{"m":1,"t":1,"p":1}"#.to_string(),
-            cipher: "aes-256-gcm".to_string(),
+            cipher: memory_core::vault::VaultCipher::Aes256Gcm,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
         }
