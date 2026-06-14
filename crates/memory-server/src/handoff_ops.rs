@@ -353,11 +353,7 @@ fn supersede_pending_handoffs(
     memo: &HandoffMemo,
     entry: &MemoryEntry,
 ) -> Result<(), String> {
-    let pending = if let Ok(pending) = pending_handoff_entries(store) {
-        pending
-    } else {
-        return Ok(());
-    };
+    let pending = pending_handoff_entries(store)?;
     for old_entry in pending {
         let old_memo = memo_from_entry(&old_entry);
         if old_memo.from_agent == memo.from_agent
