@@ -327,7 +327,7 @@ fn init_vault_inline(
             verifier,
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
-            cipher: "aes-256-gcm".to_string(),
+            cipher: memory_core::vault::VaultCipher::Aes256Gcm,
             created_at: now.clone(),
             updated_at: now,
         })

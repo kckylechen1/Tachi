@@ -2,14 +2,42 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Supported vault ciphers.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum VaultCipher {
+    #[serde(rename = "aes-256-gcm")]
+    Aes256Gcm,
+}
+
+impl VaultCipher {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "aes-256-gcm" => Ok(Self::Aes256Gcm),
+            other => Err(format!("unsupported vault cipher: {other}")),
+        }
+    }
+}
+
+impl Default for VaultCipher {
+    fn default() -> Self {
+        Self::Aes256Gcm
+    }
+}
+
 /// Vault configuration stored in vault_config table (exactly one row).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VaultConfig {
-    pub salt: String,          // base64-encoded 32 bytes
-    pub verifier: String,      // base64-encoded encrypted verifier
-    pub kdf_algorithm: String, // "argon2id"
-    pub kdf_params: String,    // JSON: {"m":65536,"t":3,"p":4}
-    pub cipher: String,        // "aes-256-gcm"
+    pub salt: String,           // base64-encoded 32 bytes
+    pub verifier: String,       // base64-encoded encrypted verifier
+    pub kdf_algorithm: String,  // "argon2id"
+    pub kdf_params: String,     // JSON: {"m":65536,"t":3,"p":4}
+    pub cipher: VaultCipher,    // only aes-256-gcm is supported
     pub created_at: String,
     pub updated_at: String,
 }
@@ -116,7 +144,7 @@ impl Default for VaultConfig {
             verifier: String::new(),
             kdf_algorithm: "argon2id".to_string(),
             kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
-            cipher: "aes-256-gcm".to_string(),
+            cipher: VaultCipher::default(),
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -147,4 +175,34 @@ pub fn api_key_pool_member_index(name: &str, prefix: &str) -> Option<usize> {
         .and_then(|suffix| suffix.strip_prefix('_'))
         .and_then(|suffix| suffix.parse::<usize>().ok())
         .filter(|idx| *idx > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vault_cipher_defaults_to_aes_256_gcm() {
+        let cipher = VaultCipher::default();
+        assert_eq!(cipher, VaultCipher::Aes256Gcm);
+        assert_eq!(cipher.as_str(), "aes-256-gcm");
+    }
+
+    #[test]
+    fn vault_cipher_roundtrips_through_string() {
+        assert_eq!(
+            VaultCipher::from_str("aes-256-gcm").unwrap(),
+            VaultCipher::Aes256Gcm
+        );
+        assert!(VaultCipher::from_str("unknown").is_err());
+    }
+
+    #[test]
+    fn vault_cipher_serializes_as_string() {
+        let cipher = VaultCipher::Aes256Gcm;
+        let json = serde_json::to_string(&cipher).unwrap();
+        assert_eq!(json, "\"aes-256-gcm\"");
+        let decoded: VaultCipher = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, cipher);
+    }
 }
