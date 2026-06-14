@@ -20,7 +20,7 @@ The target split is:
 - `OpenClaw`
   - owns hooks, runtime timing, section assembly, and agent-facing tool exposure
 - `IDE / direct MCP clients`
-  - see a small host-appropriate tool subset instead of the full 60+ tool catalog
+  - see a small host-appropriate tool subset instead of the full admin catalog (100+ tools)
 
 ## Principles
 
@@ -66,19 +66,25 @@ The target split is:
 - `admin`
   - full surface, including hub governance, pack management, vault, sandbox, VC, and destructive operations
 
+There are also two curated minimal profiles for common hosts:
+
+- `standard` — default for IDE agents. Intersects the bundles with a 12-tool facade surface (`tachi_search`, `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`).
+- `delegate` — for worker subagents spawned by `tachi_dispatch`. A 7-tool surface with no dispatch and no handoff.
+
 Selection paths:
 
+- `tachi --profile standard`
 - `tachi --profile remember`
 - `tachi --profile observe+coordinate`
 - `TACHI_PROFILE=openclaw tachi`
-- default with no profile: `admin` for backward compatibility; agent hosts should opt into `remember`, `coordinate`, or `operate`
+- default with no profile: `standard` since v1.0.1; set `TACHI_PROFILE=admin` explicitly for maintenance
 
-Host aliases expand to bundle sets:
+Host aliases expand to profile/bundle sets:
 
-- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `ide`, `agent` → `remember`
-- `antigravity` → `coordinate`
+- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`
+- `worker`, `subagent`, `delegate` → `delegate`
+- `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
 - `workflow` → `coordinate + operate`
-- `openclaw`, `runtime`, `adapter`, `ops` → `operate`
 - `admin`, `full` → `admin`
 
 ### OpenClaw extension surface
