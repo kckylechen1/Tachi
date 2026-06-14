@@ -122,6 +122,7 @@ pub(super) async fn run_env_command(
             cwd,
             output,
             dry_run,
+            apply,
             force,
             json,
         }) => {
@@ -134,19 +135,20 @@ pub(super) async fn run_env_command(
                     password_file,
                     insecure_password_file,
                 )?;
+            let preview = dry_run || !apply;
             let report = sync_project_env(
                 &unlocked,
                 &cwd,
                 output.as_deref(),
-                dry_run,
+                preview,
                 force,
                 filter,
                 env_only,
             )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
-            } else if dry_run {
-                println!("Tachi env sync dry-run.");
+            } else if preview {
+                println!("Tachi env sync preview (pass --apply to write).");
                 println!("  cwd: {}", report.cwd);
                 println!("  bindings: {}", report.bindings_path);
                 println!("  output: {}", report.output_path);
@@ -825,6 +827,31 @@ BAD-NAME=vault:direct.secret
         assert_eq!(plan.bindings[0].source, "secret");
         assert_eq!(plan.bindings[1].source, "pool");
         assert_eq!(plan.bindings[2].status, "missing");
+    }
+
+    #[test]
+    fn project_env_sync_preview_does_not_write() {
+        let store = temp_store();
+        let key =
+            crate::vault_crypto::DerivedVaultKey::derive("test-password", b"1234567890123456")
+                .expect("key");
+        put_secret(&store, key.bytes(), "direct.secret", "direct-value");
+        let unlocked = UnlockedVaultStore { store, key };
+
+        let temp = tempfile::tempdir().expect("temp project");
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
+        std::fs::write(
+            project.join(".tachi/vault.env"),
+            "PROJECT_DIRECT=vault:direct.secret\n",
+        )
+        .expect("write bindings");
+
+        let report = sync_project_env(&unlocked, &project, None, true, false, None, false)
+            .expect("preview sync");
+        assert!(!report.written);
+        assert!(report.dry_run);
+        assert!(!project.join(".tachi/env.generated").exists());
     }
 
     #[test]

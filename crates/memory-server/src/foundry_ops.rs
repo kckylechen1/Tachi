@@ -22,6 +22,140 @@ fn parse_evidence_kind(raw: &str) -> Result<memory_core::FoundryEvidenceKind, St
     })
 }
 
+fn agent_evolution_job_fingerprint(params: &SynthesizeAgentEvolutionParams) -> String {
+    let document_paths: Vec<String> = params
+        .document_paths
+        .iter()
+        .map(|item| format!("{}:{}", item.kind, item.path))
+        .collect();
+    let evidence_paths: Vec<String> = params
+        .evidence_paths
+        .iter()
+        .map(|item| format!("{}:{}", item.kind, item.path))
+        .collect();
+    let documents: Vec<String> = params
+        .documents
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{}:{}",
+                item.kind,
+                item.path.as_deref().unwrap_or(""),
+                item.content
+            )
+        })
+        .collect();
+    let evidence: Vec<String> = params
+        .evidence
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{}:{}",
+                item.kind,
+                item.source_ref.as_deref().unwrap_or(""),
+                item.content
+            )
+        })
+        .collect();
+    let memory_queries: Vec<String> = params
+        .memory_queries
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{}:{:?}",
+                item.query,
+                item.path_prefix.as_deref().unwrap_or(""),
+                item.project
+            )
+        })
+        .collect();
+    let payload = format!(
+        "agent_id={}|display_name={}|goals={goals:?}|document_paths={document_paths:?}|evidence_paths={evidence_paths:?}|documents={documents:?}|evidence={evidence:?}|memory_queries={memory_queries:?}",
+        params.agent_id,
+        params.display_name.as_deref().unwrap_or(""),
+        goals = params.goals,
+    );
+    crate::utils::stable_hash(&payload)
+}
+
+fn agent_evolution_job_id(params: &SynthesizeAgentEvolutionParams) -> String {
+    format!(
+        "foundry-job:agent-evolution:{}",
+        agent_evolution_job_fingerprint(params)
+    )
+}
+
+fn load_foundry_job_state(
+    server: &MemoryServer,
+    job_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    server.with_global_store(|store| {
+        match store.get_state_kv(FOUNDRY_JOB_NAMESPACE, job_id) {
+            Ok(Some((value, _version))) => {
+                serde_json::from_str(&value)
+                    .map(Some)
+                    .map_err(|e| format!("Failed to parse foundry job state: {e}"))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Failed to load foundry job state: {e}")),
+        }
+    })
+}
+
+fn foundry_job_status(state: &serde_json::Value) -> &str {
+    state
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
+fn foundry_job_updated_at(state: &serde_json::Value) -> Option<chrono::DateTime<Utc>> {
+    state
+        .get("updated_at")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|ts| ts.with_timezone(&Utc))
+}
+
+fn foundry_running_job_is_stale(state: &serde_json::Value) -> bool {
+    const STALE_AFTER_SECS: i64 = 30 * 60;
+    foundry_job_updated_at(state).is_some_and(|updated| {
+        (Utc::now() - updated).num_seconds() > STALE_AFTER_SECS
+    })
+}
+
+fn foundry_job_is_active(state: &serde_json::Value) -> bool {
+    match foundry_job_status(state) {
+        "queued" => true,
+        "running" => !foundry_running_job_is_stale(state),
+        _ => false,
+    }
+}
+
+fn try_claim_foundry_job(server: &MemoryServer, job: &memory_core::FoundryJobSpec) -> bool {
+    match load_foundry_job_state(server, &job.id) {
+        Ok(Some(state)) => {
+            let status = foundry_job_status(&state);
+            if status == "running" && !foundry_running_job_is_stale(&state) {
+                return false;
+            }
+            if status == "completed" || status == "failed" {
+                return false;
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!(
+                "[foundry-agent-evolution] failed to load job {} before claim: {err}",
+                job.id
+            );
+            return false;
+        }
+    }
+
+    save_foundry_job_state(server, job, "running", json!({})).is_ok()
+}
+
 fn build_foundry_job(
     server: &MemoryServer,
     params: &SynthesizeAgentEvolutionParams,
@@ -33,7 +167,7 @@ fn build_foundry_job(
         .map(|profile| profile.agent_id.clone());
 
     memory_core::FoundryJobSpec {
-        id: format!("foundry-job:{}", uuid::Uuid::new_v4()),
+        id: agent_evolution_job_id(params),
         kind: memory_core::FoundryJobKind::AgentEvolution,
         lane: memory_core::FoundryModelLane::Reasoning,
         status: memory_core::FoundryJobStatus::Planned,
@@ -860,7 +994,28 @@ pub(crate) async fn handle_queue_agent_evolution(
         );
     }
 
-    let mut job = build_foundry_job(server, &params);
+    let job = build_foundry_job(server, &params);
+    if let Ok(Some(state)) = load_foundry_job_state(server, &job.id) {
+        if foundry_job_is_active(&state) {
+            return serde_json::to_string(&json!({
+                "status": "deduped",
+                "job": job,
+                "existing_status": foundry_job_status(&state),
+            }))
+            .map_err(|e| format!("Failed to serialize dedupe response: {e}"));
+        }
+        let status = foundry_job_status(&state);
+        if status == "completed" || status == "failed" {
+            return serde_json::to_string(&json!({
+                "status": "deduped",
+                "job": job,
+                "existing_status": status,
+            }))
+            .map_err(|e| format!("Failed to serialize dedupe response: {e}"));
+        }
+    }
+
+    let mut job = job;
     job.status = memory_core::FoundryJobStatus::Queued;
     save_foundry_job_state(server, &job, "queued", json!({}))?;
 
@@ -868,11 +1023,12 @@ pub(crate) async fn handle_queue_agent_evolution(
     let params_for_task = params;
     let job_for_task = job.clone();
     tokio::spawn(async move {
-        if let Err(err) = save_foundry_job_state(&server, &job_for_task, "running", json!({})) {
+        if !try_claim_foundry_job(&server, &job_for_task) {
             eprintln!(
-                "[foundry-agent-evolution] failed to update job {} to running: {err}",
+                "[foundry-agent-evolution] job {} already claimed or finished; skipping synthesis",
                 job_for_task.id
             );
+            return;
         }
 
         match run_agent_evolution_synthesis(&server, &params_for_task, &job_for_task).await {
@@ -1118,6 +1274,145 @@ pub(crate) async fn handle_project_agent_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_evolution_job_id_is_deterministic_for_same_inputs() {
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex".to_string(),
+            display_name: Some("Codex".to_string()),
+            documents: vec![AgentEvolutionDocumentParams {
+                kind: "identity".to_string(),
+                path: None,
+                content: "hello".to_string(),
+            }],
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: vec![AgentEvolutionMemoryQueryParams {
+                query: "routing".to_string(),
+                title: None,
+                path_prefix: None,
+                project: None,
+                weight: 1.0,
+                top_k: 5,
+            }],
+            goals: vec!["tighten routing".to_string()],
+            dry_run: false,
+        };
+        let first = agent_evolution_job_id(&params);
+        let second = agent_evolution_job_id(&params);
+        assert_eq!(first, second);
+        assert!(first.starts_with("foundry-job:agent-evolution:"));
+    }
+
+    #[test]
+    fn agent_evolution_job_id_changes_when_inputs_change() {
+        let mut params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex".to_string(),
+            display_name: None,
+            documents: Vec::new(),
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: vec!["one".to_string()],
+            dry_run: false,
+        };
+        let first = agent_evolution_job_id(&params);
+        params.goals = vec!["two".to_string()];
+        let second = agent_evolution_job_id(&params);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn foundry_job_is_active_for_queued_and_fresh_running() {
+        let queued = json!({ "status": "queued" });
+        assert!(foundry_job_is_active(&queued));
+
+        let running = json!({
+            "status": "running",
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        assert!(foundry_job_is_active(&running));
+    }
+
+    #[test]
+    fn foundry_job_is_inactive_for_stale_running_and_terminal_states() {
+        let stale = json!({
+            "status": "running",
+            "updated_at": (Utc::now() - chrono::Duration::minutes(31)).to_rfc3339(),
+        });
+        assert!(!foundry_job_is_active(&stale));
+        assert!(foundry_running_job_is_stale(&stale));
+
+        assert!(!foundry_job_is_active(&json!({ "status": "completed" })));
+        assert!(!foundry_job_is_active(&json!({ "status": "failed" })));
+    }
+
+    #[test]
+    fn try_claim_foundry_job_rejects_completed_jobs() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let server = crate::MemoryServer::new(temp.path().to_path_buf(), None).expect("server");
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex".to_string(),
+            display_name: None,
+            documents: vec![AgentEvolutionDocumentParams {
+                kind: "identity".to_string(),
+                path: None,
+                content: "hello".to_string(),
+            }],
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: Vec::new(),
+            dry_run: false,
+        };
+        let job = build_foundry_job(&server, &params);
+        save_foundry_job_state(&server, &job, "completed", json!({})).expect("seed completed");
+        assert!(!try_claim_foundry_job(&server, &job));
+    }
+
+    #[test]
+    fn try_claim_foundry_job_reclaims_stale_running_jobs() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let server = crate::MemoryServer::new(temp.path().to_path_buf(), None).expect("server");
+        let params = SynthesizeAgentEvolutionParams {
+            agent_id: "codex".to_string(),
+            display_name: None,
+            documents: vec![AgentEvolutionDocumentParams {
+                kind: "identity".to_string(),
+                path: None,
+                content: "hello".to_string(),
+            }],
+            document_paths: Vec::new(),
+            evidence: Vec::new(),
+            evidence_paths: Vec::new(),
+            memory_queries: Vec::new(),
+            goals: Vec::new(),
+            dry_run: false,
+        };
+        let job = build_foundry_job(&server, &params);
+        let stale_at = (Utc::now() - chrono::Duration::minutes(31)).to_rfc3339();
+        let mut payload = serde_json::Map::new();
+        payload.insert("job".into(), json!(job));
+        payload.insert("status".into(), json!("running"));
+        payload.insert("updated_at".into(), json!(stale_at));
+        let value_json = serde_json::to_string(&serde_json::Value::Object(payload)).expect("json");
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(FOUNDRY_JOB_NAMESPACE, &job.id, &value_json)
+                    .map_err(|e| format!("seed stale running: {e}"))
+            })
+            .expect("seed stale running");
+
+        assert!(try_claim_foundry_job(&server, &job));
+        let state = load_foundry_job_state(&server, &job.id)
+            .expect("load state")
+            .expect("state exists");
+        assert_eq!(foundry_job_status(&state), "running");
+    }
 
     #[test]
     fn parse_synthesis_response_accepts_json_object() {

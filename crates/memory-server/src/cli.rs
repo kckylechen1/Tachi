@@ -470,8 +470,11 @@ pub(crate) enum EnvAction {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
         /// Preview the target path and bindings without writing.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "apply")]
         dry_run: bool,
+        /// Write the generated exports file. Without this flag, sync is preview-only.
+        #[arg(long)]
+        apply: bool,
         /// Overwrite an existing output file.
         #[arg(long)]
         force: bool,

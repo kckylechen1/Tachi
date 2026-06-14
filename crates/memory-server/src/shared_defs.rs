@@ -54,6 +54,79 @@ pub(super) fn categorize_error(error: &str) -> String {
     }
 }
 
+const NON_IDEMPOTENT_TOOL_NAMES: &[&str] = &[
+    "save_memory",
+    "delete_memory",
+    "tachi_save",
+    "tachi_wiki_write",
+    "vault_set",
+    "vault_remove",
+    "vault_init",
+    "vault_setup_rotation",
+    "vault_set_api_key_pool",
+    "tachi_dispatch",
+    "handoff_leave",
+    "hub_call",
+];
+
+const FACADE_MUTATING_ACTIONS: &[&str] = &[
+    "save",
+    "write",
+    "dispatch",
+    "complete",
+    "extract_facts",
+    "delete",
+    "remove",
+    "promote_issue",
+    "merge",
+];
+
+fn tool_name_tail(tool_name: &str) -> &str {
+    tool_name.rsplit("__").next().unwrap_or(tool_name)
+}
+
+/// Returns true when replaying the tool through DLQ could duplicate writes.
+pub(super) fn dlq_mutation_is_unsafe(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    if NON_IDEMPOTENT_TOOL_NAMES.contains(&tool_name)
+        || NON_IDEMPOTENT_TOOL_NAMES.contains(&tool_name_tail(tool_name))
+    {
+        return true;
+    }
+
+    if matches!(
+        tool_name,
+        "tachi_memory" | "tachi_wiki" | "tachi_task" | "tachi_gh" | "tachi_shell"
+    ) {
+        let action = arguments
+            .and_then(|args| args.get("action"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        return FACADE_MUTATING_ACTIONS.contains(&action);
+    }
+
+    false
+}
+
+pub(super) fn should_enqueue_dlq(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    is_native_route: bool,
+) -> bool {
+    if tool_name.starts_with("dlq_")
+        || tool_name.starts_with("ghost_")
+        || tool_name == "get_pipeline_status"
+    {
+        return false;
+    }
+    if is_native_route || dlq_mutation_is_unsafe(tool_name, arguments) {
+        return false;
+    }
+    true
+}
+
 pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(e.id));
@@ -266,5 +339,36 @@ mod dlq_tests {
 
         let ids = dlq.iter().map(|dl| dl.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids, vec!["fresh", "new"]);
+    }
+
+    #[test]
+    fn dlq_mutation_is_unsafe_for_write_tools_and_hub_call() {
+        assert!(dlq_mutation_is_unsafe("save_memory", None));
+        assert!(dlq_mutation_is_unsafe("hub_call", None));
+        assert!(dlq_mutation_is_unsafe(
+            "remote__save_memory",
+            None
+        ));
+        assert!(dlq_mutation_is_unsafe(
+            "tachi_memory",
+            Some(&serde_json::Map::from_iter([(
+                "action".to_string(),
+                json!("save")
+            )]))
+        ));
+        assert!(!dlq_mutation_is_unsafe(
+            "tachi_memory",
+            Some(&serde_json::Map::from_iter([(
+                "action".to_string(),
+                json!("search")
+            )]))
+        ));
+    }
+
+    #[test]
+    fn should_enqueue_dlq_skips_native_and_mutating_tools() {
+        assert!(!should_enqueue_dlq("save_memory", None, true));
+        assert!(!should_enqueue_dlq("hub_call", None, false));
+        assert!(should_enqueue_dlq("remote__echo", None, false));
     }
 }

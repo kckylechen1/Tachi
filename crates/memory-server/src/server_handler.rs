@@ -306,16 +306,13 @@ impl ServerHandler for MemoryServer {
             };
 
             // ─── Dead Letter Queue: capture failures ─────────────────────
-            // Skip DLQ for DLQ tools themselves, ghost_* tools, and native
-            // tools (the latter cannot be retried by the DLQ mechanism).
-            let is_native = self.tool_router.has_route(&tool_name_owned);
-            let is_dlq_exempt = tool_name_owned.starts_with("dlq_")
-                || tool_name_owned.starts_with("ghost_")
-                || tool_name_owned == "get_pipeline_status"
-                || is_native;
-
             if let Err(ref err) = result {
-                if !is_dlq_exempt {
+                let is_native = self.tool_router.has_route(&tool_name_owned);
+                if should_enqueue_dlq(
+                    &tool_name_owned,
+                    tool_args_for_dlq.as_ref(),
+                    is_native,
+                ) {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
 

@@ -95,28 +95,30 @@ fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
     ) || status.get("exit_code").is_some()
 }
 
-fn reserve_flow_dispatch_slot(
-    flow_id: Option<&str>,
+fn dispatch_dedupe_root() -> PathBuf {
+    dispatch_runs_root().join(".dispatch-dedupe")
+}
+
+fn reserve_dispatch_dedupe_lock(
+    lock_dir: &Path,
+    scope: &str,
     task: &str,
     dispatch_id: &str,
-) -> Result<Option<PathBuf>, String> {
-    let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) else {
-        return Ok(None);
-    };
-    let lock_dir = run_dir.join(".dispatch-dedupe");
-    std::fs::create_dir_all(&lock_dir).map_err(|e| format!("create dispatch dedupe dir: {e}"))?;
+    flow_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(lock_dir).map_err(|e| format!("create dispatch dedupe dir: {e}"))?;
     let task_hash = crate::utils::stable_hash(task);
     let lock_path = lock_dir.join(format!("{task_hash}.json"));
-    let payload = json!({
-        "flow_id": flow_id,
+    let mut payload = json!({
+        "scope": scope,
         "task_hash": task_hash,
         "dispatch_id": dispatch_id,
         "task": task,
         "created_at": Utc::now().to_rfc3339(),
     });
+    if let Some(flow_id) = flow_id {
+        payload["flow_id"] = json!(flow_id);
+    }
     let payload =
         serde_json::to_vec_pretty(&payload).map_err(|e| format!("serialize dedupe lock: {e}"))?;
 
@@ -129,7 +131,7 @@ fn reserve_flow_dispatch_slot(
             use std::io::Write;
             file.write_all(&payload)
                 .map_err(|e| format!("write dispatch dedupe lock: {e}"))?;
-            Ok(Some(lock_path))
+            Ok(lock_path)
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing = crate::task_lifecycle::read_json_file(&lock_path)?.unwrap_or(json!({}));
@@ -139,13 +141,52 @@ fn reserve_flow_dispatch_slot(
                 .unwrap_or("<unknown>");
             if dispatch_status_is_terminal(existing_dispatch_id) {
                 let _ = std::fs::remove_file(&lock_path);
-                return reserve_flow_dispatch_slot(Some(flow_id), task, dispatch_id);
+                return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
             }
+            let scope_label = flow_id.unwrap_or("global");
             Err(format!(
-                "duplicate dispatch blocked for flow_id '{flow_id}' and same task; active dispatch_id: {existing_dispatch_id}"
+                "duplicate dispatch blocked for {scope_label} scope and same task; active dispatch_id: {existing_dispatch_id}"
             ))
         }
         Err(err) => Err(format!("create dispatch dedupe lock: {err}")),
+    }
+}
+
+fn reserve_flow_dispatch_slot(
+    flow_id: Option<&str>,
+    task: &str,
+    dispatch_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let Ok(run_dir) = crate::shell_ops::run_dir_for_flow_id(flow_id) else {
+        return Ok(None);
+    };
+    let lock_dir = run_dir.join(".dispatch-dedupe");
+    reserve_dispatch_dedupe_lock(&lock_dir, "flow", task, dispatch_id, Some(flow_id))
+        .map(Some)
+}
+
+fn reserve_global_dispatch_slot(task: &str, dispatch_id: &str) -> Result<PathBuf, String> {
+    reserve_dispatch_dedupe_lock(
+        &dispatch_dedupe_root(),
+        "global",
+        task,
+        dispatch_id,
+        None,
+    )
+}
+
+fn reserve_dispatch_slot(
+    flow_id: Option<&str>,
+    task: &str,
+    dispatch_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    if flow_id.filter(|id| !id.trim().is_empty()).is_some() {
+        reserve_flow_dispatch_slot(flow_id, task, dispatch_id)
+    } else {
+        reserve_global_dispatch_slot(task, dispatch_id).map(Some)
     }
 }
 
@@ -985,7 +1026,7 @@ pub(crate) async fn handle_tachi_dispatch(
         .map(credential_materialize_report_json)
         .collect::<Vec<_>>();
     let flow_dispatch_slot =
-        reserve_flow_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
+        reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
 
     // 6. Spawn background task with Watchdog
     let server_clone = server.clone();
@@ -1499,6 +1540,44 @@ mod tests {
                 .unwrap();
         assert_eq!(status["state"], "TASK_STATE_FAILED");
         assert_eq!(status["recovery_reason"], "daemon_restart_orphan_recovery");
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = original_tachi_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
+    fn global_dispatch_slot_blocks_duplicate_active_task_without_flow_id() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("TACHI_HOME");
+
+        let first = reserve_global_dispatch_slot("same task without flow", "dispatch-one")
+            .expect("first global reserve");
+        let duplicate = reserve_global_dispatch_slot("same task without flow", "dispatch-two")
+            .expect_err("duplicate active task should be blocked without flow_id");
+        assert!(
+            duplicate.contains("duplicate dispatch blocked"),
+            "unexpected error: {duplicate}"
+        );
+
+        release_flow_dispatch_slot(Some(first));
+        assert!(
+            reserve_global_dispatch_slot("same task without flow", "dispatch-three").is_ok(),
+            "slot should be reusable after release"
+        );
 
         if let Some(value) = original_home {
             std::env::set_var("HOME", value);
