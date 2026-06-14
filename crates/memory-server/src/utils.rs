@@ -50,8 +50,56 @@ pub(super) fn find_project_git_root() -> Option<PathBuf> {
     find_git_root()
 }
 
+/// Create or truncate a file with owner-only permissions on Unix.
+pub(super) fn write_owner_only_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent dir: {e}"))?;
+    }
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        file.write_all(bytes)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, bytes).map_err(|e| format!("write {}: {e}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Check if a command is in the trusted allowlist for MCP server spawning.
 ///
+/// Returns true when the command basename looks like an interpreter, shell, or
+/// package runner that must not be auto-approved for MCP registration.
+fn is_mcp_interpreter_basename(basename: &str) -> bool {
+    const INTERPRETER_BASENAMES: &[&str] = &[
+        "npm", "npx", "yarn", "pnpm", "node", "bun", "deno", "python", "python3", "pip", "uv",
+        "cargo", "rustup", "sh", "bash", "zsh", "fish", "ruby", "perl", "php",
+    ];
+
+    INTERPRETER_BASENAMES.iter().any(|&interp| {
+        if basename == interp {
+            return true;
+        }
+        if let Some(suffix) = basename.strip_prefix(interp) {
+            suffix.chars().next().is_none_or(|c| {
+                c.is_ascii_digit() || matches!(c, '.' | '-' | '@' | '_')
+            })
+        } else {
+            false
+        }
+    })
+}
+
 /// Interpreters and package runners (node, python, npx, bun, deno, uv,
 /// cargo, rustup, etc.) are intentionally NOT auto-approved for MCP
 /// registration; they require capability-level approval. Only
@@ -63,11 +111,7 @@ pub(super) fn is_trusted_mcp_command(cmd: &str) -> bool {
         .and_then(|n| n.to_str())
         .unwrap_or(cmd);
 
-    // Interpreters must never be trusted for auto-approved MCP servers.
-    const INTERPRETER_BASENAMES: &[&str] = &[
-        "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup",
-    ];
-    if INTERPRETER_BASENAMES.contains(&basename) {
+    if is_mcp_interpreter_basename(basename) {
         return false;
     }
 
@@ -469,7 +513,26 @@ mod tests {
 
     #[test]
     fn mcp_interpreters_are_not_auto_approved() {
-        for cmd in ["python3", "python", "node", "npx", "bun", "deno", "uv", "cargo", "rustup"] {
+        let test_cmds = [
+            "python3",
+            "python",
+            "node",
+            "npx",
+            "bun",
+            "deno",
+            "uv",
+            "cargo",
+            "rustup",
+            "python3.12",
+            "node20",
+            "bash",
+            "sh",
+            "zsh",
+            "ruby",
+            "perl",
+            "php",
+        ];
+        for cmd in test_cmds {
             assert!(
                 !is_trusted_mcp_command(cmd),
                 "{cmd} should require capability-level approval for MCP"

@@ -1327,6 +1327,92 @@ pub(crate) async fn handle_tachi_dispatch(
     serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
 }
 
+fn dispatch_status_needs_recovery(status: &serde_json::Value) -> bool {
+    if status.get("exit_code").is_some() {
+        return false;
+    }
+    match status.get("state").and_then(serde_json::Value::as_str) {
+        Some(
+            "TASK_STATE_WORKING" | "TASK_STATE_PENDING" | "TASK_STATE_RUNNING",
+        ) => true,
+        Some(_) => false,
+        None => true,
+    }
+}
+
+/// Mark orphaned in-flight dispatch runs as failed after daemon restart.
+pub(crate) fn recover_orphaned_dispatch_runs() -> Vec<String> {
+    let root = dispatch_runs_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+
+    let mut recovered = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let run_dir = entry.path();
+        let dispatch_id = match run_dir.file_name().and_then(|name| name.to_str()) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => continue,
+        };
+        if dispatch_status_is_terminal(&dispatch_id) {
+            continue;
+        }
+        let status_path = run_dir.join("status.json");
+        let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) else {
+            continue;
+        };
+        if !dispatch_status_needs_recovery(&status) {
+            continue;
+        }
+        let previous_state = status
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        append_trajectory_event(
+            &run_dir.join("trajectory.jsonl"),
+            json!({
+                "event": "dispatch_recovered",
+                "dispatch_id": dispatch_id,
+                "previous_state": previous_state,
+                "reason": "daemon_restart_orphan_recovery",
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+
+        write_status_json(
+            &run_dir,
+            &dispatch_id,
+            status.get("v2").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            status
+                .get("plan_generated_at")
+                .and_then(serde_json::Value::as_str),
+            status.get("executed_at").and_then(serde_json::Value::as_str),
+            status
+                .get("plan_review_status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("n/a"),
+            Some(1),
+            None,
+            None,
+            None,
+            Some(json!({
+                "state": "TASK_STATE_FAILED",
+                "updated_at": Utc::now().to_rfc3339(),
+                "exit_code": 1,
+                "recovery_reason": "daemon_restart_orphan_recovery",
+                "previous_state": previous_state,
+            })),
+        );
+        recovered.push(dispatch_id);
+    }
+    recovered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,6 +1465,51 @@ mod tests {
             let _cleanup = McpCleanup(Some(path.clone()));
         }
         assert!(!path.exists(), "MCP config should be removed on drop");
+    }
+
+    #[test]
+    fn recover_orphaned_dispatch_runs_marks_working_runs_failed() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("TACHI_HOME");
+
+        let run_dir = dispatch_runs_root().join("20260614T000000Z-claude-deadbeef");
+        std::fs::create_dir_all(&run_dir).expect("run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": "20260614T000000Z-claude-deadbeef",
+                "state": "TASK_STATE_WORKING",
+                "agent": "claude",
+            })
+            .to_string(),
+        )
+        .expect("status");
+
+        let recovered = recover_orphaned_dispatch_runs();
+        assert_eq!(recovered, vec!["20260614T000000Z-claude-deadbeef".to_string()]);
+
+        let status: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+                .unwrap();
+        assert_eq!(status["state"], "TASK_STATE_FAILED");
+        assert_eq!(status["recovery_reason"], "daemon_restart_orphan_recovery");
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = original_tachi_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
     }
 
     #[test]

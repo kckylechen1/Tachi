@@ -16,16 +16,24 @@ fn init_tracing(home: &std::path::Path) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok()?;
         #[cfg(unix)]
         {
-            let _ = restrict_file_permissions(path);
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+                .ok()
         }
-        Some(file)
+        #[cfg(not(unix))]
+        {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        }
     };
 
     let (writer, sink_label): (Box<dyn std::io::Write + Send + Sync>, String) =
@@ -80,6 +88,7 @@ fn init_tracing(home: &std::path::Path) {
 }
 
 /// Best-effort restrict a file to owner-read/write (0o600) on Unix.
+#[cfg(test)]
 #[cfg(unix)]
 fn restrict_file_permissions(path: &std::path::Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt;
@@ -693,6 +702,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
+    let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs();
+    if !recovered.is_empty() {
+        eprintln!(
+            "[dispatch] recovered {} orphaned run(s): {}",
+            recovered.len(),
+            recovered.join(", ")
+        );
+    }
 
     let requested_tool_profile = cli
         .profile
@@ -1242,27 +1259,25 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         if let Some(parent) = pid_path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
-        if let Err(e) = tokio::fs::write(
-            &pid_path,
-            serde_json::to_string_pretty(&pid_payload).unwrap_or_default(),
-        )
+        let pid_body = serde_json::to_string_pretty(&pid_payload).unwrap_or_default();
+        match tokio::task::spawn_blocking({
+            let pid_path = pid_path.clone();
+            move || crate::utils::write_owner_only_file(&pid_path, pid_body.as_bytes())
+        })
         .await
         {
-            eprintln!(
-                "warning: failed to write daemon discovery file {}: {e}",
-                pid_path.display()
-            );
-        } else {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o600);
-                if let Err(e) = tokio::fs::set_permissions(&pid_path, perms).await {
-                    eprintln!(
-                        "warning: failed to set permissions on daemon discovery file {}: {e}",
-                        pid_path.display()
-                    );
-                }
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!(
+                    "warning: failed to write daemon discovery file {}: {e}",
+                    pid_path.display()
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to write daemon discovery file {}: {e}",
+                    pid_path.display()
+                );
             }
         }
         let pid_path_cleanup = pid_path.clone();

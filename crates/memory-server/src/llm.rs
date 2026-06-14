@@ -3010,16 +3010,17 @@ mod tests {
         let mut persisted = None;
         for _ in 0..50 {
             if db_path.exists() {
-                let store = memory_core::MemoryStore::open_read_only(db_path.to_str().unwrap())
-                    .expect("open persisted vault db");
-                persisted = store
-                    .vault_get_key_health(
-                        "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST",
-                        "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST_1",
-                    )
-                    .expect("read persisted key health");
-                if persisted.is_some() {
-                    break;
+                if let Ok(store) = memory_core::MemoryStore::open(db_path.to_str().unwrap()) {
+                    persisted = store
+                        .vault_get_key_health(
+                            "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST",
+                            "TACHI_TEST_ONLY_API_KEY_ASYNC_PERSIST_1",
+                        )
+                        .ok()
+                        .flatten();
+                    if persisted.is_some() {
+                        break;
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;

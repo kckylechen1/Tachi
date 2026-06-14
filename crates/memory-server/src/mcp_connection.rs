@@ -3,6 +3,8 @@ use crate::vault_ops::read_unlocked_vault_secret;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Map as JsonMap;
+use std::net::{IpAddr, SocketAddr};
+use tokio::net::lookup_host;
 
 const MCP_PRESERVED_ENV_VARS: &[&str] = &[
     "PATH",
@@ -478,6 +480,47 @@ pub(crate) fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
         })
 }
 
+struct ValidatedRemoteMcpUrl {
+    url: String,
+    resolved_addrs: Option<Vec<SocketAddr>>,
+}
+
+fn mcp_remote_ip_is_blocked(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+            {
+                return true;
+            }
+            v6.to_ipv4_mapped()
+                .is_some_and(|v4| mcp_remote_ip_is_blocked(IpAddr::V4(v4)))
+        }
+    }
+}
+
+fn reject_blocked_mcp_remote_ip(ip: IpAddr) -> Result<(), String> {
+    if mcp_remote_ip_is_blocked(ip) {
+        Err(format!(
+            "MCP URL resolves to a private or local address: {ip}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Validate that a remote MCP URL points to a publicly reachable host.
 /// Blocks non-HTTP(S) schemes, loopback, link-local, and private addresses
 /// to prevent SSRF against internal services.
@@ -502,32 +545,93 @@ pub(crate) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
         || host_str == "[::1]"
         || host_str.ends_with(".localhost")
         || host_str == "0.0.0.0"
+        || host_str == "[::]"
     {
         return Err(format!(
             "MCP URL host '{host}' resolves to a loopback address and is not allowed"
         ));
     }
 
-    // IP-level blocklist (loopback, private, link-local).
     match host {
         url::Host::Ipv4(v4) => {
-            if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                return Err(format!(
+            reject_blocked_mcp_remote_ip(IpAddr::V4(v4)).map_err(|_| {
+                format!(
                     "MCP URL host '{host}' is a loopback/private/link-local address and is not allowed"
-                ));
-            }
+                )
+            })?;
         }
         url::Host::Ipv6(v6) => {
-            if v6.is_loopback() || v6.is_unicast_link_local() {
-                return Err(format!(
+            reject_blocked_mcp_remote_ip(IpAddr::V6(v6)).map_err(|_| {
+                format!(
                     "MCP URL host '{host}' is a loopback/link-local address and is not allowed"
-                ));
-            }
+                )
+            })?;
         }
         _ => {}
     }
 
     Ok(())
+}
+
+async fn validate_remote_mcp_url_for_connect(url: &str) -> Result<ValidatedRemoteMcpUrl, String> {
+    validate_mcp_remote_url(url)?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL '{url}': {e}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("MCP URL '{url}' is missing a host"))?;
+
+    let ip_literal = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if ip_literal.parse::<IpAddr>().is_ok() {
+        return Ok(ValidatedRemoteMcpUrl {
+            url: url.to_string(),
+            resolved_addrs: None,
+        });
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| format!("MCP URL '{url}' has no usable port"))?;
+    let mut resolved_addrs = Vec::new();
+    let mut resolved_any = false;
+    for addr in lookup_host((host, port))
+        .await
+        .map_err(|e| format!("resolve MCP URL host: {e}"))?
+    {
+        resolved_any = true;
+        reject_blocked_mcp_remote_ip(addr.ip())?;
+        resolved_addrs.push(addr);
+    }
+    if !resolved_any {
+        return Err(format!("MCP URL host '{host}' resolved to no addresses"));
+    }
+
+    Ok(ValidatedRemoteMcpUrl {
+        url: url.to_string(),
+        resolved_addrs: Some(resolved_addrs),
+    })
+}
+
+fn build_remote_mcp_http_client(
+    validated: &ValidatedRemoteMcpUrl,
+    timeout_secs: u64,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(timeout_secs));
+    if let Some(addrs) = &validated.resolved_addrs {
+        if let Some(host) = url::Url::parse(&validated.url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_string))
+        {
+            builder = builder.resolve_to_addrs(host.as_str(), addrs);
+        }
+    }
+    builder
+        .build()
+        .map_err(|e| format!("build http client: {e}"))
 }
 
 fn resolve_remote_mcp_url_with_secret_resolver<F>(
@@ -538,8 +642,9 @@ where
     F: Fn(&str) -> Result<Option<String>, String>,
 {
     let url = remote_mcp_url(def).ok_or_else(|| "missing url for remote MCP".to_string())?;
-    validate_mcp_remote_url(url)?;
-    expand_placeholders_with_secret_resolver(url, secret_resolver)
+    let expanded = expand_placeholders_with_secret_resolver(url, secret_resolver)?;
+    validate_mcp_remote_url(&expanded)?;
+    Ok(expanded)
 }
 
 /// Returns true for remote HTTP-based MCP servers (streamable-http, sse, http transport).
@@ -995,11 +1100,13 @@ mod tests {
             "http://localhost/mcp",
             "http://127.0.0.1/mcp",
             "http://[::1]/mcp",
+            "http://[::ffff:127.0.0.1]/mcp",
             "http://192.168.1.1/mcp",
             "http://10.0.0.1/mcp",
             "http://172.16.0.1/mcp",
             "http://169.254.1.1/mcp",
             "http://0.0.0.0/mcp",
+            "http://[::]/mcp",
             "file:///etc/passwd",
             "https://foo.localhost/mcp",
         ] {
@@ -1019,6 +1126,21 @@ mod tests {
         assert!(
             resolve_remote_mcp_url_with_secret_resolver(&def, &|_| Ok(None)).is_err(),
             "loopback URL should be rejected during resolution"
+        );
+    }
+
+    #[test]
+    fn resolve_remote_mcp_url_rejects_vault_expanded_loopback_host() {
+        let def = json!({
+            "transport": "streamable-http",
+            "url": "http://${vault:MCP_HOST}:8080/mcp"
+        });
+        assert!(
+            resolve_remote_mcp_url_with_secret_resolver(&def, &|key| {
+                Ok((key == "MCP_HOST").then(|| "127.0.0.1".to_string()))
+            })
+            .is_err(),
+            "vault-expanded loopback host should be rejected after placeholder expansion"
         );
     }
 }
@@ -1098,12 +1220,15 @@ impl MemoryServer {
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("resolve remote MCP URL: {e}"), None)
             })?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
+        let validated = validate_remote_mcp_url_for_connect(&url)
+            .await
             .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("build http client: {e}"), None)
+                rmcp::ErrorData::internal_error(format!("validate remote MCP URL: {e}"), None)
             })?;
+        let client = build_remote_mcp_http_client(&validated, 90).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("build http client: {e}"), None)
+        })?;
+        let url = validated.url;
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in self
@@ -1235,10 +1360,9 @@ impl MemoryServer {
         def: &serde_json::Value,
     ) -> Result<Vec<rmcp::model::Tool>, String> {
         let url = self.resolve_remote_mcp_url_for_capability(capability_id, def)?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(90))
-            .build()
-            .map_err(|e| format!("build http client: {e}"))?;
+        let validated = validate_remote_mcp_url_for_connect(&url).await?;
+        let client = build_remote_mcp_http_client(&validated, 90)?;
+        let url = validated.url;
 
         let mut headers = reqwest::header::HeaderMap::new();
         for (name, value) in self.resolve_header_map_for_capability(capability_id, def)? {
@@ -1669,12 +1793,12 @@ impl MemoryServer {
                 }
             }
             "sse" | "http" | "streamable-http" => {
-                let url = def["url"]
-                    .as_str()
-                    .ok_or_else(|| "missing url for SSE".to_string())?;
-                validate_mcp_remote_url(url)?;
+                let url = self.resolve_remote_mcp_url_for_capability(capability_id, def)?;
+                validate_remote_mcp_url_for_connect(&url).await?;
                 let mut transport_config =
-                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                        url.as_str(),
+                    );
                 if let Some(token) = def
                     .get("auth_header")
                     .and_then(|value| value.as_str())

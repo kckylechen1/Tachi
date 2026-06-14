@@ -37,6 +37,15 @@ pub(super) fn resolve_permission_profile(params: &TachiDispatchParams) -> Result
     }
 }
 
+fn reject_non_claude_allowlist(agent: &str, profile: &str) -> Result<(), String> {
+    if profile == "allowlist" {
+        return Err(format!(
+            "permission_profile 'allowlist' is only supported for agent 'claude', not '{agent}'"
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn build_claude_command(
     params: &TachiDispatchParams,
     prompt: &str,
@@ -95,6 +104,7 @@ pub(super) fn build_codex_command(
 
     // Permission profile
     let profile = resolve_permission_profile(params)?;
+    reject_non_claude_allowlist("codex", profile)?;
     if profile == "full" {
         cmd.arg("--dangerously-bypass-approvals-and-sandbox");
     } else {
@@ -131,6 +141,7 @@ pub(super) fn build_grok_command(
     cmd.arg("--output-format").arg("json");
 
     let profile = resolve_permission_profile(params)?;
+    reject_non_claude_allowlist("grok", profile)?;
     if profile == "full" {
         cmd.arg("--permission-mode").arg("bypassPermissions");
     }
@@ -158,6 +169,7 @@ pub(super) fn build_kimi_command(
     prompt: &str,
 ) -> Result<Command, String> {
     let profile = resolve_permission_profile(params)?;
+    reject_non_claude_allowlist("kimi", profile)?;
     let mut cmd = Command::new("kimi");
     for arg in kimi_command_args(params, prompt, profile) {
         cmd.arg(arg);
@@ -354,6 +366,33 @@ mod tests {
             Some(v) => std::env::set_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE", v),
             None => std::env::remove_var("TACHI_DISPATCH_ALLOW_FULL_PERMISSION_PROFILE"),
         }
+    }
+
+    #[test]
+    fn allowlist_permission_profile_rejected_for_non_claude_agents() {
+        let mut params = dispatch_params("codex");
+        params.permission_profile = Some("allowlist".to_string());
+        params.allowed_tools = vec!["Read".to_string()];
+        assert!(
+            build_codex_command(&params, "hello", None).is_err(),
+            "codex should reject allowlist profile"
+        );
+
+        params = dispatch_params("grok");
+        params.permission_profile = Some("allowlist".to_string());
+        params.allowed_tools = vec!["Read".to_string()];
+        assert!(
+            build_grok_command(&params, "hello", None).is_err(),
+            "grok should reject allowlist profile"
+        );
+
+        params = dispatch_params("kimi");
+        params.permission_profile = Some("allowlist".to_string());
+        params.allowed_tools = vec!["Read".to_string()];
+        assert!(
+            build_kimi_command(&params, "hello").is_err(),
+            "kimi should reject allowlist profile"
+        );
     }
 
     #[tokio::test]

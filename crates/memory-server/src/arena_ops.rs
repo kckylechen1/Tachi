@@ -309,23 +309,40 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
 
 fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
     use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     let path = run_dir.join("events.jsonl");
     let line = format!(
         "{}\n",
         serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?
     );
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open events.jsonl: {e}"))?;
+    let mut f = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| format!("open events.jsonl: {e}"))?
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("open events.jsonl: {e}"))?
+        }
+    };
     f.write_all(line.as_bytes())
         .map_err(|e| format!("write events.jsonl: {e}"))?;
     f.sync_all()
         .map_err(|e| format!("fsync events.jsonl: {e}"))?;
-    // Best-effort restrict the log to owner-read/write on Unix.
-    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     Ok(())
 }
 
@@ -1825,6 +1842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn append_event_writes_synced_and_owner_only_file() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();

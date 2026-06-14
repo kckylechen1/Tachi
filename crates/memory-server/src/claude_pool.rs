@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
+use crate::utils::write_owner_only_file;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -110,13 +111,8 @@ impl ClaudePool {
         }
 
         let prompt_path = run_dir.join("prompt.md");
-        if let Err(e) = std::fs::write(&prompt_path, prompt) {
+        if let Err(e) = write_owner_only_file(&prompt_path, prompt.as_bytes()) {
             return Err(format!("claude_pool write {}: {e}", prompt_path.display()));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&prompt_path, std::fs::Permissions::from_mode(0o600));
         }
 
         let started_at = Utc::now().to_rfc3339();
