@@ -2958,6 +2958,45 @@ async fn tachi_dispatch_with_flow_id_records_dispatch_card() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dispatch_run_dir_is_created_with_0o700() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    let tmp = tempfile::tempdir().expect("temp dispatch cwd");
+
+    let mut params = dispatch_params(Some("custom"), "smoke dispatch dir mode");
+    params.command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "print('ok')".to_string(),
+    ];
+    params.cwd = Some(tmp.path().to_string_lossy().to_string());
+
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+        .await
+        .expect("custom dispatch should start");
+    let response: Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+
+    let home = std::env::var("HOME").expect("HOME set by TempHomeGuard");
+    let run_dir = std::path::PathBuf::from(home)
+        .join(".tachi")
+        .join("runs")
+        .join(dispatch_id);
+    assert!(run_dir.exists(), "run dir should exist: {run_dir:?}");
+    let mode = std::fs::metadata(&run_dir)
+        .expect("run dir metadata")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o700,
+        "dispatch run dir should be restricted to owner"
+    );
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
