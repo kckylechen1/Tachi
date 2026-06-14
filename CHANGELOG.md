@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
-- [1.5.x](#153---2026-06-08) — verification-led merge gates and agent workflow hardening
+- [1.5.x](#154---2026-06-15) — issue-driven automation gates and runtime hardening
 - [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
 - [1.3.x](#130---2026-05-30) — search quality, memory lifecycle, and audit hardening
 - [1.2.0](#120---2026-05-25) — shell orchestration, dispatch v2, daily distill
@@ -36,9 +36,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+## [1.5.4] - 2026-06-15 — 🔒 Issue-driven automation gates and runtime hardening
+
+Patch release for GitHub issue-driven agent handoffs, runtime boundary hardening, and bounded read concurrency.
+
+### Added
+
+- **Issue automation plans**: `tachi_task(action="intake")` now records `automation_plan` metadata, including dispatch readiness, leader-gate reasons, suggested branch, PR title, and PR body contract.
+- **Leader-gated dispatch**: issue flows missing acceptance criteria or touching high-risk boundaries now block `tachi_task(action="dispatch")` unless a leader explicitly confirms with `confirm=true`.
+- **PR handoff artifacts**: `tachi_task(action="pr_handoff")` writes branch/title/body handoff material with linked issue, completed dispatches, verification evidence, and known gaps.
+- **Bounded read-only store pools**: daemon-bound global/project read paths now use a configurable read-only `MemoryStore` pool via `TACHI_MEMORY_READ_POOL_SIZE` (default 4, capped at 32).
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, OpenClaw plugin, and npm package metadata versions are aligned to `1.5.4`.
+- Installer URLs across READMEs, `docs/INSTALL.md`, and OpenClaw docs now point at the `v1.5.4` release tag.
+- Agent workflow docs now treat GitHub issues/PRs as authoritative handoff records for spec/document-driven work.
+- Production `tool_params` imports were narrowed to explicit schema/serde imports instead of broad `use super::*`.
+
+### Fixed
+
+- Cached read stores no longer serialize all daemon read closures behind one mutex.
+- Named/path read helper stores now open through the read-only store API.
+- Issue-based worker dispatch no longer silently proceeds from underspecified or high-risk issue text.
+
 ### Security & idempotency hardening
 
-Post–Gemini review hardening landed on `main` after v1.5.3 (PRs #359–#376 security batch, #377 idempotency follow-up).
+Post–Gemini review hardening landed after v1.5.3 (PRs #359–#376 security batch, #377 idempotency follow-up).
 
 #### Added
 

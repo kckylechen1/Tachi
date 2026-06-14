@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)"
 ```
 
 验证：

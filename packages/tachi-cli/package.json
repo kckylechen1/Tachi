@@ -1,6 +1,6 @@
 {
   "name": "@tachi/cli",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Tachi CLI - Memory and Capability Orchestrator",
   "type": "module",
   "bin": {

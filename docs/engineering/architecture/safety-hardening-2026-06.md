@@ -1,6 +1,6 @@
 # Safety & Idempotency Hardening (2026-06)
 
-Reference for the post–Gemini review hardening batch merged after v1.5.3. Operator-facing summary lives in [`CHANGELOG.md`](../../../CHANGELOG.md#unreleased); install notes in [`docs/INSTALL.md`](../../INSTALL.md).
+Reference for the post–Gemini review hardening batch released in v1.5.4. Operator-facing summary lives in [`CHANGELOG.md`](../../../CHANGELOG.md#154---2026-06-15); install notes in [`docs/INSTALL.md`](../../INSTALL.md).
 
 ## Scope
 

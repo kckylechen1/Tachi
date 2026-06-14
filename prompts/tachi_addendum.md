@@ -1,7 +1,7 @@
-<!-- TACHI:BEGIN v1.5.3 -->
+<!-- TACHI:BEGIN v1.5.4 -->
 # Tachi 使用指南 / Tachi Usage Addendum
 
-> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v1.5.3。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
+> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v1.5.4。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
 
 ## 角色
 
@@ -110,4 +110,4 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 后台 skill / foundry 调用优先走 **Claude CLI pool**，失败时回退到 `SILICONFLOW_*`。`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
 
-<!-- TACHI:END v1.5.3 -->
+<!-- TACHI:END v1.5.4 -->

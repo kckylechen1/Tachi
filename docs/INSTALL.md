@@ -25,14 +25,14 @@ brew tap kckylechen1/tachi && brew install tachi
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)" -- --skip-plugin
 ```
 
 ### Verify Installation
 
 ```bash
 tachi --version
-# Expected: tachi 1.5.3 (or later)
+# Expected: tachi 1.5.4 (or later)
 ```
 
 If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
@@ -167,7 +167,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.3/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)"
 ```
 
 This will:
