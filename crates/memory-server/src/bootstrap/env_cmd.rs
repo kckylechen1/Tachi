@@ -82,6 +82,7 @@ pub(super) async fn run_env_command(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&std::path::Path>,
+    insecure_password_file: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         Some(EnvAction::Plan { cwd, json }) => {
@@ -94,7 +95,13 @@ pub(super) async fn run_env_command(
         Some(EnvAction::Export { cwd, json }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
             let unlocked =
-                unlock_cli_vault(global_db_path, stdin_password, keychain, password_file)?;
+                unlock_cli_vault(
+                    global_db_path,
+                    stdin_password,
+                    keychain,
+                    password_file,
+                    insecure_password_file,
+                )?;
             let exports = filter_project_exports(
                 resolve_project_env_values(&unlocked, &cwd)?,
                 filter,
@@ -120,7 +127,13 @@ pub(super) async fn run_env_command(
         }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
             let unlocked =
-                unlock_cli_vault(global_db_path, stdin_password, keychain, password_file)?;
+                unlock_cli_vault(
+                    global_db_path,
+                    stdin_password,
+                    keychain,
+                    password_file,
+                    insecure_password_file,
+                )?;
             let report = sync_project_env(
                 &unlocked,
                 &cwd,
@@ -148,7 +161,13 @@ pub(super) async fn run_env_command(
         Some(EnvAction::Run { cwd, command }) => {
             let cwd = resolve_cwd(cwd.as_deref())?;
             let unlocked =
-                unlock_cli_vault(global_db_path, stdin_password, keychain, password_file)?;
+                unlock_cli_vault(
+                    global_db_path,
+                    stdin_password,
+                    keychain,
+                    password_file,
+                    insecure_password_file,
+                )?;
             let exports = filter_project_exports(
                 resolve_project_env_values(&unlocked, &cwd)?,
                 filter,
@@ -164,6 +183,7 @@ pub(super) async fn run_env_command(
                 stdin_password,
                 keychain,
                 password_file,
+                insecure_password_file,
             )
             .await
         }
@@ -183,6 +203,7 @@ fn unlock_cli_vault(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&std::path::Path>,
+    insecure_password_file: bool,
 ) -> Result<UnlockedVaultStore, Box<dyn std::error::Error>> {
     let store = open_cli_store(global_db_path)?;
     let config = store
@@ -193,7 +214,8 @@ fn unlock_cli_vault(
                 .to_string()
         })?;
 
-    let password = super::vault_cli::read_vault_password(stdin_password, keychain, password_file)?;
+    let password =
+        super::vault_cli::read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let salt = B64
         .decode(&config.salt)
@@ -603,6 +625,7 @@ async fn run_legacy_env_export(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&std::path::Path>,
+    insecure_password_file: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = open_cli_store_read_only(global_db_path)?;
 
@@ -617,7 +640,8 @@ async fn run_legacy_env_export(
         })?;
 
     // 2. Resolve password from the requested portable source.
-    let password = super::vault_cli::read_vault_password(stdin_password, keychain, password_file)?;
+    let password =
+        super::vault_cli::read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
 
     // 3. Derive key and verify
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
