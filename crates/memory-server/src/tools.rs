@@ -1804,7 +1804,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='doc_index': project-first layered source index across GitHub issues/PRs, repo docs/specs, project wiki, global guide, feedback rules, eval, and runtime artifacts; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='wait': block on a dispatch_id until terminal state or timeout; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing/doc_index → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → wait/board → complete/eval → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='doc_index': project-first layered source index across GitHub issues/PRs, repo docs/specs, project wiki, global guide, feedback rules, eval, and runtime artifacts; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='wait': block on a dispatch_id until terminal state or timeout; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='pr_handoff': write a PR body/branch handoff with verification evidence and known gaps; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing/doc_index → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → wait/board → complete/eval → pr_handoff → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1831,6 +1831,7 @@ impl MemoryServer {
             }
             "briefing" | "doc_index" => return handle_tachi_feature_briefing(self, &params).await,
             "dispatch" => {
+                crate::task_lifecycle::guard_issue_flow_dispatch(&params)?;
                 if params.agent.is_none() && params.profile.is_none() {
                     return Err("agent or profile is required when action='dispatch'".to_string());
                 }
@@ -2036,6 +2037,7 @@ impl MemoryServer {
                 let gh_params = build_task_pr_status_gh_params(&params)?;
                 crate::gh_ops::handle_tachi_gh(self, gh_params).await
             }
+            "pr_handoff" => crate::task_lifecycle::handle_task_pr_handoff(&params),
             "release_note" => crate::task_lifecycle::handle_task_release_note(self, &params).await,
             "ux_matrix" => crate::task_lifecycle::handle_task_ux_matrix(&params),
             "build_references" | "close_loop" => {
@@ -2072,7 +2074,7 @@ impl MemoryServer {
                 Ok(result)
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;

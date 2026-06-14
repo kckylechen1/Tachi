@@ -160,6 +160,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
@@ -236,6 +237,8 @@ const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Maximum entries in the tool cache before LRU eviction kicks in
 const TOOL_CACHE_MAX_ENTRIES: usize = 256;
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_MEMORY_READ_POOL_SIZE: usize = 4;
+const MAX_MEMORY_READ_POOL_SIZE: usize = 32;
 
 // ─── Rate Limiter Constants ──────────────────────────────────────────────────
 /// Default requests-per-minute limit per session (0 = unlimited)
@@ -384,9 +387,44 @@ pub(crate) struct ToolDiscovery {
 }
 
 #[derive(Clone)]
+struct ReadStorePool {
+    stores: Arc<Vec<StdMutex<MemoryStore>>>,
+    next: Arc<AtomicUsize>,
+}
+
+impl ReadStorePool {
+    fn open_read_only(db_path: &str, size: usize) -> Result<Self, memory_core::MemoryError> {
+        let size = size.clamp(1, MAX_MEMORY_READ_POOL_SIZE);
+        let mut stores = Vec::with_capacity(size);
+        for _ in 0..size {
+            stores.push(StdMutex::new(MemoryStore::open_read_only(db_path)?));
+        }
+        Ok(Self {
+            stores: Arc::new(stores),
+            next: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn with_store<T>(
+        &self,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.stores.len();
+        let mut store = lock_or_recover(&self.stores[index], label);
+        f(&mut store)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.stores.len()
+    }
+}
+
+#[derive(Clone)]
 struct ProjectDbState {
     store: Arc<StdMutex<MemoryStore>>,
-    read_store: Arc<StdMutex<MemoryStore>>,
+    read_pool: ReadStorePool,
     rw_gate: Arc<StdRwLock<()>>,
     db_path: Arc<PathBuf>,
 }
@@ -431,9 +469,9 @@ pub(crate) struct FoundryRuntime {
 #[allow(dead_code)]
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
-    global_read_store: Arc<StdMutex<MemoryStore>>,
+    global_read_pool: ReadStorePool,
     project_store: Option<Arc<StdMutex<MemoryStore>>>,
-    project_read_store: Option<Arc<StdMutex<MemoryStore>>>,
+    project_read_pool: Option<ReadStorePool>,
     /// Read/write gate for global DB access. Read operations share the lock,
     /// write operations take exclusive lock.
     global_rw_gate: Arc<StdRwLock<()>>,
@@ -490,6 +528,13 @@ fn test_background_workers_enabled() -> bool {
     }
 }
 
+fn configured_memory_read_pool_size() -> usize {
+    parse_env_u64("TACHI_MEMORY_READ_POOL_SIZE")
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(DEFAULT_MEMORY_READ_POOL_SIZE)
+        .clamp(1, MAX_MEMORY_READ_POOL_SIZE)
+}
+
 impl MemoryServer {
     fn new(
         global_db_path: PathBuf,
@@ -506,12 +551,13 @@ impl MemoryServer {
             )
         })?;
         let global_store = MemoryStore::open_with_label(global_db_str, "global")?;
-        let global_read_store = MemoryStore::open_read_only(global_db_str)?;
+        let read_pool_size = configured_memory_read_pool_size();
+        let global_read_pool = ReadStorePool::open_read_only(global_db_str, read_pool_size)?;
         let global_vec_available = global_store.vec_available;
 
         let (
             project_store,
-            project_read_store,
+            project_read_pool,
             project_rw_gate,
             project_db_path,
             project_vec_available,
@@ -531,11 +577,11 @@ impl MemoryServer {
                 .unwrap_or("project")
                 .to_string();
             let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
-            let read_store = MemoryStore::open_read_only(project_db_str)?;
+            let read_pool = ReadStorePool::open_read_only(project_db_str, read_pool_size)?;
             let v = store.vec_available;
             (
                 Some(Arc::new(StdMutex::new(store))),
-                Some(Arc::new(StdMutex::new(read_store))),
+                Some(read_pool),
                 Some(Arc::new(StdRwLock::new(()))),
                 Some(Arc::new(p.clone())),
                 v,
@@ -586,14 +632,14 @@ impl MemoryServer {
         let hot_project_db = Arc::new(StdRwLock::new(
             match (
                 project_store.as_ref(),
-                project_read_store.as_ref(),
+                project_read_pool.as_ref(),
                 project_rw_gate.clone(),
                 project_db_path.clone(),
             ) {
-                (Some(store), Some(read_store), Some(rw_gate), Some(db_path)) => {
+                (Some(store), Some(read_pool), Some(rw_gate), Some(db_path)) => {
                     Some(ProjectDbState {
                         store: Arc::clone(store),
-                        read_store: Arc::clone(read_store),
+                        read_pool: read_pool.clone(),
                         rw_gate,
                         db_path,
                     })
@@ -604,9 +650,9 @@ impl MemoryServer {
 
         let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
-            global_read_store: Arc::new(StdMutex::new(global_read_store)),
+            global_read_pool,
             project_store,
-            project_read_store,
+            project_read_pool,
             global_rw_gate: Arc::new(StdRwLock::new(())),
             project_rw_gate,
             global_db_path: Arc::new(global_db_path),
@@ -744,6 +790,11 @@ impl MemoryServer {
 
     pub(crate) fn dead_letters_lock(&self) -> std::sync::MutexGuard<'_, VecDeque<DeadLetter>> {
         lock_or_recover(&self.tool_discovery.dead_letters, "dead_letters")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn global_read_pool_size_for_tests(&self) -> usize {
+        self.global_read_pool.len()
     }
 
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {

@@ -2765,15 +2765,19 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
         repo: "kckylechen1/tachi".to_string(),
         number: 194,
         title: "Policy-learning dispatch profiles".to_string(),
+        body: Some("## Acceptance criteria\n- Flow artifacts feed briefing.".to_string()),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/194".to_string(),
         doc_paths: vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()],
         spec_paths: Vec::new(),
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Policy-learning dispatch profiles",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
 
@@ -2945,15 +2949,19 @@ async fn tachi_task_close_loop_marks_flow_complete_for_ux_matrix() {
         repo: "kckylechen1/tachi".to_string(),
         number: 239,
         title: "Persist close_loop marker".to_string(),
+        body: Some("## Acceptance criteria\n- close_loop marks the flow complete.".to_string()),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/239".to_string(),
         doc_paths: vec!["docs/engineering/architecture/credential-adapters-cleanup.md".to_string()],
         spec_paths: Vec::new(),
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Persist close_loop marker",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
 
@@ -3583,6 +3591,160 @@ async fn tachi_task_release_note_requires_flow_or_pr_ref_before_github_access() 
     );
 }
 
+#[test]
+fn issue_automation_plan_blocks_missing_acceptance_and_high_risk() {
+    let missing_acceptance = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 380,
+        title: "Automate issue dispatch".to_string(),
+        body: Some("Let Tachi read an issue and do the work.".to_string()),
+        labels: Vec::new(),
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/380".to_string(),
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+    };
+    let plan = crate::task_lifecycle::build_issue_automation_plan(&missing_acceptance, None);
+    assert_eq!(plan["dispatch_allowed"], json!(false));
+    assert_eq!(plan["requires_leader"], json!(true));
+    assert!(plan["leader_gate_reasons"]
+        .as_array()
+        .expect("leader gate reasons")
+        .contains(&json!("missing_acceptance_criteria")));
+
+    let high_risk = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 381,
+        title: "Rotate vault token handling".to_string(),
+        body: Some("## Acceptance criteria\n- Secrets stay redacted.".to_string()),
+        labels: vec!["security".to_string()],
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/381".to_string(),
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+    };
+    let plan = crate::task_lifecycle::build_issue_automation_plan(&high_risk, None);
+    assert_eq!(plan["dispatch_allowed"], json!(false));
+    assert!(plan["high_risk_reasons"]
+        .as_array()
+        .expect("high risk reasons")
+        .contains(&json!("touches_security")));
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_task_dispatch_requires_leader_confirmation_for_blocked_issue_flow() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let temp_runs = tempfile::tempdir().expect("temp run root");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
+    let server = make_server();
+    let flow_id = "flow_20260614T000001Z_blocked_dispatch_gate";
+    let issue = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 380,
+        title: "Automate issue dispatch".to_string(),
+        body: Some("Do the automation.".to_string()),
+        labels: Vec::new(),
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/380".to_string(),
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+    };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
+    crate::task_lifecycle::write_intake_flow_artifacts(
+        flow_id,
+        "Automate issue dispatch",
+        &issue,
+        &automation_plan,
+    )
+    .expect("write intake artifacts");
+
+    let mut params = task_params("dispatch");
+    params.flow_id = Some(flow_id.to_string());
+    params.issue_ref = Some("kckylechen1/tachi#380".to_string());
+    params.task = Some("Automate issue dispatch".to_string());
+    params.agent = Some("codex".to_string());
+    let err = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect_err("dispatch should fail before spawning an agent");
+    assert!(
+        err.contains("dispatch requires leader confirmation"),
+        "unexpected error: {err}"
+    );
+    assert!(
+        err.contains("missing_acceptance_criteria"),
+        "unexpected error: {err}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn tachi_task_pr_handoff_writes_pr_body_with_verification_and_gaps() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let temp_runs = tempfile::tempdir().expect("temp run root");
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", temp_runs.path());
+    let server = make_server();
+    let flow_id = "flow_20260614T000002Z_pr_handoff";
+    let issue = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 380,
+        title: "Automate issue dispatch".to_string(),
+        body: Some("## Acceptance criteria\n- PR handoff contains required evidence.".to_string()),
+        labels: Vec::new(),
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/380".to_string(),
+        doc_paths: Vec::new(),
+        spec_paths: Vec::new(),
+    };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
+    crate::task_lifecycle::write_intake_flow_artifacts(
+        flow_id,
+        "Automate issue dispatch",
+        &issue,
+        &automation_plan,
+    )
+    .expect("write intake artifacts");
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).expect("run dir");
+    std::fs::write(
+        run_dir.join("verification.json"),
+        serde_json::to_string_pretty(&json!({
+            "overall": "passed",
+            "items": [
+                { "command": "cargo test -p memory-server tachi_task_pr_handoff", "status": "passed" }
+            ]
+        }))
+        .expect("verification json"),
+    )
+    .expect("write verification");
+
+    let mut params = task_params("pr_handoff");
+    params.flow_id = Some(flow_id.to_string());
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("pr_handoff should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("pr_handoff JSON");
+    assert_eq!(parsed["ok"], json!(true));
+    assert_eq!(parsed["safe_to_open"], json!(true));
+    let body = parsed["pr_body"].as_str().expect("pr body");
+    assert!(body.contains("Linked issue: kckylechen1/tachi#380"));
+    assert!(body.contains("Overall: `passed`"));
+    assert!(body.contains("Known Gaps / Review Gates"));
+    assert!(body.contains("None recorded by Tachi automation gate"));
+    let handoff_path = parsed["pr_handoff_path"].as_str().expect("handoff path");
+    assert!(handoff_path.ends_with("pr_handoff.md"), "{handoff_path}");
+    assert!(run_dir.join("pr_handoff.md").exists());
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
@@ -3599,15 +3761,22 @@ async fn tachi_task_release_note_writes_flow_artifact_with_refs() {
         repo: "kckylechen1/tachi".to_string(),
         number: 194,
         title: "Policy-learning dispatch profiles".to_string(),
+        body: Some(
+            "## Acceptance criteria\n- Release note includes issue, PR, and verification."
+                .to_string(),
+        ),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/194".to_string(),
         doc_paths: vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()],
         spec_paths: vec!["docs/engineering/specs/dispatch-policy.md".to_string()],
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Policy-learning dispatch profiles",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
     let pr = crate::task_lifecycle::PrSnapshot {
@@ -3695,15 +3864,19 @@ async fn tachi_task_release_note_rejects_mismatched_pr_ref_for_cached_flow_pr() 
         repo: "kckylechen1/tachi".to_string(),
         number: 194,
         title: "Policy-learning dispatch profiles".to_string(),
+        body: Some("## Acceptance criteria\n- Mismatched PR refs are rejected.".to_string()),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/194".to_string(),
         doc_paths: Vec::new(),
         spec_paths: Vec::new(),
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Policy-learning dispatch profiles",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
     let pr = crate::task_lifecycle::PrSnapshot {
@@ -3749,15 +3922,21 @@ async fn tachi_task_release_note_skips_empty_optional_github_fields() {
         repo: "kckylechen1/tachi".to_string(),
         number: 194,
         title: "Policy-learning dispatch profiles".to_string(),
+        body: Some(
+            "## Acceptance criteria\n- Empty optional GitHub fields are skipped.".to_string(),
+        ),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/194".to_string(),
         doc_paths: Vec::new(),
         spec_paths: Vec::new(),
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Policy-learning dispatch profiles",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
     let pr = crate::task_lifecycle::PrSnapshot {
@@ -3803,15 +3982,19 @@ async fn tachi_task_ux_matrix_writes_feature_workflow_artifact() {
         repo: "kckylechen1/tachi".to_string(),
         number: 194,
         title: "Policy-learning dispatch profiles".to_string(),
+        body: Some("## Acceptance criteria\n- UX matrix includes workflow gates.".to_string()),
+        labels: Vec::new(),
         state: Some("OPEN".to_string()),
         url: "https://github.com/kckylechen1/tachi/issues/194".to_string(),
         doc_paths: vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()],
         spec_paths: vec!["docs/engineering/specs/dispatch-policy.md".to_string()],
     };
+    let automation_plan = crate::task_lifecycle::build_issue_automation_plan(&issue, None);
     crate::task_lifecycle::write_intake_flow_artifacts(
         flow_id,
         "Policy-learning dispatch profiles",
         &issue,
+        &automation_plan,
     )
     .expect("write intake artifacts");
     let pr = crate::task_lifecycle::PrSnapshot {

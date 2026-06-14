@@ -25,6 +25,8 @@ pub(crate) struct IssueSnapshot {
     pub repo: String,
     pub number: u64,
     pub title: String,
+    pub body: Option<String>,
+    pub labels: Vec<String>,
     pub state: Option<String>,
     pub url: String,
     pub doc_paths: Vec<String>,
@@ -152,6 +154,53 @@ pub(crate) fn resolve_task_pr_target(params: &TachiTaskParams) -> Result<GithubT
     )
 }
 
+pub(crate) fn build_issue_automation_plan(
+    issue: &IssueSnapshot,
+    risk_override: Option<&str>,
+) -> Value {
+    let has_acceptance_criteria = issue_has_acceptance_criteria(issue);
+    let high_risk_reasons = issue_high_risk_reasons(issue, risk_override);
+    let mut leader_gate_reasons = Vec::new();
+    if !has_acceptance_criteria {
+        leader_gate_reasons.push("missing_acceptance_criteria".to_string());
+    }
+    leader_gate_reasons.extend(high_risk_reasons.iter().cloned());
+    dedupe_strings(&mut leader_gate_reasons);
+
+    let dispatch_allowed = leader_gate_reasons.is_empty();
+    let branch = format!(
+        "tachi/issue-{}-{}",
+        issue.number,
+        slug_for_branch(&issue.title)
+    );
+    let recommended_next_action = if dispatch_allowed {
+        "Run tachi_task(action='recommend'), then dispatch a bounded worker with flow_id and issue_ref."
+    } else {
+        "Ask the leader to clarify acceptance criteria or approve the high-risk boundary before dispatch."
+    };
+
+    json!({
+        "status": if dispatch_allowed { "ready_for_dispatch" } else { "needs_leader" },
+        "dispatch_allowed": dispatch_allowed,
+        "requires_leader": !dispatch_allowed,
+        "risk": if high_risk_reasons.is_empty() { "standard" } else { "high" },
+        "has_acceptance_criteria": has_acceptance_criteria,
+        "missing_acceptance_criteria": !has_acceptance_criteria,
+        "high_risk_reasons": high_risk_reasons,
+        "leader_gate_reasons": leader_gate_reasons,
+        "branch": branch,
+        "pr_title": issue.title,
+        "recommended_next_action": recommended_next_action,
+        "pr_body_contract": {
+            "requires_linked_issue": true,
+            "requires_implementation_summary": true,
+            "requires_verification_evidence": true,
+            "requires_known_gaps": true,
+            "auto_merge_allowed": false
+        }
+    })
+}
+
 pub(crate) async fn handle_task_intake(
     server: &MemoryServer,
     params: &TachiTaskParams,
@@ -168,19 +217,23 @@ pub(crate) async fn handle_task_intake(
         .clone()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| new_task_flow_id("intake", &objective));
-    write_intake_flow_artifacts(&flow_id, &objective, &issue)?;
-    seed_intake_orchestrator(server, &flow_id, &objective, &issue).await?;
+    let automation_plan = build_issue_automation_plan(&issue, params.risk.as_deref());
+    write_intake_flow_artifacts(&flow_id, &objective, &issue, &automation_plan)?;
+    seed_intake_orchestrator(server, &flow_id, &objective, &issue, &automation_plan).await?;
     let briefing_params = intake_briefing_params(params, &flow_id, &objective, &issue);
     let briefing =
         crate::copilot_ops::handle_tachi_feature_briefing(server, &briefing_params).await?;
+    let pr_handoff_path = run_dir_for_flow_id(&flow_id)?.join("pr_handoff.md");
     serde_json::to_string(&json!({
         "ok": true,
         "action": "intake",
         "flow_id": flow_id,
         "issue_ref": format!("{}#{}", issue.repo, issue.number),
         "issue": issue_to_json(&issue),
+        "automation_plan": automation_plan,
         "doc_paths": issue.doc_paths,
         "spec_paths": issue.spec_paths,
+        "pr_handoff_path": pr_handoff_path.to_string_lossy(),
         "run_dir": run_dir_for_flow_id(&flow_id)?.to_string_lossy(),
         "briefing": serde_json::from_str::<Value>(&briefing).unwrap_or(json!(briefing)),
     }))
@@ -211,6 +264,286 @@ pub(crate) async fn handle_task_link_pr(
         "run_dir": run_dir_for_flow_id(flow_id)?.to_string_lossy(),
     }))
     .map_err(|e| format!("serialize link_pr: {e}"))
+}
+
+pub(crate) fn handle_task_pr_handoff(params: &TachiTaskParams) -> Result<String, String> {
+    let flow_id = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "flow_id is required for pr_handoff".to_string())?;
+    let run_dir = run_dir_for_flow_id(flow_id)?;
+    let status = read_json_file(&run_dir.join("status.json"))?
+        .ok_or_else(|| format!("flow status not found for flow_id '{flow_id}'"))?;
+    let task = params
+        .task
+        .clone()
+        .or_else(|| status_string(&status, "task"))
+        .unwrap_or_else(|| "Tachi issue-driven change".to_string());
+    let issue_ref = params
+        .issue_ref
+        .clone()
+        .or_else(|| release_note_issue_ref(&status));
+    let automation_plan = status
+        .get("automation_plan")
+        .cloned()
+        .unwrap_or_else(|| json!({ "status": "unknown", "dispatch_allowed": true }));
+    let verification = crate::verify_ops::read_verification_ledger(flow_id)?;
+    let verification_overall = verification
+        .as_ref()
+        .and_then(|ledger| ledger.get("overall"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let branch = params
+        .branch
+        .clone()
+        .or_else(|| {
+            automation_plan
+                .get("branch")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("tachi/{}", slug_for_branch(&task)));
+    let mut blockers = string_array_field(&automation_plan, "leader_gate_reasons");
+    if verification_overall.as_deref() != Some("passed") {
+        blockers.push("verification_not_passed".to_string());
+    }
+    dedupe_strings(&mut blockers);
+    let safe_to_open = blockers.is_empty();
+    let pr_title = params
+        .notes
+        .as_deref()
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            automation_plan
+                .get("pr_title")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| task.clone());
+    let pr_body = build_pr_handoff_body(
+        flow_id,
+        &task,
+        issue_ref.as_deref(),
+        &status,
+        verification.as_ref(),
+        &blockers,
+    );
+    let path = run_dir.join("pr_handoff.md");
+    write_text_atomic(&path, &pr_body)?;
+    let path_string = path.to_string_lossy().to_string();
+    merge_flow_status(
+        &run_dir,
+        json!({
+            "flow_id": flow_id,
+            "stage": "pr_handoff",
+            "state": if safe_to_open { "pr_handoff_ready" } else { "pr_handoff_blocked" },
+            "branch": branch.clone(),
+            "pr_title": pr_title.clone(),
+            "pr_handoff_path": path_string.clone(),
+            "artifacts": { "pr_handoff": path_string.clone() },
+            "updated_at": Utc::now().to_rfc3339(),
+        }),
+    )?;
+    serde_json::to_string(&json!({
+        "ok": true,
+        "action": "pr_handoff",
+        "flow_id": flow_id,
+        "issue_ref": issue_ref,
+        "safe_to_open": safe_to_open,
+        "blocked_reasons": blockers,
+        "branch": branch,
+        "pr_title": pr_title,
+        "pr_handoff_path": path_string,
+        "pr_body": pr_body,
+        "verification_overall": verification_overall,
+    }))
+    .map_err(|e| format!("serialize pr_handoff: {e}"))
+}
+
+pub(crate) fn guard_issue_flow_dispatch(params: &TachiTaskParams) -> Result<(), String> {
+    let Some(flow_id) = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    let run_dir = run_dir_for_flow_id(flow_id)?;
+    let status = read_json_file(&run_dir.join("status.json"))?.unwrap_or_else(|| json!({}));
+    let Some(plan) = status.get("automation_plan") else {
+        return Ok(());
+    };
+    let dispatch_allowed = plan
+        .get("dispatch_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if dispatch_allowed || params.confirm {
+        return Ok(());
+    }
+    let reasons = string_array_field(plan, "leader_gate_reasons");
+    let reason_text = if reasons.is_empty() {
+        "automation plan requires leader confirmation".to_string()
+    } else {
+        reasons.join(", ")
+    };
+    Err(format!(
+        "dispatch requires leader confirmation for flow_id '{flow_id}': {reason_text}. Re-run with confirm=true only after leader review."
+    ))
+}
+
+fn issue_has_acceptance_criteria(issue: &IssueSnapshot) -> bool {
+    let text = issue_text_for_gate(issue);
+    [
+        "acceptance criteria",
+        "acceptance",
+        "definition of done",
+        "done when",
+        "completion criteria",
+        "验收",
+        "完成标准",
+        "- [ ]",
+        "* [ ]",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn issue_high_risk_reasons(issue: &IssueSnapshot, risk_override: Option<&str>) -> Vec<String> {
+    let text = issue_text_for_gate(issue);
+    let mut reasons = Vec::new();
+    if matches!(
+        risk_override.map(|risk| risk.trim().to_ascii_lowercase()),
+        Some(risk) if matches!(risk.as_str(), "high" | "critical" | "security")
+    ) {
+        reasons.push("risk_override_high".to_string());
+    }
+    for (needle, reason) in [
+        ("security", "touches_security"),
+        ("secret", "touches_secrets"),
+        ("token", "touches_credentials"),
+        ("credential", "touches_credentials"),
+        ("authentication", "touches_auth"),
+        ("authorization", "touches_auth"),
+        ("authn", "touches_auth"),
+        ("authz", "touches_auth"),
+        ("permission", "touches_permissions"),
+        ("vault", "touches_vault"),
+        ("migration", "touches_migrations"),
+        ("schema", "touches_schema"),
+        ("data integrity", "touches_data_integrity"),
+        ("delete", "touches_destructive_behavior"),
+        ("destructive", "touches_destructive_behavior"),
+        ("safe_merge", "touches_merge_gate"),
+        ("merge gate", "touches_merge_gate"),
+    ] {
+        if text.contains(needle) {
+            reasons.push(reason.to_string());
+        }
+    }
+    dedupe_strings(&mut reasons);
+    reasons
+}
+
+fn issue_text_for_gate(issue: &IssueSnapshot) -> String {
+    format!(
+        "{}\n{}\n{}",
+        issue.title,
+        issue.body.as_deref().unwrap_or_default(),
+        issue.labels.join("\n")
+    )
+    .to_ascii_lowercase()
+}
+
+fn slug_for_branch(text: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if matches!(ch, ' ' | '-' | '_' | '/' | ':' | '.') && !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "work".to_string()
+    } else {
+        out
+    }
+}
+
+fn build_pr_handoff_body(
+    flow_id: &str,
+    task: &str,
+    issue_ref: Option<&str>,
+    status: &Value,
+    verification: Option<&Value>,
+    blockers: &[String],
+) -> String {
+    let mut body = String::new();
+    body.push_str("## Summary\n\n");
+    body.push_str("- ");
+    body.push_str(task.trim());
+    body.push('\n');
+    if let Some(issue_ref) = issue_ref {
+        body.push_str(&format!("- Linked issue: {issue_ref}\n"));
+    }
+    body.push_str(&format!("- Tachi flow: `{flow_id}`\n"));
+
+    let dispatch_ids = string_array_field(status, "completed_dispatch_ids");
+    if !dispatch_ids.is_empty() {
+        body.push_str("\n## Completed Dispatches\n\n");
+        for id in dispatch_ids {
+            body.push_str(&format!("- `{id}`\n"));
+        }
+    }
+
+    body.push_str("\n## Verification\n\n");
+    if let Some(verification) = verification {
+        if let Some(overall) = verification.get("overall").and_then(Value::as_str) {
+            body.push_str(&format!("- Overall: `{overall}`\n"));
+        }
+        if let Some(items) = verification.get("items").and_then(Value::as_array) {
+            for item in items {
+                let status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let command = item
+                    .get("command")
+                    .or_else(|| item.get("id"))
+                    .or_else(|| item.get("kind"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("verification item");
+                body.push_str(&format!("- `{status}` {command}\n"));
+            }
+        }
+    } else {
+        body.push_str(
+            "- Missing verification ledger. Run required checks before opening a non-draft PR.\n",
+        );
+    }
+
+    body.push_str("\n## Known Gaps / Review Gates\n\n");
+    if blockers.is_empty() {
+        body.push_str("- None recorded by Tachi automation gate.\n");
+    } else {
+        for blocker in blockers {
+            body.push_str(&format!("- {blocker}\n"));
+        }
+    }
+    body
 }
 
 pub(crate) async fn handle_task_release_note(
@@ -1025,11 +1358,27 @@ pub(crate) fn write_intake_flow_artifacts(
     flow_id: &str,
     objective: &str,
     issue: &IssueSnapshot,
+    automation_plan: &Value,
 ) -> Result<(), String> {
     let run_dir = run_dir_for_flow_id(flow_id)?;
     std::fs::create_dir_all(run_dir.join("artifacts"))
         .map_err(|e| format!("create intake run dir: {e}"))?;
     let now = Utc::now().to_rfc3339();
+    let pr_handoff_path = run_dir.join("pr_handoff.md");
+    let pr_handoff_path_string = pr_handoff_path.to_string_lossy().to_string();
+    let pr_handoff = build_pr_handoff_body(
+        flow_id,
+        objective,
+        Some(&format!("{}#{}", issue.repo, issue.number)),
+        &json!({
+            "task": objective,
+            "issue_ref": format!("{}#{}", issue.repo, issue.number),
+            "automation_plan": automation_plan,
+        }),
+        None,
+        &string_array_field(automation_plan, "leader_gate_reasons"),
+    );
+    write_text_atomic(&pr_handoff_path, &pr_handoff)?;
     merge_flow_status(
         &run_dir,
         json!({
@@ -1040,6 +1389,11 @@ pub(crate) fn write_intake_flow_artifacts(
             "issue_ref": format!("{}#{}", issue.repo, issue.number),
             "doc_paths": issue.doc_paths,
             "spec_paths": issue.spec_paths,
+            "automation_plan": automation_plan,
+            "branch": automation_plan.get("branch").and_then(Value::as_str),
+            "pr_title": automation_plan.get("pr_title").and_then(Value::as_str),
+            "pr_handoff_path": pr_handoff_path_string.clone(),
+            "artifacts": { "pr_handoff": pr_handoff_path_string },
             "dispatch_ids": [],
             "updated_at": now,
         }),
@@ -1055,9 +1409,11 @@ pub(crate) fn write_intake_flow_artifacts(
             "issue_state": issue.state,
             "doc_paths": issue.doc_paths,
             "spec_paths": issue.spec_paths,
+            "labels": issue.labels,
+            "automation_plan": automation_plan,
         }),
     )?;
-    write_intake_instruction(&run_dir, flow_id, objective, issue)?;
+    write_intake_instruction(&run_dir, flow_id, objective, issue, automation_plan)?;
     append_github_event(
         &run_dir,
         flow_id,
@@ -1070,6 +1426,7 @@ pub(crate) fn write_intake_flow_artifacts(
             "state": issue.state,
             "doc_paths": issue.doc_paths,
             "spec_paths": issue.spec_paths,
+            "automation_plan": automation_plan,
         }),
     )?;
     Ok(())
@@ -1515,6 +1872,21 @@ async fn read_issue_snapshot(
         .get("body")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let labels = result
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    item.get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| item.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let comments = result
         .get("comments")
         .and_then(Value::as_array)
@@ -1543,6 +1915,8 @@ async fn read_issue_snapshot(
         repo: target.repo.clone(),
         number: target.number,
         title,
+        body,
+        labels,
         state: result
             .get("state")
             .and_then(Value::as_str)
@@ -1632,6 +2006,7 @@ async fn seed_intake_orchestrator(
     flow_id: &str,
     objective: &str,
     issue: &IssueSnapshot,
+    automation_plan: &Value,
 ) -> Result<(), String> {
     let issue_ref = format!("{}#{}", issue.repo, issue.number);
     let refs = std::iter::once(issue_ref.clone())
@@ -1643,6 +2018,11 @@ async fn seed_intake_orchestrator(
     } else {
         "done"
     };
+    let dispatch_allowed = automation_plan
+        .get("dispatch_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let leader_gate_reasons = string_array_field(automation_plan, "leader_gate_reasons");
     let _ = crate::orchestrator_ops::handle_orchestrator(
         server,
         TachiOrchestratorParams {
@@ -1686,11 +2066,22 @@ async fn seed_intake_orchestrator(
                 "Run briefing/recommend, then dispatch a bounded implementation or review slice."
                     .to_string(),
             ),
-            todo_status: Some("pending".to_string()),
+            todo_status: Some(
+                if dispatch_allowed {
+                    "pending"
+                } else {
+                    "blocked"
+                }
+                .to_string(),
+            ),
             parent_todo_id: None,
             agent: Some("tachi_task_intake".to_string()),
             issue_ref: Some(issue_ref.clone()),
-            blocked_reason: None,
+            blocked_reason: if dispatch_allowed {
+                None
+            } else {
+                Some(leader_gate_reasons.join(", "))
+            },
             verification: None,
             references: refs.clone(),
             objective: None,
@@ -1725,14 +2116,24 @@ async fn seed_intake_orchestrator(
             completed_steps: vec!["Read issue and wrote intake flow artifacts.".to_string()],
             remaining_steps: vec![
                 "Confirm canonical docs/specs.".to_string(),
-                "Dispatch bounded worker slice.".to_string(),
+                if dispatch_allowed {
+                    "Dispatch bounded worker slice.".to_string()
+                } else {
+                    "Get leader confirmation before dispatch.".to_string()
+                },
                 "Link PR and run pr_status gate before merge.".to_string(),
             ],
             files_touched: Vec::new(),
             commands_run: Vec::new(),
             tests_run: Vec::new(),
-            known_blockers: Vec::new(),
-            next_action: Some("Call tachi_task(action='briefing', flow_id=...) and dispatch the next bounded slice.".to_string()),
+            known_blockers: leader_gate_reasons,
+            next_action: Some(
+                automation_plan
+                    .get("recommended_next_action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Call tachi_task(action='briefing', flow_id=...) and dispatch the next bounded slice.")
+                    .to_string(),
+            ),
             newest_user_instruction: None,
         },
     )
@@ -1745,6 +2146,8 @@ fn issue_to_json(issue: &IssueSnapshot) -> Value {
         "repo": issue.repo,
         "number": issue.number,
         "title": issue.title,
+        "body": issue.body,
+        "labels": issue.labels,
         "state": issue.state,
         "url": issue.url,
         "doc_paths": issue.doc_paths,
@@ -1813,6 +2216,7 @@ fn write_intake_instruction(
     flow_id: &str,
     objective: &str,
     issue: &IssueSnapshot,
+    automation_plan: &Value,
 ) -> Result<(), String> {
     let mut body = String::new();
     body.push_str(&format!("# Tachi Issue Intake - {flow_id}\n\n"));
@@ -1824,6 +2228,31 @@ fn write_intake_instruction(
     body.push_str(&format!("- url: {}\n", issue.url));
     if let Some(state) = issue.state.as_deref() {
         body.push_str(&format!("- state: `{state}`\n"));
+    }
+    if !issue.labels.is_empty() {
+        body.push_str(&format!("- labels: `{}`\n", issue.labels.join("`, `")));
+    }
+    body.push_str("\n## Automation Gate\n\n");
+    body.push_str(&format!(
+        "- status: `{}`\n",
+        automation_plan
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    ));
+    body.push_str(&format!(
+        "- dispatch_allowed: `{}`\n",
+        automation_plan
+            .get("dispatch_allowed")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    ));
+    let gate_reasons = string_array_field(automation_plan, "leader_gate_reasons");
+    if !gate_reasons.is_empty() {
+        body.push_str("- leader_gate_reasons:\n");
+        for reason in gate_reasons {
+            body.push_str(&format!("  - `{reason}`\n"));
+        }
     }
     body.push_str("\n## Canonical Docs / Specs\n\n");
     if issue.doc_paths.is_empty() && issue.spec_paths.is_empty() {
@@ -1840,6 +2269,7 @@ fn write_intake_instruction(
     body.push_str("- `tachi_task(action='briefing', flow_id=...)`\n");
     body.push_str("- `tachi_task(action='recommend', task=..., doc_paths=[...])`\n");
     body.push_str("- `tachi_task(action='dispatch', flow_id=..., issue_ref=...)`\n");
+    body.push_str("- `tachi_task(action='pr_handoff', flow_id=...)`\n");
     body.push_str("- `tachi_task(action='link_pr', flow_id=..., pr_ref=...)`\n");
     body.push_str("- `tachi_task(action='pr_status', flow_id=..., pr_ref=...)`\n");
     write_text_atomic(&run_dir.join("instruction.md"), &body)

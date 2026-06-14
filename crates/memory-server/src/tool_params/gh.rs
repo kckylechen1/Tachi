@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

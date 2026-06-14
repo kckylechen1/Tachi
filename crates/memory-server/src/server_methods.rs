@@ -120,11 +120,11 @@ impl MemoryServer {
             .to_string();
         let store = MemoryStore::open_with_label(db_str, &project_label)
             .map_err(|e| format!("open project db: {e}"))?;
-        let read_store = MemoryStore::open_read_only(db_str)
+        let read_pool = ReadStorePool::open_read_only(db_str, configured_memory_read_pool_size())
             .map_err(|e| format!("open project read db: {e}"))?;
         let state = ProjectDbState {
             store: Arc::new(StdMutex::new(store)),
-            read_store: Arc::new(StdMutex::new(read_store)),
+            read_pool,
             rw_gate: Arc::new(StdRwLock::new(())),
             db_path: Arc::new(db_path),
         };
@@ -168,8 +168,7 @@ impl MemoryServer {
             .as_ref()
             .ok_or_else(|| "No hot-swapped project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "hot_project_rw_gate");
-        let mut store = lock_or_recover(&state.read_store, "hot_project_read_store");
-        f(&mut store)
+        state.read_pool.with_store("hot_project_read_pool", f)
     }
 
     fn open_read_store(db_path: &PathBuf, label: &str) -> Result<MemoryStore, String> {
@@ -180,7 +179,7 @@ impl MemoryServer {
                 db_path.display()
             )
         })?;
-        MemoryStore::open(db_str).map_err(|e| format!("open {label} read store: {e}"))
+        MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))
     }
 
     pub(super) fn with_path_store<T>(
@@ -226,8 +225,7 @@ impl MemoryServer {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
-        let mut store = lock_or_recover(&self.global_read_store, "global_read_store");
-        f(&mut store)
+        self.global_read_pool.with_store("global_read_pool", f)
     }
 
     pub(super) fn with_project_store<T>(
@@ -267,14 +265,13 @@ impl MemoryServer {
         {
             return self.with_hot_project_store_read(f);
         }
-        if let Some(ref store_arc) = self.project_read_store {
+        if let Some(ref read_pool) = self.project_read_pool {
             let gate = self
                 .project_rw_gate
                 .as_ref()
                 .ok_or_else(|| "No project lock available".to_string())?;
             let _gate = read_or_recover(gate, "project_rw_gate");
-            let mut store = lock_or_recover(store_arc, "project_read_store");
-            return f(&mut store);
+            return read_pool.with_store("project_read_pool", f);
         }
         Err("No project database available".to_string())
     }
