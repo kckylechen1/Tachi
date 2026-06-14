@@ -13,16 +13,57 @@ const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
 const WIKI_DUP_JACCARD_THRESHOLD: f64 = 0.85;
 
 fn compact_rows(rows: Vec<Value>, limit: usize) -> Vec<Value> {
+    compact_layer_rows(rows, limit, None, None)
+}
+
+fn compact_layer_rows(
+    rows: Vec<Value>,
+    limit: usize,
+    default_layer: Option<&str>,
+    default_authority: Option<&str>,
+) -> Vec<Value> {
     rows.into_iter()
         .take(limit)
         .map(|row| {
-            json!({
-                "id": row.get("id").cloned().unwrap_or(Value::Null),
-                "path": row.get("path").cloned().unwrap_or(Value::Null),
-                "topic": row.get("topic").cloned().unwrap_or(Value::Null),
-                "summary": row.get("summary").cloned().unwrap_or(Value::Null),
-                "score": row.get("score").or_else(|| row.get("relevance")).cloned().unwrap_or(Value::Null),
-            })
+            let metadata = row.get("metadata").unwrap_or(&Value::Null);
+            let mut out = serde_json::Map::new();
+            for key in ["id", "db", "path", "topic", "summary", "excerpt"] {
+                out.insert(
+                    key.to_string(),
+                    row.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+            out.insert(
+                "score".to_string(),
+                row.get("score")
+                    .or_else(|| row.get("relevance"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+
+            for key in ["layer", "scope", "authority", "status", "source_ref"] {
+                let value = metadata
+                    .get(key)
+                    .or_else(|| row.get(key))
+                    .cloned()
+                    .unwrap_or_else(|| match key {
+                        "layer" => default_layer.map_or(Value::Null, |value| json!(value)),
+                        "authority" => default_authority.map_or(Value::Null, |value| json!(value)),
+                        "scope" => row.get("db").cloned().unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    });
+                if !value.is_null() {
+                    out.insert(key.to_string(), value);
+                }
+            }
+
+            for key in ["source_refs", "applies_to"] {
+                if let Some(value) = metadata.get(key).or_else(|| row.get(key)) {
+                    out.insert(key.to_string(), value.clone());
+                }
+            }
+
+            Value::Object(out)
         })
         .collect()
 }
@@ -63,10 +104,15 @@ fn wiki_layer_metadata(
     } else {
         "global"
     };
+    let authority = if layer == "guide" {
+        "playbook"
+    } else {
+        "advisory"
+    };
     json!({
         "layer": layer,
         "scope": scope,
-        "authority": "advisory",
+        "authority": authority,
         "status": "active",
         "source_ref": references.first().cloned(),
     })
@@ -534,7 +580,7 @@ fn guide_hit_row(
         "score": score,
         "layer": metadata.get("layer").and_then(Value::as_str).unwrap_or("guide"),
         "scope": metadata.get("scope").and_then(Value::as_str).unwrap_or(entry.scope.as_str()),
-        "authority": metadata.get("authority").and_then(Value::as_str).unwrap_or("advisory"),
+        "authority": metadata.get("authority").and_then(Value::as_str).unwrap_or("playbook"),
         "status": metadata.get("status").and_then(Value::as_str).unwrap_or("active"),
         "applies_to": metadata.get("applies_to").cloned().unwrap_or(Value::Null),
     })
@@ -984,6 +1030,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     };
     let query = feature_briefing_query(params);
     let board = feature_board(server, params, top_k).await;
+    let project_work_record = project_work_records(params);
     let canonical_docs = canonical_doc_refs(params);
     let run_artifacts = feature_run_artifacts(params.flow_id.as_deref())?;
 
@@ -1008,7 +1055,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             error_context: None,
             enable_rerank: false,
             as_of: None,
-            include_metadata: false,
+            include_metadata: true,
         },
         false,
     )
@@ -1036,7 +1083,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             error_context: None,
             enable_rerank: false,
             as_of: None,
-            include_metadata: false,
+            include_metadata: true,
         },
         !params.include_global,
     )
@@ -1064,7 +1111,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             error_context: None,
             enable_rerank: false,
             as_of: None,
-            include_metadata: false,
+            include_metadata: true,
         },
         !params.include_global,
     )
@@ -1083,12 +1130,51 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &route_recommendation,
         top_k,
     );
+    let feedback_profile = params.profile.as_deref().or_else(|| {
+        route_recommendation
+            .get("recommended_profile")
+            .and_then(Value::as_str)
+    });
+    let feedback_stage = params
+        .stage
+        .clone()
+        .unwrap_or_else(|| current_stage.clone());
+    let feedback_rules = crate::feedback_rule_ops::applicable_feedback_rules(
+        server,
+        crate::feedback_rule_ops::FeedbackRuleQuery {
+            task: query.clone(),
+            task_type: params.task_type.clone(),
+            profile: feedback_profile.map(str::to_string),
+            stage: Some(feedback_stage),
+            keywords: feature_needles(params),
+            project: params.project.clone(),
+        },
+    )
+    .await;
+    let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
     let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
     let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
+    let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
+    let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));
+    let eval_evidence = compact_layer_rows(eval_rows, top_k.min(5), Some("eval"), Some("evidence"));
+    let doc_index = build_feature_doc_index(
+        &project_work_record,
+        &canonical_docs,
+        &wiki_hits,
+        &guide_hits,
+        &feedback_rules_trace,
+        &eval_evidence,
+        &run_artifacts,
+    );
+    let kind = if params.action.eq_ignore_ascii_case("doc_index") {
+        "doc_index"
+    } else {
+        "feature_briefing"
+    };
     let response = json!({
         "status": "ok",
-        "kind": "feature_briefing",
+        "kind": kind,
         "objective": params.task.clone().unwrap_or_else(|| query.clone()),
         "scope": {
             "project": params.project,
@@ -1099,6 +1185,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
             "include_global": params.include_global,
         },
         "current_stage": current_stage,
+        "project_work_record": project_work_record,
         "board_state": board,
         "canonical_docs": canonical_docs,
         "run_artifacts": run_artifacts,
@@ -1112,15 +1199,21 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "relevant_profiles": relevant_profiles,
         "suggested_dispatch": suggested_dispatch,
         "guide_hits": guide_hits,
-        "wiki_hits": compact_rows(wiki_rows, top_k),
-        "memory_fragments": compact_rows(memory_rows, top_k),
-        "eval_evidence": compact_rows(eval_rows, top_k.min(5)),
+        "wiki_hits": wiki_hits,
+        "feedback_rules": feedback_rules_trace,
+        "memory_fragments": memory_fragments,
+        "eval_evidence": eval_evidence,
+        "doc_index": doc_index,
         "next_action": next_action,
         "layering": {
-            "docs": "canonical specs/design docs; highest authority for feature truth",
-            "guide": "workflow/SOP and skill loadout guidance",
-            "wiki": "synthesized durable knowledge and lessons",
-            "memory": "fragmented checkpoints, decisions, and eval evidence"
+            "project_work_record": "GitHub issues/PRs and linked flow state; source of truth for active work",
+            "docs": "canonical repo specs/design docs; source of truth for feature/API truth",
+            "wiki": "project-specific durable decisions and lessons; advisory unless promoted back to docs/issues",
+            "guide": "global workflow/SOP and skill loadout guidance; playbook authority",
+            "feedback_rules": "behavior patches that shape future agent prompts",
+            "eval": "verification and reviewer usefulness evidence",
+            "runtime_artifacts": "arena/dispatch/run files; runtime state, not canonical product truth",
+            "principle": "Project facts first. Global playbook second. Feedback rules and eval pitfalls as behavior patches."
         },
     });
 
@@ -1129,6 +1222,131 @@ pub(crate) async fn handle_tachi_feature_briefing(
     } else {
         Ok(format_feature_briefing_markdown(&response))
     }
+}
+
+fn project_work_records(params: &TachiTaskParams) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    push_project_work_record(
+        &mut out,
+        &mut seen,
+        "github_issue",
+        params.issue_ref.as_deref(),
+    );
+    push_project_work_record(&mut out, &mut seen, "github_pr", params.pr_ref.as_deref());
+    out
+}
+
+fn push_project_work_record(
+    out: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+    kind: &str,
+    raw_ref: Option<&str>,
+) {
+    let Some(reference) = raw_ref.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    if !seen.insert(format!("{kind}:{reference}")) {
+        return;
+    }
+    out.push(json!({
+        "kind": kind,
+        "ref": reference,
+        "layer": "github_ref",
+        "authority": "project_work_record",
+        "source_of_truth": true,
+        "status": "ref_only",
+        "retrieval": "Call tachi_task(action='intake') for issue snapshots or tachi_task(action='link_pr'/'pr_status') for PR state.",
+    }));
+}
+
+fn build_feature_doc_index(
+    project_work_record: &[Value],
+    canonical_docs: &[Value],
+    wiki_hits: &[Value],
+    guide_hits: &[Value],
+    feedback_rules: &Value,
+    eval_evidence: &[Value],
+    run_artifacts: &[Value],
+) -> Value {
+    let feedback_items = feedback_rules
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    json!({
+        "authority_order": [
+            "project_work_record",
+            "canonical",
+            "project_wiki",
+            "global_guide",
+            "feedback_rule",
+            "eval",
+            "runtime_artifact"
+        ],
+        "groups": [
+            doc_index_group(
+                "project_work_record",
+                "github_ref",
+                "project_work_record",
+                "GitHub Issues/PRs remain the source of truth for active project work.",
+                project_work_record,
+            ),
+            doc_index_group(
+                "canonical_docs",
+                "repo_doc_ref",
+                "canonical",
+                "Repo docs/specs define accepted design and API truth.",
+                canonical_docs,
+            ),
+            doc_index_group(
+                "project_wiki",
+                "wiki",
+                "advisory",
+                "Project decisions and lessons are durable but do not override GitHub or repo docs.",
+                wiki_hits,
+            ),
+            doc_index_group(
+                "global_guide",
+                "guide",
+                "playbook",
+                "Global guide entries apply by task_type/profile/stage as reusable workflow playbooks.",
+                guide_hits,
+            ),
+            doc_index_group(
+                "feedback_rules",
+                "feedback_rule",
+                "behavior_patch",
+                "Feedback rules patch future agent behavior; they are not project facts.",
+                &feedback_items,
+            ),
+            doc_index_group(
+                "eval_evidence",
+                "eval",
+                "evidence",
+                "Eval rows and reviewer findings are evidence for routing and verification.",
+                eval_evidence,
+            ),
+            doc_index_group(
+                "runtime_artifacts",
+                "runtime_artifact",
+                "runtime_state",
+                "Arena/dispatch/run artifacts describe execution state and handoffs.",
+                run_artifacts,
+            ),
+        ],
+    })
+}
+
+fn doc_index_group(name: &str, layer: &str, authority: &str, rule: &str, items: &[Value]) -> Value {
+    json!({
+        "name": name,
+        "layer": layer,
+        "authority": authority,
+        "rule": rule,
+        "count": items.len(),
+        "items": items,
+    })
 }
 
 fn feature_briefing_query(params: &TachiTaskParams) -> String {
@@ -1206,6 +1424,9 @@ fn push_doc_ref(
         "path": raw_path,
         "exists": resolved.as_ref().is_some_and(|path| path.exists()),
         "resolved_path": resolved.map(|path| path.to_string_lossy().to_string()),
+        "layer": "repo_doc_ref",
+        "authority": "canonical",
+        "source_of_truth": true,
     }));
 }
 
@@ -1374,6 +1595,8 @@ fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
         "kind": "run_dir",
         "path": run_dir.to_string_lossy(),
         "exists": run_dir.exists(),
+        "layer": "runtime_artifact",
+        "authority": "runtime_state",
     })];
     for name in [
         "instruction.md",
@@ -1390,6 +1613,8 @@ fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
             "kind": "run_artifact",
             "path": path.to_string_lossy(),
             "exists": path.exists(),
+            "layer": "runtime_artifact",
+            "authority": "runtime_state",
         }));
     }
     Ok(out)
@@ -1594,6 +1819,11 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
             .unwrap_or("intake")
     ));
     out.push(markdown_section(
+        "Project Work Record",
+        value.get("project_work_record").and_then(Value::as_array),
+        "No GitHub issue/PR reference attached.",
+    ));
+    out.push(markdown_section(
         "Canonical Docs / Specs",
         value.get("canonical_docs").and_then(Value::as_array),
         "No canonical docs/specs attached.",
@@ -1630,6 +1860,14 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
             Some(&guide_rows)
         },
         "No SOP selected.",
+    ));
+    out.push(markdown_section(
+        "Feedback Rules",
+        value
+            .get("feedback_rules")
+            .and_then(|rules| rules.get("rules"))
+            .and_then(Value::as_array),
+        "No applicable feedback rules.",
     ));
     out.push(markdown_dispatch_recommendation(value));
     out.push(markdown_section(

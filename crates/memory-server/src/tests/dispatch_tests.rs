@@ -2424,6 +2424,29 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             });
             store.upsert(&guide).map_err(|e| e.to_string())?;
 
+            let mut feedback = make_entry("feedback-feature-briefing-agent-review");
+            feedback.path = "/feedback/global/agent-review/promotion-routing".to_string();
+            feedback.summary = "AgentReview findings need explicit promotion evidence".to_string();
+            feedback.text = "FeatureBriefingNeedle review findings should list target destination and leader verdict before promotion.".to_string();
+            feedback.category = "prompt_rule".to_string();
+            feedback.topic = "agent-review-promotion-routing".to_string();
+            feedback.scope = "global".to_string();
+            feedback.metadata = json!({
+                "kind": "feedback_rule",
+                "layer": "feedback_rule",
+                "scope": "global",
+                "authority": "behavior_patch",
+                "status": "active",
+                "applies_to": {
+                    "task_type": ["agent_review"],
+                    "profiles": ["codex_55_review"],
+                    "stage": ["review"]
+                },
+                "trigger_keywords": ["FeatureBriefingNeedle", "promotion", "routing"],
+                "prompt_patch": "Before promoting a review finding, name the destination layer and cite the leader verdict."
+            });
+            store.upsert(&feedback).map_err(|e| e.to_string())?;
+
             let mut unrelated = make_entry("global-unrelated-feature-briefing");
             unrelated.path = "/scratch/other/global-memory-dump".to_string();
             unrelated.summary = "FeatureBriefingNeedle unrelated global fragment".to_string();
@@ -2469,11 +2492,19 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
 
     assert_eq!(briefing["kind"], json!("feature_briefing"));
     assert_eq!(briefing["scope"]["flow_id"], json!(flow_id));
+    assert!(briefing["project_work_record"]
+        .as_array()
+        .is_some_and(|records| records.iter().any(|record| {
+            record["kind"] == json!("github_issue")
+                && record["ref"] == json!("kckylechen1/tachi#194")
+                && record["authority"] == json!("project_work_record")
+        })));
     assert!(briefing["canonical_docs"]
         .as_array()
         .is_some_and(|docs| docs.iter().any(|doc| {
             doc["path"] == json!("docs/engineering/architecture/subagent-eval-system.md")
                 && doc["exists"] == json!(true)
+                && doc["authority"] == json!("canonical")
         })));
     assert!(briefing["run_artifacts"]
         .as_array()
@@ -2482,6 +2513,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
                 .as_str()
                 .is_some_and(|path| path.ends_with("instruction.md"))
                 && artifact["exists"] == json!(true)
+                && artifact["authority"] == json!("runtime_state")
         })));
     assert!(briefing["board_state"]["tasks"]
         .as_array()
@@ -2489,9 +2521,13 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             task["dispatch_id"] == json!("dispatch-feature-briefing")
                 && task["state"] == json!("TASK_STATE_WORKING")
         })));
-    assert!(briefing["wiki_hits"].as_array().is_some_and(|hits| hits
-        .iter()
-        .any(|hit| { hit["path"] == json!("/wiki/agent/tachi/feature-briefing") })));
+    assert!(briefing["wiki_hits"]
+        .as_array()
+        .is_some_and(|hits| hits.iter().any(|hit| {
+            hit["path"] == json!("/wiki/agent/tachi/feature-briefing")
+                && hit["layer"] == json!("wiki")
+                && hit["authority"] == json!("advisory")
+        })));
     assert!(briefing["guide_hits"]
         .as_array()
         .is_some_and(|hits| hits.iter().any(|hit| {
@@ -2503,6 +2539,34 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         hits.iter()
             .all(|hit| hit["path"] != json!("/guide/global/workflows/agent-review"))
     }));
+    assert!(briefing["feedback_rules"]["rules"]
+        .as_array()
+        .is_some_and(|rules| rules.iter().any(|rule| {
+            rule["path"] == json!("/feedback/global/agent-review/promotion-routing")
+                && rule["layer"] == json!("feedback_rule")
+                && rule["authority"] == json!("behavior_patch")
+        })));
+    let groups = briefing["doc_index"]["groups"]
+        .as_array()
+        .expect("doc index groups");
+    for expected in [
+        "project_work_record",
+        "canonical_docs",
+        "project_wiki",
+        "global_guide",
+        "feedback_rules",
+        "eval_evidence",
+        "runtime_artifacts",
+    ] {
+        assert!(
+            groups.iter().any(|group| group["name"] == json!(expected)),
+            "missing doc_index group {expected}: {briefing:#}"
+        );
+    }
+    assert_eq!(
+        briefing["doc_index"]["authority_order"][0],
+        json!("project_work_record")
+    );
     assert!(briefing["route_recommendation"]["recommended_profile"]
         .as_str()
         .is_some_and(|profile| !profile.is_empty()));
@@ -2571,10 +2635,12 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
 
     assert!(body.starts_with("# Feature Briefing"), "{body}");
     for section in [
+        "## Project Work Record",
         "## Canonical Docs / Specs",
         "## Run Artifacts",
         "## Board State",
         "## Guide / SOP",
+        "## Feedback Rules",
         "## Recommended Dispatch",
         "## Relevant Skills / Profiles",
         "## Wiki Decisions / Lessons",
@@ -2585,6 +2651,41 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
         assert!(body.contains(section), "missing {section}: {body}");
     }
     assert!(body.contains("Dispatch args:"), "{body}");
+}
+
+#[tokio::test]
+async fn tachi_task_doc_index_returns_layered_authority_groups() {
+    let server = make_server();
+    let mut params = task_params("doc_index");
+    params.format = Some("json".to_string());
+    params.task = Some(
+        "Implement issue-driven docs flow docs/engineering/architecture/subagent-eval-system.md"
+            .to_string(),
+    );
+    params.issue_ref = Some("kckylechen1/tachi#363".to_string());
+    params.pr_ref = Some("kckylechen1/tachi#364".to_string());
+    params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("doc_index should succeed");
+    let parsed: Value = serde_json::from_str(&raw).expect("doc_index JSON");
+
+    assert_eq!(parsed["kind"], json!("doc_index"));
+    assert!(parsed["project_work_record"]
+        .as_array()
+        .is_some_and(|records| records.iter().any(|record| {
+            record["kind"] == json!("github_issue")
+                && record["ref"] == json!("kckylechen1/tachi#363")
+        })));
+    assert!(parsed["doc_index"]["groups"]
+        .as_array()
+        .is_some_and(|groups| groups.iter().any(|group| {
+            group["name"] == json!("canonical_docs")
+                && group["authority"] == json!("canonical")
+                && group["count"].as_u64().unwrap_or(0) > 0
+        })));
 }
 
 #[test]
@@ -2758,6 +2859,19 @@ async fn tachi_task_build_references_reuses_workflow_closure() {
             "#153"
         ])
     );
+    assert_eq!(
+        parsed["promotion_plan"]["requires_explicit_invocation"],
+        json!(true)
+    );
+    assert_eq!(
+        parsed["promotion_plan"]["automatic_double_write"],
+        json!(false)
+    );
+    assert!(parsed["promotion_plan"]["destinations"]
+        .as_array()
+        .is_some_and(|destinations| destinations
+            .iter()
+            .any(|dest| dest["destination"] == json!("feedback_rule"))));
 }
 
 #[tokio::test]
@@ -2779,6 +2893,10 @@ async fn tachi_task_close_loop_writes_wiki_with_references() {
     let parsed: Value = serde_json::from_str(&raw).expect("task response JSON");
     assert_eq!(parsed["ok"], json!(true));
     assert_eq!(parsed["action"], json!("close_loop"));
+    assert_eq!(
+        parsed["promotion_plan"]["automatic_double_write"],
+        json!(false)
+    );
     let wiki_id = parsed["wiki"]["id"].as_str().expect("wiki id");
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
@@ -3940,6 +4058,32 @@ async fn dispatch_prompt_injects_applicable_feedback_rules_separately() {
     assert!(!prompt.contains("## Relevant context from Tachi memory/wiki"));
     assert_eq!(assembly.feedback_rules["status"], json!("applied"));
     assert_eq!(assembly.feedback_rules["rules"][0]["id"], json!(rule_id));
+}
+
+#[tokio::test]
+async fn applicable_feedback_rules_fall_back_from_project_to_global_rules() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+
+    let rules = crate::feedback_rule_ops::applicable_feedback_rules(
+        &server,
+        crate::feedback_rule_ops::FeedbackRuleQuery {
+            task: "Review unused code and require grep evidence".to_string(),
+            task_type: Some("code_audit".to_string()),
+            profile: Some("codex_55_review".to_string()),
+            stage: Some("review".to_string()),
+            keywords: vec!["grep".to_string(), "unused".to_string()],
+            project: Some("missing-project-feedback-fallback".to_string()),
+        },
+    )
+    .await;
+
+    assert!(
+        rules.iter().any(|rule| rule.id == rule_id
+            && rule.scope == "global"
+            && rule.authority == "behavior_patch"),
+        "expected global fallback rule, got {rules:#?}"
+    );
 }
 
 #[tokio::test]

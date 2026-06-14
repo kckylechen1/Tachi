@@ -2,6 +2,7 @@ use crate::memory_search_ops::search_memory_rows;
 use crate::tool_params::SearchMemoryParams;
 use crate::MemoryServer;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 
 const FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS: usize = 512;
 
@@ -24,6 +25,9 @@ pub(crate) struct FeedbackRuleHit {
     pub prompt_patch: String,
     pub evidence_contract: Vec<String>,
     pub score: usize,
+    pub scope: String,
+    pub authority: String,
+    pub applies_to: Value,
 }
 
 pub(crate) fn normalize_feedback_rule_save(
@@ -58,6 +62,12 @@ pub(crate) fn normalize_feedback_rule_save(
     obj.insert("kind".to_string(), json!("feedback_rule"));
     obj.entry("category".to_string())
         .or_insert_with(|| json!("prompt_rule"));
+    obj.entry("layer".to_string())
+        .or_insert_with(|| json!("feedback_rule"));
+    obj.entry("authority".to_string())
+        .or_insert_with(|| json!("behavior_patch"));
+    obj.entry("status".to_string())
+        .or_insert_with(|| json!("active"));
     *metadata = Some(Value::Object(obj));
 }
 
@@ -66,10 +76,54 @@ pub(crate) async fn applicable_feedback_rules(
     query: FeedbackRuleQuery,
 ) -> Vec<FeedbackRuleHit> {
     let search_query = feedback_search_query(&query);
-    let rows = match search_memory_rows(
+    let mut rows = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(project) = query
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+    {
+        match search_feedback_rule_rows(server, &search_query, Some(project.to_string())).await {
+            Ok(project_rows) => merge_feedback_rows(&mut rows, &mut seen, project_rows),
+            Err(err) => tracing::warn!("project feedback rule search failed: {err}"),
+        }
+    }
+
+    match search_feedback_rule_rows(server, &search_query, None).await {
+        Ok(global_rows) => merge_feedback_rows(&mut rows, &mut seen, global_rows),
+        Err(err) => {
+            tracing::warn!("global feedback rule search failed: {err}");
+            if rows.is_empty() {
+                return Vec::new();
+            }
+        }
+    }
+
+    let mut hits = rows
+        .iter()
+        .filter_map(|row| feedback_rule_hit(row, &query))
+        .collect::<Vec<_>>();
+    hits.sort_by(|a, b| {
+        feedback_scope_rank(&a.scope)
+            .cmp(&feedback_scope_rank(&b.scope))
+            .then_with(|| b.score.cmp(&a.score))
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    hits.truncate(5);
+    hits
+}
+
+async fn search_feedback_rule_rows(
+    server: &MemoryServer,
+    query: &str,
+    project: Option<String>,
+) -> Result<Vec<Value>, String> {
+    search_memory_rows(
         server,
         SearchMemoryParams {
-            query: search_query,
+            query: query.to_string(),
             query_vec: None,
             top_k: 8,
             path_prefix: Some("/feedback".to_string()),
@@ -81,7 +135,7 @@ pub(crate) async fn applicable_feedback_rules(
             graph_relation_filter: None,
             weights: None,
             agent_role: None,
-            project: query.project.clone(),
+            project,
             domain: None,
             file_context: None,
             error_context: None,
@@ -92,21 +146,32 @@ pub(crate) async fn applicable_feedback_rules(
         false,
     )
     .await
-    {
-        Ok(rows) => rows,
-        Err(err) => {
-            tracing::warn!("feedback rule search failed: {err}");
-            return Vec::new();
-        }
-    };
+}
 
-    let mut hits = rows
-        .iter()
-        .filter_map(|row| feedback_rule_hit(row, &query))
-        .collect::<Vec<_>>();
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
-    hits.truncate(5);
-    hits
+fn merge_feedback_rows(rows: &mut Vec<Value>, seen: &mut HashSet<String>, next: Vec<Value>) {
+    for row in next {
+        let key = row
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                row.get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            });
+        if key.is_empty() || seen.insert(key) {
+            rows.push(row);
+        }
+    }
+}
+
+fn feedback_scope_rank(scope: &str) -> usize {
+    if scope == "project" {
+        0
+    } else {
+        1
+    }
 }
 
 pub(crate) fn render_feedback_rules_section(rules: &[FeedbackRuleHit]) -> Option<String> {
@@ -147,6 +212,10 @@ pub(crate) fn feedback_rules_trace(rules: &[FeedbackRuleHit]) -> Value {
                 "prompt_patch": rule.prompt_patch,
                 "evidence_contract": rule.evidence_contract,
                 "score": rule.score,
+                "layer": "feedback_rule",
+                "scope": rule.scope,
+                "authority": rule.authority,
+                "applies_to": rule.applies_to,
             })
         }).collect::<Vec<_>>(),
     })
@@ -234,7 +303,23 @@ fn feedback_rule_hit(row: &Value, query: &FeedbackRuleQuery) -> Option<FeedbackR
         prompt_patch,
         evidence_contract,
         score,
+        scope: feedback_rule_scope(row, metadata),
+        authority: metadata
+            .get("authority")
+            .and_then(Value::as_str)
+            .unwrap_or("behavior_patch")
+            .to_string(),
+        applies_to: applies.clone(),
     })
+}
+
+fn feedback_rule_scope(row: &Value, metadata: &Value) -> String {
+    metadata
+        .get("scope")
+        .and_then(Value::as_str)
+        .or_else(|| row.get("db").and_then(Value::as_str))
+        .unwrap_or("global")
+        .to_string()
 }
 
 fn feedback_search_query(query: &FeedbackRuleQuery) -> String {
@@ -412,6 +497,9 @@ mod tests {
             prompt_patch: "Use this checklist:\n- search identifiers\n- list files".to_string(),
             evidence_contract: Vec::new(),
             score: 1,
+            scope: "global".to_string(),
+            authority: "behavior_patch".to_string(),
+            applies_to: Value::Null,
         }])
         .expect("section");
 

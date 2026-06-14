@@ -2028,6 +2028,14 @@ mod safe_merge_tests {
             json!("github_issue")
         );
         assert_eq!(
+            digest["items"][0]["routing"]["promotion_requires"],
+            json!("leader_verdict")
+        );
+        assert_eq!(
+            digest["routing_plan"]["status"],
+            json!("needs_leader_verdict")
+        );
+        assert_eq!(
             digest["routing_plan"]["destination_counts"]["feedback_rule"],
             1
         );

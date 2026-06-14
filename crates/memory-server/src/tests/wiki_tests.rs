@@ -539,6 +539,7 @@ async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
     assert_eq!(entry["path"], json!("/guide/global/workflows/agent-review"));
     assert_eq!(entry["metadata"]["layer"], json!("guide"));
     assert_eq!(entry["metadata"]["scope"], json!("global"));
+    assert_eq!(entry["metadata"]["authority"], json!("playbook"));
     assert_eq!(
         entry["metadata"]["applies_to"]["task_type"],
         json!(["agent_review"])

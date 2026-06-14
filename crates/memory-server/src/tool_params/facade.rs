@@ -77,6 +77,7 @@ fn tachi_task_action_schema(
         &[
             "plan",
             "briefing",
+            "doc_index",
             "recommend",
             "dispatch",
             "complete",
@@ -98,7 +99,7 @@ fn tachi_task_action_schema(
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the same project-first layered source index for agent context assembly; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='pr_status' previews GitHub PR safe-merge status without merging; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -1136,7 +1137,7 @@ pub(crate) struct TachiSkillParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiTaskParams {
-    /// Action: "plan", "briefing", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "wait", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "doc_index", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "board", "wait", "merge", "intake", "link_pr", "pr_status", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
@@ -1148,6 +1149,7 @@ pub(crate) struct TachiTaskParams {
     /// when flow_id is supplied.
     /// action="build_references" previews the issue/doc/related reference array.
     /// action="close_loop" writes durable wiki closure through the task lifecycle.
+    /// action="doc_index" exposes the layered GitHub/docs/wiki/guide/feedback/eval/runtime source index.
     /// Use "recommend" before assigning external workers so Tachi can choose a dispatch profile
     /// from the task, risk, and live eval evidence.
     /// Use "route_simulate" to replay recent /eval rows across policy variants before

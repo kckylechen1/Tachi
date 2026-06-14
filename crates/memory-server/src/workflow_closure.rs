@@ -76,6 +76,57 @@ pub(crate) fn build_close_loop_metadata(
     })
 }
 
+pub(crate) fn build_promotion_plan(issue_ref: &str, references: &[String]) -> Value {
+    json!({
+        "requires_explicit_invocation": true,
+        "automatic_double_write": false,
+        "source_ref": issue_ref,
+        "source_refs": references,
+        "destinations": [
+            {
+                "destination": "wiki",
+                "layer": "wiki",
+                "authority": "advisory",
+                "tool": "tachi_task",
+                "action": "close_loop",
+                "when": "project-specific durable lesson or decision after the work is complete"
+            },
+            {
+                "destination": "guide",
+                "layer": "guide",
+                "authority": "playbook",
+                "tool": "tachi_task",
+                "action": "close_loop",
+                "when": "reusable workflow/SOP lesson; pass wiki_path under /guide"
+            },
+            {
+                "destination": "feedback_rule",
+                "layer": "feedback_rule",
+                "authority": "behavior_patch",
+                "tool": "tachi_memory",
+                "action": "save",
+                "when": "the lesson should patch future agent prompts or evidence contracts"
+            },
+            {
+                "destination": "github_issue",
+                "layer": "github_ref",
+                "authority": "project_work_record",
+                "tool": "tachi_gh",
+                "action": "issue_create",
+                "when": "a valid project task or bug remains open after review"
+            },
+            {
+                "destination": "eval",
+                "layer": "eval",
+                "authority": "evidence",
+                "tool": "tachi_complete",
+                "action": "complete",
+                "when": "record verification, reviewer usefulness, or false-positive signal"
+            }
+        ]
+    })
+}
+
 pub(crate) async fn handle_workflow(
     server: &MemoryServer,
     params: TachiWorkflowParams,
@@ -111,6 +162,7 @@ pub(crate) async fn handle_workflow(
                 params.wiki_path.as_deref(),
                 &references,
             );
+            let promotion_plan = build_promotion_plan(&issue_ref, &references);
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
                 server,
@@ -145,6 +197,7 @@ pub(crate) async fn handle_workflow(
                 "ok": true,
                 "action": "close_loop",
                 "issue_ref": issue_ref,
+                "promotion_plan": promotion_plan,
                 "wiki": serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result)),
             }))
             .map_err(|e| format!("serialize close_loop: {e}"))
@@ -154,8 +207,10 @@ pub(crate) async fn handle_workflow(
             let references =
                 build_closure_references(issue_ref, &params.doc_paths, &params.related_issues);
             crate::wiki_ops::validate_references(&references)?;
+            let promotion_plan = build_promotion_plan(issue_ref, &references);
             serde_json::to_string(&json!({
                 "references": references,
+                "promotion_plan": promotion_plan,
             }))
             .map_err(|e| format!("serialize build_references: {e}"))
         }

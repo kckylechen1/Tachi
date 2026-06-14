@@ -622,6 +622,7 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert_eq!(action["type"], json!("string"));
     let values = action["enum"].as_array().expect("action enum");
     assert!(values.contains(&json!("briefing")));
+    assert!(values.contains(&json!("doc_index")));
     assert!(values.contains(&json!("plan")));
     assert!(values.contains(&json!("dispatch")));
     assert!(values.contains(&json!("complete")));
