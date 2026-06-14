@@ -52,6 +52,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
@@ -82,6 +83,7 @@ pub(super) async fn run_vault_command(
                     stdin_password,
                     keychain,
                     password_file.as_deref(),
+                    insecure_password_file,
                 )?;
                 let result = crate::credential_profile::apply_credential_materialization(
                     &profile,
@@ -177,6 +179,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
             let output = super::vault_sync::resolve_vault_sync_path(output)?;
             let config = read_vault_config_for_key(global_db_path)?;
@@ -185,6 +188,7 @@ pub(super) async fn run_vault_command(
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
+                insecure_password_file,
             )?;
             let status = super::vault_sync::export_vault_bundle(
                 global_db_path,
@@ -206,6 +210,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
             let input = super::vault_sync::resolve_vault_sync_path(input)?;
             let key = if allow_unsigned && !super::vault_sync::bundle_has_signature(&input)? {
@@ -217,6 +222,7 @@ pub(super) async fn run_vault_command(
                     stdin_password,
                     keychain,
                     password_file.as_deref(),
+                    insecure_password_file,
                 )?)
             };
             let report = super::vault_sync::import_vault_bundle(
@@ -239,6 +245,7 @@ pub(super) async fn run_vault_command(
             keychain,
             password_file,
             confirm_password_file,
+            insecure_password_file,
         } => {
             if vault_config_exists_cli(global_db_path)? {
                 println!("Vault already initialized.");
@@ -250,6 +257,7 @@ pub(super) async fn run_vault_command(
                 keychain,
                 password_file.as_deref(),
                 confirm_password_file.as_deref(),
+                insecure_password_file,
             )?;
 
             let salt = crate::vault_crypto::generate_salt();
@@ -298,9 +306,14 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
-            let mut password =
-                read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let mut password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
 
             if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
                 let out = call_daemon_vault_unlock(app_home, &info, password).await?;
@@ -340,6 +353,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
             value_stdin,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
@@ -351,7 +365,12 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -409,6 +428,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
             values_stdin,
         } => {
             if !values_stdin {
@@ -441,7 +461,12 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -522,6 +547,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
             json,
         } => {
             if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
@@ -545,7 +571,12 @@ pub(super) async fn run_vault_command(
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -613,6 +644,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let config = store
@@ -620,7 +652,12 @@ pub(super) async fn run_vault_command(
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
 
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -649,6 +686,7 @@ pub(super) async fn run_vault_command(
             stdin_password,
             keychain,
             password_file,
+            insecure_password_file,
         } => {
             crate::vault_crypto::validate_secret_name(&name)?;
 
@@ -659,7 +697,12 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(stdin_password, keychain, password_file.as_deref())?;
+            let password = read_vault_password(
+                stdin_password,
+                keychain,
+                password_file.as_deref(),
+                insecure_password_file,
+            )?;
             let salt = B64
                 .decode(&config.salt)
                 .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -686,6 +729,7 @@ pub(super) async fn run_vault_command(
             stdin_password: _,
             keychain: _,
             password_file: _,
+            insecure_password_file: _,
         } => {
             if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
                 if let Ok(out) =
@@ -860,10 +904,12 @@ fn read_verified_vault_key(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
+    insecure_password_file: bool,
 ) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
-    let mut password = read_vault_password(stdin_password, keychain, password_file)?;
+    let mut password =
+        read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -882,6 +928,7 @@ fn decrypt_profile_secret_values(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
+    insecure_password_file: bool,
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
@@ -890,7 +937,8 @@ fn decrypt_profile_secret_values(
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?
         .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-    let password = read_vault_password(stdin_password, keychain, password_file)?;
+    let password =
+        read_vault_password(stdin_password, keychain, password_file, insecure_password_file)?;
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
@@ -1174,6 +1222,7 @@ pub(super) fn read_vault_password(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
+    insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let password = if keychain {
         if !cfg!(target_os = "macos") {
@@ -1201,7 +1250,7 @@ pub(super) fn read_vault_password(
         }
         String::from_utf8(output.stdout)?.trim().to_string()
     } else if let Some(path) = password_file {
-        read_password_file(path)?
+        read_password_file(path, insecure_password_file)?
     } else if stdin_password {
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf)?;
@@ -1221,20 +1270,21 @@ pub(super) fn read_vault_init_password(
     keychain: bool,
     password_file: Option<&Path>,
     confirm_password_file: Option<&Path>,
+    insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let (password, confirm) = if stdin_password {
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
-        read_vault_init_password_stdin_lines(&mut stdin, confirm_password_file)?
+        read_vault_init_password_stdin_lines(&mut stdin, confirm_password_file, insecure_password_file)?
     } else if keychain || password_file.is_some() {
-        let password = read_vault_password(false, keychain, password_file)?;
+        let password = read_vault_password(false, keychain, password_file, insecure_password_file)?;
         let Some(path) = confirm_password_file else {
             return Err(
                 "Non-interactive vault init requires --confirm-password-file. Use interactive `tachi vault init` or provide a separate confirmation file."
                     .into(),
             );
         };
-        (password, read_password_file(path)?)
+        (password, read_password_file(path, insecure_password_file)?)
     } else {
         let password = rpassword::prompt_password("New vault password: ")?;
         let confirm = rpassword::prompt_password("Confirm password: ")?;
@@ -1253,12 +1303,13 @@ pub(super) fn read_vault_init_password(
 fn read_vault_init_password_stdin_lines(
     reader: &mut impl BufRead,
     confirm_password_file: Option<&Path>,
+    insecure_password_file: bool,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     let mut password = String::new();
     reader.read_line(&mut password)?;
     let password = password.trim().to_string();
     let confirm = if let Some(path) = confirm_password_file {
-        read_password_file(path)?
+        read_password_file(path, insecure_password_file)?
     } else {
         let mut confirm = String::new();
         reader.read_line(&mut confirm)?;
@@ -1267,7 +1318,10 @@ fn read_vault_init_password_stdin_lines(
     Ok((password, confirm))
 }
 
-fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+fn read_password_file(
+    path: &Path,
+    insecure_password_file: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read password file {}: {e}", path.display()))?;
     let password = raw.lines().next().unwrap_or_default().trim().to_string();
@@ -1278,11 +1332,20 @@ fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
         if let Ok(metadata) = std::fs::metadata(path) {
             let mode = metadata.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
-                eprintln!(
-                    "WARNING: password file {} is readable by group/other (mode {:o}); prefer 0600",
-                    path.display(),
-                    mode
-                );
+                if insecure_password_file {
+                    eprintln!(
+                        "WARNING: password file {} is readable by group/other (mode {:o}); prefer 0600",
+                        path.display(),
+                        mode
+                    );
+                } else {
+                    return Err(format!(
+                        "Password file {} is readable by group/other (mode {:o}). Set permissions to 0600 or pass --insecure-password-file.",
+                        path.display(),
+                        mode
+                    )
+                    .into());
+                }
             }
         }
     }
@@ -1294,13 +1357,31 @@ fn read_password_file(path: &Path) -> Result<String, Box<dyn std::error::Error>>
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    fn make_owner_only(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("set owner-only permissions");
+    }
+
+    #[cfg(not(unix))]
+    fn make_owner_only(_path: &Path) {}
+
+    #[cfg(unix)]
+    fn make_group_readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))
+            .expect("set group-readable permissions");
+    }
 
     #[test]
     fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
         let mut input =
             Cursor::new("correct horse battery staple\ncorrect horse battery staple\nextra\n");
         let (password, confirm) =
-            read_vault_init_password_stdin_lines(&mut input, None).expect("stdin lines");
+            read_vault_init_password_stdin_lines(&mut input, None, false).expect("stdin lines");
 
         assert_eq!(password, "correct horse battery staple");
         assert_eq!(confirm, "correct horse battery staple");
@@ -1316,8 +1397,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let password_file = dir.path().join("password.txt");
         std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+        make_owner_only(&password_file);
 
-        let err = read_vault_init_password(false, false, Some(&password_file), None)
+        let err = read_vault_init_password(false, false, Some(&password_file), None, false)
             .expect_err("missing confirmation file should fail");
         assert!(err.to_string().contains("--confirm-password-file"), "{err}");
     }
@@ -1329,15 +1411,59 @@ mod tests {
         let confirm_file = dir.path().join("confirm.txt");
         std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
         std::fs::write(&confirm_file, "wrong horse battery staple\n").expect("confirm file");
+        make_owner_only(&password_file);
+        make_owner_only(&confirm_file);
 
-        let err = read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file))
-            .expect_err("mismatched confirmation should fail");
+        let err =
+            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file), false)
+                .expect_err("mismatched confirmation should fail");
         assert!(err.to_string().contains("Passwords do not match"), "{err}");
 
         std::fs::write(&confirm_file, "correct horse battery staple\n").expect("confirm file");
+        make_owner_only(&confirm_file);
         let password =
-            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file))
+            read_vault_init_password(false, false, Some(&password_file), Some(&confirm_file), false)
                 .expect("matching confirmation should succeed");
+        assert_eq!(password, "correct horse battery staple");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn password_file_rejects_group_or_other_readable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+        make_group_readable(&password_file);
+
+        let err = read_password_file(&password_file, false)
+            .expect_err("group-readable password file should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("readable by group/other"), "{msg}");
+        assert!(msg.contains("--insecure-password-file"), "{msg}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn password_file_allows_insecure_opt_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+        make_group_readable(&password_file);
+
+        let password = read_password_file(&password_file, true)
+            .expect("group-readable password file should be accepted with --insecure-password-file");
+        assert_eq!(password, "correct horse battery staple");
+    }
+
+    #[test]
+    fn password_file_accepts_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let password_file = dir.path().join("password.txt");
+        std::fs::write(&password_file, "correct horse battery staple\n").expect("password file");
+        make_owner_only(&password_file);
+
+        let password = read_password_file(&password_file, false)
+            .expect("owner-only password file should be accepted");
         assert_eq!(password, "correct horse battery staple");
     }
 }

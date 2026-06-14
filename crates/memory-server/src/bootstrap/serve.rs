@@ -656,6 +656,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         stdin_password,
         keychain,
         password_file,
+        insecure_password_file,
     } = &command
     {
         return super::env_cmd::run_env_command(
@@ -666,6 +667,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             *stdin_password,
             *keychain,
             password_file.as_deref(),
+            *insecure_password_file,
         )
         .await;
     }

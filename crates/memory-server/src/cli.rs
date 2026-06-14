@@ -435,6 +435,9 @@ pub(crate) enum Commands {
         /// Useful on Linux/Windows with OS/container secret mounts.
         #[arg(long, value_name = "PATH", global = true)]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long, global = true)]
+        insecure_password_file: bool,
     },
 }
 
@@ -874,6 +877,9 @@ pub(crate) enum VaultAction {
         /// where the second stdin line is used when this flag is omitted.
         #[arg(long, value_name = "PATH")]
         confirm_password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Unlock the vault for this session.
     Unlock {
@@ -886,6 +892,9 @@ pub(crate) enum VaultAction {
         /// Read password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Store a secret in the vault. Prompts for the value interactively
     /// unless --value-stdin is set.
@@ -907,6 +916,9 @@ pub(crate) enum VaultAction {
         /// Read vault password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
         /// Read the secret value from stdin (first line) instead of prompting.
         /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
         #[arg(long)]
@@ -933,6 +945,9 @@ pub(crate) enum VaultAction {
         /// Read vault password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
         /// Read API key values from stdin, one per line.
         #[arg(long)]
         values_stdin: bool,
@@ -953,6 +968,9 @@ pub(crate) enum VaultAction {
         /// Read password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
         /// Emit JSON instead of shell export syntax.
         #[arg(long)]
         json: bool,
@@ -992,6 +1010,9 @@ pub(crate) enum VaultAction {
         /// Read password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Remove a secret from the vault.
     Remove {
@@ -1006,6 +1027,9 @@ pub(crate) enum VaultAction {
         /// Read password from a local file (first line only).
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// List vault secret metadata only (names/types/descriptions; does not show values).
     List {
@@ -1018,6 +1042,9 @@ pub(crate) enum VaultAction {
         /// Legacy no-op; listing metadata does not require unlocking.
         #[arg(long, value_name = "PATH", hide = true)]
         password_file: Option<PathBuf>,
+        /// Legacy no-op; kept for CLI compatibility.
+        #[arg(long, hide = true)]
+        insecure_password_file: bool,
     },
     /// Lock the vault (clear cached key).
     Lock,
@@ -1052,6 +1079,9 @@ pub(crate) enum VaultAction {
         /// Read vault password from a local file when --apply needs decrypted values.
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Cleanup or mark Tachi-managed credential materializations.
     Cleanup {
@@ -1103,6 +1133,9 @@ pub(crate) enum VaultAction {
         /// Read Vault password from the first line of a file.
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Import encrypted Vault rows from a sync bundle.
     SyncImport {
@@ -1121,6 +1154,9 @@ pub(crate) enum VaultAction {
         /// Read Vault password from the first line of a file.
         #[arg(long, value_name = "PATH")]
         password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
     },
     /// Show the default Vault sync bundle path and whether it exists.
     SyncStatus {
