@@ -828,12 +828,26 @@ impl MemoryServer {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
-
         if lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools").contains_key(tool_name)
         {
+            let args_obj = arguments
+                .map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
             return self.call_skill_tool(tool_name, args_obj).await;
         }
+
+        if dlq_mutation_is_unsafe(tool_name, arguments.as_ref())
+            || self.tool_router.has_route(tool_name)
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Tool '{}' cannot be retried via DLQ because it is native or non-idempotent; retry the MCP call explicitly",
+                    tool_name
+                ),
+                None,
+            ));
+        }
+
+        let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
 
         if let Some((server_name, remote_tool)) = {
             let proxy_tools = lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
