@@ -553,6 +553,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         return super::clean_cli::run_clean_command(action.clone()).await;
     }
 
+    if let Commands::Harness { action } = &command {
+        return super::harness_cli::run_harness_command(action.clone()).await;
+    }
+
+    if let Commands::SkillSurface { action } = &command {
+        return super::skill_surface_cli::run_skill_surface_command(action.clone()).await;
+    }
+
     if let Commands::Doctor {
         json,
         fix,

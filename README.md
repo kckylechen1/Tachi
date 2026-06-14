@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer (also installs the OpenClaw plugin when detected):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.5/scripts/install.sh)"
 ```
 
 Verify:
@@ -241,6 +241,15 @@ Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-
 
 ### 6. Tachi Hub & Skill Packs
 Register MCP servers, skills, and toolchains once; any connected agent can discover and call them. `pack_register` / `pack_project` install curated skill collections and project them to Claude, Cursor, Codex, Gemini, and OpenCode formats. `run_skill` executes a skill as a native MCP tool.
+
+Read-only diagnostics help keep those surfaces aligned:
+
+```bash
+tachi harness status --host codex,claude,gemini,antigravity,cursor
+tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
+```
+
+`harness status` checks host instruction files for managed Tachi guidance, legacy blocks, duplicate workflows, and stale host-specific hardcodes. `skill-surface status` compares local skill stores and host projections, including CC Switch projection metadata when available.
 
 ### 7. Agent Coordination
 - **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).

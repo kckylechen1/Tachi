@@ -147,6 +147,16 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: HubAction,
     },
+    /// Inspect host instruction files projected from Tachi harness guidance
+    Harness {
+        #[command(subcommand)]
+        action: HarnessAction,
+    },
+    /// Inspect local skill stores and host-specific skill projections
+    SkillSurface {
+        #[command(subcommand)]
+        action: SkillSurfaceAction,
+    },
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {
         /// Target DB path (defaults to global DB)
@@ -776,6 +786,38 @@ pub(crate) enum WikiAction {
         /// Optional named project DB.
         #[arg(long, default_value = "wiki")]
         project: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum HarnessAction {
+    /// Read-only inventory of host AgentMD / workflow files managed by Tachi
+    Status {
+        /// Limit the scan to one or more hosts. Repeat or comma-separate values.
+        #[arg(long = "host", value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Override home directory for testing or dry-run inventory
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum SkillSurfaceAction {
+    /// Read-only inventory of local skill stores, hashes, symlinks, and host projections
+    Status {
+        /// Limit host projection checks. Repeat or comma-separate values.
+        #[arg(long = "host", value_delimiter = ',')]
+        hosts: Vec<String>,
+        /// Override home directory for testing or dry-run inventory
+        #[arg(long, value_name = "PATH")]
+        home: Option<PathBuf>,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
     },
 }
 

@@ -6,11 +6,13 @@ mod backfill;
 mod clean_cli;
 mod cli_tool;
 mod env_cmd;
+mod harness_cli;
 mod manifest_cli;
 mod rescue_cli;
 mod serve;
 mod setup;
 mod setup_wizard;
+mod skill_surface_cli;
 mod tidy;
 mod vault_sync;
 

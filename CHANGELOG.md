@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
-- [1.5.x](#154---2026-06-15) — issue-driven automation gates and runtime hardening
+- [1.5.x](#155---2026-06-15) — harness and skill-surface diagnostics
 - [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
 - [1.3.x](#130---2026-05-30) — search quality, memory lifecycle, and audit hardening
 - [1.2.0](#120---2026-05-25) — shell orchestration, dispatch v2, daily distill
@@ -35,6 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.5.5] - 2026-06-15 — Harness and skill-surface diagnostics
+
+Patch release for keeping multi-agent host guidance and local skill projections auditable from the Tachi CLI.
+
+### Added
+
+- **Harness inventory**: `tachi harness status` scans Codex, Claude, Gemini, Antigravity, and Cursor instruction surfaces for managed Tachi guidance, legacy blocks, duplicates, and stale host-specific hardcodes.
+- **Skill surface inventory**: `tachi skill-surface status` compares CC Switch, Tachi, agent, and host skill stores; reports broken symlinks, missing `SKILL.md` files, same-name content drift, and CC Switch projection status.
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, and npm package metadata versions are aligned to `1.5.5`.
+- Installer URLs across README and install docs now point at the `v1.5.5` release tag.
 
 ## [1.5.4] - 2026-06-15 — 🔒 Issue-driven automation gates and runtime hardening
 
