@@ -309,6 +309,7 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
 
 fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     let path = run_dir.join("events.jsonl");
     let line = format!(
         "{}\n",
@@ -320,7 +321,12 @@ fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
         .open(&path)
         .map_err(|e| format!("open events.jsonl: {e}"))?;
     f.write_all(line.as_bytes())
-        .map_err(|e| format!("write events.jsonl: {e}"))
+        .map_err(|e| format!("write events.jsonl: {e}"))?;
+    f.sync_all()
+        .map_err(|e| format!("fsync events.jsonl: {e}"))?;
+    // Best-effort restrict the log to owner-read/write on Unix.
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Ok(())
 }
 
 fn update_mission_status(arena_id: &str, mission_id: &str, patch: Value) -> Result<Value, String> {
@@ -1812,5 +1818,20 @@ mod tests {
         assert!(validate_mission_id("mission_explore_deadbeef").is_ok());
         let err = validate_mission_id("bad/name").unwrap_err();
         assert!(err.contains("Expected prefix 'mission_'"));
+    }
+
+    #[test]
+    fn append_event_writes_synced_and_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        append_event(tmp.path(), json!({"event": "test"})).unwrap();
+
+        let path = tmp.path().join("events.jsonl");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("\"event\":\"test\""));
+
+        let meta = std::fs::metadata(&path).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "events.jsonl should be owner-readable only");
     }
 }
