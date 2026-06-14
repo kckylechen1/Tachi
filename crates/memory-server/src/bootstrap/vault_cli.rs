@@ -1,5 +1,4 @@
 use super::*;
-use memory_core::vault::api_key_pool_member_index;
 use std::io::{BufRead, Read, Write};
 use std::path::Path;
 
@@ -77,7 +76,7 @@ pub(super) async fn run_vault_command(
                 &store,
             )?;
             let mut body = if apply {
-                let secret_values = decrypt_profile_secret_values(
+                let mut secret_values = decrypt_profile_secret_values(
                     global_db_path,
                     &profile_def,
                     stdin_password,
@@ -95,7 +94,11 @@ pub(super) async fn run_vault_command(
                         allow_existing,
                         run_dir: None,
                     },
-                )?;
+                );
+                for value in secret_values.values_mut() {
+                    crate::vault_crypto::zero_string(value);
+                }
+                let result = result?;
                 let mut value =
                     crate::credential_profile::credential_materialize_report_json(&result.report);
                 value["env_outputs"] = serde_json::json!(result
@@ -252,7 +255,7 @@ pub(super) async fn run_vault_command(
                 return Ok(());
             }
 
-            let password = read_vault_init_password(
+            let mut password = read_vault_init_password(
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
@@ -261,7 +264,9 @@ pub(super) async fn run_vault_command(
             )?;
 
             let salt = crate::vault_crypto::generate_salt();
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
+            let key_result = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt);
+            crate::vault_crypto::zero_string(&mut password);
+            let key = key_result?;
             let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
             let salt_b64 = B64.encode(salt);
             let now = chrono::Utc::now().to_rfc3339();
@@ -365,22 +370,15 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(
+            let key = read_verified_vault_key(
+                &config,
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
 
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("Wrong password".into());
-            }
-
-            let secret_value = if value_stdin {
+            let mut secret_value = if value_stdin {
                 let mut buf = String::new();
                 std::io::stdin().read_line(&mut buf)?;
                 buf.trim().to_string()
@@ -391,8 +389,9 @@ pub(super) async fn run_vault_command(
                 return Err("Secret value cannot be empty".into());
             }
 
-            let (encrypted_value, nonce) =
-                crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes())?;
+            let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
+            crate::vault_crypto::zero_string(&mut secret_value);
+            let (encrypted_value, nonce) = encrypt_result?;
 
             let is_new = !open_cli_store_read_only(global_db_path)?
                 .vault_entry_exists(&name)
@@ -444,12 +443,13 @@ pub(super) async fn run_vault_command(
 
             let mut raw_values = String::new();
             std::io::stdin().read_to_string(&mut raw_values)?;
-            let values = raw_values
+            let mut values = raw_values
                 .lines()
                 .map(str::trim)
                 .filter(|line| !line.is_empty())
                 .map(str::to_string)
                 .collect::<Vec<_>>();
+            crate::vault_crypto::zero_string(&mut raw_values);
             if values.is_empty() {
                 return Err("No API key values received on stdin.".into());
             }
@@ -461,79 +461,61 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(
+            let key = read_verified_vault_key(
+                &config,
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("Wrong password".into());
-            }
 
             let now = chrono::Utc::now().to_rfc3339();
-            let store = open_cli_store(global_db_path)?;
-            let existing_entries = store
-                .vault_list_entries_by_type("api_key")
-                .map_err(|e| format!("vault_list_entries_by_type: {e}"))?;
-            let mut removed_members = Vec::new();
-            for (idx, value) in values.iter().enumerate() {
-                let name = format!("{}_{}", prefix, idx + 1);
-                let is_new = !store
-                    .vault_entry_exists(&name)
-                    .map_err(|e| format!("vault_entry_exists: {e}"))?;
-                let (encrypted_value, nonce) =
-                    crate::vault_crypto::encrypt(key.bytes(), value.as_bytes())?;
-                store
-                    .vault_upsert_entry(&memory_core::vault::VaultEntry {
+            let mut entries = Vec::with_capacity(values.len());
+            let build_entries = (|| -> Result<(), Box<dyn std::error::Error>> {
+                for (idx, value) in values.iter().enumerate() {
+                    let name = format!("{}_{}", prefix, idx + 1);
+                    let (encrypted_value, nonce) =
+                        crate::vault_crypto::encrypt(key.bytes(), value.as_bytes())?;
+                    entries.push(memory_core::vault::VaultEntry {
                         name,
                         encrypted_value,
                         nonce,
                         secret_type: "api_key".to_string(),
                         description: description.clone().unwrap_or_default(),
                         allowed_agents: None,
-                        created_at: if is_new { now.clone() } else { String::new() },
+                        created_at: now.clone(),
                         updated_at: now.clone(),
                         accessed_at: String::new(),
                         access_count: 0,
-                    })
-                    .map_err(|e| format!("vault_upsert_entry: {e}"))?;
-            }
-            for entry in existing_entries {
-                if api_key_pool_member_index(&entry.name, &prefix)
-                    .is_some_and(|idx| idx > values.len())
-                {
-                    if store
-                        .vault_delete_entry(&entry.name)
-                        .map_err(|e| format!("vault_delete_entry: {e}"))?
-                    {
-                        removed_members.push(entry.name);
-                    }
+                    });
                 }
+                Ok(())
+            })();
+            for value in &mut values {
+                crate::vault_crypto::zero_string(value);
             }
+            build_entries?;
 
             let strategy = normalize_rotation_strategy_cli(&strategy);
-            store
-                .vault_set_rotation(&memory_core::vault::VaultKeyRotation {
-                    prefix: prefix.clone(),
-                    current_index: 1,
-                    total_keys: values.len() as i64,
-                    rotation_strategy: strategy.clone(),
-                    created_at: now.clone(),
-                    updated_at: now,
-                })
-                .map_err(|e| format!("vault_set_rotation: {e}"))?;
+            let rotation = memory_core::vault::VaultKeyRotation {
+                prefix: prefix.clone(),
+                current_index: 1,
+                total_keys: entries.len() as i64,
+                rotation_strategy: strategy.clone(),
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            let mut store = open_cli_store(global_db_path)?;
+            let removed_members = store
+                .vault_replace_api_key_pool(&prefix, &entries, &rotation)
+                .map_err(|e| format!("vault_replace_api_key_pool: {e}"))?;
 
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "stored": true,
                     "logical_name": prefix,
-                    "total_keys": values.len(),
+                    "total_keys": entries.len(),
                     "strategy": strategy,
                     "removed_members": removed_members,
                 }))?
@@ -571,29 +553,24 @@ pub(super) async fn run_vault_command(
                 .vault_get_config()
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-            let password = read_vault_password(
+            let key = read_verified_vault_key(
+                &config,
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("Wrong password".into());
-            }
 
-            let (key_id, value) = lease_api_key_from_store(&store, key.bytes(), &name)?;
+            let (key_id, mut value) = lease_api_key_from_store(&store, key.bytes(), &name)?;
             let body = serde_json::json!({
                 "leased": true,
                 "logical_name": name,
                 "key_id": key_id,
                 "env_name": env_name,
-                "env": { env_name: value },
+                "env": { env_name: value.clone() },
             });
             let out = serde_json::to_string(&body)?;
+            crate::vault_crypto::zero_string(&mut value);
             print_lease_output(&out, json)?;
             Ok(())
         }
@@ -654,20 +631,13 @@ pub(super) async fn run_vault_command(
                 .map_err(|e| format!("vault_get_config: {e}"))?
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
 
-            let password = read_vault_password(
+            let key = read_verified_vault_key(
+                &config,
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("Wrong password".into());
-            }
 
             let entry = store
                 .vault_get_entry(&name)
@@ -676,10 +646,12 @@ pub(super) async fn run_vault_command(
 
             let decrypted =
                 crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)?;
-            let value = String::from_utf8(decrypted)
+            let mut value = String::from_utf8(decrypted)
                 .map_err(|e| format!("Secret is not valid UTF-8: {e}"))?;
 
-            print!("{}", vault_get_output(&name, &value, reveal, json)?);
+            let output = vault_get_output(&name, &value, reveal, json)?;
+            crate::vault_crypto::zero_string(&mut value);
+            print!("{output}");
             Ok(())
         }
 
@@ -699,20 +671,13 @@ pub(super) async fn run_vault_command(
                 .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
             drop(store_ro);
 
-            let password = read_vault_password(
+            let _key = read_verified_vault_key(
+                &config,
                 stdin_password,
                 keychain,
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let salt = B64
-                .decode(&config.salt)
-                .map_err(|e| format!("Invalid vault salt: {e}"))?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("Wrong password".into());
-            }
 
             let store = open_cli_store(global_db_path)?;
             let removed = store
@@ -908,19 +873,26 @@ fn read_verified_vault_key(
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
     let mut password = read_vault_password(
         stdin_password,
         keychain,
         password_file,
         insecure_password_file,
     )?;
+    derive_verified_vault_key_from_password(config, &mut password)
+}
+
+fn derive_verified_vault_key_from_password(
+    config: &memory_core::vault::VaultConfig,
+    password: &mut String,
+) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
     let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key_result = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt);
-    crate::vault_crypto::zero_string(&mut password);
+    let key_result = crate::vault_crypto::DerivedVaultKey::derive(password, &salt);
+    crate::vault_crypto::zero_string(password);
     let key = key_result?;
     if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
         return Err("Wrong password".into());
@@ -936,26 +908,18 @@ fn decrypt_profile_secret_values(
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<std::collections::HashMap<String, String>, Box<dyn std::error::Error>> {
-    use base64::{engine::general_purpose::STANDARD as B64, Engine};
-
     let store = open_cli_store_read_only(global_db_path)?;
     let config = store
         .vault_get_config()
         .map_err(|e| format!("vault_get_config: {e}"))?
         .ok_or("Vault not initialized. Run `tachi vault init` first.")?;
-    let password = read_vault_password(
+    let key = read_verified_vault_key(
+        &config,
         stdin_password,
         keychain,
         password_file,
         insecure_password_file,
     )?;
-    let salt = B64
-        .decode(&config.salt)
-        .map_err(|e| format!("Invalid vault salt: {e}"))?;
-    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-        return Err("Wrong password".into());
-    }
 
     let mut values = std::collections::HashMap::new();
     for name in crate::credential_profile::profile_secret_names(profile) {
@@ -1101,9 +1065,10 @@ pub(super) fn lease_api_key_from_store(
         }
 
         let decrypted = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-        let value = String::from_utf8(decrypted)
+        let mut value = String::from_utf8(decrypted)
             .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
         if value.trim().is_empty() {
+            crate::vault_crypto::zero_string(&mut value);
             continue;
         }
 
@@ -1311,7 +1276,7 @@ pub(super) fn read_vault_init_password(
     confirm_password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let (password, confirm) = if stdin_password {
+    let (mut password, mut confirm) = if stdin_password {
         let stdin = std::io::stdin();
         let mut stdin = stdin.lock();
         read_vault_init_password_stdin_lines(
@@ -1335,11 +1300,16 @@ pub(super) fn read_vault_init_password(
     };
 
     if password.is_empty() {
+        crate::vault_crypto::zero_string(&mut password);
+        crate::vault_crypto::zero_string(&mut confirm);
         return Err("Password cannot be empty".into());
     }
     if password != confirm {
+        crate::vault_crypto::zero_string(&mut password);
+        crate::vault_crypto::zero_string(&mut confirm);
         return Err("Passwords do not match".into());
     }
+    crate::vault_crypto::zero_string(&mut confirm);
     Ok(password)
 }
 
@@ -1419,6 +1389,28 @@ mod tests {
             .expect("set group-readable permissions");
     }
 
+    fn config_for_password(password: &str) -> memory_core::vault::VaultConfig {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+        let salt = crate::vault_crypto::generate_salt();
+        let key =
+            crate::vault_crypto::DerivedVaultKey::derive(password, &salt).expect("derive test key");
+        let verifier = crate::vault_crypto::create_verifier(key.bytes()).expect("create verifier");
+        memory_core::vault::VaultConfig {
+            salt: B64.encode(salt),
+            verifier,
+            kdf_algorithm: "argon2id".to_string(),
+            kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            cipher: memory_core::vault::VaultCipher::Aes256Gcm,
+            created_at: "2026-06-14T00:00:00Z".to_string(),
+            updated_at: "2026-06-14T00:00:00Z".to_string(),
+        }
+    }
+
+    fn string_is_zeroed(value: &str) -> bool {
+        value.as_bytes().iter().all(|byte| *byte == 0)
+    }
+
     #[test]
     fn stdin_init_password_reads_two_lines_without_waiting_for_eof() {
         let mut input =
@@ -1433,6 +1425,37 @@ mod tests {
             .read_to_string(&mut remaining)
             .expect("read remaining stdin");
         assert_eq!(remaining, "extra\n");
+    }
+
+    #[test]
+    fn derive_verified_vault_key_zeroes_password_on_success() {
+        let config = config_for_password("correct horse battery staple");
+        let mut password = "correct horse battery staple".to_string();
+
+        let _key = derive_verified_vault_key_from_password(&config, &mut password)
+            .expect("verified password should derive key");
+
+        assert!(
+            string_is_zeroed(&password),
+            "password buffer was not zeroed"
+        );
+    }
+
+    #[test]
+    fn derive_verified_vault_key_zeroes_password_on_wrong_password() {
+        let config = config_for_password("correct horse battery staple");
+        let mut password = "wrong horse battery staple".to_string();
+
+        let err = match derive_verified_vault_key_from_password(&config, &mut password) {
+            Ok(_) => panic!("wrong password should fail verification"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("Wrong password"), "{err}");
+        assert!(
+            string_is_zeroed(&password),
+            "password buffer was not zeroed"
+        );
     }
 
     #[test]

@@ -244,7 +244,7 @@ pub struct GcReport {
 
 /// Run a GC / hygiene pass over the manifest file at `manifest_path`:
 ///   1. Load the manifest (returns Ok with empty report if file missing).
-///   2. Write a one-shot `{manifest_path}.bak` backup (best-effort).
+///   2. Write a one-shot `{manifest_path}.bak` backup before mutation.
 ///   3. For each entry: canonicalize path, drop if file is missing, drop if
 ///      `should_skip_path` matches, re-classify `schema_kind`.
 ///   4. Dedup by canonical path (prefer entry with most-recent `last_doctor_at`).
@@ -263,17 +263,19 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
         ..GcReport::default()
     };
 
-    // 2. Best-effort backup. Don't fail the GC if backup write fails (e.g.
-    //    read-only fs); the user still has the original manifest because we
-    //    write atomically below.
+    // 2. Refuse to mutate unless a backup was durably written first.
     let backup_path: PathBuf = {
         let mut s = manifest_path.as_os_str().to_os_string();
         s.push(".bak");
         PathBuf::from(s)
     };
-    if let Ok(orig_bytes) = std::fs::read(manifest_path) {
-        let _ = std::fs::write(&backup_path, &orig_bytes);
-    }
+    let orig_bytes = std::fs::read(manifest_path)?;
+    crate::utils::write_owner_only_file_atomic(&backup_path, &orig_bytes).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("manifest backup write {}: {e}", backup_path.display()),
+        )
+    })?;
 
     // 3. Per-entry pass.
     let original = std::mem::take(&mut manifest.dbs);
@@ -1263,6 +1265,38 @@ mod tests {
         let p = Path::new("/definitely/does/not/exist/here.db");
         // Should not panic, returns the input path unchanged.
         assert_eq!(canonicalize_db_path(p), p.to_path_buf());
+    }
+
+    #[test]
+    fn gc_manifest_refuses_to_mutate_when_backup_write_fails() {
+        let dir = tempdir().unwrap();
+        let manifest_path = dir.path().join("manifest.json");
+        let manifest = Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            generated_at: "2026-06-14T00:00:00Z".to_string(),
+            comment: String::new(),
+            dbs: vec![],
+        };
+        manifest.save(&manifest_path).unwrap();
+        let before = std::fs::read(&manifest_path).unwrap();
+
+        let backup_path = {
+            let mut s = manifest_path.as_os_str().to_os_string();
+            s.push(".bak");
+            std::path::PathBuf::from(s)
+        };
+        std::fs::create_dir(&backup_path).unwrap();
+
+        let err = gc_manifest(&manifest_path).expect_err("backup failure should abort GC");
+        assert!(
+            err.to_string().contains("manifest backup write"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).unwrap(),
+            before,
+            "GC must not mutate manifest when backup cannot be written"
+        );
     }
 
     #[test]
