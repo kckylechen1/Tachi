@@ -447,6 +447,13 @@ pub(crate) async fn handle_tachi_dispatch(
     tokio::fs::create_dir_all(&workspace_dir)
         .await
         .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&workspace_dir, std::fs::Permissions::from_mode(0o700))
+            .await
+            .map_err(|e| format!("Failed to set workspace dir permissions: {e}"))?;
+    }
 
     // 2. Generate MCP config if requested
     let mcp_config_path = if inject_tachi || inject_hub {

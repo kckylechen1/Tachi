@@ -63,6 +63,11 @@ impl ClaudePool {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let runs_dir = home.join(".tachi").join("foundry-runs");
         let _ = std::fs::create_dir_all(&runs_dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&runs_dir, std::fs::Permissions::from_mode(0o700));
+        }
 
         let timeout_secs = std::env::var("CLAUDE_POOL_TIMEOUT_SECS")
             .ok()
@@ -777,5 +782,37 @@ mod tests {
         assert_eq!(mode, 0o600, "prompt.md should be owner-readable only");
         let contents = std::fs::read_to_string(&prompt_file).unwrap();
         assert!(contents.contains("secret prompt body"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foundry_runs_dir_is_created_with_0o700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().expect("temp home");
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let _pool = ClaudePool::new(1);
+        let runs_dir = tmp.path().join(".tachi").join("foundry-runs");
+        assert!(runs_dir.exists(), "foundry-runs dir should be created");
+        let mode = std::fs::metadata(&runs_dir)
+            .expect("foundry-runs metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "foundry-runs dir should be restricted to owner"
+        );
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
     }
 }
