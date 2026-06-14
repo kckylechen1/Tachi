@@ -16,11 +16,16 @@ fn init_tracing(home: &std::path::Path) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .ok()
+            .ok()?;
+        #[cfg(unix)]
+        {
+            let _ = restrict_file_permissions(path);
+        }
+        Some(file)
     };
 
     let (writer, sink_label): (Box<dyn std::io::Write + Send + Sync>, String) =
@@ -72,6 +77,13 @@ fn init_tracing(home: &std::path::Path) {
 
     // Mirror the sink choice to stderr so operators can find their logs.
     let _ = writeln!(std::io::stderr(), "tachi: logging to {sink_label}");
+}
+
+/// Best-effort restrict a file to owner-read/write (0o600) on Unix.
+#[cfg(unix)]
+fn restrict_file_permissions(path: &std::path::Path) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
 }
 
 /// Liveness probe for the manifest self-lock fix: returns true iff some
@@ -1238,6 +1250,18 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 "warning: failed to write daemon discovery file {}: {e}",
                 pid_path.display()
             );
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o600);
+                if let Err(e) = tokio::fs::set_permissions(&pid_path, perms).await {
+                    eprintln!(
+                        "warning: failed to set permissions on daemon discovery file {}: {e}",
+                        pid_path.display()
+                    );
+                }
+            }
         }
         let pid_path_cleanup = pid_path.clone();
 
@@ -1342,4 +1366,24 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_file_permissions_sets_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::NamedTempFile::new().expect("temp file");
+        let path = temp.path();
+
+        restrict_file_permissions(path).expect("set permissions");
+
+        let meta = std::fs::metadata(path).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600, got {mode:o}");
+    }
 }
