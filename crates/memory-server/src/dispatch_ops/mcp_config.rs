@@ -112,5 +112,14 @@ pub(super) async fn generate_mcp_config(
     std::fs::write(&config_path, config_str)
         .map_err(|e| format!("Failed to write MCP config: {e}"))?;
 
+    // Restrict the temp config to owner-only access; it may contain MCP
+    // command definitions, environment values, or capability metadata.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to set MCP config permissions: {e}"))?;
+    }
+
     Ok(Some(config_path))
 }
