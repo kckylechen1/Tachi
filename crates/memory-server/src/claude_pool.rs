@@ -108,6 +108,11 @@ impl ClaudePool {
         if let Err(e) = std::fs::write(&prompt_path, prompt) {
             return Err(format!("claude_pool write {}: {e}", prompt_path.display()));
         }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&prompt_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let started_at = Utc::now().to_rfc3339();
         let started = Instant::now();
@@ -741,5 +746,36 @@ mod tests {
         .await
         .expect_err("fallback error should surface");
         assert!(err.contains("raw api also down"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn prompt_file_is_owner_readable_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = ClaudePool {
+            sem: Arc::new(Semaphore::new(1)),
+            runs_dir: tmp.path().to_path_buf(),
+            timeout: Duration::from_secs(1),
+            binary: Ok("/nonexistent/__tachi_test_no_such_claude_prompt__".to_string()),
+        };
+
+        let _ = pool
+            .call("perm-test", "secret prompt body")
+            .await
+            .expect_err("binary missing so call fails after writing prompt");
+
+        let prompt_file = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flat_map(|e| e.ok())
+            .find(|e| e.file_type().unwrap().is_dir())
+            .map(|e| e.path().join("prompt.md"))
+            .expect("run dir with prompt.md should exist");
+
+        let meta = std::fs::metadata(&prompt_file).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "prompt.md should be owner-readable only");
+        let contents = std::fs::read_to_string(&prompt_file).unwrap();
+        assert!(contents.contains("secret prompt body"));
     }
 }
