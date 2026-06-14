@@ -845,10 +845,10 @@ pub(crate) async fn handle_tachi_dispatch(
 
     // 5. Build command
     let mut cmd = match agent_norm.as_str() {
-        "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref()),
-        "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref()),
-        "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref()),
-        "kimi" => build_kimi_command(&params, &prompt),
+        "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref())?,
+        "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref())?,
+        "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref())?,
+        "kimi" => build_kimi_command(&params, &prompt)?,
         "custom" => build_custom_command(&params, &prompt)?,
         other => {
             return Err(format!(
