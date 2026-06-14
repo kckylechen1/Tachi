@@ -194,6 +194,49 @@ fn tidy_report_scans_memory_dbs_and_suggests_scope() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn tidy_apply_removes_broken_memory_db_symlink() {
+    let root = std::env::temp_dir().join(format!(
+        "tachi-tidy-broken-symlink-{}",
+        uuid::Uuid::new_v4()
+    ));
+    let app_home = root.join(".tachi-home");
+    let link = root
+        .join(".tachi")
+        .join("projects")
+        .join("stale")
+        .join("memory.db");
+    let missing_target = root.join("missing").join("memory.db");
+    std::fs::create_dir_all(link.parent().unwrap()).expect("create symlink parent");
+    std::os::unix::fs::symlink(&missing_target, &link).expect("create broken symlink");
+
+    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), None)
+        .expect("tidy report should build");
+    let finding = report
+        .databases
+        .iter()
+        .find(|db| db.path == link.display().to_string())
+        .expect("broken symlink should be included");
+    assert_eq!(finding.status, "broken_symlink");
+    assert_eq!(finding.recommended_action, "remove_broken_symlink");
+    assert_eq!(finding.target_exists, Some(false));
+    assert!(finding.is_symlink);
+
+    let summary = crate::bootstrap::execute_tidy_apply(&app_home, &report)
+        .expect("apply summary should build");
+    assert!(summary
+        .applied_steps
+        .iter()
+        .any(|step| step.action == "remove_broken_symlink" && step.outcome == "cleaned"));
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "broken symlink should be removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5: fragment-DB consolidation (`tachi tidy --execute`)
 // ---------------------------------------------------------------------------

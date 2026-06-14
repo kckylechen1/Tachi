@@ -78,6 +78,10 @@ pub(super) fn tidy_group_priority(group: &str) -> usize {
 }
 
 pub(super) fn tidy_recommended_action(scope_suggestion: &str, status: &str) -> String {
+    if status == "broken_symlink" {
+        return "remove_broken_symlink".to_string();
+    }
+
     if status != "ok" {
         return "repair_before_any_move".to_string();
     }
@@ -103,6 +107,7 @@ pub(super) fn tidy_target_label(scope_suggestion: &str, action: &str) -> String 
         "review_for_legacy_migration" => format!("review->{scope_suggestion}"),
         "archive_or_delete_after_review" => "archive".to_string(),
         "repair_before_any_move" => "repair".to_string(),
+        "remove_broken_symlink" => "cleanup".to_string(),
         _ => "manual-review".to_string(),
     }
 }
@@ -121,6 +126,9 @@ pub(super) fn tidy_rationale(scope_suggestion: &str, action: &str) -> String {
             "{scope_suggestion} appears to be backup state that should not be merged blindly."
         ),
         "repair_before_any_move" => "The DB could not be opened/read cleanly; repair it before planning migration.".to_string(),
+        "remove_broken_symlink" => {
+            "The memory.db path is a broken symlink; remove the stale link and rescan.".to_string()
+        }
         _ => format!("{scope_suggestion} needs manual review before deciding a destination."),
     }
 }
@@ -145,22 +153,39 @@ pub(crate) fn build_tidy_report(
         let mut status = "ok".to_string();
         let mut entry_count = None;
         let mut vec_available = false;
+        let link_meta = std::fs::symlink_metadata(&path).ok();
+        let is_symlink = link_meta
+            .as_ref()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+        let symlink_target = if is_symlink {
+            std::fs::read_link(&path)
+                .ok()
+                .map(|target| target.display().to_string())
+        } else {
+            None
+        };
+        let target_exists = is_symlink.then(|| path.exists());
 
-        match open_cli_store(&path) {
-            Ok(store) => {
-                vec_available = store.vec_available;
-                match store.stats(false) {
-                    Ok(stats) => {
-                        entry_count = Some(stats.total as usize);
-                        total_memories += stats.total as usize;
-                    }
-                    Err(_) => {
-                        status = "stats_error".to_string();
+        if is_symlink && !path.exists() {
+            status = "broken_symlink".to_string();
+        } else {
+            match open_cli_store(&path) {
+                Ok(store) => {
+                    vec_available = store.vec_available;
+                    match store.stats(false) {
+                        Ok(stats) => {
+                            entry_count = Some(stats.total as usize);
+                            total_memories += stats.total as usize;
+                        }
+                        Err(_) => {
+                            status = "stats_error".to_string();
+                        }
                     }
                 }
-            }
-            Err(_) => {
-                status = "open_error".to_string();
+                Err(_) => {
+                    status = "open_error".to_string();
+                }
             }
         }
 
@@ -171,6 +196,9 @@ pub(crate) fn build_tidy_report(
             recommended_action: tidy_recommended_action(&scope_suggestion, &status),
             scope_suggestion,
             status,
+            is_symlink,
+            symlink_target,
+            target_exists,
         });
     }
 
@@ -235,6 +263,12 @@ pub(crate) fn build_tidy_report(
             "Repair or inspect DBs with open_error/stats_error before consolidation".to_string(),
         );
     }
+    if databases.iter().any(|db| db.status == "broken_symlink") {
+        next_steps.push(
+            "Run `tachi tidy --apply` to remove broken memory.db symlinks, then rescan."
+                .to_string(),
+        );
+    }
     if databases.is_empty() {
         next_steps.push(
             "No memory.db files found in scanned roots; add more roots or initialize a project DB"
@@ -277,6 +311,17 @@ pub(super) fn render_tidy_report(report: &TidyReport) -> String {
             "{emoji} {} — entries: {count}, suggest: {}, action: {}, vectors: {}, status: {}",
             db.path, db.scope_suggestion, db.recommended_action, db.vec_available, db.status
         ));
+        if db.is_symlink {
+            let target = db
+                .symlink_target
+                .as_deref()
+                .unwrap_or("<unreadable symlink target>");
+            let exists = db
+                .target_exists
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            lines.push(format!("   symlink -> {target} (target_exists={exists})"));
+        }
     }
 
     if !report.groups.is_empty() {
@@ -377,6 +422,43 @@ pub(crate) fn execute_tidy_apply(
                 "skipped".to_string(),
                 "DB must be repaired and re-scanned before apply.".to_string(),
             ),
+            "remove_broken_symlink" => {
+                let mut removed = 0usize;
+                let mut failures = Vec::new();
+                for source in &step.source_paths {
+                    let path = PathBuf::from(source);
+                    match std::fs::symlink_metadata(&path) {
+                        Ok(meta) if meta.file_type().is_symlink() && !path.exists() => {
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => {
+                                    removed += 1;
+                                    if let Some(parent) = path.parent() {
+                                        let _ = std::fs::remove_dir(parent);
+                                    }
+                                }
+                                Err(err) => failures.push(format!("{source}: {err}")),
+                            }
+                        }
+                        Ok(_) => failures.push(format!("{source}: no longer a broken symlink")),
+                        Err(err) => failures.push(format!("{source}: {err}")),
+                    }
+                }
+
+                if failures.is_empty() {
+                    (
+                        "cleaned".to_string(),
+                        format!("Removed {removed} broken memory.db symlink(s)."),
+                    )
+                } else {
+                    (
+                        "skipped".to_string(),
+                        format!(
+                            "Removed {removed} broken memory.db symlink(s); failures: {}",
+                            failures.join("; ")
+                        ),
+                    )
+                }
+            }
             _ => (
                 "skipped".to_string(),
                 "This action remains manual-review only in the conservative apply path."
@@ -384,7 +466,7 @@ pub(crate) fn execute_tidy_apply(
             ),
         };
 
-        if outcome == "confirmed" {
+        if outcome == "confirmed" || outcome == "cleaned" {
             applied_count += 1;
         } else {
             skipped_count += 1;

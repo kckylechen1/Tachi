@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
-- [1.5.x](#155---2026-06-15) — harness and skill-surface diagnostics
+- [1.5.x](#156---2026-06-15) — repair and tidy cleanup UX
 - [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
 - [1.3.x](#130---2026-05-30) — search quality, memory lifecycle, and audit hardening
 - [1.2.0](#120---2026-05-25) — shell orchestration, dispatch v2, daily distill
@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.5.6] - 2026-06-15 — Repair and tidy cleanup UX
+
+Patch release for stale project DB symlink cleanup and Foundry repair follow-through.
+
+### Changed
+
+- `tachi tidy` now includes `memory.db` symlinks even when their targets are missing, reports the target path, and recommends `remove_broken_symlink`.
+- `tachi tidy --apply` now removes broken `memory.db` symlinks and cleans up the empty parent directory when possible.
+- `memory-core`, `memory-node`, `memory-server`, and npm package metadata versions are aligned to `1.5.6`.
+- Installer URLs across README and install docs now point at the `v1.5.6` release tag.
 
 ## [1.5.5] - 2026-06-15 — Harness and skill-surface diagnostics
 

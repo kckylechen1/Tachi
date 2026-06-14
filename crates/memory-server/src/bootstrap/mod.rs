@@ -101,6 +101,9 @@ pub(crate) struct TidyFinding {
     pub scope_suggestion: String,
     pub status: String,
     pub recommended_action: String,
+    pub is_symlink: bool,
+    pub symlink_target: Option<String>,
+    pub target_exists: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,13 +283,17 @@ pub(super) fn collect_memory_db_files(
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if path.is_file() {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name == "memory.db")
-                .unwrap_or(false)
-            {
+        let is_memory_db = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == "memory.db")
+            .unwrap_or(false);
+        let is_symlink = std::fs::symlink_metadata(&path)
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false);
+
+        if path.is_file() || (is_memory_db && is_symlink) {
+            if is_memory_db {
                 out.push(path);
             }
             continue;
