@@ -1405,6 +1405,26 @@ mod tests {
     }
 
     #[test]
+    fn truth_maintenance_routes_external_global_target_as_global_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global = tmp.path().join("global").join("memory.db");
+        let current_project = tmp
+            .path()
+            .join("workspace")
+            .join(".tachi")
+            .join("memory.db");
+        let external_global = tmp.path().join("archive").join("global-memory.db");
+        let target = manifest_target("global", external_global.clone());
+
+        let route =
+            resolve_truth_maintenance_route_for_paths(&global, Some(&current_project), &target);
+
+        assert_eq!(route.target_db, DbScope::Global);
+        assert_eq!(route.named_project, None);
+        assert_eq!(route.db_path.as_deref(), Some(external_global.as_path()));
+    }
+
+    #[test]
     fn truth_maintenance_routes_plan_c_project_by_name() {
         let _guard = crate::shell_ops::tachi_run_root_env_lock()
             .lock()

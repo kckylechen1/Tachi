@@ -803,19 +803,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                let mut conns = lock_or_recover(&pool.connections, "mcp_pool.connections");
-                let now = Instant::now();
-                let idle_ttl = pool.idle_ttl;
-                let stale: Vec<String> = conns
-                    .iter()
-                    .filter(|(_, c)| now.duration_since(c.last_used) > idle_ttl)
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                for key in stale {
-                    if let Some(conn) = conns.remove(&key) {
-                        eprintln!("Idle cleanup: disconnecting '{}'", key);
-                        drop(conn);
-                    }
+                for key in pool.remove_idle_connections(Instant::now()) {
+                    eprintln!("Idle cleanup: disconnecting '{}'", key);
                 }
             }
         });

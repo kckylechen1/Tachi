@@ -406,6 +406,16 @@ async fn test_pack_project_openclaw_writes_projection_manifest() {
         projection_manifest.exists(),
         "projection manifest should exist"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&projection_manifest)
+            .expect("projection manifest metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "projection manifest should be owner-only");
+    }
 
     let manifest: Value = serde_json::from_str(
         &std::fs::read_to_string(&projection_manifest).expect("read projection manifest"),
@@ -428,6 +438,21 @@ async fn test_pack_project_openclaw_writes_projection_manifest() {
             .exists(),
         "openclaw plugin overlay should be copied"
     );
+    let overlay_manifest = std::path::Path::new(projected_path)
+        .join("_overlay")
+        .join("openclaw")
+        .join("overlay-manifest.json");
+    assert!(overlay_manifest.exists(), "overlay manifest should exist");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&overlay_manifest)
+            .expect("overlay manifest metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "overlay manifest should be owner-only");
+    }
 
     let _ = std::fs::remove_dir_all(&pack_dir);
 }

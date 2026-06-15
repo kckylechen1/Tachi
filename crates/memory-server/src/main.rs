@@ -466,7 +466,6 @@ pub(crate) struct FoundryRuntime {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
     global_read_pool: ReadStorePool,

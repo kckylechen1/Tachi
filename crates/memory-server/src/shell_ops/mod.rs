@@ -157,22 +157,25 @@ fn validate_slice_id(id: &str) -> Result<(), String> {
 fn read_status(run_dir: &Path) -> Value {
     let status_path = run_dir.join("status.json");
     match std::fs::read_to_string(&status_path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| json!({})),
-        Err(_) => json!({}),
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %status_path.display(),
+                error = %err,
+                "shell status JSON parse failed; continuing with empty status"
+            );
+            json!({})
+        }),
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %status_path.display(),
+                    error = %err,
+                    "shell status read failed; continuing with empty status"
+                );
+            }
+            json!({})
+        }
     }
-}
-
-fn write_status(run_dir: &Path, status: &Value) -> Result<(), String> {
-    let status_path = run_dir.join("status.json");
-    let serialized =
-        serde_json::to_string_pretty(status).map_err(|e| format!("serialize status.json: {e}"))?;
-    crate::utils::write_owner_only_file_atomic(&status_path, serialized.as_bytes())
-}
-
-fn append_event(run_dir: &Path, event: Value) -> Result<(), String> {
-    let path = run_dir.join("events.jsonl");
-    let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
-    crate::utils::append_owner_only_jsonl_line(&path, &line)
 }
 
 // ─── Meta skill injection ────────────────────────────────────────────────────
@@ -460,7 +463,9 @@ async fn handle_stage_action(
         &params.allowed_scope,
     );
     let instr_path = run_dir.join("instruction.md");
-    std::fs::write(&instr_path, instruction).map_err(|e| format!("write instruction.md: {e}"))?;
+    tokio::fs::write(&instr_path, instruction)
+        .await
+        .map_err(|e| format!("write instruction.md: {e}"))?;
 
     advance_stage(&run_dir, &flow_id, stage, &task, &injection, created)?;
     let required_skills = crate::skill_policy::shell_stage_skills(stage);
@@ -499,7 +504,9 @@ async fn handle_dispatch_action(
         &params.allowed_scope,
     );
     let instr_path = run_dir.join("instruction.md");
-    std::fs::write(&instr_path, &instruction).map_err(|e| format!("write instruction.md: {e}"))?;
+    tokio::fs::write(&instr_path, &instruction)
+        .await
+        .map_err(|e| format!("write instruction.md: {e}"))?;
 
     advance_stage(&run_dir, &flow_id, "dispatch", &task, &injection, created)?;
     let required_skills = crate::skill_policy::shell_stage_skills("dispatch");
@@ -591,8 +598,8 @@ async fn handle_dispatch_action(
                             a.push(json!(d));
                         }
                     }
-                    let _ = write_status(&run_dir, &status);
-                    let _ = append_event(
+                    let _ = crate::utils::write_run_status_file(&run_dir, &status);
+                    let _ = crate::utils::append_run_event(
                         &run_dir,
                         json!({
                             "event": "dispatch_spawned",
@@ -666,7 +673,8 @@ async fn handle_convoy_dispatch_action(
     parent_instruction.push_str(
         "- Require each worker to report back; leader reviews results before integration.\n\n",
     );
-    std::fs::write(parent_instr_path, parent_instruction)
+    tokio::fs::write(parent_instr_path, parent_instruction)
+        .await
         .map_err(|e| format!("write convoy parent instruction.md: {e}"))?;
     let mut seen = std::collections::HashSet::new();
     let mut slice_records = Vec::new();
@@ -724,7 +732,8 @@ async fn handle_convoy_dispatch_action(
         };
         let slice_notes = slice.notes.as_deref().or(params.notes.as_deref());
         let slice_dir = run_dir.join("slices").join(&slice_id);
-        std::fs::create_dir_all(slice_dir.join("artifacts"))
+        tokio::fs::create_dir_all(slice_dir.join("artifacts"))
+            .await
             .map_err(|e| format!("create convoy slice dir: {e}"))?;
 
         let task_packet = match slice.title.as_deref() {
@@ -757,10 +766,11 @@ async fn handle_convoy_dispatch_action(
         instruction.push_str("- Report changed files, verification commands and outcomes, blockers, and recommended handoff.\n");
         instruction.push_str("- Do not claim the parent flow is complete; the leader owns integration and final verification.\n\n");
         let slice_instr_path = slice_dir.join("instruction.md");
-        std::fs::write(&slice_instr_path, instruction)
+        tokio::fs::write(&slice_instr_path, instruction)
+            .await
             .map_err(|e| format!("write convoy slice instruction.md: {e}"))?;
 
-        append_event(
+        crate::utils::append_run_event(
             run_dir,
             json!({
                 "event": "convoy_slice_prepared",
@@ -839,7 +849,7 @@ async fn handle_convoy_dispatch_action(
         }
 
         if let Some(d) = dispatch_id.as_deref() {
-            append_event(
+            crate::utils::append_run_event(
                 run_dir,
                 json!({
                     "event": "convoy_dispatch_spawned",
@@ -887,7 +897,7 @@ async fn handle_convoy_dispatch_action(
             }),
         );
     }
-    write_status(run_dir, &status)?;
+    crate::utils::write_run_status_file(run_dir, &status)?;
 
     let resp = json!({
         "flow_id": flow_id,
@@ -1069,13 +1079,13 @@ fn advance_stage(
             "at": now,
         }));
     }
-    write_status(run_dir, &Value::Object(new_status))?;
+    crate::utils::write_run_status_file(run_dir, &Value::Object(new_status))?;
     let event_kind = if created {
         "flow_created"
     } else {
         "stage_entered"
     };
-    append_event(
+    crate::utils::append_run_event(
         run_dir,
         json!({
             "event": event_kind,
@@ -1839,7 +1849,7 @@ mod tests {
         let run_dir = _root.join("flow-gh-coexist");
         std::fs::create_dir_all(&run_dir).unwrap();
         // Pre-seed a status.json that mimics a flow already in `dispatch`.
-        write_status(
+        crate::utils::write_run_status_file(
             &run_dir,
             &json!({
                 "flow_id": "flow-coexist",

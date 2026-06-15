@@ -457,7 +457,7 @@ pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
+fn remote_mcp_url(def: &serde_json::Value) -> Option<&str> {
     if let Some(url) = def.get("url").and_then(|value| value.as_str()) {
         return Some(url);
     }
@@ -524,7 +524,7 @@ fn reject_blocked_mcp_remote_ip(ip: IpAddr) -> Result<(), String> {
 /// Validate that a remote MCP URL points to a publicly reachable host.
 /// Blocks non-HTTP(S) schemes, loopback, link-local, and private addresses
 /// to prevent SSRF against internal services.
-pub(crate) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
+fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL '{url}': {e}"))?;
 
     let scheme = parsed.scheme();

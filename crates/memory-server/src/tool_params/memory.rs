@@ -708,7 +708,7 @@ pub(crate) struct ExtractFactsParams {
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
 pub(crate) struct Message {
     /// Role of the message sender (e.g., "user", "assistant", "system")
-    #[allow(dead_code)]
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
     /// Content of the message
     pub content: String,

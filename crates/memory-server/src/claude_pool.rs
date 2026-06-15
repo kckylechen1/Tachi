@@ -103,7 +103,7 @@ impl ClaudePool {
         let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
         let safe_label = sanitize_label(label);
         let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
-        if let Err(e) = std::fs::create_dir_all(&run_dir) {
+        if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
             return Err(format!(
                 "claude_pool create run dir {}: {e}",
                 run_dir.display()
@@ -129,7 +129,7 @@ impl ClaudePool {
                 if let Err(err) = write_run_file(&run_dir.join("result.md"), &text) {
                     tracing::warn!("claude_pool failed to write result.md: {err}");
                 }
-                if let Err(err) = write_status(
+                if let Err(err) = crate::utils::write_run_status_file(
                     &run_dir,
                     &json!({
                         "status": "success",
@@ -148,7 +148,7 @@ impl ClaudePool {
                 if let Err(write_err) = write_run_file(&run_dir.join("result.md"), &err) {
                     tracing::warn!("claude_pool failed to write error result.md: {write_err}");
                 }
-                if let Err(write_err) = write_status(
+                if let Err(write_err) = crate::utils::write_run_status_file(
                     &run_dir,
                     &json!({
                         "status": "failed",
@@ -238,7 +238,7 @@ impl ClaudePool {
 /// Combine a `system` preamble and `user` payload into a single prompt the
 /// Claude CLI can consume on stdin. Mirrors the OpenAI-compatible chat
 /// shape used by the raw-API lanes so behaviour stays comparable.
-pub fn format_pool_prompt(system: &str, user: &str) -> String {
+fn format_pool_prompt(system: &str, user: &str) -> String {
     let sys = system.trim();
     let usr = user.trim();
     if sys.is_empty() {
@@ -317,15 +317,9 @@ fn write_run_file(path: &Path, body: &str) -> Result<(), String> {
     write_owner_only_file_atomic(path, body.as_bytes())
 }
 
-fn write_status(run_dir: &Path, value: &Value) -> Result<(), String> {
-    let path = run_dir.join("status.json");
-    let body = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    write_run_file(&path, &body)
-}
-
 /// Extract the `result` field from Claude CLI's JSON envelope. Tolerates
 /// either a JSON object or raw text falling back to the whole stdout.
-pub fn parse_claude_json_envelope(stdout: &str) -> Result<String, String> {
+fn parse_claude_json_envelope(stdout: &str) -> Result<String, String> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
         return Err("claude cli returned empty stdout".to_string());

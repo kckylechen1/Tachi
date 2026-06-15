@@ -1342,11 +1342,17 @@ async fn handle_foundry_maintenance_item(
     let worker = foundry_worker_name(&item.job.kind);
     let event_hash = build_foundry_event_hash(server, item)?;
     if matches!(lease, memory_core::FoundryJobLease::StaleRunning) {
-        let _ = with_foundry_store(server, item, |store| {
+        if let Err(err) = with_foundry_store(server, item, |store| {
             store
                 .release_event_claim(&event_hash, worker)
                 .map_err(|e| format!("Failed to release stale foundry claim {}: {e}", item.job.id))
-        });
+        }) {
+            tracing::warn!(
+                error = %err,
+                job_id = %item.job.id,
+                "failed to release stale foundry claim"
+            );
+        }
     }
     let claimed = with_foundry_store(server, item, |store| {
         store
@@ -1406,11 +1412,17 @@ async fn handle_foundry_maintenance_item(
     };
 
     if let Err(err) = &result {
-        let _ = with_foundry_store(server, item, |store| {
+        if let Err(release_err) = with_foundry_store(server, item, |store| {
             store
                 .release_event_claim(&event_hash, worker)
                 .map_err(|e| format!("Failed to release foundry job claim {}: {e}", item.job.id))
-        });
+        }) {
+            tracing::warn!(
+                error = %release_err,
+                job_id = %item.job.id,
+                "failed to release foundry claim after processing error"
+            );
+        }
         return Err(err.clone());
     }
 
@@ -1466,7 +1478,7 @@ pub(crate) async fn run_foundry_maintenance_worker(
             Err(e) => Some(("failed", Some(e.clone()))),
         };
         if let Some((status_str, reason)) = terminal {
-            let _ = with_foundry_store(&server, &item, |store| {
+            if let Err(err) = with_foundry_store(&server, &item, |store| {
                 memory_core::update_foundry_job_status_with_reason(
                     store.connection(),
                     &item.job.id,
@@ -1474,7 +1486,14 @@ pub(crate) async fn run_foundry_maintenance_worker(
                     reason.as_deref(),
                 )
                 .map_err(|e| format!("update foundry job status: {e}"))
-            });
+            }) {
+                tracing::warn!(
+                    error = %err,
+                    job_id = %item.job.id,
+                    status = %status_str,
+                    "failed to persist foundry job terminal status"
+                );
+            }
         }
 
         match result {

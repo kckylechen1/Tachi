@@ -62,7 +62,7 @@ pub(super) async fn run_harness_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         HarnessAction::Status { hosts, home, json } => {
-            let home = resolve_home(home)?;
+            let home = crate::utils::resolve_home_arg(home)?;
             let report = build_harness_report(&home, &hosts)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -74,39 +74,12 @@ pub(super) async fn run_harness_command(
     }
 }
 
-fn resolve_home(home: Option<PathBuf>) -> Result<PathBuf, String> {
-    if let Some(home) = home {
-        return Ok(home);
-    }
-    dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())
-}
-
-fn normalize_hosts(hosts: &[String]) -> Result<Vec<&'static str>, String> {
-    if hosts.is_empty() {
-        return Ok(SUPPORTED_HOSTS.to_vec());
-    }
-
-    let mut out = Vec::new();
-    for raw in hosts {
-        let host = raw.trim().to_ascii_lowercase();
-        let Some(supported) = SUPPORTED_HOSTS.iter().copied().find(|h| *h == host) else {
-            return Err(format!(
-                "unsupported harness host '{raw}'. Supported: {}",
-                SUPPORTED_HOSTS.join(", ")
-            ));
-        };
-        if !out.contains(&supported) {
-            out.push(supported);
-        }
-    }
-    Ok(out)
-}
-
 fn build_harness_report(
     home: &Path,
     host_filters: &[String],
 ) -> Result<HarnessStatusReport, String> {
-    let hosts = normalize_hosts(host_filters)?;
+    let hosts =
+        crate::utils::normalize_supported_values(host_filters, SUPPORTED_HOSTS, "harness host")?;
     let mut specs = Vec::new();
     for host in &hosts {
         specs.extend(target_specs_for_host(home, host));

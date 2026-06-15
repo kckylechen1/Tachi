@@ -5,17 +5,6 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-fn is_shell_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
 fn is_upper_snake_env_name(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -283,7 +272,7 @@ pub(crate) fn parse_project_vault_env_bindings_detailed(
             continue;
         };
         let name = name.trim();
-        if !is_shell_env_name(name) {
+        if !crate::utils::is_shell_env_name(name) {
             ignored.push(ProjectEnvIgnoredLine {
                 line: line_no,
                 reason: format!("invalid env name '{name}'"),
@@ -644,7 +633,7 @@ async fn run_legacy_env_export(
             continue;
         }
 
-        if !is_shell_env_name(&entry.name) {
+        if !crate::utils::is_shell_env_name(&entry.name) {
             eprintln!(
                 "WARNING: skipped secret '{}' because it is not a valid shell environment name",
                 entry.name

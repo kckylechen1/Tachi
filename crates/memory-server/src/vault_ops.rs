@@ -4,7 +4,10 @@ use super::*;
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
-use memory_core::vault::{VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation};
+use memory_core::vault::{
+    normalize_secret_type, VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
+    SECRET_TYPE_API_KEY,
+};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +16,7 @@ const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
 const VAULT_UNLOCK_LOCKOUT_SECS: u64 = 300;
 
 fn default_secret_type() -> String {
-    "api_key".to_string()
+    SECRET_TYPE_API_KEY.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -446,17 +449,6 @@ fn record_successful_vault_access(
         .map_err(|e| e.to_string())
 }
 
-fn is_shell_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
-}
-
 fn load_unlocked_vault_secrets(
     server: &MemoryServer,
     include_entry: impl Fn(&VaultEntry) -> bool,
@@ -610,7 +602,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             matching.rotate_left(selected_idx);
             let mut pool = Vec::new();
             for (_, entry) in matching {
-                if entry.secret_type != "api_key"
+                if entry.secret_type != SECRET_TYPE_API_KEY
                     || entry
                         .allowed_agents
                         .as_ref()
@@ -641,7 +633,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             if only_logical_name.is_some_and(|logical_name| logical_name != entry.name) {
                 continue;
             }
-            if entry.secret_type != "api_key"
+            if entry.secret_type != SECRET_TYPE_API_KEY
                 || !entry.name.ends_with("_API_KEY")
                 || rotation_members.contains(&entry.name)
                 || entry
@@ -678,10 +670,10 @@ pub(super) fn load_unlocked_env_secrets(
         .flat_map(|entries| entries.iter().map(|entry| entry.key_id.clone()))
         .collect();
     let mut secrets = load_unlocked_vault_secrets(server, |entry| {
-        is_shell_env_name(&entry.name) && !rotation_member_names.contains(&entry.name)
+        crate::utils::is_shell_env_name(&entry.name) && !rotation_member_names.contains(&entry.name)
     })?;
     for (logical_name, entries) in pools {
-        if !is_shell_env_name(&logical_name) {
+        if !crate::utils::is_shell_env_name(&logical_name) {
             continue;
         }
         if let Some(entry) = entries.first() {
@@ -698,7 +690,8 @@ fn load_unlocked_provider_env_secrets(
     let pools = load_unlocked_api_key_secret_pools(server)?;
     let mut secrets = Vec::new();
     for (logical_name, entries) in pools {
-        if !provider_keys.contains(&logical_name) || !is_shell_env_name(&logical_name) {
+        if !provider_keys.contains(&logical_name) || !crate::utils::is_shell_env_name(&logical_name)
+        {
             continue;
         }
         if let Some(entry) = entries.first() {
@@ -791,7 +784,7 @@ fn parse_project_vault_env_bindings(contents: &str) -> Vec<(String, String)> {
             let line = line.strip_prefix("export ").unwrap_or(line).trim();
             let (name, value) = line.split_once('=')?;
             let name = name.trim();
-            if !is_shell_env_name(name) {
+            if !crate::utils::is_shell_env_name(name) {
                 return None;
             }
             crate::provider_config::parse_vault_alias(value)
@@ -1156,13 +1149,7 @@ pub(crate) async fn handle_vault_set(
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
         with_vault_key(server, |key| {
-            let secret_type = match params.secret_type.to_ascii_lowercase().as_str() {
-                "api_key" => "api_key",
-                "oauth_token" | "oauth" => "oauth_token",
-                "json_blob" | "json" => "json_blob",
-                "cookie" => "cookie",
-                _ => "other",
-            };
+            let secret_type = normalize_secret_type(&params.secret_type);
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
             let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
 
@@ -1313,6 +1300,7 @@ pub(crate) async fn handle_vault_list(
     }
 
     let entries = if let Some(ref secret_type) = params.secret_type {
+        let secret_type = normalize_secret_type(secret_type);
         server.with_global_store_read(|store| {
             store
                 .vault_list_entries_by_type(secret_type)
@@ -1393,7 +1381,7 @@ pub(crate) async fn handle_vault_remove(
 
 pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
     let initialized = is_vault_initialized(server)?;
-    let _ = maybe_auto_lock_vault(server);
+    maybe_auto_lock_vault(server);
     let (locked, auto_lock_secs) = {
         let v = server.vault_read();
         (v.key.is_none(), v.auto_lock_after_secs)
@@ -1480,7 +1468,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
     let logical_name = params.prefix.clone();
     let result = (|| {
         crypto::validate_secret_name(&params.prefix)?;
-        if !is_shell_env_name(&params.prefix) {
+        if !crate::utils::is_shell_env_name(&params.prefix) {
             return Err(format!(
                 "API key pool prefix '{}' must be a shell env name such as OPENAI_API_KEY",
                 params.prefix
@@ -1508,7 +1496,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
                     name,
                     encrypted_value,
                     nonce,
-                    secret_type: "api_key".to_string(),
+                    secret_type: SECRET_TYPE_API_KEY.to_string(),
                     description: params.description.clone(),
                     allowed_agents: allowed_agents.clone(),
                     created_at: now.clone(),
@@ -1607,7 +1595,7 @@ pub(crate) async fn handle_vault_lease_api_key(
             .env_name
             .clone()
             .unwrap_or_else(|| params.name.clone());
-        if !is_shell_env_name(&env_name) {
+        if !crate::utils::is_shell_env_name(&env_name) {
             return Err(format!(
                 "env_name '{}' must be a valid shell env name",
                 env_name
