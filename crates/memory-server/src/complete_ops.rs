@@ -86,6 +86,75 @@ fn lesson_task_matches(text: &str, expected_task: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug)]
+struct KanbanSnapshot {
+    scope: &'static str,
+    state: Option<String>,
+    eval_ledger_id: Option<String>,
+    reviewed: Option<bool>,
+}
+
+fn read_kanban_snapshot(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<KanbanSnapshot>, String> {
+    let path = format!("/kanban/tasks/{dispatch_id}");
+    let project_entries = if server.has_project_db() {
+        server.with_project_store_read(|store| {
+            store
+                .list_by_path(&path, 1, false)
+                .map_err(|e| format!("kanban list_by_path: {e}"))
+        })?
+    } else {
+        Vec::new()
+    };
+    if let Some(entry) = project_entries.first() {
+        return Ok(Some(KanbanSnapshot {
+            scope: "project",
+            state: entry
+                .metadata
+                .get("a2a_state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            eval_ledger_id: entry
+                .metadata
+                .get("eval_ledger_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            reviewed: entry
+                .metadata
+                .get("reviewed")
+                .and_then(serde_json::Value::as_bool),
+        }));
+    }
+
+    let global_entries = server.with_global_store_read(|store| {
+        store
+            .list_by_path(&path, 1, false)
+            .map_err(|e| format!("kanban list_by_path (global): {e}"))
+    })?;
+    let Some(entry) = global_entries.first() else {
+        return Ok(None);
+    };
+    Ok(Some(KanbanSnapshot {
+        scope: "global",
+        state: entry
+            .metadata
+            .get("a2a_state")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        eval_ledger_id: entry
+            .metadata
+            .get("eval_ledger_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        reviewed: entry
+            .metadata
+            .get("reviewed")
+            .and_then(serde_json::Value::as_bool),
+    }))
+}
+
 async fn run_lesson_post_complete_hook(
     server: &MemoryServer,
     params: &TachiCompleteParams,
@@ -547,10 +616,12 @@ pub(crate) async fn handle_tachi_complete(
         .to_string();
 
     let mut pipeline_status = serde_json::json!({
+        "kanban_update": "skipped (no dispatch_id)",
         "distill_trajectory": "skipped (no trajectory data)",
         "skill_evolve": "skipped",
         "post_complete_hooks": "pending",
     });
+    let mut completion_warning: Option<String> = None;
 
     if let Some(ref trajectory) = safe_trajectory {
         if let Some(trace_arr) = trajectory.as_array() {
@@ -565,10 +636,8 @@ pub(crate) async fn handle_tachi_complete(
                 } else {
                     skills_used[0].clone()
                 };
-                pipeline_status = serde_json::json!({
-                    "distill_trajectory": "enqueued",
-                    "skill_evolve": "will follow distill if successful",
-                });
+                pipeline_status["distill_trajectory"] = json!("enqueued");
+                pipeline_status["skill_evolve"] = json!("will follow distill if successful");
                 tokio::spawn(async move {
                     let distill_params = DistillTrajectoryParams {
                         task_description: task_desc,
@@ -607,14 +676,103 @@ pub(crate) async fn handle_tachi_complete(
         // kanban row reviewed so the status dashboard stops flagging it as
         // an auto-closed, unreviewed dispatch. Watchdog auto-close keeps
         // reviewed=false.
-        let _ = crate::dispatch_ops::update_kanban_state(
+        match crate::dispatch_ops::update_kanban_state(
             server,
             did,
             new_state,
             Some(&eval_memory_id),
             Some(true),
         )
-        .await;
+        .await
+        {
+            Ok(()) => match read_kanban_snapshot(server, did) {
+                Ok(Some(snapshot))
+                    if snapshot.state.as_deref() == Some(new_state)
+                        && snapshot.eval_ledger_id.as_deref() == Some(eval_memory_id.as_str())
+                        && snapshot.reviewed == Some(true) =>
+                {
+                    pipeline_status["kanban_update"] = json!({
+                        "status": "updated",
+                        "dispatch_id": did,
+                        "scope": snapshot.scope,
+                        "state": new_state,
+                        "eval_memory_id": eval_memory_id,
+                        "reviewed": true,
+                    });
+                }
+                Ok(Some(snapshot)) => {
+                    let warning = format!(
+                            "kanban update verification failed after eval persistence for dispatch_id={did}, task_id={}, task={}: expected state={new_state}, eval_memory_id={}, reviewed=true but found scope={}, state={:?}, eval_memory_id={:?}, reviewed={:?}",
+                            task_id,
+                            safe_task,
+                            eval_memory_id,
+                            snapshot.scope,
+                            snapshot.state,
+                            snapshot.eval_ledger_id,
+                            snapshot.reviewed
+                        );
+                    eprintln!("[tachi_complete] {warning}");
+                    completion_warning = Some(warning.clone());
+                    pipeline_status["kanban_update"] = json!({
+                        "status": "stale",
+                        "dispatch_id": did,
+                        "scope": snapshot.scope,
+                        "state": snapshot.state,
+                        "eval_memory_id": snapshot.eval_ledger_id,
+                        "reviewed": snapshot.reviewed,
+                        "expected_state": new_state,
+                        "expected_eval_memory_id": eval_memory_id,
+                    });
+                }
+                Ok(None) => {
+                    let warning = format!(
+                            "kanban card missing after eval persistence for dispatch_id={did}, task_id={}, task={}",
+                            task_id, safe_task
+                        );
+                    eprintln!("[tachi_complete] {warning}");
+                    completion_warning = Some(warning.clone());
+                    pipeline_status["kanban_update"] = json!({
+                        "status": "missing",
+                        "dispatch_id": did,
+                        "expected_state": new_state,
+                        "expected_eval_memory_id": eval_memory_id,
+                        "reviewed": true,
+                    });
+                }
+                Err(error) => {
+                    let warning = format!(
+                            "kanban update readback failed after eval persistence for dispatch_id={did}, task_id={}, task={}: {error}",
+                            task_id, safe_task
+                        );
+                    eprintln!("[tachi_complete] {warning}");
+                    completion_warning = Some(warning.clone());
+                    pipeline_status["kanban_update"] = json!({
+                        "status": "readback_failed",
+                        "dispatch_id": did,
+                        "expected_state": new_state,
+                        "expected_eval_memory_id": eval_memory_id,
+                        "reviewed": true,
+                        "error": error,
+                    });
+                }
+            },
+            Err(error) => {
+                let warning = format!(
+                    "kanban update failed after eval persistence for dispatch_id={did}, task_id={}, task={}: {error}",
+                    task_id, safe_task
+                );
+                eprintln!("[tachi_complete] {warning}");
+                completion_warning = Some(warning.clone());
+                pipeline_status["kanban_update"] = json!({
+                    "status": "failed",
+                    "dispatch_id": did,
+                    "state": new_state,
+                    "eval_memory_id": eval_memory_id,
+                    "reviewed": true,
+                    "error": error,
+                });
+            }
+        }
     }
 
     let dispatch_completion_link = match (
@@ -697,7 +855,7 @@ pub(crate) async fn handle_tachi_complete(
         );
     }
 
-    let review_bundle = serde_json::json!({
+    let mut review_bundle = serde_json::json!({
         "recorded": true,
         "task_id": task_id,
         "task": safe_task,
@@ -721,7 +879,42 @@ pub(crate) async fn handle_tachi_complete(
         "pipeline": pipeline_status,
         "secret_redactions": secret_redactions,
     });
+    if let (Some(warning), Some(obj)) = (completion_warning, review_bundle.as_object_mut()) {
+        crate::mcp_proxy::append_warning(obj, warning);
+    }
 
     serde_json::to_string(&review_bundle)
         .map_err(|e| format!("Failed to serialize review bundle: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_kanban_snapshot_surfaces_project_read_failures() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let global_db = dir.path().join("global").join("memory.db");
+        let project_db = dir.path().join("project").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent"))
+            .expect("create global parent");
+        std::fs::create_dir_all(project_db.parent().expect("project parent"))
+            .expect("create project parent");
+        let server =
+            MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+
+        server
+            .with_project_store(|store| {
+                store
+                    .connection()
+                    .execute("DROP TABLE memories", [])
+                    .map_err(|e| format!("drop memories: {e}"))?;
+                Ok(())
+            })
+            .expect("break project memories table");
+
+        let err = read_kanban_snapshot(&server, "dispatch-readback-failure")
+            .expect_err("project read failure should not be treated as a missing card");
+        assert!(err.contains("kanban list_by_path"), "{err}");
+    }
 }

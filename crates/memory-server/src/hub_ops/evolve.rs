@@ -265,7 +265,7 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
         })?;
 
         // Also update the original skill's active_version pointer
-        let _ = server.with_global_store(|store| {
+        if let Err(error) = server.with_global_store(|store| {
             // Read, modify, write back
             if let Some(mut orig) = store
                 .hub_get(&params.skill_id)
@@ -275,7 +275,14 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
                 store.hub_register(&orig).map_err(|e| format!("{e}"))?;
             }
             Ok::<(), String>(())
-        });
+        }) {
+            tracing::warn!(
+                skill_id = %params.skill_id,
+                active_version = %new_id,
+                error = %error,
+                "failed to update original skill active_version pointer"
+            );
+        }
     }
 
     serde_json::to_string(&json!({
