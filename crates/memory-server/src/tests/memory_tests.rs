@@ -402,6 +402,77 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
 }
 
 #[tokio::test]
+async fn tachi_search_excludes_recall_cache_rows_by_default() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut live = make_entry("recall-live-memory-row");
+            live.path = "/scratch/sigil/current".to_string();
+            live.text = "UniqueRecallCacheNeedle belongs in live memory.".to_string();
+            live.summary = "Live memory row".to_string();
+            store.upsert(&live).map_err(|e| e.to_string())?;
+
+            let mut cache = make_entry("foundry:recall-cache:boundary");
+            cache.path = "/scratch/sigil/recall-cache/boundary".to_string();
+            cache.text = "UniqueRecallCacheNeedle belongs in recall cache.".to_string();
+            cache.summary = "Recall cache row".to_string();
+            cache.topic = "recall_rerank_cache".to_string();
+            cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+            cache.metadata = json!({"recall_rerank_cache": true});
+            store.upsert(&cache).map_err(|e| e.to_string())
+        })
+        .expect("seed recall-cache boundary entries");
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "UniqueRecallCacheNeedle".to_string(),
+            scope: "memory".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            category: None,
+            include_archived: false,
+            include_training: false,
+            enable_rerank: false,
+            as_of: None,
+        }))
+        .await
+        .expect("memory scoped search");
+
+    assert!(response.contains("recall-live-memory-row"));
+    assert!(!response.contains("foundry:recall-cache:boundary"));
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "UniqueRecallCacheNeedle".to_string(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: Some("/scratch/sigil/recall-cache".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("recall-cache scoped search");
+    assert!(response.contains("foundry:recall-cache:boundary"));
+}
+
+#[tokio::test]
 async fn tachi_search_surfaces_referenced_files() {
     let server = make_server();
     server
@@ -606,6 +677,79 @@ async fn find_similar_memory_excludes_sft_training_rows_by_default() {
         rows.iter()
             .any(|row| row["id"] == json!("similar-sft-training-row")),
         "training opt-in should surface training row: {rows:#?}"
+    );
+}
+
+#[tokio::test]
+async fn find_similar_memory_excludes_recall_cache_rows_by_default() {
+    let server = make_server();
+    if !server.global_vec_available {
+        return;
+    }
+    let mut query_vec = vec![0.0; 1024];
+    query_vec[0] = 1.0;
+
+    server
+        .with_global_store(|store| {
+            let mut live = make_entry("similar-recall-live-row");
+            live.path = "/scratch/sigil/current-similar".to_string();
+            live.text = "Similar vector live memory.".to_string();
+            live.summary = "Similar live memory".to_string();
+            live.vector = Some(query_vec.clone());
+            store.upsert(&live).map_err(|e| e.to_string())?;
+
+            let mut cache = make_entry("foundry:recall-cache:similar");
+            cache.path = "/scratch/sigil/recall-cache/similar".to_string();
+            cache.text = "Similar vector recall cache.".to_string();
+            cache.summary = "Similar recall cache".to_string();
+            cache.topic = "recall_rerank_cache".to_string();
+            cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+            cache.metadata = json!({"cache_key": memory_core::FOUNDRY_RECALL_CACHE_SOURCE});
+            cache.vector = Some(query_vec.clone());
+            store.upsert(&cache).map_err(|e| e.to_string())
+        })
+        .expect("seed similar recall-cache boundary entries");
+
+    let response = server
+        .find_similar_memory(Parameters(FindSimilarMemoryParams {
+            query_vec: query_vec.clone(),
+            top_k: 5,
+            path_prefix: None,
+            include_archived: false,
+            include_training: false,
+            candidates_per_channel: 20,
+        }))
+        .await
+        .expect("find similar should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("similar JSON");
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == json!("similar-recall-live-row")),
+        "live row should remain visible: {rows:#?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["id"] == json!("foundry:recall-cache:similar")),
+        "recall-cache row leaked through default find_similar_memory: {rows:#?}"
+    );
+
+    let response = server
+        .find_similar_memory(Parameters(FindSimilarMemoryParams {
+            query_vec,
+            top_k: 5,
+            path_prefix: Some("/scratch/sigil/recall-cache".to_string()),
+            include_archived: false,
+            include_training: false,
+            candidates_per_channel: 20,
+        }))
+        .await
+        .expect("find similar recall-cache scope should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("similar JSON");
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == json!("foundry:recall-cache:similar")),
+        "recall-cache scope should surface cache row: {rows:#?}"
     );
 }
 
