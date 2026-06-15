@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tokio::process::Command;
 
+mod acp_native;
+mod acpx;
 mod board;
 mod dispatch;
 mod dispatch_v2;
@@ -22,6 +24,7 @@ mod subprocess;
 // Re-exports preserving the legacy public surface so external callers
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep
 // resolving symbols via `crate::dispatch_ops::<name>`.
+pub(crate) use acpx::run_acpx_control_from_status;
 pub(crate) use board::{collect_run_task_for_server, handle_tachi_board};
 #[cfg(test)]
 pub(crate) use dispatch::apply_unlocked_vault_env;

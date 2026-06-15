@@ -8,6 +8,7 @@ mod cli_tool;
 mod env_cmd;
 mod harness_cli;
 mod manifest_cli;
+mod poke_cli;
 mod rescue_cli;
 mod serve;
 mod setup;

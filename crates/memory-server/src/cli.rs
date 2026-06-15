@@ -157,6 +157,16 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: SkillSurfaceAction,
     },
+    /// Inspect Tachikoma Cards projected from dispatch profiles.
+    Card {
+        #[command(subcommand)]
+        action: CardAction,
+    },
+    /// Run Poke product-probe smoke suites against isolated local Tachi surfaces.
+    Poke {
+        #[command(subcommand)]
+        action: PokeAction,
+    },
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {
         /// Target DB path (defaults to global DB)
@@ -822,6 +832,37 @@ pub(crate) enum SkillSurfaceAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub(crate) enum CardAction {
+    /// List Cards available to the current project/runtime.
+    List {
+        /// Emit machine-readable JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one Card by dispatch profile id.
+    Show {
+        /// Card/profile id, e.g. codex_55_review.
+        id: String,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum PokeAction {
+    /// Run a local Poke probe suite.
+    Run {
+        /// Probe suite to run. Currently only "smoke" is supported.
+        #[arg(long, default_value = "smoke")]
+        suite: String,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub(crate) enum HubAction {
     /// List capabilities (table by default; pass --json for machine output)
     List {
@@ -902,6 +943,50 @@ pub(crate) enum HubAction {
         #[arg(long)]
         fix: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_cli_parses_list_and_show() {
+        let list = Cli::try_parse_from(["tachi", "card", "list", "--json"])
+            .expect("card list should parse");
+        match list.command.expect("command") {
+            Commands::Card {
+                action: CardAction::List { json },
+            } => assert!(json),
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let show = Cli::try_parse_from(["tachi", "card", "show", "codex_55_review"])
+            .expect("card show should parse");
+        match show.command.expect("command") {
+            Commands::Card {
+                action: CardAction::Show { id, json },
+            } => {
+                assert_eq!(id, "codex_55_review");
+                assert!(!json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn poke_cli_parses_smoke_run() {
+        let parsed = Cli::try_parse_from(["tachi", "poke", "run", "--suite", "smoke", "--json"])
+            .expect("poke run should parse");
+        match parsed.command.expect("command") {
+            Commands::Poke {
+                action: PokeAction::Run { suite, json },
+            } => {
+                assert_eq!(suite, "smoke");
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

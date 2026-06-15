@@ -1,0 +1,90 @@
+schema_version: 1
+updated: 2026-06-15
+corpus: superpowers
+upstream:
+  repo: obra/superpowers
+  pinned_ref: main
+  pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+  update_policy: reviewed_sync
+notes:
+  - Superpowers source text is upstream-managed.
+  - Tachi-local native contracts are wrappers or compatibility shims and must not
+    be treated as upstream text.
+skills:
+  - id: skill:superpowers-brainstorming
+    name: brainstorming
+    local_path: skill/superpowers/skills/brainstorming/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: obra/superpowers
+      path: skills/brainstorming/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync
+      local_overlay: null
+  - id: skill:superpowers-writing-plans
+    name: writing-plans
+    local_path: skill/superpowers/skills/writing-plans/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: obra/superpowers
+      path: skills/writing-plans/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync
+      local_overlay: null
+  - id: skill:superpowers-executing-plans
+    name: executing-plans
+    local_path: skill/superpowers/skills/executing-plans/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: obra/superpowers
+      path: skills/executing-plans/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync
+      local_overlay: null
+  - id: skill:superpowers-subagent-driven-development
+    name: subagent-driven-development
+    local_path: native/superpowers/subagent-driven-development
+    source:
+      kind: tachi_native_contract
+      repo: obra/superpowers
+      path: skills/subagent-driven-development/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync_for_upstream_equivalent
+      local_overlay: tachi-native-contract
+  - id: skill:superpowers-requesting-code-review
+    name: requesting-code-review
+    local_path: skill/superpowers/skills/requesting-code-review/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: obra/superpowers
+      path: skills/requesting-code-review/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync
+      local_overlay: null
+  - id: skill:superpowers-verification-before-completion
+    name: verification-before-completion
+    local_path: native/superpowers/verification-before-completion
+    source:
+      kind: tachi_native_contract
+      repo: obra/superpowers
+      path: skills/verification-before-completion/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync_for_upstream_equivalent
+      local_overlay: tachi-native-contract
+  - id: skill:superpowers-finishing-a-development-branch
+    name: finishing-a-development-branch
+    local_path: skill/superpowers/skills/finishing-a-development-branch/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: obra/superpowers
+      path: skills/finishing-a-development-branch/SKILL.md
+      pinned_ref: main
+      pinned_sha: 6fd4507659784c351abbd2bc264c7162cfd386dc
+      update_policy: reviewed_sync
+      local_overlay: null

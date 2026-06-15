@@ -1567,6 +1567,12 @@ fn profile_json_with_loadout_and_evidence_contract(
     projected_weak_against: Vec<String>,
     demotion_targets: Vec<String>,
 ) -> Value {
+    let stats = profile_mbit_stats(profile);
+    let authority = profile_card_authority_json(profile);
+    let guidance = profile_card_guidance_json(&skill_loadout);
+    let moves = profile_card_moves_json(&skill_loadout);
+    let personality = profile_card_personality_json(&stats);
+    let archetype = profile_card_archetype(profile);
     let card_projection = json!({
         "status": if projected_weak_against.is_empty() && demotion_targets.is_empty() {
             "baseline"
@@ -1582,6 +1588,7 @@ fn profile_json_with_loadout_and_evidence_contract(
         "backend": profile.backend,
         "role": profile.role,
         "stage": profile.stage,
+        "card_archetype": archetype,
         "model": profile.model,
         "tool_profile": profile.tool_profile,
         "mcp_access": {
@@ -1598,8 +1605,13 @@ fn profile_json_with_loadout_and_evidence_contract(
         "weak_against": weak_against,
         "mbit_card": {
             "display_name": profile.display_name,
+            "archetype": archetype,
             "type": [profile.role],
-            "stats": profile_mbit_stats(profile),
+            "stats": stats,
+            "authority": authority,
+            "guidance": guidance,
+            "moves": moves,
+            "personality": personality,
             "strong_against": profile.strong_against,
             "weak_against": weak_against,
             "projected_weak_against": projected_weak_against,
@@ -1612,6 +1624,17 @@ fn profile_json_with_loadout_and_evidence_contract(
             },
         }
     })
+}
+
+fn profile_card_archetype(profile: &DispatchProfileDef) -> &'static str {
+    let stage = profile.stage.unwrap_or_default();
+    if profile.role == "explore" || stage == "explore" || stage == "probe" {
+        "poke"
+    } else if profile.role == "executor" || stage == "execute" || stage == "hotfix" {
+        "scv"
+    } else {
+        "raven"
+    }
 }
 
 fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
@@ -1633,6 +1656,81 @@ fn profile_mbit_stats(profile: &DispatchProfileDef) -> Value {
         "creativity": creativity,
         "risk_control": risk_control,
     })
+}
+
+fn profile_card_authority_json(profile: &DispatchProfileDef) -> Value {
+    json!({
+        "write_code": profile.write_actions,
+        "merge": false,
+        "github_read": profile.github_read,
+        "github_write": false,
+        "can_dispatch_followup": false,
+        "credential_profiles": profile.credential_profiles,
+        "tool_profile": profile.tool_profile,
+    })
+}
+
+fn profile_card_guidance_json(skill_loadout: &Value) -> Value {
+    json!({
+        "superpowers": profile_card_skills_by_prefix(skill_loadout, "skill:superpowers-"),
+    })
+}
+
+fn profile_card_moves_json(skill_loadout: &Value) -> Value {
+    let skills = profile_card_skill_ids_from_loadout(skill_loadout);
+    let mut tachi_native = skills
+        .iter()
+        .filter(|skill| {
+            skill.starts_with("skill:")
+                && !skill.starts_with("skill:superpowers-")
+                && !skill.starts_with("skill:waza-")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut tachi_native);
+    json!({
+        "waza": profile_card_skills_by_prefix(skill_loadout, "skill:waza-"),
+        "external": [],
+        "tachi_native": tachi_native,
+    })
+}
+
+fn profile_card_personality_json(stats: &Value) -> Value {
+    json!({
+        "curiosity": stats.get("creativity").and_then(Value::as_i64).unwrap_or(70),
+        "caution": stats.get("risk_control").and_then(Value::as_i64).unwrap_or(70),
+        "speed": stats.get("speed").and_then(Value::as_i64).unwrap_or(70),
+        "risk_control": stats.get("risk_control").and_then(Value::as_i64).unwrap_or(70),
+    })
+}
+
+fn profile_card_skills_by_prefix(skill_loadout: &Value, prefix: &str) -> Vec<String> {
+    let mut skills = profile_card_skill_ids_from_loadout(skill_loadout)
+        .into_iter()
+        .filter(|skill| skill.starts_with(prefix))
+        .collect::<Vec<_>>();
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
+    skills
+}
+
+fn profile_card_skill_ids_from_loadout(skill_loadout: &Value) -> Vec<String> {
+    let mut skills = Vec::new();
+    for key in [
+        "common_skills",
+        "signature_skills",
+        "projected_signature_skills",
+    ] {
+        let Some(items) = skill_loadout.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let Some(skill) = item.as_str() {
+                skills.push(skill.to_string());
+            }
+        }
+    }
+    crate::skill_policy::dedupe_preserve_order(&mut skills);
+    skills
 }
 
 pub(crate) fn profile_evidence_required(profile: &DispatchProfileDef) -> Vec<String> {
@@ -3727,6 +3825,35 @@ mod tests {
             profile_skill_loadout_json(resolve_dispatch_profile("claude_plan").unwrap())
                 ["passive_traits"][0],
             json!("plan_before_execute")
+        );
+        let profile_payload = profile_json(resolve_dispatch_profile("claude_plan").unwrap());
+        assert_eq!(profile_payload["card_archetype"], json!("raven"));
+        assert_eq!(profile_payload["mbit_card"]["archetype"], json!("raven"));
+        assert_eq!(
+            profile_payload["mbit_card"]["authority"]["write_code"],
+            json!(false)
+        );
+        assert_eq!(
+            profile_payload["mbit_card"]["guidance"]["superpowers"][0],
+            json!(SUPERPOWER_WRITING_PLANS)
+        );
+        assert!(profile_payload["mbit_card"]["moves"]["waza"]
+            .as_array()
+            .expect("waza moves")
+            .contains(&json!(WAZA_THINK)));
+        assert_eq!(
+            profile_payload["mbit_card"]["personality"]["risk_control"],
+            profile_payload["mbit_card"]["stats"]["risk_control"]
+        );
+        assert_eq!(
+            profile_json(resolve_dispatch_profile("glm_51_impl").unwrap())["mbit_card"]
+                ["archetype"],
+            json!("scv")
+        );
+        assert_eq!(
+            profile_json(resolve_dispatch_profile("deepseek_explore").unwrap())["mbit_card"]
+                ["archetype"],
+            json!("poke")
         );
     }
 

@@ -21,7 +21,7 @@ pub(crate) use text_scrub::scrub_secrets;
 // Shared imports that sub-modules pull in via `use super::*`.
 use crate::shared_defs::{slim_entry, slim_l0_rule, slim_search_result};
 use crate::tool_params::*;
-use crate::utils::{is_active_global_rule, stable_hash};
+use crate::utils::{is_active_global_rule, parse_env_bool, stable_hash};
 use crate::DbScope;
 use crate::MemoryServer;
 use chrono::Utc;

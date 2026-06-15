@@ -293,7 +293,7 @@ pub(super) fn is_trusted_command(cmd: &str) -> bool {
 
     const TRUSTED_BASENAMES: &[&str] = &[
         "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup", "docker",
-        "podman", "tachi", "opencode",
+        "podman", "tachi", "opencode", "acpx",
     ];
 
     if TRUSTED_BASENAMES.contains(&basename) {
@@ -739,6 +739,7 @@ mod tests {
     fn dispatch_interpreters_remain_trusted_for_caller_supplied_commands() {
         assert!(is_trusted_command("python3"));
         assert!(is_trusted_command("/usr/local/bin/node"));
+        assert!(is_trusted_command("acpx"));
     }
 
     #[test]

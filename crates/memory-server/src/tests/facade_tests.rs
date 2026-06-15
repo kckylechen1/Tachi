@@ -631,6 +631,8 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("proposals")));
     assert!(values.contains(&json!("review_proposal")));
     assert!(values.contains(&json!("apply_proposals")));
+    assert!(values.contains(&json!("status")));
+    assert!(values.contains(&json!("cancel")));
     assert!(values.contains(&json!("intake")));
     assert!(values.contains(&json!("link_pr")));
     assert!(values.contains(&json!("pr_status")));

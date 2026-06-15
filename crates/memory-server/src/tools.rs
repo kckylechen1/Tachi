@@ -1804,7 +1804,7 @@ impl MemoryServer {
     // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle)
 
     #[tool(
-        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='doc_index': project-first layered source index across GitHub issues/PRs, repo docs/specs, project wiki, global guide, feedback rules, eval, and runtime artifacts; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='wait': block on a dispatch_id until terminal state or timeout; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='pr_handoff': write a PR body/branch handoff with verification evidence and known gaps; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing/doc_index → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → wait/board → complete/eval → pr_handoff → link_pr → pr_status → release_note → close_loop → merge."
+        description = "Task management facade for agent work. action='briefing': feature-scoped handoff board with docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='doc_index': project-first layered source index across GitHub issues/PRs, repo docs/specs, project wiki, global guide, feedback rules, eval, and runtime artifacts; action='plan': search memory/wiki and produce a todo list before complex work; action='recommend': choose a dispatch profile/agent/tool surface from the task, risk, and live eval evidence before assigning external workers; action='route_simulate': replay recent /eval rows across current, cost_sensitive, and quality_first policies without mutating routing; action='proposals': generate/list route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal': approve/reject a proposal; action='apply_proposals': persist an approved route-policy rule or project an approved loadout-evolution proposal into a profile/card overlay, requiring confirm=true; action='profiles'/'profile'/'card': inspect built-in dispatch profiles plus reviewed overlays; action='dispatch': spawn a delegate agent from either agent or profile; action='status': read one dispatch ledger and query backend-local status when supported; action='cancel': request cooperative cancellation for a dispatch backend that supports it; action='wait': block on a dispatch_id until terminal state or timeout; action='complete': record evaluated completion evidence and link flow_id+dispatch_id back to the dispatch card; action='board': view task status; action='intake': bind/read a GitHub issue and create/refresh a flow; action='link_pr': attach a PR to a flow; action='pr_status': preview GitHub PR safe-merge status without merging, optionally persisting flow status; action='pr_handoff': write a PR body/branch handoff with verification evidence and known gaps; action='release_note': synthesize release notes; action='ux_matrix': write/read a feature workflow UX checklist; action='build_references': preview issue/doc/related refs; action='close_loop': write durable issue/doc/wiki closure; action='merge': local dispatched worktree git merge only. To execute GitHub PR merges use tachi_gh(action='safe_merge'). Typical worker flow: intake → briefing/doc_index → ux_matrix → plan/recommend/route_simulate/proposals → dispatch → status/wait/board → complete/eval → pr_handoff → link_pr → pr_status → release_note → close_loop → merge."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -1951,6 +1951,8 @@ impl MemoryServer {
                 };
                 crate::dispatch_ops::handle_tachi_board(self, board_params).await
             }
+            "status" => handle_tachi_task_status(self, &params).await,
+            "cancel" => handle_tachi_task_cancel(self, &params).await,
             "wait" => handle_tachi_task_wait(self, &params).await,
             "profiles" | "profile" | "card" => serde_json::to_string(
                 &crate::dispatch_profile::dispatch_profiles_json_for_server(self)?,
@@ -2074,7 +2076,7 @@ impl MemoryServer {
                 Ok(result)
             }
             _ => Err(format!(
-                "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+                "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'status', 'cancel', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
                 params.action
             )),
         }?;
@@ -2208,6 +2210,129 @@ async fn handle_tachi_task_wait(
         tokio::time::sleep(poll_delay.min(remaining)).await;
         poll_delay = next_task_wait_poll_delay(poll_delay);
     }
+}
+
+fn read_dispatch_status_for_task(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    action: &str,
+) -> Result<(String, Value, Value, PathBuf), String> {
+    let dispatch_id = params
+        .dispatch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("dispatch_id is required when action='{action}'"))?
+        .to_string();
+    let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)
+        .ok_or_else(|| format!("dispatch '{dispatch_id}' was not found in the run ledger"))?;
+    let run_dir = task
+        .get("run_dir")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("dispatch '{dispatch_id}' has no readable run_dir"))?;
+    let status_path = run_dir.join("status.json");
+    let status = crate::task_lifecycle::read_json_file(&status_path)?
+        .ok_or_else(|| format!("dispatch '{dispatch_id}' has no status.json"))?;
+    Ok((dispatch_id, task, status, run_dir))
+}
+
+async fn handle_tachi_task_status(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Result<String, String> {
+    let (dispatch_id, task, status, run_dir) =
+        read_dispatch_status_for_task(server, params, "status")?;
+    let state = task
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut response = json!({
+        "status": "ok",
+        "dispatch_id": dispatch_id,
+        "terminal": is_terminal_task_state(state),
+        "state": state,
+        "task": task,
+        "run_status": status,
+    });
+    if response["run_status"]
+        .get("execution_backend")
+        .and_then(Value::as_str)
+        == Some("acpx")
+    {
+        let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(30).min(300));
+        match crate::dispatch_ops::run_acpx_control_from_status(
+            &run_dir,
+            &response["run_status"],
+            "status",
+            timeout,
+        )
+        .await
+        {
+            Ok(acpx_status) => response["acpx_status"] = acpx_status,
+            Err(err) => response["acpx_status_error"] = json!(err),
+        }
+    }
+    serde_json::to_string(&response).map_err(|e| format!("serialize status response: {e}"))
+}
+
+async fn handle_tachi_task_cancel(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Result<String, String> {
+    let (dispatch_id, task, status, run_dir) =
+        read_dispatch_status_for_task(server, params, "cancel")?;
+    let state = task
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if is_terminal_task_state(state) {
+        return serde_json::to_string(&json!({
+            "status": "already_terminal",
+            "dispatch_id": dispatch_id,
+            "terminal": true,
+            "state": state,
+            "task": task,
+        }))
+        .map_err(|e| format!("serialize cancel response: {e}"));
+    }
+    let timeout = StdDuration::from_secs(params.timeout_secs.unwrap_or(30).min(300));
+    let acpx_cancel =
+        crate::dispatch_ops::run_acpx_control_from_status(&run_dir, &status, "cancel", timeout)
+            .await?;
+    let success = acpx_cancel
+        .get("success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut updated_status = status.clone();
+    if let Some(obj) = updated_status.as_object_mut() {
+        obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
+        obj.insert("acpx_cancel".to_string(), acpx_cancel.clone());
+        if success {
+            obj.insert("cancel_requested".to_string(), json!(true));
+            obj.insert(
+                "cancel_requested_at".to_string(),
+                json!(Utc::now().to_rfc3339()),
+            );
+        }
+    }
+    let status_path = run_dir.join("status.json");
+    let body = serde_json::to_vec_pretty(&updated_status)
+        .map_err(|e| format!("serialize updated dispatch status: {e}"))?;
+    crate::utils::write_owner_only_file_atomic(&status_path, &body)
+        .map_err(|e| format!("write updated dispatch status: {e}"))?;
+
+    serde_json::to_string(&json!({
+        "status": if success { "cancel_requested" } else { "cancel_failed" },
+        "dispatch_id": dispatch_id,
+        "terminal": false,
+        "state": state,
+        "task": task,
+        "acpx_cancel": acpx_cancel,
+    }))
+    .map_err(|e| format!("serialize cancel response: {e}"))
 }
 
 fn next_task_wait_poll_delay(current: StdDuration) -> StdDuration {
