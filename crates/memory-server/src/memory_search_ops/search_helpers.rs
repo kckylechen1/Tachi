@@ -251,6 +251,13 @@ pub(crate) fn named_project_db_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub(crate) fn named_project_from_db_path(path: &std::path::Path) -> Option<String> {
+    crate::path_utils::named_project_from_path(path).or_else(|| {
+        crate::path_utils::plan_c_project_root_from_local_db(path)
+            .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
+    })
+}
+
 /// Infer a named project library from query text when the caller omitted `project`.
 /// Git repo folder name for Plan C (`~/.tachi/projects/<name>/memory.db`), if any.
 pub(crate) fn resolve_workspace_named_project() -> Option<String> {
