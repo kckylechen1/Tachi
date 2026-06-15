@@ -35,12 +35,25 @@ pub(crate) async fn handle_tachi_init_project_db(
         let global_link = crate::path_utils::plan_c_global_db_path(&safe_name);
         #[cfg(unix)]
         {
-            crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root);
-            plan_c_note = Some(format!(
-                "Global symlink: {} -> {}",
-                global_link.display(),
-                db_path.display()
-            ));
+            match crate::path_utils::ensure_plan_c_symlink(&db_path, &project_root) {
+                crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
+                    plan_c_note = Some(issue.warning_message());
+                }
+                crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
+                    plan_c_note = Some(format!(
+                        "Plan C global symlink failed at {}: {}",
+                        path.display(),
+                        error
+                    ));
+                }
+                _ => {
+                    plan_c_note = Some(format!(
+                        "Global symlink: {} -> {}",
+                        global_link.display(),
+                        db_path.display()
+                    ));
+                }
+            }
         }
         #[cfg(not(unix))]
         {
@@ -70,6 +83,7 @@ pub(crate) async fn handle_tachi_init_project_db(
         "project_root": project_root.display().to_string(),
         "db_path": db_path.display().to_string(),
         "db_relpath": rel.display().to_string(),
+        "plan_c_split_brain": crate::path_utils::plan_c_split_brain(&db_path, &project_root),
         "note": note,
     }))
     .map_err(|e| format!("serialize: {e}"))

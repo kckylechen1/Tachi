@@ -1,5 +1,40 @@
 use std::path::{Component, Path, PathBuf};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct PlanCSplitBrain {
+    pub(crate) project_name: String,
+    pub(crate) canonical_db: PathBuf,
+    pub(crate) alias_db: PathBuf,
+    pub(crate) canonical_rows: Option<i64>,
+    pub(crate) alias_rows: Option<i64>,
+    pub(crate) canonical_bytes: Option<u64>,
+    pub(crate) alias_bytes: Option<u64>,
+}
+
+impl PlanCSplitBrain {
+    pub(crate) fn warning_message(&self) -> String {
+        format!(
+            "Plan C split-brain detected for project '{}': repo-local DB {} (rows={}, bytes={}) and alias DB {} (rows={}, bytes={}) are different regular files. Back up both, merge by id into the repo-local DB, then replace the alias with a symlink to the repo-local DB.",
+            self.project_name,
+            self.canonical_db.display(),
+            opt_i64(self.canonical_rows),
+            opt_u64(self.canonical_bytes),
+            self.alias_db.display(),
+            opt_i64(self.alias_rows),
+            opt_u64(self.alias_bytes),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanCLinkOutcome {
+    AlreadyLinked,
+    Created(PathBuf),
+    SplitBrain(PlanCSplitBrain),
+    Skipped(&'static str),
+    Failed { path: PathBuf, error: String },
+}
+
 pub(crate) fn tachi_home() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     for key in ["TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"] {
@@ -29,6 +64,14 @@ pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {
         .join("projects")
         .join(project_dir_name)
         .join("memory.db")
+}
+
+pub(crate) fn plan_c_project_root_from_local_db(local_db: &Path) -> Option<PathBuf> {
+    let tachi_dir = local_db.parent()?;
+    if tachi_dir.file_name().and_then(|name| name.to_str()) != Some(".tachi") {
+        return None;
+    }
+    tachi_dir.parent().map(Path::to_path_buf)
 }
 
 /// Reject absolute paths and `..` segments in `db_relpath`.
@@ -81,42 +124,138 @@ pub(crate) fn resolve_project_db_path(project_root: &Path, rel: &Path) -> Result
 
 /// Global Plan C symlink for a repo-local project DB (Unix only).
 #[cfg(unix)]
-pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) {
+pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
     let Some(dir_name) = plan_c_dir_name_from_root(project_root) else {
-        return;
+        return PlanCLinkOutcome::Skipped("project root has no directory name");
     };
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
-        return;
+        return PlanCLinkOutcome::Skipped("local db is already under the Plan C projects root");
     }
     let global_project_dir = projects_root.join(&dir_name);
     if std::fs::create_dir_all(&global_project_dir).is_err() {
-        return;
+        return PlanCLinkOutcome::Skipped("failed to create Plan C project directory");
     }
     let global_link = global_project_dir.join("memory.db");
     let link_is_correct = global_link.is_symlink()
         && std::fs::read_link(&global_link)
-            .map(|target| target == local_db)
-            .unwrap_or(false);
+            .is_ok_and(|target| target == local_db || canonical_paths_equal(&target, local_db));
     if link_is_correct {
-        return;
+        return PlanCLinkOutcome::AlreadyLinked;
     }
     if global_link.is_symlink() {
         let _ = std::fs::remove_file(&global_link);
     } else if global_link.exists() {
+        if let Some(split_brain) = plan_c_split_brain(local_db, project_root) {
+            tracing::warn!(
+                project = %split_brain.project_name,
+                canonical_db = %split_brain.canonical_db.display(),
+                alias_db = %split_brain.alias_db.display(),
+                canonical_rows = ?split_brain.canonical_rows,
+                alias_rows = ?split_brain.alias_rows,
+                "Plan C global alias exists as a regular file and diverges from repo-local DB"
+            );
+            return PlanCLinkOutcome::SplitBrain(split_brain);
+        }
         tracing::warn!(
             path = %global_link.display(),
             "Plan C global link exists as a regular file; skipping symlink"
         );
-        return;
+        return PlanCLinkOutcome::Skipped("Plan C global link exists as a regular file");
     }
     if let Err(e) = std::os::unix::fs::symlink(local_db, &global_link) {
         tracing::warn!(error = %e, path = %global_link.display(), "Failed to create Plan C symlink");
+        return PlanCLinkOutcome::Failed {
+            path: global_link,
+            error: e.to_string(),
+        };
     }
+    PlanCLinkOutcome::Created(global_link)
 }
 
 #[cfg(not(unix))]
-pub(crate) fn ensure_plan_c_symlink(_local_db: &Path, _project_root: &Path) {}
+pub(crate) fn ensure_plan_c_symlink(_local_db: &Path, _project_root: &Path) -> PlanCLinkOutcome {
+    PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
+}
+
+pub(crate) fn plan_c_split_brain_for_local_db(local_db: &Path) -> Option<PlanCSplitBrain> {
+    let project_root = plan_c_project_root_from_local_db(local_db)?;
+    plan_c_split_brain(local_db, &project_root)
+}
+
+pub(crate) fn plan_c_split_brain(local_db: &Path, project_root: &Path) -> Option<PlanCSplitBrain> {
+    let project_name = plan_c_dir_name_from_root(project_root)?;
+    let projects_root = tachi_home().join("projects");
+    if local_db.starts_with(&projects_root) {
+        return None;
+    }
+    let alias_db = plan_c_global_db_path(&project_name);
+    let alias_meta = std::fs::symlink_metadata(&alias_db).ok()?;
+    if !alias_meta.file_type().is_file() {
+        return None;
+    }
+    if same_file_identity(local_db, &alias_db) {
+        return None;
+    }
+    Some(PlanCSplitBrain {
+        project_name,
+        canonical_db: local_db.to_path_buf(),
+        alias_db: alias_db.clone(),
+        canonical_rows: active_memory_count(local_db),
+        alias_rows: active_memory_count(&alias_db),
+        canonical_bytes: file_len(local_db),
+        alias_bytes: Some(alias_meta.len()),
+    })
+}
+
+fn opt_i64(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn opt_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn file_len(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|metadata| metadata.len())
+}
+
+fn active_memory_count(path: &Path) -> Option<i64> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE archived = 0",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+fn canonical_paths_equal(left: &Path, right: &Path) -> bool {
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(left)
+        .ok()
+        .zip(std::fs::metadata(right).ok())
+        .is_some_and(|(left, right)| left.dev() == right.dev() && left.ino() == right.ino())
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &Path, right: &Path) -> bool {
+    canonical_paths_equal(left, right)
+}
 
 /// Extract a project name from `<tachi_home>/projects/<name>/memory.db`.
 pub(crate) fn named_project_from_path(db_path: &Path) -> Option<String> {
@@ -304,6 +443,44 @@ mod tests {
             assert_eq!(
                 named_project_for_db_path(&local_db).as_deref(),
                 Some("Quant_Analyzer")
+            );
+
+            restore_env("TACHI_HOME", saved);
+        });
+    }
+
+    #[test]
+    fn plan_c_regular_alias_file_reports_split_brain() {
+        with_env_lock(|| {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let saved = std::env::var_os("TACHI_HOME");
+            let tachi_home = tmp.path().join("home");
+            std::env::set_var("TACHI_HOME", &tachi_home);
+
+            let repo = tmp.path().join("Split Brain Repo");
+            let local_db = repo.join(".tachi/memory.db");
+            std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
+            memory_core::MemoryStore::open(local_db.to_str().expect("local db"))
+                .expect("create local db");
+
+            let alias_db = plan_c_global_db_path("Split_Brain_Repo");
+            std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+            memory_core::MemoryStore::open(alias_db.to_str().expect("alias db"))
+                .expect("create alias db");
+
+            let outcome = ensure_plan_c_symlink(&local_db, &repo);
+            let PlanCLinkOutcome::SplitBrain(issue) = outcome else {
+                panic!("expected split-brain outcome, got {outcome:?}");
+            };
+            assert_eq!(issue.project_name, "Split_Brain_Repo");
+            assert_eq!(issue.canonical_db, local_db);
+            assert_eq!(issue.alias_db, alias_db);
+            assert_eq!(issue.canonical_rows, Some(0));
+            assert_eq!(issue.alias_rows, Some(0));
+            assert!(issue.warning_message().contains("Plan C split-brain"));
+            assert!(
+                !issue.alias_db.is_symlink(),
+                "regular alias file must not be silently replaced"
             );
 
             restore_env("TACHI_HOME", saved);

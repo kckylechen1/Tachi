@@ -92,6 +92,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) api_keys: Vec<ApiKeyStatus>,
     pub(crate) provider_probe_cache: Option<status_health::ProviderProbeCache>,
     pub(crate) project_warnings: Vec<String>,
+    pub(crate) plan_c_split_brain: Vec<crate::path_utils::PlanCSplitBrain>,
     pub(crate) health_score: u8,
 }
 
@@ -424,6 +425,10 @@ fn collect_snapshot_inner(
         .into_iter()
         .map(|warning| warning.message)
         .collect();
+    let plan_c_split_brain = project_db_path
+        .and_then(crate::path_utils::plan_c_split_brain_for_local_db)
+        .into_iter()
+        .collect();
     let health_score = status_health::calculate_health_score(
         &daemon,
         &dbs,
@@ -444,6 +449,7 @@ fn collect_snapshot_inner(
         api_keys,
         provider_probe_cache,
         project_warnings,
+        plan_c_split_brain,
         health_score,
     }
 }
@@ -1690,6 +1696,7 @@ async fn handle_tachi_status_detail(
                 "vector_orphans": vector_orphan_dbs,
                 "enrichment_failures": enrichment_failure_dbs,
                 "namespace_issues": namespace_issues,
+                "plan_c_split_brain": snapshot.plan_c_split_brain,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },
@@ -1740,6 +1747,7 @@ async fn handle_tachi_status_detail(
             "vector_orphans": vector_orphan_dbs.len(),
             "enrichment_failures": enrichment_failure_dbs.len(),
             "namespace_issues": namespace_issues.len(),
+            "plan_c_split_brain": snapshot.plan_c_split_brain.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {
                 "drift": api_key_drift,
@@ -1835,6 +1843,9 @@ fn build_status_warnings(
         );
     }
     warnings.extend(snapshot.project_warnings.iter().cloned());
+    for issue in &snapshot.plan_c_split_brain {
+        warnings.push(issue.warning_message());
+    }
     if low_coverage_count > 0 {
         warnings.push(format!(
             "{low_coverage_count} db(s) have vector coverage below 90%: {}",
@@ -2239,6 +2250,54 @@ mod tests {
     }
 
     #[test]
+    fn collect_snapshot_surfaces_plan_c_split_brain_warning() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("TACHI_HOME");
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let app_home = dir.path().join("home");
+        std::env::set_var("TACHI_HOME", &app_home);
+
+        let global_db = app_home.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent"))
+            .expect("create global parent");
+        MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
+
+        let repo = dir.path().join("Split Brain Repo");
+        let local_db = repo.join(".tachi/memory.db");
+        std::fs::create_dir_all(local_db.parent().expect("local parent"))
+            .expect("create local parent");
+        MemoryStore::open(local_db.to_str().expect("local path")).expect("open local");
+
+        let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
+        std::fs::create_dir_all(alias_db.parent().expect("alias parent"))
+            .expect("create alias parent");
+        MemoryStore::open(alias_db.to_str().expect("alias path")).expect("open alias");
+
+        let snapshot = collect_snapshot(&app_home, &global_db, Some(&local_db));
+        assert_eq!(snapshot.plan_c_split_brain.len(), 1);
+        assert_eq!(
+            snapshot.plan_c_split_brain[0].project_name,
+            "Split_Brain_Repo"
+        );
+
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Plan C split-brain detected")),
+            "expected Plan C warning in {warnings:?}"
+        );
+
+        if let Some(value) = saved {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
     fn namespace_health_counts_cache_wiki_derived_and_graph_rows() {
         let dir = tempfile::tempdir().expect("temp db dir");
         let db = dir.path().join("memory.db");
@@ -2373,6 +2432,7 @@ mod tests {
             api_keys: Vec::new(),
             provider_probe_cache: None,
             project_warnings: Vec::new(),
+            plan_c_split_brain: Vec::new(),
             health_score: 95,
         }
     }

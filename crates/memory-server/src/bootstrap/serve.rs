@@ -454,7 +454,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     // Plan C: link <tachi_home>/projects/<sanitized-dir>/memory.db -> repo-local DB.
     if let Some(ref db_path) = project_db_path {
         if let Some(root) = git_root.as_ref() {
-            crate::path_utils::ensure_plan_c_symlink(db_path, root);
+            if let crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) =
+                crate::path_utils::ensure_plan_c_symlink(db_path, root)
+            {
+                eprintln!("[!] {}", issue.warning_message());
+            }
         }
     }
 

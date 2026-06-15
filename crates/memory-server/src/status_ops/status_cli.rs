@@ -457,6 +457,13 @@ async fn render_one(
         }
         println!();
     }
+    if !snapshot.plan_c_split_brain.is_empty() {
+        println!("Plan C Warnings");
+        for issue in &snapshot.plan_c_split_brain {
+            println!("  [!] {}", issue.warning_message());
+        }
+        println!();
+    }
 
     let total_pending: usize = snapshot.dbs.iter().map(|d| d.pending).sum();
     let total_orphan = snapshot.dbs.iter().filter(|d| d.orphan).count();
