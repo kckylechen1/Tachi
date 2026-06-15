@@ -132,6 +132,14 @@ fn db_path_held_by_other_process(db_path: &str) -> bool {
     }
 }
 
+fn daily_distill_scheduler_enabled(server: &crate::MemoryServer) -> bool {
+    server.has_project_db()
+}
+
+fn daily_distill_marker_path(app_home: &std::path::Path) -> std::path::PathBuf {
+    app_home.join("foundry-runs").join(".last_distill_run")
+}
+
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
@@ -1001,28 +1009,27 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
+    } else {
+        eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
+    }
 
+    if daily_distill_scheduler_enabled(&server) {
         // Phase 1 daily batch distill. Default cadence is 24h; the legacy
-        // 30-minute per-capture scheduler is retained as a fallback (see
-        // `schedule_pending_distill_jobs`) but is no longer the primary path.
+        // per-capture `MemoryDistill` enqueue is gone, so this scheduler must
+        // remain active even when external pipeline workers are disabled.
         let distill_interval_secs: u64 = std::env::var("DISTILL_INTERVAL_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(86_400);
 
         let distill_server = server.clone();
+        let marker_path = daily_distill_marker_path(&app_home);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
             eprintln!(
                 "Distill scheduler: ENABLED (daily batch, interval={}s)",
                 distill_interval_secs
             );
-
-            let marker_path = dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".tachi")
-                .join("foundry-runs")
-                .join(".last_distill_run");
 
             let run_once = |server: &crate::MemoryServer, marker: &std::path::Path| {
                 let server = server.clone();
@@ -1039,9 +1046,22 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                                 report.errors.len()
                             );
                             if let Some(parent) = marker.parent() {
-                                let _ = std::fs::create_dir_all(parent);
+                                if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                                    eprintln!(
+                                        "[distill] failed to create marker directory {}: {err}",
+                                        parent.display()
+                                    );
+                                    return;
+                                }
                             }
-                            let _ = std::fs::write(&marker, chrono::Utc::now().to_rfc3339());
+                            if let Err(err) =
+                                tokio::fs::write(&marker, chrono::Utc::now().to_rfc3339()).await
+                            {
+                                eprintln!(
+                                    "[distill] failed to write marker {}: {err}",
+                                    marker.display()
+                                );
+                            }
                         }
                         Err(err) => eprintln!("[distill] daily batch error: {err}"),
                     }
@@ -1050,7 +1070,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
             // Catch-up: if the marker is missing or older than the cadence,
             // run immediately after the 60s warmup.
-            let should_run_now = match std::fs::metadata(&marker_path).and_then(|m| m.modified()) {
+            let should_run_now = match tokio::fs::metadata(&marker_path)
+                .await
+                .and_then(|m| m.modified())
+            {
                 Ok(modified) => modified
                     .elapsed()
                     .map(|d| d.as_secs() >= distill_interval_secs)
@@ -1070,7 +1093,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             }
         });
     } else {
-        eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
+        eprintln!("Distill scheduler: DISABLED (no project DB available)");
     }
 
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
@@ -1399,6 +1422,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn daily_distill_marker_path_lives_under_app_home() {
+        let app_home = std::path::Path::new("/tmp/tachi-custom-home");
+        assert_eq!(
+            daily_distill_marker_path(app_home),
+            app_home.join("foundry-runs").join(".last_distill_run")
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn restrict_file_permissions_sets_owner_only_mode() {
@@ -1412,5 +1444,56 @@ mod tests {
         let meta = std::fs::metadata(path).expect("metadata");
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0o600, got {mode:o}");
+    }
+
+    #[test]
+    fn daily_distill_scheduler_stays_enabled_when_pipeline_is_disabled() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("ENABLE_PIPELINE").ok();
+        std::env::remove_var("ENABLE_PIPELINE");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_db = temp.path().join("global.db");
+        let project_db = temp.path().join("project").join("memory.db");
+        std::fs::create_dir_all(project_db.parent().expect("project parent"))
+            .expect("create project db parent");
+
+        let server =
+            crate::MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+        assert!(
+            !server.pipeline_enabled,
+            "test precondition: pipeline should default to disabled"
+        );
+        assert!(daily_distill_scheduler_enabled(&server));
+
+        match previous {
+            Some(value) => std::env::set_var("ENABLE_PIPELINE", value),
+            None => std::env::remove_var("ENABLE_PIPELINE"),
+        }
+    }
+
+    #[test]
+    fn daily_distill_scheduler_requires_project_db() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var("ENABLE_PIPELINE").ok();
+        std::env::set_var("ENABLE_PIPELINE", "true");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = crate::MemoryServer::new(temp.path().join("global.db"), None).expect("server");
+
+        assert!(
+            server.pipeline_enabled,
+            "test precondition: pipeline enabled"
+        );
+        assert!(!daily_distill_scheduler_enabled(&server));
+
+        match previous {
+            Some(value) => std::env::set_var("ENABLE_PIPELINE", value),
+            None => std::env::remove_var("ENABLE_PIPELINE"),
+        }
     }
 }

@@ -4,7 +4,7 @@
 //! Each call:
 //!   * acquires a semaphore permit (cap concurrent CLI invocations);
 //!   * writes `prompt.md` / `result.md` / `status.json` under
-//!     `~/.tachi/foundry-runs/<label>-<UTCts>/`;
+//!     `<tachi_home>/foundry-runs/<label>-<UTCts>/`;
 //!   * spawns `claude -p --output-format json` by default; adds
 //!     `--dangerously-skip-permissions` only when
 //!     `TACHI_CLAUDE_SKIP_PERMISSIONS=true` (or `1`) is set. Daemon-driven
@@ -58,16 +58,33 @@ pub struct ClaudeCallOutcome {
 
 impl ClaudePool {
     /// Construct a pool with `max_concurrent` permits writing into
-    /// `<home>/.tachi/foundry-runs/`. Honours `CLAUDE_POOL_TIMEOUT_SECS`
+    /// `<tachi_home>/foundry-runs/`. Honours `CLAUDE_POOL_TIMEOUT_SECS`
     /// and `CLAUDE_BIN` env overrides.
     pub fn new(max_concurrent: usize) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let runs_dir = home.join(".tachi").join("foundry-runs");
-        let _ = std::fs::create_dir_all(&runs_dir);
+        Self::new_in_app_home(max_concurrent, crate::path_utils::tachi_home())
+    }
+
+    pub(crate) fn new_in_app_home(max_concurrent: usize, app_home: impl Into<PathBuf>) -> Self {
+        let runs_dir = app_home.into().join("foundry-runs");
+        if let Err(error) = std::fs::create_dir_all(&runs_dir) {
+            tracing::warn!(
+                runs_dir = %runs_dir.display(),
+                error = %error,
+                "failed to create ClaudePool foundry-runs directory"
+            );
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&runs_dir, std::fs::Permissions::from_mode(0o700));
+            if let Err(error) =
+                std::fs::set_permissions(&runs_dir, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(
+                    runs_dir = %runs_dir.display(),
+                    error = %error,
+                    "failed to restrict ClaudePool foundry-runs permissions"
+                );
+            }
         }
 
         let timeout_secs = std::env::var("CLAUDE_POOL_TIMEOUT_SECS")
@@ -111,7 +128,9 @@ impl ClaudePool {
         }
 
         let prompt_path = run_dir.join("prompt.md");
-        if let Err(e) = write_owner_only_file(&prompt_path, prompt.as_bytes()) {
+        if let Err(e) =
+            write_owner_only_file_blocking(prompt_path.clone(), prompt.as_bytes().to_vec()).await
+        {
             return Err(format!("claude_pool write {}: {e}", prompt_path.display()));
         }
 
@@ -126,12 +145,14 @@ impl ClaudePool {
 
         match result {
             Ok(text) => {
-                if let Err(err) = write_run_file(&run_dir.join("result.md"), &text) {
+                if let Err(err) =
+                    write_run_file_blocking(run_dir.join("result.md"), text.clone()).await
+                {
                     tracing::warn!("claude_pool failed to write result.md: {err}");
                 }
-                if let Err(err) = crate::utils::write_run_status_file(
-                    &run_dir,
-                    &json!({
+                if let Err(err) = write_run_status_file_blocking(
+                    run_dir.clone(),
+                    json!({
                         "status": "success",
                         "started_at": started_at,
                         "finished_at": finished_at,
@@ -139,18 +160,22 @@ impl ClaudePool {
                         "label": label,
                         "bytes": text.len(),
                     }),
-                ) {
+                )
+                .await
+                {
                     tracing::warn!("claude_pool failed to write status.json: {err}");
                 }
                 Ok(ClaudeCallOutcome { text })
             }
             Err(err) => {
-                if let Err(write_err) = write_run_file(&run_dir.join("result.md"), &err) {
+                if let Err(write_err) =
+                    write_run_file_blocking(run_dir.join("result.md"), err.clone()).await
+                {
                     tracing::warn!("claude_pool failed to write error result.md: {write_err}");
                 }
-                if let Err(write_err) = crate::utils::write_run_status_file(
-                    &run_dir,
-                    &json!({
+                if let Err(write_err) = write_run_status_file_blocking(
+                    run_dir.clone(),
+                    json!({
                         "status": "failed",
                         "started_at": started_at,
                         "finished_at": finished_at,
@@ -158,7 +183,9 @@ impl ClaudePool {
                         "label": label,
                         "error": err,
                     }),
-                ) {
+                )
+                .await
+                {
                     tracing::warn!("claude_pool failed to write failed status.json: {write_err}");
                 }
                 Err(err)
@@ -313,8 +340,25 @@ fn sanitize_label(label: &str) -> String {
     }
 }
 
-fn write_run_file(path: &Path, body: &str) -> Result<(), String> {
-    write_owner_only_file_atomic(path, body.as_bytes())
+async fn write_owner_only_file_blocking(path: PathBuf, bytes: Vec<u8>) -> Result<(), String> {
+    let display = path.display().to_string();
+    tokio::task::spawn_blocking(move || write_owner_only_file(&path, &bytes))
+        .await
+        .map_err(|error| format!("owner-only write task failed for {display}: {error}"))?
+}
+
+async fn write_run_file_blocking(path: PathBuf, body: String) -> Result<(), String> {
+    let display = path.display().to_string();
+    tokio::task::spawn_blocking(move || write_owner_only_file_atomic(&path, body.as_bytes()))
+        .await
+        .map_err(|error| format!("run-file write task failed for {display}: {error}"))?
+}
+
+async fn write_run_status_file_blocking(run_dir: PathBuf, status: Value) -> Result<(), String> {
+    let display = run_dir.display().to_string();
+    tokio::task::spawn_blocking(move || crate::utils::write_run_status_file(&run_dir, &status))
+        .await
+        .map_err(|error| format!("status write task failed for {display}: {error}"))?
 }
 
 /// Extract the `result` field from Claude CLI's JSON envelope. Tolerates
@@ -794,15 +838,11 @@ mod tests {
     fn foundry_runs_dir_is_created_with_0o700() {
         use std::os::unix::fs::PermissionsExt;
 
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().expect("temp home");
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
+        let app_home = tmp.path().join(".tachi");
 
-        let _pool = ClaudePool::new(1);
-        let runs_dir = tmp.path().join(".tachi").join("foundry-runs");
+        let _pool = ClaudePool::new_in_app_home(1, &app_home);
+        let runs_dir = app_home.join("foundry-runs");
         assert!(runs_dir.exists(), "foundry-runs dir should be created");
         let mode = std::fs::metadata(&runs_dir)
             .expect("foundry-runs metadata")
@@ -813,11 +853,40 @@ mod tests {
             0o700,
             "foundry-runs dir should be restricted to owner"
         );
+    }
 
-        if let Some(value) = original_home {
-            std::env::set_var("HOME", value);
+    #[test]
+    fn foundry_runs_dir_honors_tachi_home() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().expect("temp home");
+        let custom_home = tmp.path().join("custom-tachi-home");
+        let default_home = tmp.path().join("home");
+        std::fs::create_dir_all(&default_home).expect("create default home");
+
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        std::env::set_var("HOME", &default_home);
+        std::env::set_var("TACHI_HOME", &custom_home);
+
+        let pool = ClaudePool::new(1);
+        assert_eq!(pool.runs_dir(), custom_home.join("foundry-runs").as_path());
+        assert!(custom_home.join("foundry-runs").exists());
+        assert!(
+            !default_home.join(".tachi").join("foundry-runs").exists(),
+            "ClaudePool should not fall back to HOME/.tachi when TACHI_HOME is set"
+        );
+
+        restore_os_env("HOME", original_home);
+        restore_os_env("TACHI_HOME", original_tachi_home);
+    }
+
+    fn restore_os_env(key: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
         } else {
-            std::env::remove_var("HOME");
+            std::env::remove_var(key);
         }
     }
 }

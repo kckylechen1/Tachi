@@ -3994,6 +3994,45 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
+async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    let dispatch_id = "20260615T000008Z-kanban-warning";
+
+    let mut complete_params = task_params("complete");
+    complete_params.task = Some("Write completion while kanban is stale".to_string());
+    complete_params.agent = Some("codex".to_string());
+    complete_params.outcome = Some("success".to_string());
+    complete_params.task_id = Some("eval-kanban-warning".to_string());
+    complete_params.dispatch_id = Some(dispatch_id.to_string());
+    complete_params.evidence_refs = vec!["result.md".to_string()];
+    let raw = server
+        .tachi_task(Parameters(complete_params))
+        .await
+        .expect("complete should still succeed");
+
+    let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
+    let warning = bundle["warning"]
+        .as_str()
+        .expect("kanban update warning should be surfaced");
+    assert!(warning.contains("kanban card missing"), "{warning}");
+    assert!(warning.contains(dispatch_id), "{warning}");
+    assert!(warning.contains("eval-kanban-warning"), "{warning}");
+    assert!(
+        warning.contains("Write completion while kanban is stale"),
+        "{warning}"
+    );
+    assert_eq!(
+        bundle["pipeline"]["kanban_update"]["status"],
+        json!("missing")
+    );
+    assert_eq!(
+        bundle["pipeline"]["kanban_update"]["dispatch_id"],
+        json!(dispatch_id)
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
 async fn tachi_task_board_filters_to_flow_dispatch_ids() {
     let _lock = crate::shell_ops::tachi_run_root_env_lock()
         .lock()

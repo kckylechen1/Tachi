@@ -225,7 +225,7 @@ fn enqueue_dead_letter(
 }
 
 fn insert_ingest_audit(server: &MemoryServer, label: &str, event_hash: &str) {
-    let _ = server.with_global_store(|store| {
+    if let Err(error) = server.with_global_store(|store| {
         store
             .audit_log_insert(
                 &Utc::now().to_rfc3339(),
@@ -237,12 +237,19 @@ fn insert_ingest_audit(server: &MemoryServer, label: &str, event_hash: &str) {
                 None,
             )
             .map_err(|e| format!("audit insert: {e}"))
-    });
+    }) {
+        tracing::warn!(
+            label,
+            event_hash,
+            error = %error,
+            "failed to write ingest audit log"
+        );
+    }
 }
 
 fn insert_ingest_skip_audit(server: &MemoryServer, label: &str, reason: &str, context: &str) {
     let args_hash = stable_hash(&format!("{label}:{reason}:{context}"));
-    let _ = server.with_global_store(|store| {
+    if let Err(error) = server.with_global_store(|store| {
         store
             .audit_log_insert(
                 &Utc::now().to_rfc3339(),
@@ -254,7 +261,15 @@ fn insert_ingest_skip_audit(server: &MemoryServer, label: &str, reason: &str, co
                 Some(reason),
             )
             .map_err(|e| format!("audit insert: {e}"))
-    });
+    }) {
+        tracing::warn!(
+            label,
+            reason,
+            args_hash,
+            error = %error,
+            "failed to write skipped ingest audit log"
+        );
+    }
 }
 
 fn claim_ingest_event(
