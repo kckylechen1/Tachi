@@ -11,8 +11,9 @@
 //!   * Cache writes are deterministic by `(named_project, path_prefix,
 //!     top_k, query)` — re-running the same job overwrites the same
 //!     `foundry:recall-cache:{stable_hash}` row instead of growing the
-//!     table. This is intentional; cache rows are ephemeral and meant
-//!     to be reaped by the retention policy.
+//!     table. Durable cache writes are disabled by default after the DB
+//!     hygiene audit showed they leaked across every long-lived memory DB.
+//!     Set `TACHI_ENABLE_DURABLE_RECALL_CACHE=1` to opt back in.
 //!
 //!   * We deliberately do NOT enqueue an enrichment job for cache rows
 //!     (PR #2 / Q4). The cache entry already carries the query string,
@@ -40,6 +41,18 @@ use super::maintenance::{
 use super::recall::{rerank_rows_with_outcome, value_id, value_path, value_relevance, value_topic};
 use super::*;
 use serde_json::json;
+
+fn durable_recall_cache_enabled() -> bool {
+    std::env::var("TACHI_ENABLE_DURABLE_RECALL_CACHE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
 
 async fn search_rows_for_recall_cache(
     server: &MemoryServer,
@@ -97,6 +110,14 @@ pub(super) async fn process_recall_rerank_cache_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
 ) -> Result<usize, String> {
+    if !durable_recall_cache_enabled() {
+        tracing::debug!(
+            "[recall_rerank_cache] durable cache writes disabled; skipping job {}",
+            item.job.id
+        );
+        return Ok(0);
+    }
+
     let source_entries = with_foundry_store_read(server, item, |store| {
         let mut entries = Vec::new();
         for memory_id in &item.memory_ids {
@@ -469,7 +490,51 @@ fn build_recall_cache_text(query: &str, rows: &[serde_json::Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::recall_cache_write_path;
+    use super::{durable_recall_cache_enabled, recall_cache_write_path};
+
+    struct EnvGuard {
+        key: &'static str,
+        old: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn unset(key: &'static str) -> Self {
+            let old = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, old }
+        }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let old = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, old }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(value) = &self.old {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn durable_recall_cache_is_opt_in() {
+        let _guard = EnvGuard::unset("TACHI_ENABLE_DURABLE_RECALL_CACHE");
+        assert!(!durable_recall_cache_enabled());
+
+        let _guard = EnvGuard::set("TACHI_ENABLE_DURABLE_RECALL_CACHE", "1");
+        assert!(durable_recall_cache_enabled());
+    }
 
     #[test]
     fn recall_cache_path_remaps_wiki_prefix_for_non_wiki_project() {
