@@ -155,18 +155,20 @@ pub(super) fn write_run_status_file(
     write_json_file_owner_only(&run_dir.join("status.json"), status)
 }
 
-pub(super) fn read_to_string_or_warn_default(path: &std::path::Path, label: &str) -> String {
+pub(super) fn read_to_string_allow_missing(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<Option<String>, String> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
+        Ok(raw) => Ok(Some(raw)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %err,
-                    "{label} read failed; continuing with empty content"
-                );
-            }
-            String::new()
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "{label} read failed"
+            );
+            Err(format!("read {label} {}: {err}", path.display()))
         }
     }
 }
@@ -807,16 +809,26 @@ mod tests {
     }
 
     #[test]
-    fn read_to_string_or_warn_default_returns_content_or_empty_missing_file() {
+    fn read_to_string_allow_missing_distinguishes_missing_from_io_errors() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("result.md");
-        assert_eq!(read_to_string_or_warn_default(&path, "test artifact"), "");
-
-        std::fs::write(&path, "done").expect("write artifact");
+        let missing = dir.path().join("missing.md");
         assert_eq!(
-            read_to_string_or_warn_default(&path, "test artifact"),
-            "done"
+            read_to_string_allow_missing(&missing, "test artifact").expect("missing is ok"),
+            None
         );
+
+        let readable = dir.path().join("result.md");
+        std::fs::write(&readable, "done").expect("write artifact");
+        assert_eq!(
+            read_to_string_allow_missing(&readable, "test artifact").expect("readable file"),
+            Some("done".to_string())
+        );
+
+        let unreadable = dir.path().join("unreadable");
+        std::fs::create_dir(&unreadable).expect("create unreadable directory");
+        let err = read_to_string_allow_missing(&unreadable, "test artifact").expect_err("dir read");
+        assert!(err.contains("test artifact"), "{err}");
+        assert!(err.contains("unreadable"), "{err}");
     }
 
     #[test]
