@@ -1454,6 +1454,51 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
 }
 
 #[tokio::test]
+async fn wiki_lint_ignores_operation_log_rows() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut log = make_entry("wiki-log-noise");
+            log.path = "/wiki/_log".to_string();
+            log.topic = "wiki_log".to_string();
+            log.domain = Some("wiki".to_string());
+            log.metadata = json!({"wiki_log": true});
+            store.upsert(&log).map_err(|e| e.to_string())?;
+
+            let mut orphan = make_entry("wiki-real-orphan");
+            orphan.path = "/wiki/test/real-orphan".to_string();
+            orphan.domain = Some("wiki".to_string());
+            orphan.metadata = json!({"wiki": true});
+            store.upsert(&orphan).map_err(|e| e.to_string())?;
+
+            Ok(())
+        })
+        .expect("seed wiki lint log fixture");
+
+    let response = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki".to_string()),
+            checks: vec!["orphans".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: 0.6,
+            contradiction_threshold: 0.6,
+            include_skill_quality: false,
+        }))
+        .await
+        .expect("wiki_lint should succeed");
+    let parsed: Value = serde_json::from_str(&response).expect("wiki_lint json");
+    let orphan_ids = parsed["orphans"]
+        .as_array()
+        .expect("orphans array")
+        .iter()
+        .map(|row| row["id"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(orphan_ids.contains(&"wiki-real-orphan"));
+    assert!(!orphan_ids.contains(&"wiki-log-noise"));
+}
+
+#[tokio::test]
 async fn wiki_browse_large_limit_keeps_related_entries_empty() {
     let mut alpha = make_entry("wiki-large-limit-alpha");
     alpha.path = "/wiki/engineering/scale/alpha".to_string();

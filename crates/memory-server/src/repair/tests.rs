@@ -10,6 +10,7 @@ use super::edges::OrphanRefs;
 use super::enrichment::EnrichmentFailureReset;
 use super::fts::FtsRebuild;
 use super::integrity::IntegrityCheck;
+use super::inventory::select_dbs;
 use super::jobs::JobsPurge;
 use super::junk::JunkCleanup;
 use super::plan_c::PlanCRepair;
@@ -118,6 +119,27 @@ fn r1_missing_fts_table_rebuilt() {
 
     let app = FtsRebuild.apply(&mut ctx).unwrap();
     assert_eq!(app.applied, 1);
+}
+
+#[test]
+fn inventory_accepts_explicit_absolute_tachi_db_outside_manifest() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "outside-manifest.db");
+    drop(conn);
+
+    let manifest = crate::manifest::Manifest::empty();
+    let entries = select_dbs(&manifest, Some(path.to_str().unwrap()));
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].path,
+        std::fs::canonicalize(&path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(entries[0].schema_kind, "tachi");
+    assert_eq!(entries[0].last_classification, "explicit_path");
 }
 
 /// Reproduces the `project:quant` failure mode: the parent virtual table

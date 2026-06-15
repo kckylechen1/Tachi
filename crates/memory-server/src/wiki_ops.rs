@@ -1847,6 +1847,7 @@ pub(crate) async fn handle_wiki_lint(
                 .map(|entry| (entry, DbScope::Project)),
         );
     }
+    nodes.retain(|(entry, _)| is_user_facing_wiki_entry(entry));
 
     let mut orphans = Vec::new();
     let mut stale_nodes = Vec::new();

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::daemon_lock::{process_alive, read_pid_file};
-use crate::manifest::{DbEntry, Manifest};
+use crate::manifest::{classify_db_schema, DbEntry, DbRole, Manifest, SchemaKind};
 
 /// Stable human-friendly label for a DB entry.
 ///
@@ -38,7 +38,7 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
     let want = filter.map(|s| s.trim().to_string());
     let mut seen = HashSet::new();
 
-    manifest
+    let mut entries: Vec<DbEntry> = manifest
         .dbs
         .iter()
         .filter(|e| {
@@ -64,7 +64,17 @@ pub fn select_dbs(manifest: &Manifest, filter: Option<&str>) -> Vec<DbEntry> {
             seen.insert(key)
         })
         .cloned()
-        .collect()
+        .collect();
+
+    if entries.is_empty() {
+        if let Some(w) = want.as_deref() {
+            if let Some(entry) = explicit_path_entry(w) {
+                entries.push(entry);
+            }
+        }
+    }
+
+    entries
 }
 
 fn matches(e: &DbEntry, want: &str) -> bool {
@@ -84,6 +94,30 @@ fn matches(e: &DbEntry, want: &str) -> bool {
         }
     }
     e.path.to_lowercase().contains(&want.to_lowercase())
+}
+
+fn explicit_path_entry(want: &str) -> Option<DbEntry> {
+    let path = PathBuf::from(want);
+    if !path.is_absolute() || !path.exists() {
+        return None;
+    }
+    if classify_db_schema(&path) != SchemaKind::Tachi {
+        return None;
+    }
+    let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+    let path_str = canonical.to_string_lossy().to_string();
+    Some(DbEntry {
+        path: path_str.clone(),
+        role: DbRole::Unknown,
+        owner: "external".to_string(),
+        schema_kind: "tachi".to_string(),
+        vec_enabled: true,
+        allow_write: true,
+        last_doctor_at: String::new(),
+        last_classification: "explicit_path".to_string(),
+        scope_hint: format!("path:{path_str}"),
+        notes: "synthetic repair entry for explicit --db path outside manifest".to_string(),
+    })
 }
 
 /// Resolve a single label/path to one DbEntry. Returns None if no match or
