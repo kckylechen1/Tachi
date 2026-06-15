@@ -576,6 +576,7 @@ async fn tachi_memory_readiness_can_return_operational_json() {
     assert!(parsed["tool_visibility_summary"].is_object());
     assert!(parsed["suggestions"].is_array());
     assert!(parsed["vector_health"].is_object());
+    assert!(parsed["readiness_warnings"].is_array());
 }
 
 #[test]

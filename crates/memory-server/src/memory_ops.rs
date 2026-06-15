@@ -219,6 +219,10 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             "vec_available": server.project_vec_available,
         })
     });
+    let plan_c_split_brain = server
+        .project_db_path
+        .as_ref()
+        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_ref()));
 
     serde_json::to_string(&json!({
         "runtime": {
@@ -238,6 +242,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
             },
             "project": project,
             "single_db_mode": !server.has_project_db(),
+            "plan_c_split_brain": plan_c_split_brain,
         },
         "env": {
             "TACHI_HOME": std::env::var("TACHI_HOME").ok(),

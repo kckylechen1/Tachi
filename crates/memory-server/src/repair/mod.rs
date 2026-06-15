@@ -23,6 +23,8 @@
 //!   foundry rerank cache records, empty JSON turn records).
 //! - **R9** Domain normalization/backfill for missing and legacy path-like values.
 //! - **R10** Enrichment failure marker reset (explicit opt-in only).
+//! - **R11** Plan C split-brain repair: merge a stale regular alias DB into
+//!   the repo-local canonical DB, then replace the alias with a symlink.
 //!
 //! Exit codes: 0 clean (or successful dry-run with no findings), 1 if
 //! repairs were found and not applied, 2 if any rule errored.
@@ -42,6 +44,7 @@ pub mod integrity;
 pub mod inventory;
 pub mod jobs;
 pub mod junk;
+pub mod plan_c;
 pub mod quarantine;
 pub mod report;
 pub mod retention;
@@ -57,7 +60,7 @@ pub use report::{Finding, ReportBuilder, RuleReport};
 /// R8 (junk cleanup) is intentionally **excluded** from the default sweep:
 /// even with conservative duplicate matching, it is a destructive cleanup rule
 /// and must be opted in explicitly via `--rule R8`.
-const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R9"];
+const DEFAULT_RULES: &[&str] = &["R5", "R1", "R2", "R3", "R4", "R7", "R9", "R11"];
 
 #[derive(Debug)]
 pub struct RepairExit {
@@ -241,6 +244,9 @@ pub async fn run_repair(
                 "R8" => Box::new(junk::JunkCleanup),
                 "R9" => Box::new(domain::DomainRepair),
                 "R10" => Box::new(enrichment::EnrichmentFailureReset),
+                "R11" => Box::new(plan_c::PlanCRepair {
+                    backup_alias: !no_backup,
+                }),
                 // R6 deliberately not part of bulk sweep — too aggressive.
                 _ => continue,
             };

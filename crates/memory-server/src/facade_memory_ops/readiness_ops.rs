@@ -345,11 +345,17 @@ pub(crate) async fn handle_memory_readiness(
         .or_else(|| vector_health.get("missing_vectors"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let readiness_warnings = status
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
             "status": "completed",
             "health": status,
             "runtime": runtime,
+            "readiness_warnings": readiness_warnings,
             "tool_profile": tool_profile,
             "tools": tool_rows,
             "tool_visibility_summary": {
@@ -383,11 +389,22 @@ pub(crate) async fn handle_memory_readiness(
     } else {
         format!("hidden by profile: {}", hidden_advanced_tools.join(", "))
     };
+    let warning_summary = if readiness_warnings.is_empty() {
+        "none".to_string()
+    } else {
+        readiness_warnings
+            .iter()
+            .filter_map(Value::as_str)
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    };
     Ok(format_agent_status(
         "Tachi readiness",
         &[
             ("status", "completed".to_string()),
             ("health_score", health_score),
+            ("warnings", warning_summary),
             ("tool_profile", tool_profile),
             ("tool_visibility", tool_summary),
             ("core_tools", core_summary),
