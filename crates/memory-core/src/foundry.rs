@@ -83,14 +83,9 @@ pub struct FoundryEvidence {
 pub enum FoundryModelLane {
     Embedding,
     Extraction,
-    /// Backward-compat alias. Originally minted for the legacy `memory_rerank`
-    /// job kind on the assumption a maintenance-tier chat model would be
-    /// wired up; that never happened. Today no consumer in the workspace
-    /// reads this variant — `MemoryNeighborhood` (the successor of
-    /// `memory_rerank`) does pure vector + DB work and routes through
-    /// `Reasoning`. Kept (with `serde(alias)`) so persisted job rows that
-    /// stamped this lane still deserialize cleanly. Do not introduce new
-    /// uses; pick a real consuming lane (`Reasoning`, `Distill`, etc.).
+    /// General reasoning lane. The `maintenance` wire name is accepted only as
+    /// a backward-compat serde alias for old rows; new code should persist the
+    /// canonical `reasoning` lane.
     #[serde(alias = "maintenance")]
     Reasoning,
     Rerank,

@@ -2,6 +2,29 @@
 
 use serde::{Deserialize, Serialize};
 
+pub const SECRET_TYPE_API_KEY: &str = "api_key";
+pub const SECRET_TYPE_OAUTH_TOKEN: &str = "oauth_token";
+pub const SECRET_TYPE_JSON_BLOB: &str = "json_blob";
+pub const SECRET_TYPE_COOKIE: &str = "cookie";
+pub const SECRET_TYPE_OTHER: &str = "other";
+pub const SECRET_TYPES: &[&str] = &[
+    SECRET_TYPE_API_KEY,
+    SECRET_TYPE_OAUTH_TOKEN,
+    SECRET_TYPE_JSON_BLOB,
+    SECRET_TYPE_COOKIE,
+    SECRET_TYPE_OTHER,
+];
+
+pub fn normalize_secret_type(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        SECRET_TYPE_API_KEY => SECRET_TYPE_API_KEY,
+        SECRET_TYPE_OAUTH_TOKEN | "oauth" => SECRET_TYPE_OAUTH_TOKEN,
+        SECRET_TYPE_JSON_BLOB | "json" => SECRET_TYPE_JSON_BLOB,
+        SECRET_TYPE_COOKIE => SECRET_TYPE_COOKIE,
+        _ => SECRET_TYPE_OTHER,
+    }
+}
+
 /// Supported vault ciphers.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub enum VaultCipher {
@@ -47,46 +70,13 @@ pub struct VaultEntry {
     pub name: String,
     pub encrypted_value: String, // base64-encoded ciphertext
     pub nonce: String,           // base64-encoded 12 bytes
-    pub secret_type: String,     // api_key | oauth_token | json_blob | cookie | other
+    pub secret_type: String,     // one of SECRET_TYPES
     pub description: String,
     pub allowed_agents: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
     pub accessed_at: String,
     pub access_count: i64,
-}
-
-/// Secret types supported by the vault.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum SecretType {
-    ApiKey,
-    OAuthToken,
-    JsonBlob,
-    Cookie,
-    Other,
-}
-
-impl SecretType {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::ApiKey => "api_key",
-            Self::OAuthToken => "oauth_token",
-            Self::JsonBlob => "json_blob",
-            Self::Cookie => "cookie",
-            Self::Other => "other",
-        }
-    }
-
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "api_key" => Self::ApiKey,
-            "oauth_token" => Self::OAuthToken,
-            "json_blob" => Self::JsonBlob,
-            "cookie" => Self::Cookie,
-            _ => Self::Other,
-        }
-    }
 }
 
 /// Multi-key rotation state for a secret name prefix.
@@ -156,7 +146,7 @@ impl Default for VaultEntry {
             name: String::new(),
             encrypted_value: String::new(),
             nonce: String::new(),
-            secret_type: "api_key".to_string(),
+            secret_type: SECRET_TYPE_API_KEY.to_string(),
             description: String::new(),
             allowed_agents: None,
             created_at: String::new(),
@@ -203,5 +193,24 @@ mod tests {
         assert_eq!(json, "\"aes-256-gcm\"");
         let decoded: VaultCipher = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, cipher);
+    }
+
+    #[test]
+    fn secret_type_strings_are_canonicalized_without_an_orphan_enum() {
+        assert_eq!(normalize_secret_type("api_key"), SECRET_TYPE_API_KEY);
+        assert_eq!(normalize_secret_type("oauth"), SECRET_TYPE_OAUTH_TOKEN);
+        assert_eq!(normalize_secret_type("json"), SECRET_TYPE_JSON_BLOB);
+        assert_eq!(normalize_secret_type("cookie"), SECRET_TYPE_COOKIE);
+        assert_eq!(normalize_secret_type("weird"), SECRET_TYPE_OTHER);
+        assert_eq!(
+            SECRET_TYPES,
+            &[
+                SECRET_TYPE_API_KEY,
+                SECRET_TYPE_OAUTH_TOKEN,
+                SECRET_TYPE_JSON_BLOB,
+                SECRET_TYPE_COOKIE,
+                SECRET_TYPE_OTHER,
+            ]
+        );
     }
 }

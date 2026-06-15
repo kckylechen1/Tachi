@@ -434,7 +434,7 @@ pub(super) async fn run_vault_command(
                 return Err("Use --values-stdin and provide one API key per line.".into());
             }
             crate::vault_crypto::validate_secret_name(&prefix)?;
-            if !is_shell_env_name(&prefix) {
+            if !crate::utils::is_shell_env_name(&prefix) {
                 return Err(format!(
                     "API key pool prefix '{prefix}' must be a shell env name such as OPENAI_API_KEY"
                 )
@@ -545,7 +545,7 @@ pub(super) async fn run_vault_command(
             }
 
             let env_name = env_name.unwrap_or_else(|| name.clone());
-            if !is_shell_env_name(&env_name) {
+            if !crate::utils::is_shell_env_name(&env_name) {
                 return Err(format!("env name '{env_name}' is not a valid shell env name").into());
             }
             let store = open_cli_store(global_db_path)?;
@@ -970,17 +970,6 @@ fn print_vault_list_output(out: &str) -> Result<(), Box<dyn std::error::Error>> 
         .unwrap_or(secrets.len() as u64);
     println!("\n{count} secret(s) total.");
     Ok(())
-}
-
-fn is_shell_env_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
 fn normalize_rotation_strategy_cli(value: &str) -> String {

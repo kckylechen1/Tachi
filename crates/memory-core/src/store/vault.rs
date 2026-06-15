@@ -4,6 +4,7 @@ use crate::db;
 use crate::error::MemoryError;
 use crate::vault::{
     api_key_pool_member_index, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
+    SECRET_TYPE_API_KEY,
 };
 use crate::MemoryStore;
 
@@ -33,7 +34,7 @@ impl MemoryStore {
         rotation: &VaultKeyRotation,
     ) -> Result<Vec<String>, MemoryError> {
         let tx = self.conn.transaction()?;
-        let existing_entries = db::vault_list_entries_by_type(&tx, "api_key")?;
+        let existing_entries = db::vault_list_entries_by_type(&tx, SECRET_TYPE_API_KEY)?;
         let mut removed_members = Vec::new();
 
         for entry in entries {
@@ -193,7 +194,7 @@ mod tests {
             name: name.to_string(),
             encrypted_value: format!("{name}-ciphertext"),
             nonce: format!("{name}-nonce"),
-            secret_type: "api_key".to_string(),
+            secret_type: SECRET_TYPE_API_KEY.to_string(),
             description: "test pool member".to_string(),
             allowed_agents: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),

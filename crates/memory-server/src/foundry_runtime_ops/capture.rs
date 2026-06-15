@@ -318,18 +318,26 @@ pub(super) fn queue_capture_enrichment(
     agent_id: Option<&str>,
     path_prefix: Option<&str>,
 ) {
-    let _ = server
-        .enrichment_lock()
-        .enrich_tx
-        .try_send(crate::enrichment::build_enrichment_item(
-            entry,
-            true,
-            needs_summary,
-            target_db,
-            named_project,
-            db_path,
-            agent_id.map(ToString::to_string),
-            path_prefix.map(ToString::to_string),
-            entry.revision,
-        ));
+    if let Err(err) =
+        server
+            .enrichment_lock()
+            .enrich_tx
+            .try_send(crate::enrichment::build_enrichment_item(
+                entry,
+                true,
+                needs_summary,
+                target_db,
+                named_project,
+                db_path,
+                agent_id.map(ToString::to_string),
+                path_prefix.map(ToString::to_string),
+                entry.revision,
+            ))
+    {
+        tracing::warn!(
+            error = %err,
+            entry_id = %entry.id,
+            "failed to queue capture enrichment"
+        );
+    }
 }

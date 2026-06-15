@@ -22,9 +22,9 @@ struct HalfOpenProbeGuard<'a> {
 
 impl Drop for HalfOpenProbeGuard<'_> {
     fn drop(&mut self) {
-        let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
+        let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
         if let Some((CircuitState::HalfOpen { probe_in_flight }, _)) =
-            circuits.get_mut(&self.server_name)
+            state.circuits.get_mut(&self.server_name)
         {
             *probe_in_flight = false;
         }
@@ -37,15 +37,15 @@ pub(super) struct ChildConnection {
     pub(super) last_used: Instant,
 }
 
+struct McpPoolState {
+    connections: HashMap<String, ChildConnection>,
+    circuits: HashMap<String, (CircuitState, u32)>,
+    semaphores: HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>,
+    connecting_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+}
+
 pub(super) struct McpClientPool {
-    /// Active connections: server_name → connection
-    pub(super) connections: std::sync::Mutex<HashMap<String, ChildConnection>>,
-    /// Circuit breaker state per server
-    pub(super) circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
-    /// Per-child concurrency semaphores: (semaphore, configured max_concurrency)
-    pub(super) semaphores: std::sync::Mutex<HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>>,
-    /// Per-child connecting locks to prevent TOCTOU race
-    pub(super) connecting_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    state: std::sync::Mutex<McpPoolState>,
     /// Idle TTL before auto-disconnect
     pub(super) idle_ttl: Duration,
 }
@@ -53,10 +53,12 @@ pub(super) struct McpClientPool {
 impl McpClientPool {
     pub(super) fn new() -> Self {
         Self {
-            connections: std::sync::Mutex::new(HashMap::new()),
-            circuits: std::sync::Mutex::new(HashMap::new()),
-            semaphores: std::sync::Mutex::new(HashMap::new()),
-            connecting_locks: std::sync::Mutex::new(HashMap::new()),
+            state: std::sync::Mutex::new(McpPoolState {
+                connections: HashMap::new(),
+                circuits: HashMap::new(),
+                semaphores: HashMap::new(),
+                connecting_locks: HashMap::new(),
+            }),
             idle_ttl: Duration::from_secs(300),
         }
     }
@@ -66,8 +68,8 @@ impl McpClientPool {
         server_name: &str,
         now: Instant,
     ) -> CircuitProbeDecision<'a> {
-        let mut circuits = lock_or_recover(&self.circuits, "mcp_pool.circuits");
-        let Some((state, count)) = circuits.get_mut(server_name) else {
+        let mut pool_state = lock_or_recover(&self.state, "mcp_pool.state");
+        let Some((state, count)) = pool_state.circuits.get_mut(server_name) else {
             return CircuitProbeDecision::Allowed(None);
         };
 
@@ -99,6 +101,27 @@ impl McpClientPool {
             CircuitState::Closed => CircuitProbeDecision::Allowed(None),
         }
     }
+
+    pub(super) fn remove_idle_connections(&self, now: Instant) -> Vec<String> {
+        let mut state = lock_or_recover(&self.state, "mcp_pool.state");
+        let stale: Vec<String> = state
+            .connections
+            .iter()
+            .filter(|(_, connection)| now.duration_since(connection.last_used) > self.idle_ttl)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in &stale {
+            state.connections.remove(name);
+        }
+        stale
+    }
+
+    pub(super) fn remove_connection(&self, server_name: &str) -> bool {
+        lock_or_recover(&self.state, "mcp_pool.state")
+            .connections
+            .remove(server_name)
+            .is_some()
+    }
 }
 
 // ─── MCP Pool Proxy Methods on MemoryServer ──────────────────────────────────
@@ -114,16 +137,16 @@ impl MemoryServer {
             .unwrap_or(resolved_capability_id);
         // Check under lock
         {
-            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if conns.contains_key(server_name) {
+            let state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+            if state.connections.contains_key(server_name) {
                 return Ok(());
             }
         }
         // Not connected — acquire connecting lock to serialize connection attempts
         let connecting_lock = {
-            let mut locks =
-                lock_or_recover(&self.pool.connecting_locks, "mcp_pool.connecting_locks");
-            locks
+            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+            state
+                .connecting_locks
                 .entry(server_name.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -131,8 +154,8 @@ impl MemoryServer {
         let _guard = connecting_lock.lock().await;
         // Double-check after acquiring lock
         {
-            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if conns.contains_key(server_name) {
+            let state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+            if state.connections.contains_key(server_name) {
                 return Ok(());
             }
         }
@@ -238,13 +261,15 @@ impl MemoryServer {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
-        lock_or_recover(&self.pool.connections, "mcp_pool.connections").insert(
-            server_name.to_string(),
-            ChildConnection {
-                client,
-                last_used: Instant::now(),
-            },
-        );
+        lock_or_recover(&self.pool.state, "mcp_pool.state")
+            .connections
+            .insert(
+                server_name.to_string(),
+                ChildConnection {
+                    client,
+                    last_used: Instant::now(),
+                },
+            );
         Ok(())
     }
 
@@ -278,7 +303,7 @@ impl MemoryServer {
         let args_hash = stable_hash(&format!("{:?}", arguments));
         let audit_reject = |error_kind: &str| {
             let timestamp = Utc::now().to_rfc3339();
-            let _ = self.with_global_store(|store| {
+            if let Err(err) = self.with_global_store(|store| {
                 store
                     .audit_log_insert(
                         &timestamp,
@@ -290,7 +315,15 @@ impl MemoryServer {
                         Some(error_kind),
                     )
                     .map_err(|e| format!("{e}"))
-            });
+            }) {
+                tracing::warn!(
+                    error = %err,
+                    server_name,
+                    tool_name,
+                    error_kind,
+                    "failed to write MCP reject audit log"
+                );
+            }
         };
         let cap = self.get_capability(&server_id)?;
         if !capability_callable(&cap) {
@@ -500,7 +533,7 @@ impl MemoryServer {
 
         // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
-            let mut sems = lock_or_recover(&self.pool.semaphores, "mcp_pool.semaphores");
+            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
             let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
             if let Some(policy_cap) = sandbox_policy
                 .as_ref()
@@ -510,17 +543,20 @@ impl MemoryServer {
                 max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
             }
             let max_conc = max_conc.max(1) as usize;
-            let needs_rebuild = sems
+            let needs_rebuild = state
+                .semaphores
                 .get(server_name)
                 .map(|(_, cached_max)| *cached_max != max_conc)
                 .unwrap_or(true);
             if needs_rebuild {
-                sems.insert(
+                state.semaphores.insert(
                     server_name.to_string(),
                     (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
                 );
             }
-            sems.get(server_name)
+            state
+                .semaphores
+                .get(server_name)
                 .map(|(semaphore, _)| Arc::clone(semaphore))
                 .ok_or_else(|| {
                     rmcp::ErrorData::internal_error(
@@ -545,8 +581,8 @@ impl MemoryServer {
         }
 
         let peer = {
-            let mut conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if let Some(conn) = conns.get_mut(server_name) {
+            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+            if let Some(conn) = state.connections.get_mut(server_name) {
                 conn.last_used = Instant::now();
                 conn.client.peer().clone()
             } else {
@@ -586,8 +622,10 @@ impl MemoryServer {
                     );
                 }
                 // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
-                let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-                circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
+                let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+                state
+                    .circuits
+                    .insert(server_name.to_string(), (CircuitState::Closed, 0));
                 (Ok(r), "allowed", None)
             }
             Ok(Err(e)) => {
@@ -623,7 +661,7 @@ impl MemoryServer {
         let success = final_result.is_ok();
         let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
         let timestamp = Utc::now().to_rfc3339();
-        let _ = self.with_global_store(|store| {
+        if let Err(err) = self.with_global_store(|store| {
             store
                 .audit_log_insert(
                     &timestamp,
@@ -635,7 +673,14 @@ impl MemoryServer {
                     error_kind.as_deref(),
                 )
                 .map_err(|e| format!("{e}"))
-        });
+        }) {
+            tracing::warn!(
+                error = %err,
+                server_name,
+                tool_name,
+                "failed to write MCP tool audit log"
+            );
+        }
         self.record_sandbox_exec_audit(
             &server_id,
             "tool_call",
@@ -656,22 +701,17 @@ impl MemoryServer {
     }
 
     pub(super) fn record_circuit_failure(&self, server_name: &str) {
-        let mut should_remove = false;
-        {
-            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-            let entry = circuits
-                .entry(server_name.to_string())
-                .or_insert((CircuitState::Closed, 0));
-            entry.1 += 1;
-            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen { .. }) {
-                entry.0 = CircuitState::Open {
-                    until: Instant::now() + Duration::from_secs(30),
-                };
-                should_remove = true;
-            }
-        }
-        if should_remove {
-            lock_or_recover(&self.pool.connections, "mcp_pool.connections").remove(server_name);
+        let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+        let entry = state
+            .circuits
+            .entry(server_name.to_string())
+            .or_insert((CircuitState::Closed, 0));
+        entry.1 += 1;
+        if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen { .. }) {
+            entry.0 = CircuitState::Open {
+                until: Instant::now() + Duration::from_secs(30),
+            };
+            state.connections.remove(server_name);
         }
     }
 }
@@ -681,7 +721,8 @@ mod tests {
     use super::*;
 
     fn circuit_state(pool: &McpClientPool, server_name: &str) -> Option<CircuitState> {
-        lock_or_recover(&pool.circuits, "mcp_pool.circuits")
+        lock_or_recover(&pool.state, "mcp_pool.state")
+            .circuits
             .get(server_name)
             .map(|(state, _)| *state)
     }
@@ -690,15 +731,17 @@ mod tests {
     fn half_open_circuit_allows_only_one_probe() {
         let pool = McpClientPool::new();
         let server_name = "demo";
-        lock_or_recover(&pool.circuits, "mcp_pool.circuits").insert(
-            server_name.to_string(),
-            (
-                CircuitState::Open {
-                    until: Instant::now() - Duration::from_secs(1),
-                },
-                3,
-            ),
-        );
+        lock_or_recover(&pool.state, "mcp_pool.state")
+            .circuits
+            .insert(
+                server_name.to_string(),
+                (
+                    CircuitState::Open {
+                        until: Instant::now() - Duration::from_secs(1),
+                    },
+                    3,
+                ),
+            );
 
         let first = pool.acquire_circuit_probe(server_name, Instant::now());
         let first_guard = match first {
@@ -736,22 +779,25 @@ mod tests {
     fn half_open_probe_guard_preserves_terminal_circuit_state() {
         let pool = McpClientPool::new();
         let server_name = "demo";
-        lock_or_recover(&pool.circuits, "mcp_pool.circuits").insert(
-            server_name.to_string(),
-            (
-                CircuitState::HalfOpen {
-                    probe_in_flight: false,
-                },
-                0,
-            ),
-        );
+        lock_or_recover(&pool.state, "mcp_pool.state")
+            .circuits
+            .insert(
+                server_name.to_string(),
+                (
+                    CircuitState::HalfOpen {
+                        probe_in_flight: false,
+                    },
+                    0,
+                ),
+            );
 
         let probe = pool.acquire_circuit_probe(server_name, Instant::now());
         let probe_guard = match probe {
             CircuitProbeDecision::Allowed(Some(guard)) => guard,
             _ => panic!("half-open circuit should allow a probe when none is active"),
         };
-        lock_or_recover(&pool.circuits, "mcp_pool.circuits")
+        lock_or_recover(&pool.state, "mcp_pool.state")
+            .circuits
             .insert(server_name.to_string(), (CircuitState::Closed, 0));
 
         drop(probe_guard);

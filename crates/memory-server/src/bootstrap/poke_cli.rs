@@ -52,17 +52,24 @@ pub(crate) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, Strin
     let sandbox_home = run_dir.join("sandbox").join(".tachi");
     let sandbox_runs = sandbox_home.join("runs");
     let sandbox_project = run_dir.join("sandbox").join("project");
-    std::fs::create_dir_all(&probes_dir).map_err(|e| format!("create probes dir: {e}"))?;
-    std::fs::create_dir_all(&sandbox_runs).map_err(|e| format!("create sandbox runs: {e}"))?;
-    std::fs::create_dir_all(&sandbox_project)
+    tokio::fs::create_dir_all(&probes_dir)
+        .await
+        .map_err(|e| format!("create probes dir: {e}"))?;
+    tokio::fs::create_dir_all(&sandbox_runs)
+        .await
+        .map_err(|e| format!("create sandbox runs: {e}"))?;
+    tokio::fs::create_dir_all(&sandbox_project)
+        .await
         .map_err(|e| format!("create sandbox project: {e}"))?;
 
     let _env = PokeEnvGuard::new(&sandbox_home, &sandbox_runs);
     let global_db = sandbox_home.join("global").join("memory.db");
     let project_db = sandbox_home.join("project").join("memory.db");
-    std::fs::create_dir_all(global_db.parent().ok_or("global db path has no parent")?)
+    tokio::fs::create_dir_all(global_db.parent().ok_or("global db path has no parent")?)
+        .await
         .map_err(|e| format!("create global db parent: {e}"))?;
-    std::fs::create_dir_all(project_db.parent().ok_or("project db path has no parent")?)
+    tokio::fs::create_dir_all(project_db.parent().ok_or("project db path has no parent")?)
+        .await
         .map_err(|e| format!("create project db parent: {e}"))?;
     let server = MemoryServer::new(global_db, Some(project_db))
         .map_err(|e| format!("create isolated Poke MemoryServer: {e}"))?;
@@ -130,7 +137,7 @@ pub(crate) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, Strin
             "no mutation of the caller's memory DB"
         ],
     });
-    write_json_file(&run_dir.join("report.json"), &report)?;
+    crate::utils::write_json_file_owner_only(&run_dir.join("report.json"), &report)?;
     write_text_file(
         &run_dir.join("report.md"),
         &render_poke_report_markdown(&report),
@@ -174,7 +181,7 @@ where
     };
     payload["finished_at"] = json!(Utc::now().to_rfc3339());
     let path = probes_dir.join(format!("{name}.json"));
-    if let Err(error) = write_json_file(&path, &payload) {
+    if let Err(error) = crate::utils::write_json_file_owner_only(&path, &payload) {
         payload["status"] = json!("failed");
         payload["write_error"] = json!(error);
     } else {
@@ -502,7 +509,8 @@ async fn probe_dispatch_mock(
             run_dir.display()
         ));
     }
-    let result = std::fs::read_to_string(run_dir.join("result.md"))
+    let result = tokio::fs::read_to_string(run_dir.join("result.md"))
+        .await
         .map_err(|e| format!("read dispatch result: {e}"))?;
     if !result.contains("poke dispatch mock ok") {
         return Err(format!(
@@ -641,7 +649,7 @@ async fn probe_verify_ledger(server: &MemoryServer) -> Result<Value, String> {
 async fn wait_for_file(path: &Path, timeout: Duration) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if path.exists() {
+        if tokio::fs::metadata(path).await.is_ok() {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -674,12 +682,6 @@ fn collect_strings_inner(value: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
-}
-
-fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
-    let raw = serde_json::to_vec_pretty(value).map_err(|e| format!("serialize json: {e}"))?;
-    crate::utils::write_owner_only_file_atomic(path, &raw)
-        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn write_text_file(path: &Path, text: &str) -> Result<(), String> {

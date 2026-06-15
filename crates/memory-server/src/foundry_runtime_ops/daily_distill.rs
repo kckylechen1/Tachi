@@ -8,8 +8,8 @@
 //!    `metadata.source_memory_ids` array).
 //! 2. Groups them by (path_prefix, coherence_key) using the same
 //!    `coherent_distill_buckets` logic as the legacy scheduler.
-//! 3. Builds one mega-prompt per batch (≤ [`resolve_batch_size`] groups)
-//!    and dispatches it through the configured backend ([`DistillBackend`]).
+//! 3. Builds one mega-prompt per configured batch and dispatches it through
+//!    the configured backend.
 //! 4. Parses the JSON array response, persists one distill `MemoryEntry`
 //!    per group (with full provenance metadata), and writes a
 //!    `source_manifest.json` audit file under
@@ -32,13 +32,13 @@ use super::*;
 use crate::llm::LlmClient;
 
 /// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
-pub const DEFAULT_GROUPS_PER_BATCH: usize = 6;
+const DEFAULT_GROUPS_PER_BATCH: usize = 6;
 const DEFAULT_PROCESSED_SCAN_LIMIT: usize = 10_000;
 const DEFAULT_CANDIDATE_SCAN_LIMIT: usize = 5_000;
 const MAX_DISTILL_SCAN_LIMIT: usize = 50_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DistillBackend {
+enum DistillBackend {
     ClaudeCli,
     RawApi,
 }
@@ -54,7 +54,7 @@ impl DistillBackend {
 
 /// Resolve distill backend from `FOUNDRY_DISTILL_BACKEND`.
 /// Defaults to `raw_api` so daemon runs do not require Claude Code CLI.
-pub fn resolve_distill_backend() -> DistillBackend {
+fn resolve_distill_backend() -> DistillBackend {
     match std::env::var("FOUNDRY_DISTILL_BACKEND")
         .ok()
         .map(|v| v.trim().to_ascii_lowercase())
@@ -113,7 +113,7 @@ pub fn scrub_agent_noise(text: &str) -> String {
     result
 }
 
-pub fn resolve_batch_size() -> usize {
+fn resolve_batch_size() -> usize {
     std::env::var("FOUNDRY_DISTILL_BATCH_SIZE")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())

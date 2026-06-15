@@ -47,24 +47,11 @@ pub(super) struct VaultSyncImportReport {
 
 pub(super) fn default_vault_sync_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let home = dirs::home_dir().ok_or("Could not resolve home directory")?;
-    #[cfg(target_os = "macos")]
-    {
-        Ok(home
-            .join("Library")
-            .join("Mobile Documents")
-            .join("com~apple~CloudDocs")
-            .join("Tachi")
-            .join("vault")
-            .join("vault.bundle.json"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Ok(home
-            .join(".tachi")
-            .join("sync")
-            .join("vault")
-            .join("vault.bundle.json"))
-    }
+    Ok(home
+        .join(".tachi")
+        .join("sync")
+        .join("vault")
+        .join("vault.bundle.json"))
 }
 
 pub(super) fn resolve_vault_sync_path(
@@ -369,6 +356,21 @@ mod tests {
 
     fn temp_db_path() -> PathBuf {
         std::env::temp_dir().join(format!("tachi-vault-sync-{}.sqlite", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn default_vault_sync_path_is_local_only() {
+        let path = default_vault_sync_path().expect("default sync path");
+        let rendered = path.display().to_string();
+
+        assert!(
+            rendered.contains(".tachi"),
+            "default sync path should stay under local Tachi state: {rendered}"
+        );
+        assert!(
+            !vault_sync_path_requires_cloud_ack(&path),
+            "default sync path must not require cloud acknowledgement: {rendered}"
+        );
     }
 
     fn sample_config() -> VaultConfig {

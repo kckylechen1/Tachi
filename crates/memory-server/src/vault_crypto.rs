@@ -13,7 +13,7 @@ const AES_GCM_NONCE_LEN: usize = 12;
 const AES_GCM_TAG_LEN: usize = 16;
 
 /// Derive a 32-byte encryption key from password + salt using Argon2id.
-pub fn derive_key_into(password: &str, salt: &[u8], key: &mut [u8; 32]) -> Result<(), String> {
+fn derive_key_into(password: &str, salt: &[u8], key: &mut [u8; 32]) -> Result<(), String> {
     let params =
         Params::new(65536, 3, 4, Some(32)).map_err(|e| format!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -75,7 +75,7 @@ pub fn generate_salt() -> [u8; 32] {
 }
 
 /// Generate a random 12-byte nonce.
-pub fn generate_nonce() -> [u8; 12] {
+fn generate_nonce() -> [u8; 12] {
     let mut nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce);
     nonce

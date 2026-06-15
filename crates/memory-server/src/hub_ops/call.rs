@@ -461,14 +461,7 @@ pub(crate) async fn handle_hub_disconnect(
         .unwrap_or(&params.server_id);
 
     // Remove from connection pool
-    let had_connection = {
-        let mut conns = server
-            .pool
-            .connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        conns.remove(server_name).is_some()
-    };
+    let had_connection = server.pool.remove_connection(server_name);
 
     // Also clear discovered tools cache
     {

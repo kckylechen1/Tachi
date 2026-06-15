@@ -1270,9 +1270,9 @@ pub(crate) enum VaultAction {
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
     },
-    /// Export encrypted Vault rows to an iCloud-compatible sync bundle.
+    /// Export encrypted Vault rows to a signed sync bundle.
     SyncExport {
-        /// Output bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        /// Output bundle path. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
         /// Allow writing the encrypted bundle to a cloud-sync path such as iCloud Drive.
@@ -1293,7 +1293,7 @@ pub(crate) enum VaultAction {
     },
     /// Import encrypted Vault rows from a sync bundle.
     SyncImport {
-        /// Input bundle path. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        /// Input bundle path. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
         input: Option<PathBuf>,
         /// Import a legacy unsigned bundle. Signed bundles are still verified.
@@ -1314,7 +1314,7 @@ pub(crate) enum VaultAction {
     },
     /// Show the default Vault sync bundle path and whether it exists.
     SyncStatus {
-        /// Bundle path to inspect. Defaults to iCloud Drive/Tachi/vault/vault.bundle.json on macOS.
+        /// Bundle path to inspect. Defaults to ~/.tachi/sync/vault/vault.bundle.json.
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
     },

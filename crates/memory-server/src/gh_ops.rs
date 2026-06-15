@@ -231,7 +231,7 @@ fn run_gh_json(mut cmd: Command, token: &str) -> Result<String, String> {
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-pub(crate) async fn handle_gh_issue_read(
+async fn handle_gh_issue_read(
     server: &MemoryServer,
     params: GhIssueReadParams,
 ) -> Result<String, String> {
@@ -255,7 +255,7 @@ pub(crate) async fn handle_gh_issue_read(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_issue_list(
+async fn handle_gh_issue_list(
     server: &MemoryServer,
     params: GhIssueListParams,
 ) -> Result<String, String> {
@@ -281,7 +281,7 @@ pub(crate) async fn handle_gh_issue_list(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_issue_create(
+async fn handle_gh_issue_create(
     server: &MemoryServer,
     params: GhIssueCreateParams,
 ) -> Result<String, String> {
@@ -309,7 +309,7 @@ pub(crate) async fn handle_gh_issue_create(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_pr_read(
+async fn handle_gh_pr_read(
     server: &MemoryServer,
     params: GhPrReadParams,
 ) -> Result<String, String> {
@@ -992,7 +992,7 @@ fn fetch_gh_pr_comments(
     Ok((reviews, inline_comments, comments))
 }
 
-pub(crate) async fn handle_gh_pr_comments(
+async fn handle_gh_pr_comments(
     server: &MemoryServer,
     params: GhPrCommentsParams,
 ) -> Result<String, String> {
@@ -1013,7 +1013,7 @@ pub(crate) async fn handle_gh_pr_comments(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_pr_review_digest(
+async fn handle_gh_pr_review_digest(
     server: &MemoryServer,
     params: GhPrCommentsParams,
     author_filter: Option<String>,
@@ -1044,7 +1044,7 @@ pub(crate) async fn handle_gh_pr_review_digest(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_pr_list(
+async fn handle_gh_pr_list(
     server: &MemoryServer,
     params: GhPrListParams,
 ) -> Result<String, String> {
@@ -1069,7 +1069,7 @@ pub(crate) async fn handle_gh_pr_list(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(crate) async fn handle_gh_repo_view(
+async fn handle_gh_repo_view(
     server: &MemoryServer,
     params: GhRepoViewParams,
 ) -> Result<String, String> {
@@ -1834,7 +1834,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
 
     let mut persisted = false;
     if let (Some(fid), Some(run_dir)) = (flow_id, flow_run_dir.as_ref()) {
-        std::fs::create_dir_all(run_dir).map_err(|e| format!("create run dir: {e}"))?;
+        tokio::fs::create_dir_all(run_dir)
+            .await
+            .map_err(|e| format!("create run dir: {e}"))?;
         merge_github_status(run_dir, status_patch.clone())?;
         append_github_event(run_dir, fid, event_kind, event_payload.clone())?;
         persisted = true;

@@ -31,9 +31,7 @@ pub use foundry::{
 };
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use noise::{is_noise_text, should_skip_query};
-pub use pack::{
-    AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackManifestMeta, PackOverlay,
-};
+pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};
 pub use scorer::{surprise_score, HybridWeights};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
@@ -41,7 +39,9 @@ pub use types::{
     RetentionPolicy, SearchResult, StatsResult,
 };
 pub use vault::{
-    api_key_pool_member_index, SecretType, VaultCipher, VaultConfig, VaultEntry, VaultKeyRotation,
+    api_key_pool_member_index, normalize_secret_type, VaultCipher, VaultConfig, VaultEntry,
+    VaultKeyRotation, SECRET_TYPES, SECRET_TYPE_API_KEY, SECRET_TYPE_COOKIE, SECRET_TYPE_JSON_BLOB,
+    SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
 };
 
 use rusqlite::{Connection, OpenFlags};

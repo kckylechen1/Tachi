@@ -140,6 +140,42 @@ pub(super) fn write_owner_only_file_atomic(
     result
 }
 
+pub(super) fn write_json_file_owner_only(
+    path: &std::path::Path,
+    value: &Value,
+) -> Result<(), String> {
+    let body = serde_json::to_vec_pretty(value).map_err(|e| format!("serialize json: {e}"))?;
+    write_owner_only_file_atomic(path, &body)
+}
+
+pub(super) fn write_run_status_file(
+    run_dir: &std::path::Path,
+    status: &Value,
+) -> Result<(), String> {
+    write_json_file_owner_only(&run_dir.join("status.json"), status)
+}
+
+pub(super) fn read_to_string_or_warn_default(path: &std::path::Path, label: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "{label} read failed; continuing with empty content"
+                );
+            }
+            String::new()
+        }
+    }
+}
+
+pub(super) fn append_run_event(run_dir: &std::path::Path, event: Value) -> Result<(), String> {
+    let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
+    append_owner_only_jsonl_line(&run_dir.join("events.jsonl"), &line)
+}
+
 pub(super) fn sync_parent_dir(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -205,6 +241,51 @@ pub(super) fn append_owner_only_jsonl_line(
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+pub(super) fn is_shell_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+pub(super) fn resolve_home_arg(home: Option<PathBuf>) -> Result<PathBuf, String> {
+    home.or_else(dirs::home_dir)
+        .ok_or_else(|| "Cannot determine home directory".to_string())
+}
+
+pub(super) fn normalize_supported_values<'a>(
+    raw_values: &[String],
+    supported: &'a [&'a str],
+    value_label: &str,
+) -> Result<Vec<&'a str>, String> {
+    if raw_values.is_empty() {
+        return Ok(supported.to_vec());
+    }
+
+    let mut out = Vec::new();
+    for raw in raw_values {
+        let normalized = raw.trim().to_ascii_lowercase();
+        let Some(supported_value) = supported
+            .iter()
+            .copied()
+            .find(|candidate| *candidate == normalized)
+        else {
+            return Err(format!(
+                "unsupported {value_label} '{raw}'. Supported: {}",
+                supported.join(", ")
+            ));
+        };
+        if !out.contains(&supported_value) {
+            out.push(supported_value);
+        }
+    }
+    Ok(out)
 }
 
 /// Check if a command is in the trusted allowlist for MCP server spawning.
@@ -700,6 +781,51 @@ mod tests {
                 & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn write_json_file_owner_only_pretty_prints_and_restricts_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("manifest.json");
+
+        write_json_file_owner_only(&path, &json!({"state":"ok"})).expect("write json");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read json"),
+            "{\n  \"state\": \"ok\"\n}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn read_to_string_or_warn_default_returns_content_or_empty_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("result.md");
+        assert_eq!(read_to_string_or_warn_default(&path, "test artifact"), "");
+
+        std::fs::write(&path, "done").expect("write artifact");
+        assert_eq!(
+            read_to_string_or_warn_default(&path, "test artifact"),
+            "done"
+        );
+    }
+
+    #[test]
+    fn shared_env_name_validator_matches_shell_identifier_rules() {
+        assert!(is_shell_env_name("OPENAI_API_KEY"));
+        assert!(is_shell_env_name("_TACHI"));
+        assert!(!is_shell_env_name("1_BAD"));
+        assert!(!is_shell_env_name("BAD-NAME"));
+        assert!(!is_shell_env_name(""));
     }
 
     #[test]

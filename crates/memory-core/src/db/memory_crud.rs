@@ -1064,7 +1064,8 @@ pub fn find_active_wiki_entry_by_path_or_topic(
 /// used to compute `query_diversity` (distinct queries that reached this memory).
 /// Applies a promotion gate: tier → "consolidated" when recall_count ≥ 3,
 /// query_diversity ≥ 3, and (importance ≥ 0.8 OR query_diversity ≥ 3).
-pub fn record_access(
+#[cfg(test)]
+pub(crate) fn record_access(
     conn: &Connection,
     ids: &[String],
     fts_hits: &[String],

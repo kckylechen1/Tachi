@@ -15,21 +15,17 @@
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PathRouting {
+pub(crate) enum PathRouting {
     /// Path belongs in the project DB (default).
     Project,
     /// Path belongs in the wiki DB only.
     WikiOnly,
-    /// Path is global-only (none currently classified this way; reserved).
-    /// Per audit B11, handoff/kanban are normally project-local; system-wide
-    /// placements require explicit `allow_cross_project`.
-    Global,
     /// Path is acceptable in any DB.
     Any,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathRoutingError {
+pub(crate) enum PathRoutingError {
     /// A `/wiki/...` path was written to a non-wiki DB.
     WikiPathInNonWikiDb { path: String, db_label: String },
 }
@@ -115,7 +111,7 @@ pub fn normalize_path(p: &str) -> String {
 }
 
 /// Classify a path's intended routing.
-pub fn classify_path(p: &str) -> PathRouting {
+pub(crate) fn classify_path(p: &str) -> PathRouting {
     let n = normalize_path(p);
     if n == "/wiki" || n.starts_with("/wiki/") {
         return PathRouting::WikiOnly;
@@ -139,7 +135,7 @@ pub fn classify_path(p: &str) -> PathRouting {
 ///
 /// `allow_cross_project=true` bypasses all rejections (used by handoff/kanban
 /// subsystems that intentionally write project-classified paths to global).
-pub fn validate_path_for_db(
+pub(crate) fn validate_path_for_db(
     path: &str,
     db_label: &str,
     allow_cross_project: bool,
@@ -162,7 +158,7 @@ pub fn validate_path_for_db(
         // are enforced primarily by migration v4 (cross-DB quarantine using
         // provenance evidence). At write time we only enforce wiki isolation
         // here; per-project routing would require a project registry.
-        PathRouting::Global | PathRouting::Any | PathRouting::Project => {}
+        PathRouting::Any | PathRouting::Project => {}
     }
     Ok(())
 }

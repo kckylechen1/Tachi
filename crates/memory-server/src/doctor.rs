@@ -96,9 +96,7 @@ pub struct DoctorFinding {
     pub classification: DbClassification,
     pub file_size: u64,
     pub has_wal: bool,
-    pub has_shm: bool,
     pub mem_count: Option<usize>,
-    pub archived_count: Option<usize>,
     pub vec_rowid_count: Option<usize>,
     pub none_domain_count: Option<usize>,
     pub jobs: JobBreakdown,
@@ -256,12 +254,10 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     let scope_hint = scope_hint_for(path);
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal_path = sidecar(path, "-wal");
-    let shm_path = sidecar(path, "-shm");
     let has_wal = wal_path.exists()
         && fs::metadata(&wal_path)
             .map(|m| m.len() > 0)
             .unwrap_or(false);
-    let has_shm = shm_path.exists();
 
     let basename = path
         .file_name()
@@ -276,9 +272,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             classification: DbClassification::Backup,
             file_size,
             has_wal,
-            has_shm,
             mem_count: None,
-            archived_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
             jobs: JobBreakdown::default(),
@@ -295,9 +289,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             classification: DbClassification::Placeholder,
             file_size,
             has_wal,
-            has_shm,
             mem_count: None,
-            archived_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
             jobs: JobBreakdown::default(),
@@ -323,9 +315,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
                 classification: DbClassification::Corrupt,
                 file_size,
                 has_wal,
-                has_shm,
                 mem_count: None,
-                archived_count: None,
                 vec_rowid_count: None,
                 none_domain_count: None,
                 jobs: JobBreakdown::default(),
@@ -346,9 +336,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             classification: DbClassification::Corrupt,
             file_size,
             has_wal,
-            has_shm,
             mem_count: None,
-            archived_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
             jobs: JobBreakdown::default(),
@@ -400,9 +388,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             classification: class,
             file_size,
             has_wal,
-            has_shm,
             mem_count: None,
-            archived_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
             jobs: JobBreakdown::default(),
@@ -421,9 +407,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
             classification: DbClassification::LegacySchema,
             file_size,
             has_wal,
-            has_shm,
             mem_count,
-            archived_count: None,
             vec_rowid_count: None,
             none_domain_count: None,
             jobs: JobBreakdown::default(),
@@ -466,7 +450,6 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     }
 
     // Detail probes (best-effort, all errors swallowed).
-    let archived_count = scalar_count(&conn, "select count(*) from memories where archived=1").ok();
     let none_domain_count = scalar_count(
         &conn,
         "select count(*) from memories where domain is null or domain=''",
@@ -479,9 +462,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
         classification,
         file_size,
         has_wal,
-        has_shm,
         mem_count,
-        archived_count,
         vec_rowid_count,
         none_domain_count,
         jobs,

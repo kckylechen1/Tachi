@@ -363,7 +363,7 @@ fn project_pack_to_agent(pack: &Pack, agent: AgentKind) -> Result<ProjectionSumm
             .join("_overlay")
             .join(agent.as_str())
             .join("overlay-manifest.json");
-        write_json_file(&overlay_manifest_path, overlay_json)?;
+        crate::utils::write_json_file_owner_only(&overlay_manifest_path, overlay_json)?;
         overlay_count += 1;
     }
 
@@ -396,7 +396,7 @@ fn project_pack_to_agent(pack: &Pack, agent: AgentKind) -> Result<ProjectionSumm
         },
         "overlay_manifest": overlay_manifest,
     });
-    write_json_file(&projection_manifest_path, &projection_manifest)?;
+    crate::utils::write_json_file_owner_only(&projection_manifest_path, &projection_manifest)?;
 
     Ok(ProjectionSummary {
         path: target_dir.display().to_string(),
@@ -910,15 +910,6 @@ fn normalize_rel_path(path: &Path) -> String {
         }
     }
     parts.join("/")
-}
-
-fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-    }
-    let content =
-        serde_json::to_string_pretty(value).map_err(|e| format!("serialize json: {e}"))?;
-    std::fs::write(path, content).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 /// Format a SKILL.md content as a Cursor .mdc rule.
