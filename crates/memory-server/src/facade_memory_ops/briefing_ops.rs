@@ -10,7 +10,9 @@ use super::evidence_format::{
 };
 use crate::agent_markdown;
 use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
-use crate::memory_search_ops::{named_project_db_exists, resolve_workspace_named_project};
+use crate::memory_search_ops::{
+    named_project_db_exists, named_project_from_db_path, resolve_workspace_named_project,
+};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::json;
@@ -29,7 +31,13 @@ pub(crate) async fn handle_memory_briefing(
     let named_project = params
         .project
         .clone()
-        .or_else(|| resolve_workspace_named_project().filter(|name| named_project_db_exists(name)));
+        .or_else(|| resolve_workspace_named_project().filter(|name| named_project_db_exists(name)))
+        .or_else(|| {
+            server
+                .project_db_path_buf()
+                .and_then(|path| named_project_from_db_path(path.as_path()))
+                .filter(|name| named_project_db_exists(name))
+        });
     let query = params
         .query
         .clone()
@@ -149,13 +157,7 @@ pub(crate) async fn handle_memory_briefing(
             },
         ),
         async { crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap) },
-        async {
-            if compact {
-                Ok(json!({"orphans":0,"stale_nodes":0,"duplicates":0}))
-            } else {
-                crate::wiki_ops::wiki_hygiene_counts(server).await
-            }
-        },
+        async { crate::wiki_ops::wiki_hygiene_counts(server).await },
     );
     let warnings: Vec<String> = warnings_res;
     let board = slim_kanban(parse_json_or_empty(board_res?));

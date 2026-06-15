@@ -598,13 +598,50 @@ pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
 /// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
 /// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
 const TICKER_EXACT_MATCH_BOOST: f64 = 12.0;
+const ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
 const IRON_RULE_BOOST: f64 = 5.0;
 const STOP_LOSS_BOOST: f64 = 4.0;
+
+pub fn is_id_like_exact_query(query: &str) -> bool {
+    let query = query.trim();
+    if query.len() < 8 || query.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let has_precision_marker = query
+        .chars()
+        .any(|ch| ch == '_' || ch == '-' || ch == ':' || ch.is_ascii_digit());
+    has_precision_marker && tokenize(query).len() >= 2
+}
+
+pub fn entry_has_exact_query_token(entry: &MemoryEntry, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return false;
+    }
+    if entry.id.to_ascii_lowercase().contains(&query)
+        || entry.path.to_ascii_lowercase().contains(&query)
+        || entry.topic.to_ascii_lowercase().contains(&query)
+        || entry.summary.to_ascii_lowercase().contains(&query)
+        || entry.text.to_ascii_lowercase().contains(&query)
+    {
+        return true;
+    }
+    entry
+        .keywords
+        .iter()
+        .chain(entry.entities.iter())
+        .any(|value| value.to_ascii_lowercase().contains(&query))
+}
+
 pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
     for code in extract_stock_codes(query) {
         if entry_has_stock_code(entry, &code) {
             return TICKER_EXACT_MATCH_BOOST;
         }
+    }
+
+    if is_id_like_exact_query(query) && entry_has_exact_query_token(entry, query) {
+        return ID_LIKE_EXACT_MATCH_BOOST;
     }
 
     let q = query.to_ascii_lowercase();
@@ -832,6 +869,46 @@ mod tests {
         assert!(precision_query_multiplier("688981 止损", &entry) >= 10.0);
         entry.entities.clear();
         assert!(precision_query_multiplier("688981 止损", &entry) <= 1.0);
+    }
+
+    #[test]
+    fn precision_multiplier_for_id_like_exact_probe() {
+        use chrono::Utc;
+        let entry = crate::types::MemoryEntry {
+            id: "recall-probe-alpha-20260607".into(),
+            path: "/scratch/tachi/recall-probe-alpha-20260607".into(),
+            summary: "alpha recall probe".into(),
+            text: "RECALL_PROBE_ALPHA_20260607 clean-cli bridge behavior".into(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "manual".into(),
+            scope: "project".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            retention_policy: None,
+            domain: None,
+            vector: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        };
+        assert!(is_id_like_exact_query("RECALL_PROBE_ALPHA_20260607"));
+        assert!(precision_query_multiplier("RECALL_PROBE_ALPHA_20260607", &entry) >= 10.0);
+        assert_eq!(
+            precision_query_multiplier("recall probe alpha", &entry),
+            1.0
+        );
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub(crate) use contradiction::apply_auto_contradiction_detection;
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
 pub(crate) use search_helpers::named_project_db_exists;
+pub(crate) use search_helpers::named_project_from_db_path;
 pub(crate) use search_helpers::resolve_workspace_named_project;
 pub(crate) use search_memory::handle_find_similar_memory;
 pub(crate) use search_memory::handle_search_memory;

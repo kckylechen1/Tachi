@@ -556,6 +556,88 @@ async fn tachi_memory_ask_can_return_compact_json() {
 }
 
 #[tokio::test]
+async fn tachi_memory_ask_keeps_controlled_probe_evidence_aligned_with_search() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut alpha = make_entry("ask-parity-alpha");
+            alpha.path = "/scratch/tachi/ask-parity-alpha".to_string();
+            alpha.summary = "Ask parity alpha".to_string();
+            alpha.text =
+                "RECALL_PROBE_ALPHA_ASK_20260607 clean-cli bridge dry-run force-delete behavior"
+                    .to_string();
+            alpha.keywords = vec!["recall-probe".to_string(), "clean-cli".to_string()];
+            store.upsert(&alpha).map_err(|e| e.to_string())?;
+
+            for idx in 0..12 {
+                let mut distractor = make_entry(&format!("ask-parity-distractor-{idx}"));
+                distractor.path = format!("/scratch/tachi/ask-parity-distractor-{idx}");
+                distractor.summary = format!("Ask parity distractor {idx}");
+                distractor.text =
+                    format!("RECALL_PROBE_BETA_ASK_20260607 clean-cli bridge candidate {idx}");
+                distractor.keywords = vec!["recall-probe".to_string(), "clean-cli".to_string()];
+                store.upsert(&distractor).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed ask/search parity entries");
+
+    let mut search_params = tachi_memory_params("search");
+    search_params.format = Some("json".to_string());
+    search_params.query = Some("RECALL_PROBE_ALPHA_ASK_20260607".to_string());
+    search_params.scope = Some("memory".to_string());
+    search_params.top_k = 3;
+    let search_body = crate::facade_memory_ops::handle_tachi_memory(&server, search_params)
+        .await
+        .expect("search should succeed");
+    let search_json: Value = serde_json::from_str(&search_body).expect("search JSON");
+    let search_ids = search_json["sections"]
+        .as_array()
+        .expect("sections")
+        .iter()
+        .flat_map(|section| {
+            section["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|row| row["id"].as_str())
+        })
+        .collect::<Vec<_>>();
+
+    let mut ask_params = tachi_memory_params("ask");
+    ask_params.format = Some("json".to_string());
+    ask_params.query = Some("RECALL_PROBE_ALPHA_ASK_20260607".to_string());
+    ask_params.scope = Some("memory".to_string());
+    ask_params.top_k = 3;
+    ask_params.enable_rerank = false;
+    let ask_body = crate::facade_memory_ops::handle_tachi_memory(&server, ask_params)
+        .await
+        .expect("ask should succeed");
+    let ask_json: Value = serde_json::from_str(&ask_body).expect("ask JSON");
+    let evidence = ask_json["evidence"].as_array().expect("ask evidence");
+    let ask_ids = evidence
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(search_ids.first().copied(), Some("ask-parity-alpha"));
+    assert_eq!(ask_ids.first().copied(), Some("ask-parity-alpha"));
+    assert!(
+        ask_ids
+            .iter()
+            .take(3)
+            .any(|id| search_ids.iter().take(3).any(|search_id| search_id == id)),
+        "ask evidence should overlap controlled search evidence: search={search_ids:?} ask={ask_ids:?}"
+    );
+    assert!(
+        evidence
+            .first()
+            .is_some_and(|row| row.get("rerank_policy").is_none()),
+        "ask should not force rerank when enable_rerank=false: {ask_json}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_memory_readiness_can_return_operational_json() {
     let server = make_server();
     let params: TachiMemoryParams = serde_json::from_value(json!({
@@ -577,6 +659,61 @@ async fn tachi_memory_readiness_can_return_operational_json() {
     assert!(parsed["suggestions"].is_array());
     assert!(parsed["vector_health"].is_object());
     assert!(parsed["readiness_warnings"].is_array());
+
+    let tools = server.tachi_tools().await.expect("tachi_tools");
+    let tools_count = tools
+        .lines()
+        .find_map(|line| line.strip_prefix("count: "))
+        .expect("tachi_tools count line")
+        .parse::<u64>()
+        .expect("numeric tachi_tools count");
+    assert_eq!(
+        parsed["tool_visibility_summary"]["visible_count"],
+        json!(tools_count),
+        "readiness visible_count should match tachi_tools output"
+    );
+}
+
+#[tokio::test]
+async fn tachi_memory_alerts_and_compact_briefing_report_same_wiki_counts() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("briefing-alerts-wiki-orphan");
+            entry.path = "/wiki/test/briefing-alerts-orphan".to_string();
+            entry.summary = "Briefing alerts wiki orphan".to_string();
+            entry.text =
+                "BriefingAlertsWikiCountNeedle should be counted by wiki hygiene.".to_string();
+            entry.domain = Some("wiki".to_string());
+            entry.metadata = json!({"wiki": true});
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .expect("seed wiki hygiene row");
+
+    let mut briefing_params = tachi_memory_params("briefing");
+    briefing_params.format = Some("json".to_string());
+    briefing_params.query = Some("BriefingAlertsWikiCountNeedle".to_string());
+    briefing_params.compact = true;
+    let briefing_body = crate::facade_memory_ops::handle_tachi_memory(&server, briefing_params)
+        .await
+        .expect("briefing should succeed");
+    let briefing_json: Value = serde_json::from_str(&briefing_body).expect("briefing JSON");
+
+    let mut alerts_params = tachi_memory_params("alerts");
+    alerts_params.format = Some("json".to_string());
+    let alerts_body = crate::facade_memory_ops::handle_tachi_memory(&server, alerts_params)
+        .await
+        .expect("alerts should succeed");
+    let alerts_json: Value = serde_json::from_str(&alerts_body).expect("alerts JSON");
+
+    assert_eq!(
+        briefing_json["health"]["wiki"], alerts_json["wiki_counts"],
+        "alerts and compact briefing should report the same wiki hygiene counts"
+    );
+    assert!(
+        alerts_json["wiki_counts"]["orphans"].as_u64().unwrap_or(0) >= 1,
+        "fixture should produce a visible orphan count: {alerts_json}"
+    );
 }
 
 #[test]
@@ -887,6 +1024,55 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
                     || row["path"] == json!("/wiki/agent/tachi/briefing-default")
             })),
         "expected default briefing wiki rows to include project:wiki hit, got: {parsed}"
+    );
+}
+
+#[tokio::test]
+async fn tachi_memory_briefing_uses_bound_project_db_when_cwd_project_is_unknown() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home
+        .temp_home
+        .join("Bound Project Repo")
+        .canonicalize()
+        .unwrap_or_else(|_| temp_home.temp_home.join("Bound Project Repo"));
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+
+    server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: ".tachi/memory.db".to_string(),
+        }))
+        .await
+        .expect("project DB init should succeed");
+    server
+        .with_project_store(|store| {
+            let mut entry = make_entry("bound-project-briefing-hit");
+            entry.path = "/scratch/tachi/bound-project-briefing".to_string();
+            entry.summary = "Bound project briefing hit".to_string();
+            entry.text = "BoundProjectBriefingNeedle should surface from the hot-bound project DB."
+                .to_string();
+            entry.entities = vec!["BoundProjectBriefingNeedle".to_string()];
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .expect("seed bound project memory");
+
+    let mut params = tachi_memory_params("briefing");
+    params.format = Some("json".to_string());
+    params.query = Some("BoundProjectBriefingNeedle".to_string());
+    params.compact = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("briefing should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+
+    assert_eq!(parsed["project"], json!("Bound_Project_Repo"));
+    assert!(
+        parsed["memories"]
+            .as_array()
+            .is_some_and(|rows| rows
+                .iter()
+                .any(|row| row["id"] == json!("bound-project-briefing-hit"))),
+        "briefing should search the bound project DB even when cwd has no matching named DB: {parsed}"
     );
 }
 

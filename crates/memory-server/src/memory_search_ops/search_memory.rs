@@ -45,6 +45,60 @@ fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
     memory_core::path_prefix_opts_into_recall_cache(path_prefix)
 }
 
+fn row_text_for_exact_match(row: &serde_json::Value) -> String {
+    ["id", "path", "topic", "summary", "excerpt"]
+        .into_iter()
+        .filter_map(|key| row.get(key).and_then(serde_json::Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase()
+}
+
+fn row_has_exact_token_match(query: &str, row: &serde_json::Value) -> bool {
+    if row.get("match_type").and_then(serde_json::Value::as_str) == Some("exact_token") {
+        return true;
+    }
+    if !memory_core::scorer::is_id_like_exact_query(query) {
+        return false;
+    }
+    row_text_for_exact_match(row).contains(&query.trim().to_ascii_lowercase())
+}
+
+fn mark_exact_token_match(row: &mut serde_json::Value) {
+    if let Some(obj) = row.as_object_mut() {
+        obj.insert("match_type".into(), json!("exact_token"));
+    }
+}
+
+fn annotate_exact_token_matches(rows: &mut [serde_json::Value], query: &str) {
+    for row in rows {
+        if !row_has_exact_token_match(query, row) {
+            continue;
+        }
+        mark_exact_token_match(row);
+    }
+}
+
+fn has_high_confidence_exact_token_top(rows: &[serde_json::Value], query: &str) -> bool {
+    let Some(first) = rows.first() else {
+        return false;
+    };
+    if !row_has_exact_token_match(query, first) {
+        return false;
+    }
+    let fts = first
+        .get("score")
+        .and_then(|score| score.get("fts"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    let symbolic = first
+        .get("score")
+        .and_then(|score| score.get("symbolic"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0);
+    fts >= 0.95 || symbolic >= 0.95
+}
+
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
@@ -333,8 +387,17 @@ pub(crate) async fn search_memory_rows(
 
     let mut output: Vec<serde_json::Value> = deduped_results
         .iter()
-        .map(|(r, db_scope)| slim_search_result(r, *db_scope, params.include_metadata))
+        .map(|(r, db_scope)| {
+            let mut row = slim_search_result(r, *db_scope, params.include_metadata);
+            if memory_core::scorer::is_id_like_exact_query(&params.query)
+                && memory_core::scorer::entry_has_exact_query_token(&r.entry, &params.query)
+            {
+                mark_exact_token_match(&mut row);
+            }
+            row
+        })
         .collect();
+    annotate_exact_token_matches(&mut output, &params.query);
 
     if pipeline_enabled {
         let mut existing_ids: HashSet<String> = deduped_results
@@ -394,7 +457,12 @@ pub(crate) async fn handle_search_memory(
     }
     let mut rows = search_memory_rows(server, search_params, project_only).await?;
     if params.enable_rerank && rows.len() > top_k {
-        if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
+        if has_high_confidence_exact_token_top(&rows, &params.query) {
+            if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
+                obj.insert("rerank_policy".into(), json!("skipped_exact_token"));
+            }
+            rows.truncate(top_k);
+        } else if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
             let (reranked, outcome) = crate::foundry_runtime_ops::rerank_rows_with_outcome(
                 server,
                 &params.query,
