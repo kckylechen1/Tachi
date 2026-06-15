@@ -1,5 +1,98 @@
 use super::*;
 
+fn find_path_binary(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn canonical_or_original(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn build_cli_binary_item() -> SetupItem {
+    let current_exe = std::env::current_exe().ok();
+    let path_tachi = find_path_binary("tachi");
+
+    let current_display = current_exe
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let path_display = path_tachi
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "not found on PATH".to_string());
+
+    let same_binary = current_exe
+        .as_ref()
+        .zip(path_tachi.as_ref())
+        .map(|(current, path)| canonical_or_original(current) == canonical_or_original(path))
+        .unwrap_or(false);
+
+    let mut details = vec![
+        format!("running binary: {current_display}"),
+        format!("PATH tachi: {path_display}"),
+    ];
+
+    let (status, state_detail) = match (&current_exe, &path_tachi, same_binary) {
+        (_, Some(_), true) => ("ready", "PATH tachi resolves to this binary".to_string()),
+        (Some(current), Some(path), false) => (
+            "needs_attention",
+            format!(
+                "PATH tachi differs from this binary; refresh {} or invoke {} directly",
+                path.display(),
+                current.display()
+            ),
+        ),
+        (Some(current), None, _) => (
+            "needs_attention",
+            format!(
+                "no tachi binary found on PATH; install or symlink {}",
+                current.display()
+            ),
+        ),
+        (None, Some(_), _) => (
+            "needs_attention",
+            "could not resolve the running binary for PATH comparison".to_string(),
+        ),
+        (None, None, _) => (
+            "needs_attention",
+            "could not resolve the running binary and no tachi binary was found on PATH"
+                .to_string(),
+        ),
+    };
+    details.push(state_detail);
+
+    SetupItem {
+        id: "cli_binary".to_string(),
+        label: "CLI Binary".to_string(),
+        status: status.to_string(),
+        details,
+    }
+}
+
 pub(crate) fn build_setup_report(
     home: &std::path::Path,
     app_home: &std::path::Path,
@@ -149,6 +242,7 @@ pub(crate) fn build_setup_report(
     }
 
     let items = vec![
+        build_cli_binary_item(),
         SetupItem {
             id: "api_keys".to_string(),
             label: "1/5 API Keys".to_string(),
@@ -203,6 +297,17 @@ pub(crate) fn build_setup_report(
             "Add missing API keys to {}",
             config_env_path.display()
         ));
+    }
+    if items
+        .iter()
+        .find(|item| item.id == "cli_binary")
+        .map(|item| item.status != "ready")
+        .unwrap_or(true)
+    {
+        next_steps.push(
+            "Refresh the `tachi` binary on PATH, or invoke the reported running binary directly"
+                .to_string(),
+        );
     }
     if discovered_skill_entries == 0 {
         next_steps.push(

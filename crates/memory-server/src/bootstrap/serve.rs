@@ -1,15 +1,18 @@
 use super::*;
 
-fn init_tracing(home: &std::path::Path) {
+fn primary_log_path(app_home: &std::path::Path) -> std::path::PathBuf {
+    app_home.join("logs").join("tachi.log")
+}
+
+fn init_tracing(app_home: &std::path::Path) {
     use std::io::Write as _;
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,memory_server=info,rmcp=warn"));
 
-    // Try the canonical location first, then /tmp, then bare stderr.
-    let log_dir = home.join(".tachi").join("logs");
-    let primary = log_dir.join("tachi.log");
+    // Try the configured app home first, then /tmp, then bare stderr.
+    let primary = primary_log_path(app_home);
     let fallback = std::path::PathBuf::from("/tmp/tachi.log");
 
     let opener = |path: &std::path::Path| -> Option<std::fs::File> {
@@ -131,15 +134,6 @@ fn db_path_held_by_other_process(db_path: &str) -> bool {
 
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    // PR7 — install the tracing sink before doing anything else so early errors
-    // (config load, manifest resolution, daemon bind) are captured.
-    let home_for_logs = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    init_tracing(&home_for_logs);
-    tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "tachi memory-server starting"
-    );
-
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let expand_user_path = |raw: &str| {
@@ -152,10 +146,16 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     };
 
-    let app_home = std::env::var("TACHI_HOME")
-        .or_else(|_| std::env::var("SIGIL_HOME"))
-        .map(|v| expand_user_path(&v))
-        .unwrap_or_else(|_| home.join(".tachi"));
+    let app_home = crate::path_utils::tachi_home();
+
+    // PR7 — install the tracing sink before doing anything else so early errors
+    // (config load, manifest resolution, daemon bind) are captured.
+    init_tracing(&app_home);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        app_home = %app_home.display(),
+        "tachi memory-server starting"
+    );
     let git_root = find_project_git_root();
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
@@ -229,7 +229,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     //
     // Failure to read the manifest is non-fatal: we proceed with the heuristic
     // result so first-run installs still work without `tachi doctor`.
-    let manifest_path = crate::manifest::Manifest::default_path(&home);
+    let manifest_path = app_home.join("manifest.json");
     // PR-2: hygiene pass before any manifest consumer reads. Idempotent.
     // Failures are logged and swallowed — startup must never block on GC.
     if matches!(command, Commands::Serve) && manifest_path.exists() {
@@ -1400,6 +1400,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_log_path_lives_under_app_home() {
+        let app_home = std::path::Path::new("/tmp/tachi-app-home");
+        assert_eq!(
+            primary_log_path(app_home),
+            app_home.join("logs").join("tachi.log")
+        );
+    }
 
     #[cfg(unix)]
     #[test]

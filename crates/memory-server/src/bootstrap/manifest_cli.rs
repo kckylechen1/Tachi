@@ -1,5 +1,21 @@
 use super::*;
 
+fn manifest_path(app_home: &std::path::Path) -> PathBuf {
+    app_home.join("manifest.json")
+}
+
+fn default_scan_roots(
+    home: &std::path::Path,
+    app_home: &std::path::Path,
+    git_root: Option<&PathBuf>,
+) -> Vec<PathBuf> {
+    let mut roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
+    if app_home.exists() && !roots.iter().any(|root| root == app_home) {
+        roots.push(app_home.to_path_buf());
+    }
+    roots
+}
+
 pub(super) async fn run_doctor_command(
     json_output: bool,
     fix: bool,
@@ -13,7 +29,7 @@ pub(super) async fn run_doctor_command(
     let roots: Vec<PathBuf> = if !roots_override.is_empty() {
         roots_override
     } else {
-        crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()))
+        default_scan_roots(home, app_home, git_root)
     };
     let quarantine_dir = app_home.join("quarantine");
     let opts = crate::doctor::ScanOptions {
@@ -28,7 +44,7 @@ pub(super) async fn run_doctor_command(
         ));
 
     // Always update the manifest after a doctor run (idempotent; preserves notes).
-    let manifest_path = crate::manifest::Manifest::default_path(home);
+    let manifest_path = manifest_path(app_home);
     let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
     m.populate_from_doctor(&report);
     if let Err(e) = m.save(&manifest_path) {
@@ -118,6 +134,43 @@ pub(super) async fn run_doctor_command(
         println!("  extract/summary: Qwen/Qwen3.5-27B via SiliconFlow-compatible chat");
         println!("  distill/reasoning: Claude CLI first, chat fallback lanes");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_path_lives_directly_under_app_home() {
+        let app_home = std::path::Path::new("/tmp/tachi-app-home");
+        assert_eq!(manifest_path(app_home), app_home.join("manifest.json"));
+    }
+
+    #[test]
+    fn default_scan_roots_include_custom_app_home_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let app_home = temp.path().join("custom-tachi");
+        std::fs::create_dir_all(&app_home).expect("create custom app home");
+
+        let roots = default_scan_roots(&home, &app_home, None);
+        assert!(
+            roots.iter().any(|root| root == &app_home),
+            "custom app home should be scanned: {roots:?}"
+        );
+
+        let default_app_home = app_home.join(".tachi");
+        std::fs::create_dir_all(&default_app_home).expect("create default app home");
+        let roots = default_scan_roots(&app_home, &default_app_home, None);
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|root| *root == &default_app_home)
+                .count(),
+            1,
+            "app home should not be duplicated: {roots:?}"
+        );
     }
 }
 
@@ -244,7 +297,7 @@ pub(super) async fn run_manifest_command(
     app_home: &std::path::Path,
     git_root: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let manifest_path = crate::manifest::Manifest::default_path(home);
+    let manifest_path = manifest_path(app_home);
 
     match action {
         ManifestAction::Show { json } => {
@@ -258,7 +311,7 @@ pub(super) async fn run_manifest_command(
             }
         }
         ManifestAction::Init | ManifestAction::Refresh => {
-            let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
+            let roots = default_scan_roots(home, app_home, git_root);
             let quarantine_dir = app_home.join("quarantine");
             let opts = crate::doctor::ScanOptions {
                 auto_fix: false,
@@ -311,7 +364,7 @@ pub(super) async fn run_manifest_command(
             Ok(())
         }
         ManifestAction::Sweep { apply, json } => {
-            let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
+            let roots = default_scan_roots(home, app_home, git_root);
             let quarantine_dir = app_home.join("quarantine");
             let opts = crate::doctor::ScanOptions {
                 auto_fix: false,

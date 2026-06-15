@@ -41,17 +41,46 @@ fn setup_report_detects_readiness_from_local_state() {
     )
     .expect("setup report should build");
 
-    assert_eq!(report.items.len(), 5);
-    assert_eq!(report.items[0].id, "api_keys");
-    assert_eq!(report.items[0].status, "ready");
-    assert_eq!(report.items[1].id, "skills");
-    assert_eq!(report.items[1].status, "ready");
-    assert_eq!(report.items[2].id, "agents");
-    assert_eq!(report.items[2].status, "ready");
-    assert_eq!(report.items[3].id, "pipeline");
-    assert_eq!(report.items[3].status, "ready");
+    assert_eq!(report.items.len(), 6);
+    assert!(report.items.iter().any(|item| item.id == "cli_binary"));
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .find(|item| item.id == "api_keys")
+            .map(|item| item.status.as_str()),
+        Some("ready")
+    );
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .find(|item| item.id == "skills")
+            .map(|item| item.status.as_str()),
+        Some("ready")
+    );
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .find(|item| item.id == "agents")
+            .map(|item| item.status.as_str()),
+        Some("ready")
+    );
+    assert_eq!(
+        report
+            .items
+            .iter()
+            .find(|item| item.id == "pipeline")
+            .map(|item| item.status.as_str()),
+        Some("ready")
+    );
     assert!(
-        report.items[4]
+        report
+            .items
+            .iter()
+            .find(|item| item.id == "vault")
+            .expect("vault item")
             .details
             .iter()
             .any(|detail| detail.contains("vault: not initialized")),
