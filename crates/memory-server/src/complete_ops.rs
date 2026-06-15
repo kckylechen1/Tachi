@@ -73,6 +73,19 @@ fn scrub_eval_strings(values: &[String], redactions: &mut usize) -> Vec<String> 
         .collect()
 }
 
+fn lesson_task_matches(text: &str, expected_task: &str) -> bool {
+    let expected = expected_task.trim();
+    if expected.is_empty() {
+        return false;
+    }
+
+    text.lines()
+        .next()
+        .and_then(|line| line.trim().strip_prefix("Task:"))
+        .map(|task| task.trim().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
 async fn run_lesson_post_complete_hook(
     server: &MemoryServer,
     params: &TachiCompleteParams,
@@ -97,7 +110,7 @@ async fn run_lesson_post_complete_hook(
         .clone()
         .unwrap_or_else(|| "project".to_string());
     let (lesson_db, _) = server.resolve_write_scope(&lesson_scope_str);
-    let task_lower = safe_task.to_ascii_lowercase();
+    let task_ref = safe_task.to_string();
     let skills_set: std::collections::HashSet<&str> =
         safe_skills_used.iter().map(|s| s.as_str()).collect();
     let outcome_ref = outcome_norm.to_string();
@@ -124,14 +137,13 @@ async fn run_lesson_post_complete_hook(
                 .map_err(|e| format!("lesson dedup iter: {e}"))?;
             for row in rows {
                 let (id, text, meta_str) = row.map_err(|e| format!("{e}"))?;
-                let text_lower = text.to_ascii_lowercase();
                 let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
                 let same_outcome = meta
                     .get("outcome")
                     .and_then(|v| v.as_str())
                     .map(|o| o == outcome_ref)
                     .unwrap_or(false);
-                let task_match = text_lower.contains(&task_lower);
+                let task_match = lesson_task_matches(&text, &task_ref);
                 let skill_overlap = same_outcome
                     && !skills_set.is_empty()
                     && meta
