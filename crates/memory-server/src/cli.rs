@@ -829,6 +829,12 @@ pub(crate) enum SkillSurfaceAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only pinned upstream source status for builtin Superpowers and Waza skills
+    Sources {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -984,6 +990,18 @@ mod tests {
                 assert_eq!(suite, "smoke");
                 assert!(json);
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_surface_cli_parses_sources() {
+        let parsed = Cli::try_parse_from(["tachi", "skill-surface", "sources", "--json"])
+            .expect("skill-surface sources should parse");
+        match parsed.command.expect("command") {
+            Commands::SkillSurface {
+                action: SkillSurfaceAction::Sources { json },
+            } => assert!(json),
             other => panic!("unexpected command: {other:?}"),
         }
     }
