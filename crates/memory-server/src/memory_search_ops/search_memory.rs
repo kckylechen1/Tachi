@@ -15,7 +15,7 @@ fn is_eval_path(path: &str) -> bool {
 }
 
 fn is_eval_entry(entry: &memory_core::MemoryEntry) -> bool {
-    entry.category == "eval" || is_eval_path(&entry.path)
+    memory_core::is_eval_entry(entry) || is_eval_path(&entry.path)
 }
 
 fn training_recall_opted_in(params: &SearchMemoryParams) -> bool {
@@ -39,6 +39,10 @@ fn eval_recall_opted_in(params: &SearchMemoryParams) -> bool {
         .path_prefix
         .as_deref()
         .is_some_and(|prefix| is_eval_path(prefix.trim_end_matches('/')))
+}
+
+fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
+    memory_core::path_prefix_opts_into_recall_cache(path_prefix)
 }
 
 pub(crate) async fn search_memory_rows(
@@ -259,6 +263,9 @@ pub(crate) async fn search_memory_rows(
 
     if !training_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
+    }
+    if !recall_cache_recall_opted_in(params.path_prefix.as_deref()) {
+        combined_results.retain(|(result, _)| !memory_core::is_recall_cache_entry(&result.entry));
     }
     if !eval_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
@@ -496,6 +503,9 @@ pub(crate) async fn handle_find_similar_memory(
 
     if !find_similar_training_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
+    }
+    if !recall_cache_recall_opted_in(params.path_prefix.as_deref()) {
+        combined_results.retain(|(result, _)| !memory_core::is_recall_cache_entry(&result.entry));
     }
 
     let mut seen_ids = HashSet::new();

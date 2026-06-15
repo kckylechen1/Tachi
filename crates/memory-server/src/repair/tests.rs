@@ -283,6 +283,20 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     );
     insert_memory(
         &conn,
+        "cache-2",
+        "/scratch/recall-cache/noisy",
+        "cache body by recall-cache path",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    conn.execute(
+        "UPDATE memories SET topic='recall_rerank_cache' WHERE id='cache-2'",
+        [],
+    )
+    .unwrap();
+    insert_memory(
+        &conn,
         "empty-turn",
         "/hermes/turns/1",
         "{}",
@@ -300,10 +314,10 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     let mut ctx = open_ctx(&path, "test");
     let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
     let total: usize = dry.findings.iter().map(|f| f.count).sum();
-    assert_eq!(total, 2, "expected 2 junk candidates, got {dry:?}");
+    assert_eq!(total, 3, "expected 3 junk candidates, got {dry:?}");
 
     let app = JunkCleanup.apply(&mut ctx).unwrap();
-    assert_eq!(app.applied, 2);
+    assert_eq!(app.applied, 3);
 
     let remaining: i64 = ctx
         .conn

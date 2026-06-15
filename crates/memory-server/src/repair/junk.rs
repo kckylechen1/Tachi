@@ -34,8 +34,15 @@ const DUPLICATE_OLD_SQL: &str = r#"
 const RERANK_CACHE_SQL: &str = r#"
     SELECT id FROM memories
     WHERE id = 'foundry_recall_rerank_cache'
+       OR id LIKE 'foundry:recall-cache:%'
+       OR source = 'foundry_recall_rerank_cache'
        OR topic = 'foundry_recall_rerank_cache'
+       OR topic = 'recall_rerank_cache'
+       OR path = '/recall-cache'
+       OR path LIKE '%/recall-cache'
+       OR path LIKE '%/recall-cache/%'
        OR path LIKE '%foundry_recall_rerank_cache%'
+       OR json_extract(metadata, '$.recall_rerank_cache') = 1
        OR json_extract(metadata, '$.cache_key') = 'foundry_recall_rerank_cache'
 "#;
 
