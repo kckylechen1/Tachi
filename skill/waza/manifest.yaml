@@ -1,0 +1,112 @@
+schema_version: 1
+updated: 2026-06-15
+corpus: waza
+upstream:
+  repo: tw93/Waza
+  pinned_ref: main
+  pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+  update_policy: reviewed_sync
+notes:
+  - Waza source text is upstream-managed.
+  - Tachi-specific Waza entries are local wrappers and must not be silently
+    rewritten as upstream text.
+skills:
+  - id: skill:waza-check
+    name: check
+    local_path: skill/waza/skills/check/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/check/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-design
+    name: design
+    local_path: skill/waza/skills/design/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/design/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-health
+    name: health
+    local_path: skill/waza/skills/health/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/health/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-hunt
+    name: hunt
+    local_path: skill/waza/skills/hunt/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/hunt/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-learn
+    name: learn
+    local_path: skill/waza/skills/learn/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/learn/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-read
+    name: read
+    local_path: skill/waza/skills/read/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/read/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-tachi
+    name: tachi
+    local_path: skill/waza/skills/tachi/SKILL.md
+    source:
+      kind: tachi_native_contract
+      repo: null
+      path: skill/waza/skills/tachi/SKILL.md
+      pinned_ref: null
+      pinned_sha: null
+      update_policy: local_review
+      local_overlay: tachi-native-contract
+  - id: skill:waza-think
+    name: think
+    local_path: skill/waza/skills/think/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/think/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only
+  - id: skill:waza-write
+    name: write
+    local_path: skill/waza/skills/write/SKILL.md
+    source:
+      kind: upstream_skill_repo
+      repo: tw93/Waza
+      path: skills/write/SKILL.md
+      pinned_ref: main
+      pinned_sha: fe38daaa8c7714d4bc4d34bc8fb6298dc94fc39e
+      update_policy: reviewed_sync
+      local_overlay: tachi-routing-only

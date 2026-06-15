@@ -689,6 +689,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .await;
     }
 
+    if let Commands::Poke { action } = &command {
+        return super::poke_cli::run_poke_command(&app_home, action.clone()).await;
+    }
+
     if !matches!(command, Commands::Serve) {
         return super::cli_tool::run_cli_command(
             command,

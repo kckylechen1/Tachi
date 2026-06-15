@@ -1,5 +1,12 @@
 use super::*;
 
+use super::acp_native::{
+    build_native_acp_run_spec, is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
+};
+use super::acpx::{
+    build_acpx_command, build_acpx_command_spec, is_acpx_transport, persist_acpx_events_and_map,
+    prepare_acpx_prompt,
+};
 use super::dispatch_v2::{
     append_trajectory_event, build_execute_prompt, parse_plan_sections, plan_review_required,
     plan_timeout_secs, run_plan_stage, v2_enabled_from_env, write_status_json, V2Decision,
@@ -36,13 +43,30 @@ pub(crate) struct DispatchResult {
     pub exit_code: Option<i32>,
 }
 
+enum DispatchExecution {
+    Subprocess(Command),
+    NativeAcp(NativeAcpRunSpec),
+}
+
+#[cfg(test)]
 pub(crate) fn apply_unlocked_vault_env(
     cmd: &mut Command,
     server: &MemoryServer,
     cwd: Option<&std::path::Path>,
 ) -> usize {
+    let env = unlocked_vault_child_env_map(server, cwd);
+    for (name, value) in &env {
+        cmd.env(name, value);
+    }
+    env.len()
+}
+
+fn unlocked_vault_child_env_map(
+    server: &MemoryServer,
+    cwd: Option<&std::path::Path>,
+) -> HashMap<String, String> {
     let Ok(secrets) = server.unlocked_env_secrets_for_child_env(cwd) else {
-        return 0;
+        return HashMap::new();
     };
 
     let fill_missing_only = std::env::var("TACHI_VAULT_CHILD_ENV")
@@ -54,15 +78,14 @@ pub(crate) fn apply_unlocked_vault_env(
             )
         })
         .unwrap_or(false);
-    let mut injected = 0usize;
+    let mut env = HashMap::new();
     for (name, value) in secrets {
         if fill_missing_only && std::env::var_os(&name).is_some() {
             continue;
         }
-        cmd.env(name, value);
-        injected += 1;
+        env.insert(name, value);
     }
-    injected
+    env
 }
 
 pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String {
@@ -976,26 +999,176 @@ pub(crate) async fn handle_tachi_dispatch(
         }
     }
 
-    // 5. Build command
-    let mut cmd = match agent_norm.as_str() {
-        "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref())?,
-        "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref())?,
-        "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref())?,
-        "kimi" => build_kimi_command(&params, &prompt)?,
-        "custom" => build_custom_command(&params, &prompt)?,
-        other => {
-            return Err(format!(
-                "Internal error: unhandled dispatch agent '{}'. {}",
-                other,
-                dispatch_agent_help_list()
-            ));
-        }
+    // 5. Build execution backend
+    let acpx_enabled = is_acpx_transport(&harness_transport);
+    let native_acp_enabled = is_native_acp_transport(&harness_transport);
+    let mut execution_backend_metadata: Option<serde_json::Value> = None;
+    let execution_backend_name = if acpx_enabled {
+        Some("acpx")
+    } else if native_acp_enabled {
+        Some("acp_native")
+    } else {
+        None
     };
-    let legacy_vault_env_count = apply_unlocked_vault_env(
-        &mut cmd,
-        server,
-        params.cwd.as_deref().map(std::path::Path::new),
-    );
+    let mut execution = if acpx_enabled {
+        let record_backend_prepare_failure = |backend: &str, err: &str| {
+            append_trajectory_event(
+                &trajectory_path,
+                json!({
+                    "event": "execution_backend_prepare_failed",
+                    "dispatch_id": dispatch_id,
+                    "agent": agent_norm.clone(),
+                    "execution_backend": backend,
+                    "error": err,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                Some(1),
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": agent_norm.clone(),
+                    "task": params.task.clone(),
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "result_written": false,
+                    "harness_transport": harness_transport.clone(),
+                    "harness_server_url": harness_server_url.clone(),
+                    "execution_backend": backend,
+                    "capability_bundle": capability_bundle_card.clone(),
+                    "timeout_secs": timeout_secs_for_status,
+                    "error": err,
+                })),
+            );
+        };
+        let acpx_prompt_path = match prepare_acpx_prompt(&prompt_md_path, &prompt) {
+            Ok(path) => path,
+            Err(err) => {
+                record_backend_prepare_failure("acpx", &err);
+                return Err(err);
+            }
+        };
+        let acpx_spec = match build_acpx_command_spec(&params, &agent_norm, &acpx_prompt_path) {
+            Ok(spec) => spec,
+            Err(err) => {
+                record_backend_prepare_failure("acpx", &err);
+                return Err(err);
+            }
+        };
+        append_trajectory_event(
+            &trajectory_path,
+            json!({
+                "event": "execution_backend_prepared",
+                "dispatch_id": dispatch_id,
+                "agent": agent_norm.clone(),
+                "execution_backend": "acpx",
+                "acpx": acpx_spec.metadata.clone(),
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+        execution_backend_metadata = Some(acpx_spec.metadata.clone());
+        DispatchExecution::Subprocess(build_acpx_command(&acpx_spec))
+    } else if native_acp_enabled {
+        let record_backend_prepare_failure = |backend: &str, err: &str| {
+            append_trajectory_event(
+                &trajectory_path,
+                json!({
+                    "event": "execution_backend_prepare_failed",
+                    "dispatch_id": dispatch_id,
+                    "agent": agent_norm.clone(),
+                    "execution_backend": backend,
+                    "error": err,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                Some(1),
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": agent_norm.clone(),
+                    "task": params.task.clone(),
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "result_written": false,
+                    "harness_transport": harness_transport.clone(),
+                    "harness_server_url": harness_server_url.clone(),
+                    "execution_backend": backend,
+                    "capability_bundle": capability_bundle_card.clone(),
+                    "timeout_secs": timeout_secs_for_status,
+                    "error": err,
+                })),
+            );
+        };
+        let native_spec = match build_native_acp_run_spec(&params, &agent_norm, &prompt) {
+            Ok(spec) => spec,
+            Err(err) => {
+                record_backend_prepare_failure("acp_native", &err);
+                return Err(err);
+            }
+        };
+        append_trajectory_event(
+            &trajectory_path,
+            json!({
+                "event": "execution_backend_prepared",
+                "dispatch_id": dispatch_id,
+                "agent": agent_norm.clone(),
+                "execution_backend": "acp_native",
+                "acp_native": native_spec.metadata.clone(),
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+        execution_backend_metadata = Some(native_spec.metadata.clone());
+        DispatchExecution::NativeAcp(native_spec)
+    } else {
+        let cmd = match agent_norm.as_str() {
+            "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref())?,
+            "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref())?,
+            "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref())?,
+            "kimi" => build_kimi_command(&params, &prompt)?,
+            "custom" => build_custom_command(&params, &prompt)?,
+            other => {
+                return Err(format!(
+                    "Internal error: unhandled dispatch agent '{}'. {}",
+                    other,
+                    dispatch_agent_help_list()
+                ));
+            }
+        };
+        DispatchExecution::Subprocess(cmd)
+    };
+    let legacy_vault_env =
+        unlocked_vault_child_env_map(server, params.cwd.as_deref().map(std::path::Path::new));
+    let legacy_vault_env_count = legacy_vault_env.len();
+    if legacy_vault_env_count > 0 {
+        match &mut execution {
+            DispatchExecution::Subprocess(cmd) => {
+                for (name, value) in &legacy_vault_env {
+                    cmd.env(name, value);
+                }
+            }
+            DispatchExecution::NativeAcp(spec) => {
+                spec.env.extend(legacy_vault_env.clone());
+            }
+        }
+    }
     if legacy_vault_env_count > 0 {
         append_trajectory_event(
             &trajectory_path,
@@ -1048,6 +1221,9 @@ pub(crate) async fn handle_tachi_dispatch(
                     "result_written": false,
                     "harness_transport": harness_transport.clone(),
                     "harness_server_url": harness_server_url.clone(),
+                    "execution_backend": execution_backend_name,
+                    "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
+                    "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
                     "capability_bundle": capability_bundle_card.clone(),
                     "timeout_secs": timeout_secs_for_status,
                     "error": err.clone(),
@@ -1057,7 +1233,14 @@ pub(crate) async fn handle_tachi_dispatch(
         }
     };
     for (name, value) in &dispatch_credentials.env {
-        cmd.env(name, value);
+        match &mut execution {
+            DispatchExecution::Subprocess(cmd) => {
+                cmd.env(name, value);
+            }
+            DispatchExecution::NativeAcp(spec) => {
+                spec.env.insert(name.clone(), value.clone());
+            }
+        }
     }
     if !dispatch_credentials.reports.is_empty() {
         append_trajectory_event(
@@ -1100,6 +1283,8 @@ pub(crate) async fn handle_tachi_dispatch(
     let feedback_rules_trace_for_spawn = feedback_rules_trace.clone();
     let harness_transport_for_spawn = harness_transport.clone();
     let harness_server_url_for_spawn = harness_server_url.clone();
+    let execution_backend_metadata_for_spawn = execution_backend_metadata.clone();
+    let execution_for_spawn = execution;
     let flow_dispatch_slot_for_spawn = flow_dispatch_slot.clone();
 
     tokio::task::spawn(async move {
@@ -1122,14 +1307,60 @@ pub(crate) async fn handle_tachi_dispatch(
             }),
         );
 
-        let result = run_agent_subprocess(cmd, timeout).await;
+        let result = match execution_for_spawn {
+            DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
+            DispatchExecution::NativeAcp(spec) => {
+                run_native_acp_dispatch(
+                    spec,
+                    &workspace_dir_for_spawn,
+                    &traj_path_for_spawn,
+                    &d_id,
+                    &agent_for_watchdog,
+                    timeout,
+                )
+                .await
+            }
+        };
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // Append subprocess_finished event to trajectory.jsonl
-        let full_output = match &result {
+        let mut full_output = match &result {
             Ok(r) => r.output.clone(),
             Err(e) => e.clone(),
         };
+        let mut acpx_event_summary_json: Option<serde_json::Value> = None;
+        if is_acpx_transport(&harness_transport_for_spawn) {
+            match persist_acpx_events_and_map(
+                &workspace_dir_for_spawn,
+                &traj_path_for_spawn,
+                &d_id,
+                &agent_for_watchdog,
+                &full_output,
+            ) {
+                Ok(summary) => {
+                    if let Some(final_response) = summary.final_response.clone() {
+                        full_output = final_response;
+                    }
+                    acpx_event_summary_json = Some(json!({
+                        "events_file": summary.events_file.to_string_lossy(),
+                        "mapped_events": summary.mapped_events,
+                        "final_response_extracted": summary.final_response.is_some(),
+                    }));
+                }
+                Err(err) => {
+                    append_trajectory_event(
+                        &traj_path_for_spawn,
+                        json!({
+                            "event": "acpx_events_persist_failed",
+                            "dispatch_id": d_id,
+                            "agent": agent_for_watchdog.clone(),
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "error": err,
+                        }),
+                    );
+                }
+            }
+        }
         {
             let (exit_code, output_tail) = match &result {
                 Err(e) => (None, e.chars().take(200).collect::<String>()),
@@ -1152,7 +1383,7 @@ pub(crate) async fn handle_tachi_dispatch(
                 {
                     let _ = writeln!(f, "{}", line);
                 }
-                let progress_path = workspace_dir.join("progress.jsonl");
+                let progress_path = workspace_dir_for_spawn.join("progress.jsonl");
                 if let Ok(mut f) = std::fs::OpenOptions::new()
                     .append(true)
                     .create(true)
@@ -1363,6 +1594,24 @@ pub(crate) async fn handle_tachi_dispatch(
                 "result_written": true,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
+                "execution_backend": if is_acpx_transport(&harness_transport_for_spawn) {
+                    Some("acpx")
+                } else if is_native_acp_transport(&harness_transport_for_spawn) {
+                    Some("acp_native")
+                } else {
+                    None
+                },
+                "acpx": if is_acpx_transport(&harness_transport_for_spawn) {
+                    execution_backend_metadata_for_spawn.clone()
+                } else {
+                    None
+                },
+                "acp_native": if is_native_acp_transport(&harness_transport_for_spawn) {
+                    execution_backend_metadata_for_spawn.clone()
+                } else {
+                    None
+                },
+                "acpx_events": acpx_event_summary_json,
                 "capability_bundle": capability_bundle_card_for_spawn,
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
@@ -1428,6 +1677,9 @@ pub(crate) async fn handle_tachi_dispatch(
         "feedback_rules": feedback_rules_trace,
         "harness_transport": harness_transport,
         "harness_server_url": harness_server_url,
+        "execution_backend": execution_backend_name,
+        "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
+        "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
         "v2": v2,
         "plan_review_status": if v2 { "approved" } else { "n/a" },
         "duration_ms_plan": plan_duration_ms,

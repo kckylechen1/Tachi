@@ -234,6 +234,9 @@ fn collect_run_tasks_from_dir(
             "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
             "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
             "harness_server_status": super::probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
+            "execution_backend": status.get("execution_backend").cloned().unwrap_or(serde_json::Value::Null),
+            "acpx": status.get("acpx").cloned().unwrap_or(serde_json::Value::Null),
+            "acpx_events": status.get("acpx_events").cloned().unwrap_or(serde_json::Value::Null),
         }));
     }
 
@@ -318,6 +321,9 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         "harness_transport": status.get("harness_transport").cloned().unwrap_or(serde_json::Value::Null),
         "harness_server_url": status.get("harness_server_url").cloned().unwrap_or(serde_json::Value::Null),
         "harness_server_status": super::probe_harness_server_status(status.get("harness_server_url").and_then(Value::as_str)),
+        "execution_backend": status.get("execution_backend").cloned().unwrap_or(serde_json::Value::Null),
+        "acpx": status.get("acpx").cloned().unwrap_or(serde_json::Value::Null),
+        "acpx_events": status.get("acpx_events").cloned().unwrap_or(serde_json::Value::Null),
     }))
 }
 
@@ -353,6 +359,9 @@ fn merge_run_task(
             "harness_transport",
             "harness_server_url",
             "harness_server_status",
+            "execution_backend",
+            "acpx",
+            "acpx_events",
         ] {
             if obj.get(key).is_none() {
                 obj.insert(

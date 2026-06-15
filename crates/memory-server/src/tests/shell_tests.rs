@@ -36,7 +36,11 @@ fn read_status_json(run_dir: &std::path::Path) -> Value {
 /// Runs the full brainstorm → plan → dispatch → status → review → ship chain
 /// against a single flow_id and asserts cross-stage invariants.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn shell_full_lifecycle_brainstorm_to_ship() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     let flow_id = unique_flow_id("lifecycle");
     let runs_root = shell_runs_root();
@@ -211,7 +215,11 @@ async fn shell_full_lifecycle_brainstorm_to_ship() {
 /// After a flow is progressed, `action="status"` with the same flow_id must
 /// return the latest persisted state and no extra event should be appended.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn shell_status_action_reads_live_flow() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     let flow_id = unique_flow_id("status");
     let runs_root = shell_runs_root();
@@ -264,7 +272,11 @@ async fn shell_status_action_reads_live_flow() {
 /// `action="status"` with a bogus flow_id must report not-found instead of
 /// creating a stray run directory.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn shell_status_action_missing_flow_is_not_found() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     let flow_id = unique_flow_id("missing");
     let runs_root = shell_runs_root();
