@@ -203,6 +203,17 @@ source:
   local_overlay: tachi-routing-only
 ```
 
+Current pinned source metadata is exposed through:
+
+```bash
+tachi skill-surface sources
+tachi skill-surface sources --json
+```
+
+This is a read-only status surface. It reports the vendored manifest refs and
+metadata coverage; it does not fetch upstream, compute diffs, update skill text,
+or write GitHub state.
+
 ## MVP Cards
 
 Do not create an agent zoo. First version uses three Cards plus one mode.
