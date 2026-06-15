@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn write_json_file_owner_only_pretty_prints_and_restricts_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("manifest.json");
+        let path = dir.path().join("nested/overlay/manifest.json");
 
         write_json_file_owner_only(&path, &json!({"state":"ok"})).expect("write json");
 
