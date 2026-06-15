@@ -1043,10 +1043,11 @@ pub fn render_report(report: &DoctorReport) -> String {
             .map(|n| n.to_string())
             .unwrap_or_else(|| "-".to_string());
         lines.push(format!(
-            "{} {} [{}] mem={} vec={} <none>={} jobs={}/c={}/s={}/f={}/p={} wal={} schema={} scope={}",
+            "{} {} [{}] size={} mem={} vec={} <none>={} jobs={}/c={}/s={}/f={}/p={} wal={} schema={} scope={}",
             f.classification.icon(),
             f.classification.as_str(),
             f.path,
+            f.file_size,
             mem,
             vec,
             none_dom,
@@ -1122,6 +1123,18 @@ mod tests {
         assert_eq!(f.jobs.pending, 1);
         assert_eq!(f.none_domain_count, Some(1));
         assert_eq!(f.schema_kind, "tachi");
+    }
+
+    #[test]
+    fn classify_healthy_reports_actual_nonzero_file_size() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("memory.db");
+        make_healthy_db(&p);
+        let expected_size = fs::metadata(&p).unwrap().len();
+        let f = classify_one(&p);
+        assert_eq!(f.classification, DbClassification::Healthy);
+        assert_eq!(f.file_size, expected_size);
+        assert!(f.file_size > 0);
     }
 
     #[test]

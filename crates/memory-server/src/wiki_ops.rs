@@ -1153,7 +1153,7 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
     });
 
     if append_result.is_err() {
-        let _ = server.with_global_store(|store| {
+        if let Err(error) = server.with_global_store(|store| {
             let mut entry = entry;
             entry.metadata = json!({"wiki_log": true, "fallback_db": "global"});
             if let Some(existing) = store
@@ -1166,7 +1166,12 @@ pub(crate) fn append_wiki_log(server: &MemoryServer, operation: &str, details: &
             store
                 .upsert(&entry)
                 .map_err(|e| format!("wiki_log fallback upsert: {e}"))
-        });
+        }) {
+            tracing::warn!(
+                error = %error,
+                "failed to write wiki operation log fallback"
+            );
+        }
     }
 }
 

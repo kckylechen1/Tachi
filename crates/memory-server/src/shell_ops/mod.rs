@@ -178,6 +178,30 @@ fn read_status(run_dir: &Path) -> Value {
     }
 }
 
+async fn read_status_async(run_dir: &Path) -> Value {
+    let status_path = run_dir.join("status.json");
+    match tokio::fs::read_to_string(&status_path).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|err| {
+            tracing::warn!(
+                path = %status_path.display(),
+                error = %err,
+                "shell status JSON parse failed; continuing with empty status"
+            );
+            json!({})
+        }),
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %status_path.display(),
+                    error = %err,
+                    "shell status read failed; continuing with empty status"
+                );
+            }
+            json!({})
+        }
+    }
+}
+
 // ─── Meta skill injection ────────────────────────────────────────────────────
 
 /// Resolve the meta skill SOP file, falling back through several roots.
@@ -215,7 +239,7 @@ struct InjectionResult {
     warning: Option<String>,
 }
 
-fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
+async fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
     let rel = match meta_skill_for_stage(stage) {
         Some(r) => r,
         None => {
@@ -231,7 +255,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
         }
     };
     let injected_dir = run_dir.join("injected");
-    if let Err(e) = std::fs::create_dir_all(&injected_dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&injected_dir).await {
         return InjectionResult {
             required: true,
             rel_path: Some(rel.to_string()),
@@ -259,7 +283,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
             };
         }
     };
-    let bytes = match std::fs::read(&resolved) {
+    let bytes = match tokio::fs::read(&resolved).await {
         Ok(b) => b,
         Err(e) => {
             return InjectionResult {
@@ -279,7 +303,7 @@ fn inject_meta_skill(stage: &str, run_dir: &Path) -> InjectionResult {
     // Flatten path: `superpowers-<stage>.md`
     let basename = format!("superpowers-{}.md", stage);
     let target = injected_dir.join(&basename);
-    if let Err(e) = std::fs::write(&target, &bytes) {
+    if let Err(e) = tokio::fs::write(&target, &bytes).await {
         return InjectionResult {
             required: true,
             rel_path: Some(rel.to_string()),
@@ -451,7 +475,7 @@ async fn handle_stage_action(
         .clone()
         .ok_or_else(|| format!("'task' is required for action='{}'", stage))?;
     let (flow_id, run_dir, created) = resolve_or_create_flow(&params, &task)?;
-    let injection = inject_meta_skill(stage, &run_dir);
+    let injection = inject_meta_skill(stage, &run_dir).await;
 
     let instruction = build_instruction_md(
         &flow_id,
@@ -492,7 +516,7 @@ async fn handle_dispatch_action(
         .clone()
         .ok_or_else(|| "'task' is required for action='dispatch'".to_string())?;
     let (flow_id, run_dir, created) = resolve_or_create_flow(&params, &task)?;
-    let injection = inject_meta_skill("dispatch", &run_dir);
+    let injection = inject_meta_skill("dispatch", &run_dir).await;
 
     let instruction = build_instruction_md(
         &flow_id,
@@ -589,7 +613,7 @@ async fn handle_dispatch_action(
                 }
                 // Append dispatch_id to flow status
                 if let Some(d) = dispatch_id.as_deref() {
-                    let mut status = read_status(&run_dir);
+                    let mut status = read_status_async(&run_dir).await;
                     let arr = status
                         .as_object_mut()
                         .map(|o| o.entry("dispatch_ids").or_insert_with(|| json!([])));
@@ -598,8 +622,15 @@ async fn handle_dispatch_action(
                             a.push(json!(d));
                         }
                     }
-                    let _ = crate::utils::write_run_status_file(&run_dir, &status);
-                    let _ = crate::utils::append_run_event(
+                    if let Err(error) = crate::utils::write_run_status_file(&run_dir, &status) {
+                        tracing::warn!(
+                            error = %error,
+                            run_dir = %run_dir.display(),
+                            dispatch_id = %d,
+                            "failed to persist shell dispatch id in flow status"
+                        );
+                    }
+                    if let Err(error) = crate::utils::append_run_event(
                         &run_dir,
                         json!({
                             "event": "dispatch_spawned",
@@ -607,7 +638,14 @@ async fn handle_dispatch_action(
                             "dispatch_id": d,
                             "timestamp": Utc::now().to_rfc3339(),
                         }),
-                    );
+                    ) {
+                        tracing::warn!(
+                            error = %error,
+                            run_dir = %run_dir.display(),
+                            dispatch_id = %d,
+                            "failed to append shell dispatch event"
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -876,7 +914,7 @@ async fn handle_convoy_dispatch_action(
         }));
     }
 
-    let mut status = read_status(run_dir);
+    let mut status = read_status_async(run_dir).await;
     if let Some(obj) = status.as_object_mut() {
         let arr = obj.entry("dispatch_ids").or_insert_with(|| json!([]));
         if let Some(a) = arr.as_array_mut() {
@@ -956,7 +994,7 @@ async fn handle_status_action(params: TachiShellParams) -> Result<String, String
             }))
             .map_err(|e| format!("serialize: {e}"));
         }
-        let status = read_status(&run_dir);
+        let status = read_status_async(&run_dir).await;
         return serde_json::to_string(&json!({
             "flow_id": flow_id,
             "found": true,
@@ -968,19 +1006,32 @@ async fn handle_status_action(params: TachiShellParams) -> Result<String, String
     // List recent flows
     let limit = params.limit.unwrap_or(20);
     let mut flows = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(&runs_root) {
-        for entry in read_dir.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("flow_") {
-                continue;
+    match tokio::fs::read_dir(&runs_root).await {
+        Ok(mut read_dir) => {
+            while let Some(entry) = read_dir
+                .next_entry()
+                .await
+                .map_err(|e| format!("read shell runs root {}: {e}", runs_root.display()))?
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with("flow_") {
+                    continue;
+                }
+                let status = read_status_async(&entry.path()).await;
+                flows.push(json!({
+                    "flow_id": name,
+                    "stage": status.get("stage"),
+                    "state": status.get("state"),
+                    "updated_at": status.get("updated_at"),
+                }));
             }
-            let status = read_status(&entry.path());
-            flows.push(json!({
-                "flow_id": name,
-                "stage": status.get("stage"),
-                "state": status.get("state"),
-                "updated_at": status.get("updated_at"),
-            }));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(format!(
+                "read shell runs root {}: {err}",
+                runs_root.display()
+            ))
         }
     }
     flows.sort_by(|a, b| {
@@ -1010,13 +1061,15 @@ fn resolve_or_create_flow(
         let run_dir = runs_root.join(&fid);
         let created = !run_dir.exists();
         std::fs::create_dir_all(&run_dir).map_err(|e| format!("create flow run dir: {e}"))?;
-        std::fs::create_dir_all(run_dir.join("artifacts")).ok();
+        std::fs::create_dir_all(run_dir.join("artifacts"))
+            .map_err(|e| format!("create flow artifacts dir: {e}"))?;
         return Ok((fid, run_dir, created));
     }
     let fid = new_flow_id(params.title.as_deref(), Some(task));
     let run_dir = runs_root.join(&fid);
     std::fs::create_dir_all(&run_dir).map_err(|e| format!("create flow run dir: {e}"))?;
-    std::fs::create_dir_all(run_dir.join("artifacts")).ok();
+    std::fs::create_dir_all(run_dir.join("artifacts"))
+        .map_err(|e| format!("create flow artifacts dir: {e}"))?;
     Ok((fid, run_dir, true))
 }
 

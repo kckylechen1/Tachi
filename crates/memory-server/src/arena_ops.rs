@@ -297,6 +297,20 @@ fn read_json_file(path: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("parse {}: {e}", path.display()))
 }
 
+enum ArenaArtifactRead {
+    Present(String),
+    Missing,
+    Error(String),
+}
+
+fn read_arena_artifact(path: &Path, label: &str) -> ArenaArtifactRead {
+    match crate::utils::read_to_string_allow_missing(path, label) {
+        Ok(Some(raw)) => ArenaArtifactRead::Present(raw),
+        Ok(None) => ArenaArtifactRead::Missing,
+        Err(err) => ArenaArtifactRead::Error(err),
+    }
+}
+
 fn update_mission_status(arena_id: &str, mission_id: &str, patch: Value) -> Result<Value, String> {
     let dir = mission_dir(arena_id, mission_id)?;
     let status_path = dir.join("status.json");
@@ -943,14 +957,25 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
         let plan_path = dir.join("plan.md");
         let mut status_before = read_json_file(&dir.join("status.json"))?;
         refresh_linked_dispatch_fields(&mut status_before);
-        let mut result =
-            crate::utils::read_to_string_or_warn_default(&result_path, "arena mission result");
-        let mut result_source = if result.is_empty() {
-            "missing"
-        } else {
-            "mission_result"
+        let mut artifact_read_errors = Vec::new();
+        let mut result = match read_arena_artifact(&result_path, "arena mission result") {
+            ArenaArtifactRead::Present(raw) => raw,
+            ArenaArtifactRead::Missing => String::new(),
+            ArenaArtifactRead::Error(err) => {
+                artifact_read_errors.push(err);
+                String::new()
+            }
         };
-        if result.trim().is_empty() {
+        let mut result_source = if artifact_read_errors.is_empty() {
+            if result.is_empty() {
+                "missing"
+            } else {
+                "mission_result"
+            }
+        } else {
+            "result_read_error"
+        };
+        if result.trim().is_empty() && artifact_read_errors.is_empty() {
             if let Some(dispatch_id) = status_before.get("dispatch_id").and_then(Value::as_str) {
                 let run_dir_hint = status_before.get("run_dir").and_then(Value::as_str);
                 if let Some(dispatch_result) =
@@ -966,10 +991,16 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
                 }
             }
         }
-        let plan = crate::utils::read_to_string_or_warn_default(&plan_path, "arena mission plan");
-        let result_written = !result.is_empty();
-        let plan_written = !plan.is_empty();
-        let state = if result_written {
+        match read_arena_artifact(&plan_path, "arena mission plan") {
+            ArenaArtifactRead::Present(_) | ArenaArtifactRead::Missing => {}
+            ArenaArtifactRead::Error(err) => artifact_read_errors.push(err),
+        }
+        let result_written = nonempty_file(&result_path);
+        let plan_written = nonempty_file(&plan_path);
+        let artifact_read_error = artifact_read_errors.first().cloned();
+        let state = if !artifact_read_errors.is_empty() {
+            "artifact_read_error"
+        } else if result_written {
             "collected"
         } else {
             "pending_result"
@@ -981,7 +1012,13 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
                 "state": state,
                 "collected_at": Utc::now().to_rfc3339(),
                 "result_source": result_source,
-                "completion_draft": if result_written {
+                "artifact_read_error": artifact_read_error,
+                "artifact_read_errors": if artifact_read_errors.is_empty() {
+                    Value::Null
+                } else {
+                    json!(artifact_read_errors.clone())
+                },
+                "completion_draft": if state == "collected" {
                     completion_draft_for_mission(&status_before, &result_path)
                 } else {
                     Value::Null
@@ -997,6 +1034,8 @@ fn handle_collect(params: TachiArenaParams) -> Result<String, String> {
             "plan_path": plan_path,
             "result_path": result_path,
             "result": result,
+            "artifact_read_error": artifact_read_error,
+            "artifact_read_errors": artifact_read_errors,
             "completion_draft": status.get("completion_draft").cloned().unwrap_or(Value::Null),
             "status": status,
         }));
@@ -1197,10 +1236,11 @@ fn mission_result_preview(arena_id: &str, mission_id: &str) -> String {
     let Ok(dir) = mission_dir(arena_id, mission_id) else {
         return String::new();
     };
-    let raw = crate::utils::read_to_string_or_warn_default(
-        &dir.join("result.md"),
-        "arena mission result preview",
-    );
+    let raw = match read_arena_artifact(&dir.join("result.md"), "arena mission result preview") {
+        ArenaArtifactRead::Present(raw) => raw,
+        ArenaArtifactRead::Missing => String::new(),
+        ArenaArtifactRead::Error(_) => return "result unreadable".to_string(),
+    };
     raw.lines()
         .find(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .unwrap_or("")
@@ -1777,6 +1817,53 @@ mod tests {
             collected["missions"][0]["completion_draft"]["arguments"]["action"],
             json!("complete")
         );
+    }
+
+    #[tokio::test]
+    async fn arena_collect_marks_corrupt_result_as_read_error_instead_of_pending() {
+        let _root = temp_arena_root();
+        let server = server();
+        let mut open = params("open");
+        open.objective = Some("collect corrupt result".into());
+        let opened: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+        let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+        let mut spawn = params("spawn");
+        spawn.arena_id = Some(arena_id.clone());
+        spawn.prompt = Some("write corrupt result".into());
+        let spawned: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+        let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
+        let mission_dir = PathBuf::from(spawned["mission_dir"].as_str().unwrap());
+
+        std::fs::write(mission_dir.join("plan.md"), "Plan: write broken bytes\n").unwrap();
+        std::fs::write(mission_dir.join("result.md"), vec![0xff, 0xfe, b'x']).unwrap();
+
+        let mut collect = params("collect");
+        collect.arena_id = Some(arena_id);
+        collect.mission_id = Some(mission_id);
+        let collected: Value =
+            serde_json::from_str(&handle_tachi_arena(&server, collect).await.unwrap()).unwrap();
+        let mission = &collected["missions"][0];
+        assert_eq!(
+            mission["state"],
+            json!("artifact_read_error"),
+            "{mission:#}"
+        );
+        assert_eq!(mission["status"]["state"], json!("artifact_read_error"));
+        assert_eq!(mission["result_source"], json!("result_read_error"));
+        assert_eq!(
+            mission["status"]["result_source"],
+            json!("result_read_error")
+        );
+        assert_eq!(mission["result_written"], json!(true), "{mission:#}");
+        assert_ne!(mission["state"], json!("pending_result"));
+        assert!(mission["completion_draft"].is_null(), "{mission:#}");
+        let read_error = mission["artifact_read_error"]
+            .as_str()
+            .expect("read error should be surfaced");
+        assert!(read_error.contains("arena mission result"), "{read_error}");
     }
 
     #[tokio::test]

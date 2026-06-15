@@ -666,9 +666,15 @@ async fn promote_handoff_issue_with_client<C: GhClient>(
                         .ok_or_else(|| "entry disappeared during promote".to_string())
                 })
                 .unwrap_or(entry.clone());
-            let _ = server.with_global_store(|store| {
+            if let Err(error) = server.with_global_store(|store| {
                 revert_promoting_entry(store, revert_entry, &previous_status)
-            });
+            }) {
+                tracing::warn!(
+                    memo_id = %params.memo_id,
+                    error = %error,
+                    "failed to revert handoff promoting state after GitHub issue creation failed"
+                );
+            }
             return Err(format!("GitHub issue creation failed: {gh_err}"));
         }
     };
