@@ -50,5 +50,5 @@ export declare class JsMemoryStore {
   /** Get a single hub capability by ID. Returns JSON string or null. */
   hubGet(id: string): string | null
   /** Record feedback for a hub capability invocation. */
-  hubFeedback(id: string, success: boolean, rating?: number | undefined | null): void
+  hubFeedback(id: string, success: boolean, rating?: number | undefined | null): boolean
 }
