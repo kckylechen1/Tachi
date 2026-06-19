@@ -111,15 +111,34 @@ function makeMemoryId(): string {
   return `m_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
 }
 
+/**
+ * Strip model reasoning blocks that "thinking" models (Qwen3.x, GLM, DeepSeek-R*)
+ * emit inline. They carry no recall value and have polluted captured OpenClaw
+ * memories (observed ~200 leaked `<think>` blocks in a busy agent DB). Mirrors
+ * the server-side noise.rs strip so capture and distill agree.
+ */
+function stripThinkBlocks(text: string): string {
+  if (!text || text.indexOf("<think") === -1) {
+    return text;
+  }
+  return text
+    // paired <think>…</think> / <thinking> / <reasoning>
+    .replace(/<(think|thinking|reasoning)\b[^>]*>[\s\S]*?<\/\1>/gi, "")
+    // unterminated reasoning block (model truncated before the closing tag)
+    .replace(/<(think|thinking|reasoning)\b[^>]*>[\s\S]*$/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function messageToText(message: any): string {
   if (!message) {
     return "";
   }
+  let raw = "";
   if (typeof message.content === "string") {
-    return message.content;
-  }
-  if (Array.isArray(message.content)) {
-    return message.content
+    raw = message.content;
+  } else if (Array.isArray(message.content)) {
+    raw = message.content
       .map((block) => {
         if (typeof block === "string") {
           return block;
@@ -132,7 +151,7 @@ function messageToText(message: any): string {
       .filter(Boolean)
       .join("\n");
   }
-  return "";
+  return stripThinkBlocks(raw);
 }
 
 function normalizeCaptureMessage(role: string, content: string): { role: string; content: string } | null {
@@ -865,7 +884,7 @@ export const memoryHybridBridgePlugin = {
         ),
       }),
       async execute(_toolCallId, params, _signal, context) {
-        const { text, summary, topic, path: memoryPath, importance, keywords, category } = params as {
+        const { text: rawText, summary: rawSummary, topic, path: memoryPath, importance, keywords, category } = params as {
           text: string;
           summary?: string;
           topic?: string;
@@ -874,6 +893,8 @@ export const memoryHybridBridgePlugin = {
           keywords?: string[];
           category?: string;
         };
+        const text = stripThinkBlocks(rawText);
+        const summary = rawSummary != null ? stripThinkBlocks(rawSummary) : undefined;
         const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
         const result = await runWithClient("save_memory", async (client) => {
           await client.saveMemory({
