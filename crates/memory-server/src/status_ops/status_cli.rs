@@ -5,7 +5,6 @@ use serde_json::json;
 use memory_core::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
 
 use crate::cli::{DaemonAction, FoundryAction, WatcherAction};
-use crate::daemon_lock::{process_alive, read_pid_file};
 use crate::manifest::Manifest;
 
 pub(crate) async fn run_status(
@@ -492,98 +491,90 @@ fn render_rotation_group_probes(groups: &[super::status_health::ProviderRotation
 pub(crate) async fn run_daemon(
     action: DaemonAction,
     app_home: &Path,
+    global_db_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let lock_path = app_home.join("daemon.lock");
     match action {
         DaemonAction::Status { json: json_out } => {
-            let pid = read_pid_file(&lock_path);
-            let alive = pid.map(process_alive).unwrap_or(false);
-            let pid_info = crate::status_ops::read_daemon_pid_info(app_home);
-            let mismatch = pid.filter(|_| alive).and_then(|lock_pid| {
-                let global_db = app_home.join("global").join("memory.db");
-                crate::status_ops::daemon_mismatch_reason(lock_pid, pid_info.as_ref(), &global_db)
-            });
+            let daemon = crate::status_ops::collect_daemon_status(app_home, global_db_path);
             if json_out {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "lock_path": lock_path.display().to_string(),
-                        "pid": pid,
-                        "alive": alive,
-                        "mismatch": mismatch,
-                        "pid_file": pid_info,
-                    }))?
+                    serde_json::to_string_pretty(&serde_json::to_value(&daemon)?)?
                 );
             } else {
-                match (pid, alive, mismatch) {
-                    (Some(p), true, Some(reason)) => {
+                match daemon {
+                    crate::status_ops::DaemonStatus::Running { pid, lock_path } => {
+                        println!("[OK] daemon running pid={pid} lock={}", lock_path.display())
+                    }
+                    crate::status_ops::DaemonStatus::Foreign {
+                        pid,
+                        lock_path,
+                        reason,
+                        version,
+                        port,
+                        global_db,
+                    } => {
                         println!(
-                            "[!] foreign daemon pid={p} lock={} reason={reason}",
+                            "[!] foreign daemon pid={pid} lock={} reason={reason}",
                             lock_path.display()
                         );
-                        if let Some(info) = pid_info {
-                            println!(
-                                "    version={} port={} global_db={}",
-                                info.version.as_deref().unwrap_or("unknown"),
-                                info.port
-                                    .map(|p| p.to_string())
-                                    .unwrap_or_else(|| "unknown".to_string()),
-                                info.global_db.as_deref().unwrap_or("unknown")
-                            );
-                        }
+                        println!(
+                            "    version={} port={} global_db={}",
+                            version.as_deref().unwrap_or("unknown"),
+                            port.map(|p| p.to_string())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            global_db.as_deref().unwrap_or("unknown")
+                        );
                     }
-                    (Some(p), true, None) => {
-                        println!("[OK] daemon running pid={p} lock={}", lock_path.display())
+                    crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
+                        println!(
+                            "[!] stale pid file pid={pid} at {} (process not alive)",
+                            lock_path.display()
+                        )
                     }
-                    (Some(p), false, _) => println!(
-                        "[!] stale pid file pid={p} at {} (process not alive)",
-                        lock_path.display()
-                    ),
-                    (None, _, _) => println!("[OK] no daemon running"),
+                    crate::status_ops::DaemonStatus::None => println!("[OK] no daemon running"),
                 }
             }
             Ok(())
         }
         DaemonAction::Kill { force } => {
-            let pid = match read_pid_file(&lock_path) {
-                Some(p) => p,
-                None => {
-                    println!(
-                        "[OK] no daemon to kill (no lock file at {})",
-                        lock_path.display()
-                    );
-                    return Ok(());
+            match crate::status_ops::collect_daemon_status(app_home, global_db_path) {
+                crate::status_ops::DaemonStatus::Running { pid, .. } => {
+                    #[cfg(unix)]
+                    {
+                        let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                        if r == 0 {
+                            println!("[OK] sent SIGTERM to daemon pid={pid}");
+                        } else {
+                            let err = std::io::Error::last_os_error();
+                            return Err(format!("kill({pid}) failed: {err}").into());
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        return Err("daemon kill is only implemented on unix".into());
+                    }
                 }
-            };
-            let alive = process_alive(pid);
-            if !alive {
-                if force {
-                    let _ = std::fs::remove_file(&lock_path);
-                    println!(
-                        "[OK] removed stale lock {} (pid {pid} was not alive)",
-                        lock_path.display()
-                    );
-                } else {
-                    println!(
-                        "[!] pid {pid} in {} is not alive; rerun with --force to unlink the stale lock",
-                        lock_path.display()
-                    );
+                crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
+                    if force {
+                        let _ = std::fs::remove_file(&lock_path);
+                        println!(
+                            "[OK] removed stale lock {} (pid {pid} was not alive)",
+                            lock_path.display()
+                        );
+                    } else {
+                        println!(
+                            "[!] pid {pid} in {} is not alive; rerun with --force to unlink the stale lock",
+                            lock_path.display()
+                        );
+                    }
                 }
-                return Ok(());
-            }
-            #[cfg(unix)]
-            {
-                let r = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-                if r == 0 {
-                    println!("[OK] sent SIGTERM to daemon pid={pid}");
-                } else {
-                    let err = std::io::Error::last_os_error();
-                    return Err(format!("kill({pid}) failed: {err}").into());
+                crate::status_ops::DaemonStatus::Foreign { reason, .. } => {
+                    println!("[!] refusing to kill foreign daemon for current DB scope: {reason}");
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                return Err("daemon kill is only implemented on unix".into());
+                crate::status_ops::DaemonStatus::None => {
+                    println!("[OK] no daemon to kill for current DB scope");
+                }
             }
             Ok(())
         }

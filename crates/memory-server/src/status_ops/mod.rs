@@ -114,7 +114,7 @@ pub(crate) struct RecentEval {
     pub(crate) timestamp: String,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum DaemonStatus {
     Running {
@@ -230,28 +230,9 @@ fn collect_snapshot_inner(
     project_db_path: Option<&Path>,
     compare_provider_values: bool,
 ) -> StatusSnapshot {
-    let lock_path = app_home.join("daemon.lock");
-    let pid_info = read_daemon_pid_info(app_home);
-    let daemon = match read_pid_file(&lock_path) {
-        Some(pid) if process_alive(pid) => {
-            if let Some(reason) = daemon_mismatch_reason(pid, pid_info.as_ref(), global_db_path) {
-                DaemonStatus::Foreign {
-                    pid,
-                    lock_path,
-                    reason,
-                    version: pid_info.as_ref().and_then(|info| info.version.clone()),
-                    port: pid_info.as_ref().and_then(|info| info.port),
-                    global_db: pid_info.as_ref().and_then(|info| info.global_db.clone()),
-                }
-            } else {
-                DaemonStatus::Running { pid, lock_path }
-            }
-        }
-        Some(pid) => DaemonStatus::StalePid { pid, lock_path },
-        None => DaemonStatus::None,
-    };
-
+    let daemon = collect_daemon_status(app_home, global_db_path);
     let manifest_path = app_home.join("manifest.json");
+
     let manifest = Manifest::load(&manifest_path).unwrap_or_else(|_| Manifest::empty());
 
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(manifest.dbs.len());
@@ -420,8 +401,57 @@ fn collect_snapshot_inner(
     }
 }
 
-pub(crate) fn read_daemon_pid_info(app_home: &Path) -> Option<DaemonPidInfo> {
-    let raw = std::fs::read_to_string(app_home.join("daemon.pid")).ok()?;
+pub(crate) fn collect_daemon_status(app_home: &Path, global_db_path: &Path) -> DaemonStatus {
+    let scoped_lock = crate::daemon_lock::scoped_daemon_lock_path(app_home, global_db_path);
+    let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
+    let scoped_status = collect_daemon_status_from_paths(&scoped_lock, &scoped_pid, global_db_path);
+    if let Some(status) = scoped_status.as_ref() {
+        if matches!(status, DaemonStatus::Running { .. }) {
+            return status.clone();
+        }
+    }
+
+    let lock_path = crate::daemon_lock::legacy_daemon_lock_path(app_home);
+    let pid_path = crate::daemon_lock::legacy_daemon_pid_path(app_home);
+    collect_daemon_status_from_paths(&lock_path, &pid_path, global_db_path)
+        .or(scoped_status)
+        .unwrap_or(DaemonStatus::None)
+}
+
+fn collect_daemon_status_from_paths(
+    lock_path: &Path,
+    pid_path: &Path,
+    global_db_path: &Path,
+) -> Option<DaemonStatus> {
+    let pid_info = read_daemon_pid_info_from_path(pid_path);
+    match read_pid_file(lock_path) {
+        Some(pid) if process_alive(pid) => {
+            if let Some(reason) = daemon_mismatch_reason(pid, pid_info.as_ref(), global_db_path) {
+                Some(DaemonStatus::Foreign {
+                    pid,
+                    lock_path: lock_path.to_path_buf(),
+                    reason,
+                    version: pid_info.as_ref().and_then(|info| info.version.clone()),
+                    port: pid_info.as_ref().and_then(|info| info.port),
+                    global_db: pid_info.as_ref().and_then(|info| info.global_db.clone()),
+                })
+            } else {
+                Some(DaemonStatus::Running {
+                    pid,
+                    lock_path: lock_path.to_path_buf(),
+                })
+            }
+        }
+        Some(pid) => Some(DaemonStatus::StalePid {
+            pid,
+            lock_path: lock_path.to_path_buf(),
+        }),
+        None => None,
+    }
+}
+
+pub(crate) fn read_daemon_pid_info_from_path(pid_path: &Path) -> Option<DaemonPidInfo> {
+    let raw = std::fs::read_to_string(pid_path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
     Some(DaemonPidInfo {
         pid: parsed
@@ -918,14 +948,41 @@ pub(crate) fn runtime_observability_json(
     let binary = std::env::current_exe()
         .ok()
         .map(|path| path.display().to_string());
-    let daemon_pid = match daemon {
-        Some(DaemonStatus::Running { pid, .. }) => Some(*pid),
-        Some(DaemonStatus::Foreign { pid, .. }) => Some(*pid),
-        Some(DaemonStatus::StalePid { pid, .. }) => Some(*pid),
-        Some(DaemonStatus::None) => None,
-        None => read_pid_file(app_home.join("daemon.lock")),
+    let collected_daemon;
+    let daemon = match daemon {
+        Some(daemon) => Some(daemon),
+        None => {
+            collected_daemon = collect_daemon_status(app_home, &server.global_db_path_buf());
+            Some(&collected_daemon)
+        }
     };
-    let daemon_running = daemon_pid.map(process_alive).unwrap_or(false);
+    let (daemon_pid, daemon_state, daemon_reason, daemon_global_db, daemon_authoritative) =
+        match daemon {
+            Some(DaemonStatus::Running { pid, .. }) => (Some(*pid), "running", None, None, true),
+            Some(DaemonStatus::Foreign {
+                pid,
+                reason,
+                global_db,
+                ..
+            }) => (
+                Some(*pid),
+                "foreign",
+                Some(reason.clone()),
+                global_db.clone(),
+                false,
+            ),
+            Some(DaemonStatus::StalePid { pid, .. }) => (Some(*pid), "stale", None, None, false),
+            Some(DaemonStatus::None) => (None, "none", None, None, false),
+            None => (
+                read_pid_file(app_home.join("daemon.lock")),
+                "unknown",
+                None,
+                None,
+                false,
+            ),
+        };
+    let daemon_process_running = daemon_pid.map(process_alive).unwrap_or(false);
+    let daemon_running = daemon_process_running && daemon_authoritative;
     let serving_daemon = daemon_pid
         .map(|pid| daemon_running && pid as u32 == current_pid)
         .unwrap_or(false);
@@ -953,6 +1010,11 @@ pub(crate) fn runtime_observability_json(
         "expected": daemon_running && !serving_daemon,
         "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
         "fallback": if daemon_running && !serving_daemon { "in_process_before_dispatch_only" } else { "none" },
+    });
+    let read_forwarding = json!({
+        "expected": daemon_running && !serving_daemon,
+        "target": if daemon_running && !serving_daemon { "daemon" } else { "current_process" },
+        "fallback": if daemon_running && !serving_daemon { "in_process_on_transport_error" } else { "none" },
     });
 
     let vault = {
@@ -982,10 +1044,17 @@ pub(crate) fn runtime_observability_json(
         "authoritative_runtime": authoritative_runtime,
         "stdio_adapter": stdio_adapter,
         "write_forwarding": write_forwarding,
+        "read_forwarding": read_forwarding,
         "serving_daemon": serving_daemon,
         "daemon": {
             "pid": daemon_pid,
             "running": daemon_running,
+            "process_running": daemon_process_running,
+            "authoritative": daemon_running,
+            "state": daemon_state,
+            "foreign": daemon_state == "foreign" && daemon_process_running,
+            "reason": daemon_reason,
+            "global_db": daemon_global_db,
             "matches_current_process": serving_daemon,
         },
         "provider_secret_count": server.llm.provider_secret_count(),
@@ -1451,7 +1520,7 @@ async fn handle_tachi_status_detail(
             .unwrap_or(false)
     {
         warnings.push(
-            "this MCP process is a stdio adapter while a daemon is running; supported writes should forward to the daemon, otherwise restart stale MCP clients if runtime state looks inconsistent"
+            "this MCP process is a stdio adapter while a daemon is running; supported reads and writes should forward to the daemon, otherwise restart stale MCP clients if runtime state looks inconsistent"
                 .to_string(),
         );
     }
@@ -1611,7 +1680,12 @@ fn build_status_warnings(
     let auth_failures = auth_failure_dbs.len();
 
     let mut warnings: Vec<String> = Vec::new();
-    if !daemon_state["running"].as_bool().unwrap_or(false) {
+    if daemon_state["foreign"].as_bool().unwrap_or(false) {
+        let reason = daemon_state["reason"].as_str().unwrap_or("scope mismatch");
+        warnings.push(format!(
+            "foreign daemon detected ({reason}); Tachi background tasks for this DB are paused"
+        ));
+    } else if !daemon_state["running"].as_bool().unwrap_or(false) {
         warnings.push(
             "daemon not running — background tasks (enrichment, distill, GC) are paused"
                 .to_string(),
@@ -1857,6 +1931,80 @@ mod tests {
     }
 
     #[test]
+    fn collect_daemon_status_prefers_scoped_match_over_legacy_foreign() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let global = app_home.path().join("global").join("memory.db");
+        let foreign_global = app_home.path().join("openclaw").join("memory.db");
+        let pid = std::process::id();
+
+        let scoped_lock = crate::daemon_lock::scoped_daemon_lock_path(app_home.path(), &global);
+        let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home.path(), &global);
+        std::fs::write(&scoped_lock, pid.to_string()).expect("scoped lock");
+        std::fs::write(
+            &scoped_pid,
+            serde_json::json!({
+                "pid": pid,
+                "port": 7001,
+                "version": env!("CARGO_PKG_VERSION"),
+                "global_db": global.display().to_string(),
+            })
+            .to_string(),
+        )
+        .expect("scoped pid");
+        std::fs::write(
+            crate::daemon_lock::legacy_daemon_lock_path(app_home.path()),
+            pid.to_string(),
+        )
+        .expect("legacy lock");
+        std::fs::write(
+            crate::daemon_lock::legacy_daemon_pid_path(app_home.path()),
+            serde_json::json!({
+                "pid": pid,
+                "port": 6919,
+                "version": env!("CARGO_PKG_VERSION"),
+                "global_db": foreign_global.display().to_string(),
+            })
+            .to_string(),
+        )
+        .expect("legacy pid");
+
+        match collect_daemon_status(app_home.path(), &global) {
+            DaemonStatus::Running { lock_path, .. } => assert_eq!(lock_path, scoped_lock),
+            other => panic!("expected scoped daemon to win, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_daemon_status_reports_legacy_foreign_without_scoped_match() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let global = app_home.path().join("global").join("memory.db");
+        let foreign_global = app_home.path().join("openclaw").join("memory.db");
+        let pid = std::process::id();
+
+        std::fs::write(
+            crate::daemon_lock::legacy_daemon_lock_path(app_home.path()),
+            pid.to_string(),
+        )
+        .expect("legacy lock");
+        std::fs::write(
+            crate::daemon_lock::legacy_daemon_pid_path(app_home.path()),
+            serde_json::json!({
+                "pid": pid,
+                "port": 6919,
+                "version": env!("CARGO_PKG_VERSION"),
+                "global_db": foreign_global.display().to_string(),
+            })
+            .to_string(),
+        )
+        .expect("legacy pid");
+
+        match collect_daemon_status(app_home.path(), &global) {
+            DaemonStatus::Foreign { reason, .. } => assert!(reason.contains("does not match")),
+            other => panic!("expected legacy foreign daemon, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn truncate_honors_max() {
         assert_eq!(truncate("abc", 5), "abc");
         assert_eq!(truncate("abcdefghij", 5), "ab...");
@@ -2046,6 +2194,31 @@ mod tests {
 
     fn daemon_running() -> serde_json::Value {
         serde_json::json!({ "running": true })
+    }
+
+    #[test]
+    fn build_status_warnings_names_foreign_daemon() {
+        let snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
+        let daemon_state = serde_json::json!({
+            "running": false,
+            "foreign": true,
+            "reason": "daemon global_db /tmp/openclaw.db does not match /tmp/tachi.db",
+        });
+
+        let warnings = build_status_warnings(&snapshot, &daemon_state);
+
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("foreign daemon detected") && w.contains("openclaw.db")),
+            "foreign daemon warning should name the mismatch, got: {warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|w| !w.starts_with("daemon not running")),
+            "foreign daemon should not be reported as a generic missing daemon: {warnings:?}"
+        );
     }
 
     #[test]

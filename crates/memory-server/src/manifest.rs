@@ -98,7 +98,6 @@ pub fn is_archival_db_path(p: &Path) -> bool {
         "/claude-code-runs/",
         "/tidy/manual-cleanup-",
         "/data/backup/",
-        "weixin-backup/",
         ".pre-timestamp-fix",
         ".checkpointed.db",
     ];
@@ -1339,6 +1338,10 @@ mod tests {
         assert!(
             should_skip_path(Path::new("/Users/me/.openclaw/agents/x/memory/memory.db")).is_none()
         );
+        assert!(should_skip_path(Path::new(
+            "/Users/me/.openclaw/extensions/tachi/data/agents/weixin-backup/memory.db"
+        ))
+        .is_none());
     }
 
     #[test]

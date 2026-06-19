@@ -228,6 +228,98 @@ pub fn materialize_standalone(
     materialize_provider_secrets(llm, &vault_pools)
 }
 
+/// Best-effort unlock from macOS Keychain (`tachi-vault` / `default`) and materialize
+/// provider secrets into the running process. Used at daemon/MCP startup and after vault
+/// auto-lock so background embed/search can keep working without a manual unlock.
+pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
+    }
+
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let config = server
+        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))?
+        .ok_or_else(|| "vault not initialized".to_string())?;
+
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("keychain read failed: {e}"))?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+
+    let password = String::from_utf8(output.stdout)
+        .map_err(|e| format!("keychain password is not UTF-8: {e}"))?
+        .trim()
+        .to_string();
+    if password.is_empty() {
+        return Ok(false);
+    }
+
+    let salt = B64
+        .decode(&config.salt)
+        .map_err(|e| format!("invalid vault salt: {e}"))?;
+    let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)
+        .map_err(|e| format!("vault key derivation failed: {e}"))?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)
+        .map_err(|e| format!("vault verifier check failed: {e}"))?
+    {
+        return Err("keychain password does not match vault".to_string());
+    }
+
+    {
+        let mut v = server.vault_write();
+        v.key = Some(crate::CachedVaultKey::copy_from(key.bytes()));
+        v.unlock_time = Some(std::time::Instant::now());
+    }
+
+    let loaded = server.refresh_llm_provider_secrets_from_vault()?;
+    tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
+    Ok(true)
+}
+
+/// Re-load provider secrets after the in-process vault session expires. Falls back to
+/// Keychain when the cached unlock key is gone so vector/embed lanes stay alive headlessly.
+pub fn re_materialize_provider_secrets_after_auto_lock(server: &MemoryServer) {
+    match server.refresh_llm_provider_secrets_from_vault() {
+        Ok(n) if n > 0 => {
+            tracing::info!("[provider] re-materialized {n} provider key(s) after vault auto-lock")
+        }
+        Ok(_) => tracing::debug!("[provider] no provider keys available after vault auto-lock"),
+        Err(err) => {
+            tracing::warn!("[provider] provider key refresh failed after vault auto-lock: {err}")
+        }
+    }
+}
+
+/// Keychain auto-unlock (best effort) + provider secret materialization for any
+/// short-lived server instance (CLI one-shots, MCP stdio, daemon startup).
+pub fn bootstrap_provider_runtime(server: &MemoryServer) {
+    match auto_unlock_vault_from_keychain(server) {
+        Ok(true) => tracing::info!("[vault] auto-unlocked from Keychain"),
+        Ok(false) => tracing::debug!(
+            "[vault] auto-unlock skipped (no keychain entry or vault not initialized)"
+        ),
+        Err(err) => tracing::warn!("[vault] auto-unlock skipped: {err}"),
+    }
+    match server.refresh_llm_provider_secrets_from_vault() {
+        Ok(n) if n > 0 => tracing::info!("[provider] {n} provider key(s) ready for LLM/embed"),
+        Ok(_) => {
+            tracing::debug!("[provider] no provider keys materialized (Vault locked or empty)")
+        }
+        Err(err) => tracing::warn!("[provider] secret materialization failed: {err}"),
+    }
+}
+
 /// Parse `~/.tachi/config.env` (and peers) into key → value (non-empty values only).
 pub fn collect_config_env_values() -> HashMap<String, String> {
     let mut paths = Vec::new();
@@ -384,5 +476,29 @@ mod tests {
             Some("vault-secret")
         );
         assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
+    }
+
+    #[test]
+    fn re_materialize_after_auto_lock_restores_env_fallback_keys() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "env-voyage-key");
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-auto-lock-remat-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let server = crate::MemoryServer::new(db_path, None).expect("server");
+        server.llm.clear_provider_secrets();
+
+        crate::provider_config::re_materialize_provider_secrets_after_auto_lock(&server);
+
+        assert_eq!(
+            server
+                .llm
+                .provider_secret_for_tests(&["VOYAGE_API_KEY"])
+                .as_deref(),
+            Some("env-voyage-key")
+        );
     }
 }

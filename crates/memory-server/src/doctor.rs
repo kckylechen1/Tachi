@@ -205,6 +205,12 @@ pub fn collect_candidates(roots: &[PathBuf], max_depth: usize) -> Vec<PathBuf> {
     out
 }
 
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    path == root || path.starts_with(root)
+}
+
 fn walk_one(root: &Path, out: &mut Vec<PathBuf>, max_depth: usize) {
     if !root.exists() {
         return;
@@ -605,12 +611,7 @@ fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
             destination: None,
         };
     }
-    // Mangle dest filename to preserve provenance.
-    let safe_src = src
-        .trim_start_matches('/')
-        .replace('/', "_")
-        .replace(':', "_");
-    let dest = dest_dir.join(format!("{safe_src}__{basename}"));
+    let dest = dest_dir.join(quarantine_dest_filename(src, basename));
     match fs::rename(src_path, &dest) {
         Ok(_) => AutoFixAction {
             path: src.to_string(),
@@ -639,6 +640,29 @@ fn quarantine_placeholder(src: &str, dest_dir: &Path) -> AutoFixAction {
             }
         }
     }
+}
+
+fn quarantine_dest_filename(src: &str, basename: &str) -> String {
+    let mut safe_src = src
+        .trim_start_matches('/')
+        .replace(['/', ':'], "_")
+        .chars()
+        .take(120)
+        .collect::<String>();
+    if safe_src.is_empty() {
+        safe_src = "unknown".to_string();
+    }
+    let safe_basename = basename.chars().take(80).collect::<String>();
+    format!("{safe_src}__{:016x}__{safe_basename}", stable_hash(src))
+}
+
+fn stable_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
@@ -833,7 +857,10 @@ impl Default for ScanOptions {
 }
 
 pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> DoctorReport {
-    let candidates = collect_candidates(roots, options.max_depth);
+    let candidates: Vec<PathBuf> = collect_candidates(roots, options.max_depth)
+        .into_iter()
+        .filter(|path| !path_is_under(path, quarantine_root))
+        .collect();
     let findings: Vec<DoctorFinding> = candidates.iter().map(|p| classify_one(p)).collect();
 
     let mut summary = SummaryByClass::default();
@@ -1178,6 +1205,20 @@ mod tests {
     }
 
     #[test]
+    fn classify_openclaw_agent_named_backup_as_live_db() {
+        let dir = tempdir().unwrap();
+        let p = dir
+            .path()
+            .join(".openclaw/extensions/tachi/data/agents/weixin-backup/memory.db");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        make_healthy_db(&p);
+        let f = classify_one(&p);
+        assert_eq!(f.classification, DbClassification::Healthy);
+        assert_eq!(f.schema_kind, "tachi");
+        assert_eq!(f.scope_hint, "openclaw-agent:weixin-backup");
+    }
+
+    #[test]
     fn classify_legacy_schema() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("memory.db");
@@ -1219,6 +1260,40 @@ mod tests {
         assert_eq!(report.auto_fix_actions.len(), 1);
         assert_eq!(report.auto_fix_actions[0].outcome, "ok");
         assert!(!p.exists(), "original placeholder should have been moved");
+    }
+
+    #[test]
+    fn scan_ignores_own_quarantine_root() {
+        let dir = tempdir().unwrap();
+        let q = dir.path().join("quarantine");
+        let nested = q.join("placeholders/old");
+        fs::create_dir_all(&nested).unwrap();
+        fs::File::create(nested.join("memory.db")).unwrap();
+
+        let report = scan(
+            &[dir.path().to_path_buf()],
+            &q,
+            ScanOptions {
+                auto_fix: true,
+                max_depth: 5,
+            },
+        );
+
+        assert_eq!(report.summary.placeholder, 0);
+        assert!(report.auto_fix_actions.is_empty());
+    }
+
+    #[test]
+    fn quarantine_destination_name_is_bounded_for_long_paths() {
+        let long_src = format!("/{}", "very/".repeat(120));
+        let name = quarantine_dest_filename(&long_src, "memory.db");
+
+        assert!(
+            name.len() < 255,
+            "quarantine destination basename must fit common filesystem limits: {}",
+            name.len()
+        );
+        assert!(name.contains("__memory.db"));
     }
 
     #[test]

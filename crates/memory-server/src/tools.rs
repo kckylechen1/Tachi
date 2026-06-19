@@ -54,9 +54,7 @@ use crate::memory_ops::{
     handle_get_memory, handle_list_domains, handle_list_memories, handle_memory_gc,
     handle_memory_stats, handle_register_domain, handle_runtime_info,
 };
-use crate::memory_search_ops::{
-    handle_find_similar_memory, handle_remember, handle_save_memory, handle_search_memory,
-};
+use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, handle_save_memory};
 use crate::pack_ops::{
     handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
     handle_pack_remove, handle_projection_list,
@@ -146,7 +144,12 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
-        handle_search_memory(self, params, false).await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "search_memory", &params).await?
+        {
+            return Ok(body);
+        }
+        crate::memory_search_ops::handle_search_memory_with_access(self, params, false, true).await
     }
 
     #[tool(
@@ -156,7 +159,12 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
-        handle_search_memory(self, params, false).await
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "search_memory", &params).await?
+        {
+            return Ok(body);
+        }
+        crate::memory_search_ops::handle_search_memory_with_access(self, params, false, true).await
     }
 
     #[tool(
@@ -174,6 +182,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<GetMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "get_memory", &params).await?
+        {
+            return Ok(body);
+        }
         handle_get_memory(self, params).await
     }
 
@@ -1337,6 +1350,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<TachiSearchParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "tachi_search", &params).await?
+        {
+            return Ok(body);
+        }
         crate::facade_search_ops::handle_tachi_search(self, params).await
     }
 

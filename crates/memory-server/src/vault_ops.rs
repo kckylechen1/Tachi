@@ -211,7 +211,7 @@ fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
         expired
     };
     if locked {
-        server.llm.clear_provider_secrets();
+        crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
     }
     locked
 }
@@ -274,7 +274,7 @@ fn with_vault_key<T>(
         if unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs) {
             clear_cached_vault_state_locked(&mut v);
             drop(v);
-            server.llm.clear_provider_secrets();
+            crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
             return Err("Vault auto-locked. Call vault_unlock first.".into());
         }
 

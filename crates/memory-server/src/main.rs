@@ -796,7 +796,7 @@ impl MemoryServer {
         self.global_read_pool.len()
     }
 
-    fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
+    pub(crate) fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
         crate::provider_config::materialize_for_server(self).map(|report| {
             if report.from_alias > 0 || report.env_fallbacks_bypassed > 0 {
                 tracing::info!(
@@ -809,6 +809,16 @@ impl MemoryServer {
             }
             report.loaded
         })
+    }
+
+    pub(crate) fn ensure_provider_secrets_materialized(&self, keys: &[&str]) {
+        if keys
+            .iter()
+            .all(|key| self.llm.has_configured_secret(&[*key]))
+        {
+            return;
+        }
+        let _ = self.refresh_llm_provider_secrets_from_vault();
     }
 
     pub(crate) fn unlocked_env_secrets_for_child_env(

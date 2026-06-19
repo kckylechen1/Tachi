@@ -170,8 +170,11 @@ pub(crate) enum Commands {
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {
         /// Target DB path (defaults to global DB)
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "PATH", conflicts_with = "project")]
         db: Option<PathBuf>,
+        /// Target named project DB under ~/.tachi/projects/<name>/memory.db
+        #[arg(long)]
+        project: Option<String>,
         /// Batch size for Voyage API calls (max 128)
         #[arg(long, default_value_t = 64)]
         batch_size: usize,
@@ -1004,6 +1007,44 @@ mod tests {
             } => assert!(json),
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn backfill_vectors_accepts_named_project() {
+        let parsed = Cli::try_parse_from([
+            "tachi",
+            "backfill-vectors",
+            "--project",
+            "sigil",
+            "--dry-run",
+        ])
+        .expect("backfill-vectors --project should parse");
+        match parsed.command.expect("command") {
+            Commands::BackfillVectors {
+                db,
+                project,
+                dry_run,
+                ..
+            } => {
+                assert!(db.is_none());
+                assert_eq!(project.as_deref(), Some("sigil"));
+                assert!(dry_run);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backfill_vectors_rejects_db_and_project_together() {
+        let parsed = Cli::try_parse_from([
+            "tachi",
+            "backfill-vectors",
+            "--db",
+            "/tmp/memory.db",
+            "--project",
+            "sigil",
+        ]);
+        assert!(parsed.is_err());
     }
 }
 

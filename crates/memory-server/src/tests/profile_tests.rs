@@ -169,6 +169,43 @@ async fn runtime_observability_marks_stdio_daemon_client_when_daemon_is_alive() 
     assert_eq!(runtime["write_forwarding"]["target"], json!("daemon"));
 }
 
+#[tokio::test]
+async fn runtime_observability_does_not_forward_to_foreign_daemon() {
+    let server = make_server();
+    let app_home = tempfile::tempdir().expect("app home");
+    let mut child = std::process::Command::new("python3")
+        .args(["-c", "import time; time.sleep(30)"])
+        .spawn()
+        .expect("spawn live foreign daemon stand-in");
+    let runtime = crate::status_ops::runtime_observability_json(
+        &server,
+        app_home.path(),
+        Some(&crate::status_ops::DaemonStatus::Foreign {
+            pid: child.id() as i32,
+            lock_path: app_home.path().join("daemon.lock"),
+            reason: "daemon global_db /tmp/openclaw.db does not match /tmp/tachi.db".to_string(),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            port: Some(6919),
+            global_db: Some("/tmp/openclaw.db".to_string()),
+        }),
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(runtime["mode"], json!("single_process"));
+    assert_eq!(runtime["process_role"], json!("embedded_stdio"));
+    assert_eq!(runtime["authoritative_runtime"], json!("current_process"));
+    assert_eq!(runtime["daemon"]["process_running"], json!(true));
+    assert_eq!(runtime["daemon"]["running"], json!(false));
+    assert_eq!(runtime["daemon"]["foreign"], json!(true));
+    assert_eq!(runtime["daemon"]["authoritative"], json!(false));
+    assert_eq!(runtime["write_forwarding"]["expected"], json!(false));
+    assert_eq!(
+        runtime["write_forwarding"]["target"],
+        json!("current_process")
+    );
+}
+
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]

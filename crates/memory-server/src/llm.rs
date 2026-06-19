@@ -1287,6 +1287,10 @@ impl LlmClient {
             .ok_or_else(|| self.provider_secret_unavailable_error(keys))
     }
 
+    pub(crate) fn has_configured_secret(&self, keys: &[&str]) -> bool {
+        self.select_secret(keys).is_some()
+    }
+
     fn provider_secret_unavailable_error(&self, keys: &[&str]) -> String {
         let now = Instant::now();
         let now_utc = Self::now_utc();
