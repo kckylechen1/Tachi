@@ -1,4 +1,5 @@
 use super::*;
+use crate::network_safety::is_private_or_local_ip;
 use crate::vault_ops::read_unlocked_vault_secret;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::header::{HeaderName, HeaderValue};
@@ -486,29 +487,7 @@ struct ValidatedRemoteMcpUrl {
 }
 
 fn mcp_remote_ip_is_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_multicast()
-        }
-        IpAddr::V6(v6) => {
-            if v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-            {
-                return true;
-            }
-            v6.to_ipv4_mapped()
-                .is_some_and(|v4| mcp_remote_ip_is_blocked(IpAddr::V4(v4)))
-        }
-    }
+    is_private_or_local_ip(ip)
 }
 
 fn reject_blocked_mcp_remote_ip(ip: IpAddr) -> Result<(), String> {

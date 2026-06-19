@@ -1,4 +1,5 @@
 use super::*;
+use crate::network_safety::is_private_or_local_ip;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use memory_core::scorer::local_pagerank;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -312,24 +313,7 @@ fn reject_blocked_wiki_ingest_ip(ip: IpAddr) -> Result<(), String> {
 }
 
 fn wiki_ingest_ip_is_blocked(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-        }
-        IpAddr::V6(ip) => {
-            ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || ip.is_unique_local()
-                || ip.is_unicast_link_local()
-        }
-    }
+    is_private_or_local_ip(ip)
 }
 
 async fn read_limited_wiki_http_response(
@@ -2058,6 +2042,14 @@ mod reference_validation_tests {
     #[tokio::test]
     async fn wiki_ingest_http_url_rejects_ipv6_unique_local_ip() {
         let err = validate_wiki_ingest_http_url("http://[fd00::1]/source.md")
+            .await
+            .unwrap_err();
+        assert!(err.contains("private or local"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn wiki_ingest_http_url_rejects_ipv4_mapped_ipv6_loopback() {
+        let err = validate_wiki_ingest_http_url("http://[::ffff:127.0.0.1]/source.md")
             .await
             .unwrap_err();
         assert!(err.contains("private or local"), "err: {err}");
