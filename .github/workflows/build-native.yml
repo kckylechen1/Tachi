@@ -103,7 +103,7 @@ jobs:
 
       - name: Install node deps
         working-directory: crates/memory-node
-        run: npm install
+        run: npm ci
 
       - name: Build native module
         working-directory: crates/memory-node
@@ -136,7 +136,7 @@ jobs:
 
       - name: Install node deps
         working-directory: crates/memory-node
-        run: npm install
+        run: npm ci
 
       - name: Prepare npm package layout
         working-directory: crates/memory-node
@@ -180,6 +180,17 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Add platform optional dependencies
+        working-directory: crates/memory-node
+        run: |
+          VERSION="${{ needs.resolve-version.outputs.version }}"
+          npm pkg set \
+            optionalDependencies.@chaoxlabs/tachi-node-win32-x64-msvc="$VERSION" \
+            optionalDependencies.@chaoxlabs/tachi-node-darwin-x64="$VERSION" \
+            optionalDependencies.@chaoxlabs/tachi-node-darwin-arm64="$VERSION" \
+            optionalDependencies.@chaoxlabs/tachi-node-linux-x64-gnu="$VERSION" \
+            optionalDependencies.@chaoxlabs/tachi-node-linux-arm64-gnu="$VERSION"
+
       - name: Publish main package
         working-directory: crates/memory-node
         run: npm publish --access public --ignore-scripts
@@ -211,7 +222,7 @@ jobs:
       - name: Build TypeScript
         working-directory: integrations/openclaw
         run: |
-          npm install --ignore-scripts
+          npm ci --ignore-scripts
           npx tsc -p tsconfig.json
 
       - name: Create tarball
