@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use memory_core::vault::VaultKeyHealth;
 
@@ -39,6 +39,9 @@ fn provider_key_health_persist_disabled_for_tests() -> bool {
 fn provider_key_health_persist_disabled_for_tests() -> bool {
     false
 }
+
+mod embedding;
+mod helpers;
 
 #[derive(Clone)]
 struct ChatLaneConfig {
@@ -391,60 +394,6 @@ impl ClaudeCliFailureKind {
 struct ClaudeCliSkip {
     kind: ClaudeCliFailureKind,
     remaining: Duration,
-}
-
-fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
-    documents
-        .iter()
-        .enumerate()
-        .filter(|(_, doc)| !doc.trim().is_empty())
-        .map(|(idx, doc)| (doc, idx))
-        .unzip()
-}
-
-fn parse_voyage_batch_embeddings(
-    data: &[Value],
-    expected_count: usize,
-) -> Result<Vec<Vec<f32>>, String> {
-    if data.len() != expected_count {
-        return Err(format!(
-            "Voyage batch returned {} embeddings for {} inputs",
-            data.len(),
-            expected_count
-        ));
-    }
-
-    let mut embeddings = Vec::with_capacity(expected_count);
-    for (expected_index, item) in data.iter().enumerate() {
-        if let Some(index) = item.get("index") {
-            let actual_index = index
-                .as_u64()
-                .ok_or("Invalid Voyage batch response: index is not an unsigned integer")?
-                as usize;
-            if actual_index != expected_index {
-                return Err(format!(
-                    "Voyage batch response index mismatch: expected {expected_index}, got {actual_index}"
-                ));
-            }
-        }
-
-        let embedding = item["embedding"]
-            .as_array()
-            .ok_or("Invalid Voyage batch response: missing embedding in item")?;
-
-        let vec: Vec<f32> = embedding
-            .iter()
-            .filter_map(|v| v.as_f64().map(|f| f as f32))
-            .collect();
-
-        if vec.len() != 1024 {
-            return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
-        }
-
-        embeddings.push(vec);
-    }
-
-    Ok(embeddings)
 }
 
 /// LLM and embedding client using Voyage API for embeddings
@@ -1711,236 +1660,6 @@ impl LlmClient {
         model.contains("qwen") || model.contains("deepseek")
     }
 
-    /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
-    /// Convenience wrapper around embed_voyage_batch for single-item use.
-    pub async fn embed_voyage(&self, text: &str, input_type: &str) -> Result<Vec<f32>, String> {
-        let results = self
-            .embed_voyage_batch(&[text.to_string()], input_type)
-            .await?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| "Empty batch result".to_string())
-    }
-
-    /// Batch call Voyage-4 embedding API. Returns one 1024-dim f32 vector per input text.
-    /// Voyage supports up to 128 inputs per request; this method handles chunking internally.
-    pub async fn embed_voyage_batch(
-        &self,
-        texts: &[String],
-        input_type: &str,
-    ) -> Result<Vec<Vec<f32>>, String> {
-        if texts.is_empty() {
-            return Ok(vec![]);
-        }
-
-        const VOYAGE_MAX_BATCH: usize = 128;
-        let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-        for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
-            let body = serde_json::json!({
-                "model": "voyage-4",
-                "input": chunk,
-                "input_type": input_type
-            });
-            let mut response_json: Option<Value> = None;
-            let mut last_err = String::new();
-            for attempt in 1..=Self::MAX_ATTEMPTS {
-                let Some(selected) = self
-                    .required_selected_secret_or_wait(&["VOYAGE_API_KEY"], attempt, "Voyage batch")
-                    .await?
-                else {
-                    continue;
-                };
-                let response = self
-                    .http
-                    .post("https://api.voyageai.com/v1/embeddings")
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(AUTHORIZATION, format!("Bearer {}", selected.value))
-                    .json(&body)
-                    .send()
-                    .await;
-                let response = match response {
-                    Ok(response) => response,
-                    Err(err) => {
-                        last_err = format!("Voyage batch API request failed: {err}");
-                        if attempt < Self::MAX_ATTEMPTS {
-                            tokio::time::sleep(Self::retry_delay(attempt)).await;
-                            continue;
-                        }
-                        return Err(last_err);
-                    }
-                };
-
-                let status = response.status();
-                let retry_after = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse::<u64>().ok());
-                let text = response
-                    .text()
-                    .await
-                    .map_err(|e| format!("Voyage batch response body read failed: {e}"))?;
-                if status.as_u16() == 429 {
-                    self.mark_secret_rate_limited(&selected, retry_after);
-                    last_err = format!("Voyage batch API error: {} - {}", status, text);
-                    if attempt < Self::MAX_ATTEMPTS {
-                        continue;
-                    }
-                    return Err(last_err);
-                }
-                if status.as_u16() == 401 || status.as_u16() == 403 {
-                    self.mark_secret_auth_failed(
-                        &selected,
-                        Some(&format!("Voyage batch auth failure {status}")),
-                    );
-                    return Err(format!("Voyage batch API error: {} - {}", status, text));
-                }
-                if !status.is_success() {
-                    return Err(format!("Voyage batch API error: {} - {}", status, text));
-                }
-                response_json = Some(
-                    serde_json::from_str(&text)
-                        .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
-                );
-                self.mark_secret_success(&selected);
-                break;
-            }
-
-            let json = response_json.ok_or_else(|| {
-                if last_err.is_empty() {
-                    "Voyage batch API failed without a response".to_string()
-                } else {
-                    last_err
-                }
-            })?;
-
-            let data = json["data"]
-                .as_array()
-                .ok_or("Invalid Voyage batch response: missing data array")?;
-            all_embeddings.extend(parse_voyage_batch_embeddings(data, chunk.len())?);
-        }
-
-        Ok(all_embeddings)
-    }
-
-    /// Call Voyage rerank API and return (original_index, relevance_score) pairs.
-    pub async fn rerank_voyage(
-        &self,
-        query: &str,
-        documents: &[String],
-        top_k: usize,
-    ) -> Result<Vec<(usize, f64)>, String> {
-        let (filtered_docs, index_map) = non_empty_rerank_documents(documents);
-        if filtered_docs.is_empty() {
-            return Ok(vec![]);
-        }
-        let effective_top_k = top_k.max(1).min(filtered_docs.len());
-
-        let body = serde_json::json!({
-            "model": "rerank-2.5",
-            "query": query,
-            "documents": filtered_docs,
-            "top_k": effective_top_k,
-        });
-
-        let mut json: Option<Value> = None;
-        let mut last_err = String::new();
-        for attempt in 1..=Self::MAX_ATTEMPTS {
-            let Some(selected) = self
-                .required_selected_secret_or_wait(
-                    &["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
-                    attempt,
-                    "Voyage rerank",
-                )
-                .await?
-            else {
-                continue;
-            };
-            let response = self
-                .http
-                .post("https://api.voyageai.com/v1/rerank")
-                .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", selected.value))
-                .json(&body)
-                .send()
-                .await;
-            let response = match response {
-                Ok(response) => response,
-                Err(err) => {
-                    last_err = format!("Voyage rerank API request failed: {err}");
-                    if attempt < Self::MAX_ATTEMPTS {
-                        tokio::time::sleep(Self::retry_delay(attempt)).await;
-                        continue;
-                    }
-                    return Err(last_err);
-                }
-            };
-
-            let status = response.status();
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            let text = response
-                .text()
-                .await
-                .map_err(|e| format!("Voyage rerank response body read failed: {e}"))?;
-            if status.as_u16() == 429 {
-                self.mark_secret_rate_limited(&selected, retry_after);
-                last_err = format!("Voyage rerank API error: {} - {}", status, text);
-                if attempt < Self::MAX_ATTEMPTS {
-                    continue;
-                }
-                return Err(last_err);
-            }
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                self.mark_secret_auth_failed(
-                    &selected,
-                    Some(&format!("Voyage rerank auth failure {status}")),
-                );
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
-            }
-            if !status.is_success() {
-                return Err(format!("Voyage rerank API error: {} - {}", status, text));
-            }
-            json = Some(
-                serde_json::from_str(&text)
-                    .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?,
-            );
-            self.mark_secret_success(&selected);
-            break;
-        }
-        let json = json.ok_or_else(|| {
-            if last_err.is_empty() {
-                "Voyage rerank API failed without a response".to_string()
-            } else {
-                last_err
-            }
-        })?;
-        let data = json["data"]
-            .as_array()
-            .ok_or("Invalid Voyage rerank response: missing data array")?;
-
-        let mut out = Vec::with_capacity(data.len());
-        for item in data {
-            let filtered_index = item["index"]
-                .as_u64()
-                .ok_or("Invalid Voyage rerank response: missing index")?
-                as usize;
-            let relevance = item["relevance_score"]
-                .as_f64()
-                .ok_or("Invalid Voyage rerank response: missing relevance_score")?;
-            let orig_index = index_map
-                .get(filtered_index)
-                .copied()
-                .unwrap_or(filtered_index);
-            out.push((orig_index, relevance));
-        }
-        Ok(out)
-    }
-
     pub async fn call_extract_llm(
         &self,
         system: &str,
@@ -2418,95 +2137,13 @@ impl LlmClient {
         })
     }
 
-    fn retry_delay(attempt: usize) -> Duration {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        Self::retry_delay_with_jitter(attempt, seed)
-    }
-
-    fn retry_delay_with_jitter(attempt: usize, seed: u64) -> Duration {
-        let multiplier = 1u64 << attempt.saturating_sub(1).min(4);
-        let base_ms = Self::BASE_RETRY_DELAY_MS * multiplier;
-        let jitter_ms = ((base_ms * Self::RETRY_JITTER_PERCENT) / 100).max(1);
-        let mixed =
-            seed ^ (attempt as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ base_ms.rotate_left(17);
-        Duration::from_millis(base_ms + (mixed % (jitter_ms + 1)))
-    }
-
-    /// Remove ```json markdown code fences from response
-    pub fn strip_code_fence(text: &str) -> &str {
-        let text = text.trim();
-        let inner = if text.starts_with("```json") {
-            text[7..].trim()
-        } else if text.starts_with("```") {
-            &text[3..]
-        } else {
-            return text;
-        };
-
-        if let Some(idx) = inner.rfind("```") {
-            inner[..idx].trim()
-        } else {
-            inner
-        }
-    }
-
-    /// Extract the first complete JSON object/array from an LLM response.
-    ///
-    /// Some reasoning models prepend hidden-thought text or other prose before
-    /// the JSON even when the prompt asks for JSON-only. Keep strict JSON
-    /// parsing, but feed the parser the first balanced JSON payload instead of
-    /// the whole response.
-    pub fn extract_json_payload(text: &str) -> Result<&str, String> {
-        let text = Self::strip_code_fence(text).trim();
-        let start = text
-            .char_indices()
-            .find_map(|(idx, ch)| matches!(ch, '{' | '[').then_some((idx, ch)))
-            .ok_or_else(|| format!("No JSON object or array found in response: {text}"))?;
-        let (start_idx, open) = start;
-        let close = if open == '{' { '}' } else { ']' };
-        let mut stack = vec![close];
-        let mut in_string = false;
-        let mut escaped = false;
-
-        for (rel_idx, ch) in text[start_idx..].char_indices().skip(1) {
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if ch == '\\' {
-                    escaped = true;
-                } else if ch == '"' {
-                    in_string = false;
-                }
-                continue;
-            }
-
-            match ch {
-                '"' => in_string = true,
-                '{' => stack.push('}'),
-                '[' => stack.push(']'),
-                '}' | ']' => {
-                    if stack.pop() != Some(ch) {
-                        return Err(format!("Mismatched JSON delimiter in response: {text}"));
-                    }
-                    if stack.is_empty() {
-                        let end_idx = start_idx + rel_idx + ch.len_utf8();
-                        return Ok(&text[start_idx..end_idx]);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        Err(format!("Incomplete JSON payload in response: {text}"))
-    }
+    
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::embedding::{non_empty_rerank_documents, parse_voyage_batch_embeddings};
     use serde_json::json;
 
     // NOTE: each test below MUST use a unique env-var name. Cargo runs

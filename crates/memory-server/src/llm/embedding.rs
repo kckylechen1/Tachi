@@ -1,0 +1,290 @@
+// embedding.rs — Voyage embedding & rerank API calls on LlmClient
+
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use serde_json::{json, Value};
+
+pub(super) fn non_empty_rerank_documents(documents: &[String]) -> (Vec<&String>, Vec<usize>) {
+    documents
+        .iter()
+        .enumerate()
+        .filter(|(_, doc)| !doc.trim().is_empty())
+        .map(|(idx, doc)| (doc, idx))
+        .unzip()
+}
+
+pub(super) fn parse_voyage_batch_embeddings(
+    data: &[Value],
+    expected_count: usize,
+) -> Result<Vec<Vec<f32>>, String> {
+    if data.len() != expected_count {
+        return Err(format!(
+            "Voyage batch returned {} embeddings for {} inputs",
+            data.len(),
+            expected_count
+        ));
+    }
+
+    let mut embeddings = Vec::with_capacity(expected_count);
+    for (expected_index, item) in data.iter().enumerate() {
+        if let Some(index) = item.get("index") {
+            let actual_index = index
+                .as_u64()
+                .ok_or("Invalid Voyage batch response: index is not an unsigned integer")?
+                as usize;
+            if actual_index != expected_index {
+                return Err(format!(
+                    "Voyage batch response index mismatch: expected {expected_index}, got {actual_index}"
+                ));
+            }
+        }
+
+        let embedding = item["embedding"]
+            .as_array()
+            .ok_or("Invalid Voyage batch response: missing embedding in item")?;
+
+        let vec: Vec<f32> = embedding
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect();
+
+        if vec.len() != 1024 {
+            return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+        }
+
+        embeddings.push(vec);
+    }
+
+    Ok(embeddings)
+}
+
+impl super::LlmClient {
+    /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
+    /// Convenience wrapper around embed_voyage_batch for single-item use.
+    pub async fn embed_voyage(&self, text: &str, input_type: &str) -> Result<Vec<f32>, String> {
+        let results = self
+            .embed_voyage_batch(&[text.to_string()], input_type)
+            .await?;
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Empty batch result".to_string())
+    }
+
+    /// Batch call Voyage-4 embedding API. Returns one 1024-dim f32 vector per input text.
+    /// Voyage supports up to 128 inputs per request; this method handles chunking internally.
+    pub async fn embed_voyage_batch(
+        &self,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        const VOYAGE_MAX_BATCH: usize = 128;
+        let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
+            let body = json!({
+                "model": "voyage-4",
+                "input": chunk,
+                "input_type": input_type
+            });
+            let mut response_json: Option<Value> = None;
+            let mut last_err = String::new();
+            for attempt in 1..=Self::MAX_ATTEMPTS {
+                let Some(selected) = self
+                    .required_selected_secret_or_wait(&["VOYAGE_API_KEY"], attempt, "Voyage batch")
+                    .await?
+                else {
+                    continue;
+                };
+                let response = self
+                    .http
+                    .post("https://api.voyageai.com/v1/embeddings")
+                    .header(CONTENT_TYPE, "application/json")
+                    .header(AUTHORIZATION, format!("Bearer {}", selected.value))
+                    .json(&body)
+                    .send()
+                    .await;
+                let response = match response {
+                    Ok(response) => response,
+                    Err(err) => {
+                        last_err = format!("Voyage batch API request failed: {err}");
+                        if attempt < Self::MAX_ATTEMPTS {
+                            tokio::time::sleep(Self::retry_delay(attempt)).await;
+                            continue;
+                        }
+                        return Err(last_err);
+                    }
+                };
+
+                let status = response.status();
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok());
+                let text = response
+                    .text()
+                    .await
+                    .map_err(|e| format!("Voyage batch response body read failed: {e}"))?;
+                if status.as_u16() == 429 {
+                    self.mark_secret_rate_limited(&selected, retry_after);
+                    last_err = format!("Voyage batch API error: {} - {}", status, text);
+                    if attempt < Self::MAX_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+                if status.as_u16() == 401 || status.as_u16() == 403 {
+                    self.mark_secret_auth_failed(
+                        &selected,
+                        Some(&format!("Voyage batch auth failure {status}")),
+                    );
+                    return Err(format!("Voyage batch API error: {} - {}", status, text));
+                }
+                if !status.is_success() {
+                    return Err(format!("Voyage batch API error: {} - {}", status, text));
+                }
+                response_json = Some(
+                    serde_json::from_str(&text)
+                        .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?,
+                );
+                self.mark_secret_success(&selected);
+                break;
+            }
+
+            let json = response_json.ok_or_else(|| {
+                if last_err.is_empty() {
+                    "Voyage batch API failed without a response".to_string()
+                } else {
+                    last_err
+                }
+            })?;
+
+            let data = json["data"]
+                .as_array()
+                .ok_or("Invalid Voyage batch response: missing data array")?;
+            all_embeddings.extend(parse_voyage_batch_embeddings(data, chunk.len())?);
+        }
+
+        Ok(all_embeddings)
+    }
+
+    /// Call Voyage rerank API and return (original_index, relevance_score) pairs.
+    pub async fn rerank_voyage(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_k: usize,
+    ) -> Result<Vec<(usize, f64)>, String> {
+        let (filtered_docs, index_map) = non_empty_rerank_documents(documents);
+        if filtered_docs.is_empty() {
+            return Ok(vec![]);
+        }
+        let effective_top_k = top_k.max(1).min(filtered_docs.len());
+
+        let body = json!({
+            "model": "rerank-2.5",
+            "query": query,
+            "documents": filtered_docs,
+            "top_k": effective_top_k,
+        });
+
+        let mut json: Option<Value> = None;
+        let mut last_err = String::new();
+        for attempt in 1..=Self::MAX_ATTEMPTS {
+            let Some(selected) = self
+                .required_selected_secret_or_wait(
+                    &["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"],
+                    attempt,
+                    "Voyage rerank",
+                )
+                .await?
+            else {
+                continue;
+            };
+            let response = self
+                .http
+                .post("https://api.voyageai.com/v1/rerank")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", selected.value))
+                .json(&body)
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    last_err = format!("Voyage rerank API request failed: {err}");
+                    if attempt < Self::MAX_ATTEMPTS {
+                        tokio::time::sleep(Self::retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
+
+            let status = response.status();
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("Voyage rerank response body read failed: {e}"))?;
+            if status.as_u16() == 429 {
+                self.mark_secret_rate_limited(&selected, retry_after);
+                last_err = format!("Voyage rerank API error: {} - {}", status, text);
+                if attempt < Self::MAX_ATTEMPTS {
+                    continue;
+                }
+                return Err(last_err);
+            }
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                self.mark_secret_auth_failed(
+                    &selected,
+                    Some(&format!("Voyage rerank auth failure {status}")),
+                );
+                return Err(format!("Voyage rerank API error: {} - {}", status, text));
+            }
+            if !status.is_success() {
+                return Err(format!("Voyage rerank API error: {} - {}", status, text));
+            }
+            json = Some(
+                serde_json::from_str(&text)
+                    .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?,
+            );
+            self.mark_secret_success(&selected);
+            break;
+        }
+        let json = json.ok_or_else(|| {
+            if last_err.is_empty() {
+                "Voyage rerank API failed without a response".to_string()
+            } else {
+                last_err
+            }
+        })?;
+        let data = json["data"]
+            .as_array()
+            .ok_or("Invalid Voyage rerank response: missing data array")?;
+
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
+            let filtered_index = item["index"]
+                .as_u64()
+                .ok_or("Invalid Voyage rerank response: missing index")?
+                as usize;
+            let relevance = item["relevance_score"]
+                .as_f64()
+                .ok_or("Invalid Voyage rerank response: missing relevance_score")?;
+            let orig_index = index_map
+                .get(filtered_index)
+                .copied()
+                .unwrap_or(filtered_index);
+            out.push((orig_index, relevance));
+        }
+        Ok(out)
+    }
+}
