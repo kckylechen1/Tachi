@@ -92,6 +92,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) api_keys: Vec<ApiKeyStatus>,
     pub(crate) provider_probe_cache: Option<status_health::ProviderProbeCache>,
     pub(crate) project_warnings: Vec<String>,
+    pub(crate) plan_c_split_brain: Vec<crate::path_utils::PlanCSplitBrain>,
     pub(crate) health_score: u8,
 }
 
@@ -155,6 +156,7 @@ pub(crate) struct DbStatus {
     pub(crate) vector_orphans: usize,
     pub(crate) vector_coverage: f64,
     pub(crate) vector_dimension: Option<usize>,
+    pub(crate) namespace: NamespaceHealth,
     pub(crate) pending_enrichment: usize,
     pub(crate) enrichment_failed_recent: usize,
     pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,
@@ -172,6 +174,29 @@ pub(crate) struct DbStatus {
     pub(crate) latest_job: Option<LatestFoundryJob>,
     pub(crate) latest_failed_job: Option<LatestFailedJob>,
     pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub(crate) struct NamespaceHealth {
+    pub(crate) recall_cache_rows: usize,
+    pub(crate) wiki_rows: usize,
+    pub(crate) wiki_non_source_rows: usize,
+    pub(crate) wiki_non_category_rows: usize,
+    pub(crate) kanban_rows: usize,
+    pub(crate) handoff_rows: usize,
+    pub(crate) eval_rows: usize,
+    pub(crate) project_scope_rows: usize,
+    pub(crate) non_project_scope_rows: usize,
+    pub(crate) derived_items: usize,
+    pub(crate) graph_edges: usize,
+    pub(crate) graph_orphan_edges: usize,
+    pub(crate) graph_relation_types: Vec<RelationCount>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RelationCount {
+    pub(crate) relation: String,
+    pub(crate) count: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -258,6 +283,7 @@ fn collect_snapshot_inner(
                 vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
+                namespace: NamespaceHealth::default(),
                 pending_enrichment: 0,
                 enrichment_failed_recent: 0,
                 enrichment_failures: Vec::new(),
@@ -283,6 +309,7 @@ fn collect_snapshot_inner(
                 hist,
                 stuck,
                 vector,
+                namespace,
                 latest_active_job,
                 latest_terminal_job,
                 latest_job,
@@ -297,6 +324,7 @@ fn collect_snapshot_inner(
                 vector_orphans: vector.orphans,
                 vector_coverage: vector.coverage,
                 vector_dimension: vector.dimension,
+                namespace,
                 pending_enrichment: vector.pending_enrichment,
                 enrichment_failed_recent: vector.enrichment_failed_recent,
                 enrichment_failures: vector.enrichment_failures,
@@ -325,6 +353,7 @@ fn collect_snapshot_inner(
                 vector_orphans: 0,
                 vector_coverage: 0.0,
                 vector_dimension: None,
+                namespace: NamespaceHealth::default(),
                 pending_enrichment: 0,
                 enrichment_failed_recent: 0,
                 enrichment_failures: Vec::new(),
@@ -377,6 +406,10 @@ fn collect_snapshot_inner(
         .into_iter()
         .map(|warning| warning.message)
         .collect();
+    let plan_c_split_brain = project_db_path
+        .and_then(crate::path_utils::plan_c_split_brain_for_local_db)
+        .into_iter()
+        .collect();
     let health_score = status_health::calculate_health_score(
         &daemon,
         &dbs,
@@ -397,6 +430,7 @@ fn collect_snapshot_inner(
         api_keys,
         provider_probe_cache,
         project_warnings,
+        plan_c_split_brain,
         health_score,
     }
 }
@@ -539,6 +573,7 @@ type ProbeDbResult = (
     JobStatusHistogram,
     usize,
     VectorHealth,
+    NamespaceHealth,
     Option<LatestFoundryJob>,
     Option<LatestFoundryJob>,
     Option<LatestFoundryJob>,
@@ -554,6 +589,7 @@ fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
     let vector = vector_health(conn).unwrap_or_default();
+    let namespace = namespace_health(conn).unwrap_or_default();
     let latest_active_job =
         latest_foundry_job_with_statuses(conn, &["planned", "queued", "running"]).unwrap_or(None);
     let latest_terminal_job =
@@ -564,6 +600,7 @@ fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
         hist,
         stuck,
         vector,
+        namespace,
         latest_active_job,
         latest_terminal_job,
         latest_job,
@@ -571,19 +608,169 @@ fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     ))
 }
 
+const RECALL_CACHE_WHERE: &str = r#"
+    id = 'foundry_recall_rerank_cache'
+    OR id LIKE 'foundry:recall-cache:%'
+    OR source = 'foundry_recall_rerank_cache'
+    OR topic = 'foundry_recall_rerank_cache'
+    OR topic = 'recall_rerank_cache'
+    OR path = '/recall-cache'
+    OR path LIKE '%/recall-cache'
+    OR path LIKE '%/recall-cache/%'
+    OR path LIKE '%foundry_recall_rerank_cache%'
+    OR COALESCE(json_extract(metadata, '$.recall_rerank_cache'), 0) = 1
+    OR COALESCE(json_extract(metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
+"#;
+
+const RECALL_CACHE_WHERE_M: &str = r#"
+    m.id = 'foundry_recall_rerank_cache'
+    OR m.id LIKE 'foundry:recall-cache:%'
+    OR m.source = 'foundry_recall_rerank_cache'
+    OR m.topic = 'foundry_recall_rerank_cache'
+    OR m.topic = 'recall_rerank_cache'
+    OR m.path = '/recall-cache'
+    OR m.path LIKE '%/recall-cache'
+    OR m.path LIKE '%/recall-cache/%'
+    OR m.path LIKE '%foundry_recall_rerank_cache%'
+    OR COALESCE(json_extract(m.metadata, '$.recall_rerank_cache'), 0) = 1
+    OR COALESCE(json_extract(m.metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
+"#;
+
+const WIKI_WHERE: &str = r#"
+    path = '/wiki'
+    OR path LIKE '/wiki/%'
+    OR source = 'wiki'
+    OR category = 'wiki'
+    OR domain = 'wiki'
+    OR COALESCE(json_extract(metadata, '$.wiki'), 0) = 1
+"#;
+
+fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |row| row.get::<_, i64>(0),
+    )
+    .is_ok()
+}
+
+fn count_sql(conn: &rusqlite::Connection, sql: &str) -> Result<usize, rusqlite::Error> {
+    conn.query_row(sql, [], |row| row.get::<_, i64>(0).map(|n| n as usize))
+}
+
+fn count_where(conn: &rusqlite::Connection, where_sql: &str) -> Result<usize, rusqlite::Error> {
+    count_sql(
+        conn,
+        &format!("SELECT COUNT(*) FROM memories WHERE {where_sql}"),
+    )
+}
+
+fn namespace_health(conn: &rusqlite::Connection) -> Result<NamespaceHealth, rusqlite::Error> {
+    let recall_cache_rows = count_where(conn, RECALL_CACHE_WHERE)?;
+    let wiki_rows = count_where(conn, WIKI_WHERE)?;
+    let wiki_non_source_rows = count_where(
+        conn,
+        &format!("({WIKI_WHERE}) AND source != 'wiki' AND COALESCE(domain, '') != 'wiki'"),
+    )?;
+    let wiki_non_category_rows =
+        count_where(conn, &format!("({WIKI_WHERE}) AND category != 'wiki'"))?;
+    let kanban_rows = count_where(
+        conn,
+        "path = '/kanban' OR path LIKE '/kanban/%' OR source = 'kanban' OR category = 'kanban'",
+    )?;
+    let handoff_rows = count_where(
+        conn,
+        "path = '/handoff' OR path LIKE '/handoff/%' OR source = 'handoff' OR category = 'handoff'",
+    )?;
+    let eval_rows = count_where(
+        conn,
+        "path = '/eval' OR path LIKE '/eval/%' OR category = 'eval'",
+    )?;
+    let project_scope_rows = count_where(conn, "scope = 'project'")?;
+    let non_project_scope_rows = count_where(conn, "scope != 'project'")?;
+    let derived_items = if table_exists(conn, "derived_items") {
+        count_sql(conn, "SELECT COUNT(*) FROM derived_items")?
+    } else {
+        0
+    };
+    let graph_edges = if table_exists(conn, "memory_edges") {
+        count_sql(conn, "SELECT COUNT(*) FROM memory_edges")?
+    } else {
+        0
+    };
+    let graph_orphan_edges = if graph_edges > 0 {
+        count_sql(
+            conn,
+            "SELECT COUNT(*)
+             FROM memory_edges e
+             LEFT JOIN memories s ON s.id = e.source_id
+             LEFT JOIN memories t ON t.id = e.target_id
+             WHERE s.id IS NULL OR t.id IS NULL",
+        )?
+    } else {
+        0
+    };
+    let graph_relation_types = if graph_edges > 0 {
+        relation_type_counts(conn)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(NamespaceHealth {
+        recall_cache_rows,
+        wiki_rows,
+        wiki_non_source_rows,
+        wiki_non_category_rows,
+        kanban_rows,
+        handoff_rows,
+        eval_rows,
+        project_scope_rows,
+        non_project_scope_rows,
+        derived_items,
+        graph_edges,
+        graph_orphan_edges,
+        graph_relation_types,
+    })
+}
+
+fn relation_type_counts(
+    conn: &rusqlite::Connection,
+) -> Result<Vec<RelationCount>, rusqlite::Error> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(NULLIF(relation, ''), 'unknown') AS relation, COUNT(*) AS n
+         FROM memory_edges
+         GROUP BY relation
+         ORDER BY n DESC, relation ASC
+         LIMIT 8",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(RelationCount {
+            relation: row.get(0)?,
+            count: row.get::<_, i64>(1)? as usize,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
     let total: usize = conn.query_row(
-        "SELECT COUNT(*) FROM memories WHERE source != ?1",
-        [FOUNDRY_RECALL_CACHE_SOURCE],
+        &format!("SELECT COUNT(*) FROM memories WHERE NOT ({RECALL_CACHE_WHERE})"),
+        [],
         |row| row.get::<_, i64>(0).map(|n| n as usize),
     )?;
     let with_vec: usize = conn
         .query_row(
-            "SELECT COUNT(DISTINCT v.id)
+            &format!(
+                "SELECT COUNT(DISTINCT v.id)
              FROM memories_vec v
              JOIN memories m ON m.id = v.id
-             WHERE m.source != ?1",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
+             WHERE NOT ({RECALL_CACHE_WHERE_M})"
+            ),
+            [],
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
@@ -607,13 +794,15 @@ fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::
         .unwrap_or(0);
     let pending_enrichment: usize = conn
         .query_row(
-            "SELECT COUNT(*)
+            &format!(
+                "SELECT COUNT(*)
              FROM memories m
              LEFT JOIN memories_vec v ON v.id = m.id
-             WHERE m.source != ?1
+             WHERE NOT ({RECALL_CACHE_WHERE_M})
                AND v.id IS NULL
-               AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
+               AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'"
+            ),
+            [],
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
         .unwrap_or(0);
@@ -1413,6 +1602,8 @@ async fn handle_tachi_status_detail(
                         None
                     },
                 }
+                ,
+                "namespace": &d.namespace,
             })
         })
         .collect();
@@ -1470,6 +1661,36 @@ async fn handle_tachi_status_detail(
                 "enrichment_failed": d.enrichment_failed_recent,
                 "failures": d.enrichment_failures,
                 "remediation": "Inspect failed enrichment metadata and provider probes; vector backfill will not retry summary/metadata enrichment failures. After fixing provider/schema issues, run `tachi repair --rule R10 --apply --db <label>` to clear stale failed markers.",
+            })
+        })
+        .collect();
+    let namespace_issues: Vec<serde_json::Value> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| {
+            d.namespace.recall_cache_rows > 0
+                || d.namespace.wiki_non_source_rows > 0
+                || d.namespace.graph_orphan_edges > 0
+                || (d.memory_total > 0 && d.namespace.derived_items == 0)
+        })
+        .map(|d| {
+            json!({
+                "label": d.label,
+                "path": d.path,
+                "recall_cache_rows": d.namespace.recall_cache_rows,
+                "wiki_rows": d.namespace.wiki_rows,
+                "wiki_non_source_rows": d.namespace.wiki_non_source_rows,
+                "wiki_non_category_rows": d.namespace.wiki_non_category_rows,
+                "kanban_rows": d.namespace.kanban_rows,
+                "handoff_rows": d.namespace.handoff_rows,
+                "eval_rows": d.namespace.eval_rows,
+                "project_scope_rows": d.namespace.project_scope_rows,
+                "non_project_scope_rows": d.namespace.non_project_scope_rows,
+                "derived_items": d.namespace.derived_items,
+                "graph_edges": d.namespace.graph_edges,
+                "graph_orphan_edges": d.namespace.graph_orphan_edges,
+                "graph_relation_types": &d.namespace.graph_relation_types,
+                "remediation": "Search excludes recall-cache rows by default. Use `tachi repair --rule R8 --dry-run` to inspect cache/junk candidates, and use these counts to plan namespace/schema follow-up without dumping memory contents.",
             })
         })
         .collect();
@@ -1543,6 +1764,8 @@ async fn handle_tachi_status_detail(
                 "vector_dimension_mismatches": vector_dimension_mismatches,
                 "vector_orphans": vector_orphan_dbs,
                 "enrichment_failures": enrichment_failure_dbs,
+                "namespace_issues": namespace_issues,
+                "plan_c_split_brain": snapshot.plan_c_split_brain,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
             },
@@ -1592,6 +1815,8 @@ async fn handle_tachi_status_detail(
             "vector_coverage_issues": low_coverage.len(),
             "vector_orphans": vector_orphan_dbs.len(),
             "enrichment_failures": enrichment_failure_dbs.len(),
+            "namespace_issues": namespace_issues.len(),
+            "plan_c_split_brain": snapshot.plan_c_split_brain.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {
                 "drift": api_key_drift,
@@ -1692,6 +1917,9 @@ fn build_status_warnings(
         );
     }
     warnings.extend(snapshot.project_warnings.iter().cloned());
+    for issue in &snapshot.plan_c_split_brain {
+        warnings.push(issue.warning_message());
+    }
     if low_coverage_count > 0 {
         warnings.push(format!(
             "{low_coverage_count} db(s) have vector coverage below 90%: {}",
@@ -1714,6 +1942,70 @@ fn build_status_warnings(
         warnings.push(format!(
             "{enrichment_failed_count} memory enrichment failure(s) remain in {}",
             enrichment_failed_dbs.join(", ")
+        ));
+    }
+    let recall_cache_rows: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.namespace.recall_cache_rows)
+        .sum();
+    if recall_cache_rows > 0 {
+        let affected: Vec<&str> = snapshot
+            .dbs
+            .iter()
+            .filter(|d| d.namespace.recall_cache_rows > 0)
+            .map(|d| d.label.as_str())
+            .collect();
+        warnings.push(format!(
+            "{recall_cache_rows} recall-cache row(s) remain in durable memories across: {}",
+            affected.join(", ")
+        ));
+    }
+    let wiki_non_source_rows: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.namespace.wiki_non_source_rows)
+        .sum();
+    if wiki_non_source_rows > 0 {
+        let affected: Vec<&str> = snapshot
+            .dbs
+            .iter()
+            .filter(|d| d.namespace.wiki_non_source_rows > 0)
+            .map(|d| d.label.as_str())
+            .collect();
+        warnings.push(format!(
+            "{wiki_non_source_rows} wiki row(s) are not tagged with source/domain wiki in: {}",
+            affected.join(", ")
+        ));
+    }
+    let graph_orphan_edges: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.namespace.graph_orphan_edges)
+        .sum();
+    if graph_orphan_edges > 0 {
+        let affected: Vec<&str> = snapshot
+            .dbs
+            .iter()
+            .filter(|d| d.namespace.graph_orphan_edges > 0)
+            .map(|d| d.label.as_str())
+            .collect();
+        warnings.push(format!(
+            "{graph_orphan_edges} memory graph orphan edge(s) found in: {}",
+            affected.join(", ")
+        ));
+    }
+    let derived_empty_dbs: Vec<&str> = snapshot
+        .dbs
+        .iter()
+        .filter(|d| d.memory_total > 0 && d.namespace.derived_items == 0)
+        .map(|d| d.label.as_str())
+        .collect();
+    if !derived_empty_dbs.is_empty() {
+        warnings.push(format!(
+            "derived_items is empty in {} active db(s): {}",
+            derived_empty_dbs.len(),
+            derived_empty_dbs.join(", ")
         ));
     }
     if total_failed > 0 {
@@ -2093,12 +2385,111 @@ mod tests {
                 None,
             ))
             .expect("insert cache row");
+        let mut cache_by_path = vector_health_entry("cache-by-path", "manual", None);
+        cache_by_path.path = "/scratch/recall-cache/vector-health".to_string();
+        cache_by_path.topic = "recall_rerank_cache".to_string();
+        store.upsert(&cache_by_path).expect("insert path cache row");
 
         let health = vector_health(store.connection()).expect("vector health");
         assert_eq!(health.total, 2);
         assert_eq!(health.with_vec, 1);
         assert_eq!(health.missing, 1);
         assert_eq!(health.pending_enrichment, 1);
+    }
+
+    #[test]
+    fn collect_snapshot_surfaces_plan_c_split_brain_warning() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("TACHI_HOME");
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let app_home = dir.path().join("home");
+        std::env::set_var("TACHI_HOME", &app_home);
+
+        let global_db = app_home.join("global/memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent"))
+            .expect("create global parent");
+        MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
+
+        let repo = dir.path().join("Split Brain Repo");
+        let local_db = repo.join(".tachi/memory.db");
+        std::fs::create_dir_all(local_db.parent().expect("local parent"))
+            .expect("create local parent");
+        MemoryStore::open(local_db.to_str().expect("local path")).expect("open local");
+
+        let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
+        std::fs::create_dir_all(alias_db.parent().expect("alias parent"))
+            .expect("create alias parent");
+        MemoryStore::open(alias_db.to_str().expect("alias path")).expect("open alias");
+
+        let snapshot = collect_snapshot(&app_home, &global_db, Some(&local_db));
+        assert_eq!(snapshot.plan_c_split_brain.len(), 1);
+        assert_eq!(
+            snapshot.plan_c_split_brain[0].project_name,
+            "Split_Brain_Repo"
+        );
+
+        let warnings = build_status_warnings(&snapshot, &daemon_running());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("Plan C split-brain detected")),
+            "expected Plan C warning in {warnings:?}"
+        );
+
+        if let Some(value) = saved {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+    }
+
+    #[test]
+    fn namespace_health_counts_cache_wiki_derived_and_graph_rows() {
+        let dir = tempfile::tempdir().expect("temp db dir");
+        let db = dir.path().join("memory.db");
+        let mut store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
+
+        store
+            .upsert(&vector_health_entry("normal", "manual", None))
+            .expect("insert normal row");
+
+        let mut cache = vector_health_entry(
+            "foundry:recall-cache:noise",
+            FOUNDRY_RECALL_CACHE_SOURCE,
+            None,
+        );
+        cache.path = "/scratch/recall-cache/noise".to_string();
+        cache.topic = "recall_rerank_cache".to_string();
+        store.upsert(&cache).expect("insert cache row");
+
+        let mut wiki = vector_health_entry("wiki-legacy", "manual", None);
+        wiki.path = "/wiki/engineering/legacy".to_string();
+        wiki.category = "experience".to_string();
+        wiki.domain = None;
+        store.upsert(&wiki).expect("insert wiki row");
+
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memory_edges
+                 (source_id, target_id, relation, weight, metadata, created_at)
+                 VALUES ('normal', 'missing-target', 'related_to', 1.0, '{}', ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .expect("insert orphan edge");
+
+        let health = namespace_health(store.connection()).expect("namespace health");
+        assert_eq!(health.recall_cache_rows, 1);
+        assert_eq!(health.wiki_rows, 1);
+        assert_eq!(health.wiki_non_source_rows, 1);
+        assert_eq!(health.wiki_non_category_rows, 1);
+        assert_eq!(health.derived_items, 0);
+        assert_eq!(health.graph_edges, 1);
+        assert_eq!(health.graph_orphan_edges, 1);
+        assert_eq!(health.graph_relation_types[0].relation, "related_to");
+        assert_eq!(health.graph_relation_types[0].count, 1);
     }
 
     #[test]
@@ -2156,6 +2547,7 @@ mod tests {
             vector_orphans: 0,
             vector_coverage: coverage,
             vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
+            namespace: NamespaceHealth::default(),
             pending_enrichment: 0,
             enrichment_failed_recent: 0,
             enrichment_failures: Vec::new(),
@@ -2188,6 +2580,7 @@ mod tests {
             api_keys: Vec::new(),
             provider_probe_cache: None,
             project_warnings: Vec::new(),
+            plan_c_split_brain: Vec::new(),
             health_score: 95,
         }
     }

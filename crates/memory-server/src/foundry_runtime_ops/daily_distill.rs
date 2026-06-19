@@ -26,7 +26,8 @@ use serde_json::{json, Value};
 
 use super::helpers::dedup_strings;
 use super::maintenance::{
-    coherence_bucket_key, coherent_distill_buckets, scheduled_distill_path_prefix,
+    build_distill_edges, coherence_bucket_key, coherent_distill_buckets,
+    scheduled_distill_path_prefix,
 };
 use super::*;
 use crate::llm::LlmClient;
@@ -561,9 +562,29 @@ fn derive_project_label(server: &MemoryServer) -> String {
         .unwrap_or_else(|| "project".to_string())
 }
 
+fn is_wiki_project_db(server: &MemoryServer) -> bool {
+    server
+        .project_db_path_buf()
+        .and_then(|path| crate::path_utils::named_project_for_db_path(&path))
+        .is_some_and(|name| name.eq_ignore_ascii_case("wiki"))
+}
+
+fn is_quarantine_entry(entry: &MemoryEntry) -> bool {
+    entry.path.starts_with("/_quarantine/") || entry.path.starts_with("/quarantine/")
+}
+
+fn should_skip_distill_candidate(entry: &MemoryEntry, wiki_project: bool) -> bool {
+    entry.archived
+        || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
+        || memory_core::is_recall_cache_entry(entry)
+        || is_quarantine_entry(entry)
+        || (!wiki_project && memory_core::is_wiki_entry(entry))
+}
+
 fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>, String> {
     let processed_scan_limit = resolve_processed_scan_limit() as i64;
     let candidate_scan_limit = resolve_candidate_scan_limit() as i64;
+    let wiki_project = is_wiki_project_db(server);
     let (processed_ids, candidate_entries) = server.with_project_store_read(|store| {
         let conn = store.connection();
         let mut processed_ids: HashSet<String> = HashSet::new();
@@ -616,7 +637,7 @@ fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>
             if processed_ids.contains(&entry.id) {
                 continue;
             }
-            if !entry.archived && entry.source != FOUNDRY_DISTILL_SOURCE {
+            if !should_skip_distill_candidate(&entry, wiki_project) {
                 entries.push(entry);
             }
         }
@@ -957,17 +978,36 @@ fn persist_distill_memory(
         revision: 1,
         metadata,
         vector: None,
-        retention_policy: None,
-        domain: None,
+        retention_policy: Some("permanent".to_string()),
+        domain: Some("foundry".to_string()),
         recall_count: 0,
         query_diversity: 0,
         tier: "consolidated".to_string(), // distilled memories skip raw — directly promoted
     };
 
+    let derived_id = format!("derived:{memory_id}");
     server.with_project_store(|store| {
         store
             .upsert(&entry)
-            .map_err(|e| format!("upsert distill memory: {e}"))
+            .map_err(|e| format!("upsert distill memory: {e}"))?;
+        for edge in build_distill_edges(&entry, &group.entries, "daily_batch", &entry.timestamp) {
+            store
+                .add_edge(&edge)
+                .map_err(|e| format!("add distill edge: {e}"))?;
+        }
+        store
+            .save_derived_with_id(
+                &derived_id,
+                &entry.text,
+                &entry.path,
+                &entry.summary,
+                entry.importance,
+                &entry.source,
+                &entry.scope,
+                &entry.metadata,
+            )
+            .map_err(|e| format!("save derived distill item: {e}"))?;
+        Ok(())
     })?;
 
     Ok(memory_id)
@@ -1083,6 +1123,129 @@ mod tests {
                 vec!["candidate-0", "candidate-1", "candidate-2", "candidate-3"]
             );
         });
+    }
+
+    #[tokio::test]
+    async fn collect_candidate_groups_filters_namespace_noise() {
+        let temp = tempfile::tempdir().expect("temp daily distill noise db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+
+        server
+            .with_project_store(|store| {
+                for idx in 0..3 {
+                    store
+                        .upsert(&candidate_entry(idx))
+                        .map_err(|e| e.to_string())?;
+                }
+
+                let mut cache = candidate_entry(3);
+                cache.id = "cache-noise".to_string();
+                cache.path = "/scratch/recall-cache/noise".to_string();
+                cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+                cache.topic = "recall_rerank_cache".to_string();
+                cache.metadata = json!({"recall_rerank_cache": true});
+                store.upsert(&cache).map_err(|e| e.to_string())?;
+
+                let mut wiki = candidate_entry(4);
+                wiki.id = "wiki-noise".to_string();
+                wiki.path = "/scratch/wiki-noise".to_string();
+                wiki.domain = Some("wiki".to_string());
+                store.upsert(&wiki).map_err(|e| e.to_string())?;
+
+                let mut quarantine = candidate_entry(5);
+                quarantine.id = "quarantine-noise".to_string();
+                quarantine.path = "/_quarantine/cross-db/noise".to_string();
+                store.upsert(&quarantine).map_err(|e| e.to_string())?;
+
+                Ok(())
+            })
+            .expect("seed candidate memories");
+
+        let groups = collect_candidate_groups(&server).expect("collect candidate groups");
+        assert_eq!(groups.len(), 1);
+        let ids = groups[0]
+            .entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["candidate-0", "candidate-1", "candidate-2"]);
+    }
+
+    #[test]
+    fn persist_distill_memory_writes_graph_and_derived_item() {
+        let temp = tempfile::tempdir().expect("temp daily distill persist db");
+        let server = crate::MemoryServer::new(
+            temp.path().join("global.db"),
+            Some(temp.path().join("project.db")),
+        )
+        .expect("server");
+        let entries = (0..3).map(candidate_entry).collect::<Vec<_>>();
+
+        server
+            .with_project_store(|store| {
+                for entry in &entries {
+                    store.upsert(entry).map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            })
+            .expect("seed source memories");
+
+        let group = CandidateGroup {
+            group_id: "bounded_scan".to_string(),
+            path_prefix: "/project/bounded".to_string(),
+            coherence_key: "bounded-scan".to_string(),
+            entries,
+        };
+        let payload = GroupPayload {
+            summary: "distilled bounded summary".to_string(),
+            text: "distilled bounded memory with durable lesson".to_string(),
+            keywords: vec!["bounded".to_string()],
+            skip_reason: None,
+        };
+
+        let memory_id =
+            persist_distill_memory(&server, &group, &payload, "batch-test", "raw_api", false)
+                .expect("persist distill");
+
+        server
+            .with_project_store_read(|store| {
+                let conn = store.connection();
+                let (retention, domain): (Option<String>, Option<String>) = conn
+                    .query_row(
+                        "SELECT retention_policy, domain FROM memories WHERE id=?1",
+                        rusqlite::params![&memory_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let edge_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_edges WHERE source_id=?1 OR target_id=?1",
+                        rusqlite::params![&memory_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let derived_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM derived_items WHERE id=?1",
+                        rusqlite::params![format!("derived:{memory_id}")],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                assert_eq!(retention.as_deref(), Some("permanent"));
+                assert_eq!(domain.as_deref(), Some("foundry"));
+                assert!(
+                    edge_count >= 3,
+                    "expected at least one distill edge per source, got {edge_count}"
+                );
+                assert_eq!(derived_count, 1);
+                Ok(())
+            })
+            .expect("verify distill graph and derived rows");
     }
 
     fn candidate_entry(idx: usize) -> MemoryEntry {

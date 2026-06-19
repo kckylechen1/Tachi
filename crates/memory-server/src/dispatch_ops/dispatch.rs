@@ -173,16 +173,7 @@ fn resolve_dispatch_start(
         }
     }
 
-    let workspace_dir = {
-        let base = if let Ok(home) = std::env::var("TACHI_HOME") {
-            PathBuf::from(home)
-        } else if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".tachi")
-        } else {
-            std::env::temp_dir().join("tachi")
-        };
-        base.join("runs").join(&dispatch_id)
-    };
+    let workspace_dir = dispatch_runs_root().join(&dispatch_id);
 
     Ok(DispatchStart {
         dispatch_id,
@@ -245,13 +236,7 @@ pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String
 }
 
 fn dispatch_runs_root() -> PathBuf {
-    if let Ok(home) = std::env::var("TACHI_HOME") {
-        PathBuf::from(home).join("runs")
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".tachi").join("runs")
-    } else {
-        std::env::temp_dir().join("tachi").join("runs")
-    }
+    crate::path_utils::tachi_home().join("runs")
 }
 
 fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
@@ -1912,6 +1897,53 @@ mod tests {
             let _cleanup = McpCleanup(Some(path.clone()));
         }
         assert!(!path.exists(), "MCP config should be removed on drop");
+    }
+
+    #[test]
+    fn dispatch_runs_root_uses_canonical_tachi_home_aliases() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let sigil_home = tempfile::tempdir().expect("sigil home");
+        let original_home = std::env::var_os("HOME");
+        let original_tachi_home = std::env::var_os("TACHI_HOME");
+        let original_sigil_home = std::env::var_os("SIGIL_HOME");
+        let original_app_home = std::env::var_os("TACHI_APP_HOME");
+
+        std::env::set_var("HOME", temp_home.path());
+        std::env::remove_var("TACHI_HOME");
+        std::env::set_var("SIGIL_HOME", sigil_home.path());
+        std::env::remove_var("TACHI_APP_HOME");
+        assert_eq!(dispatch_runs_root(), sigil_home.path().join("runs"));
+
+        std::env::remove_var("SIGIL_HOME");
+        std::env::set_var("TACHI_APP_HOME", "~/custom-tachi");
+        assert_eq!(
+            dispatch_runs_root(),
+            temp_home.path().join("custom-tachi").join("runs")
+        );
+
+        if let Some(value) = original_home {
+            std::env::set_var("HOME", value);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(value) = original_tachi_home {
+            std::env::set_var("TACHI_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_HOME");
+        }
+        if let Some(value) = original_sigil_home {
+            std::env::set_var("SIGIL_HOME", value);
+        } else {
+            std::env::remove_var("SIGIL_HOME");
+        }
+        if let Some(value) = original_app_home {
+            std::env::set_var("TACHI_APP_HOME", value);
+        } else {
+            std::env::remove_var("TACHI_APP_HOME");
+        }
     }
 
     #[test]

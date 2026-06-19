@@ -86,6 +86,7 @@ fn lesson_task_matches(text: &str, expected_task: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[derive(Debug)]
 struct KanbanSnapshot {
     scope: &'static str,
     state: Option<String>,
@@ -98,13 +99,15 @@ fn read_kanban_snapshot(
     dispatch_id: &str,
 ) -> Result<Option<KanbanSnapshot>, String> {
     let path = format!("/kanban/tasks/{dispatch_id}");
-    let project_entries = server
-        .with_project_store_read(|store| {
+    let project_entries = if server.has_project_db() {
+        server.with_project_store_read(|store| {
             store
                 .list_by_path(&path, 1, false)
                 .map_err(|e| format!("kanban list_by_path: {e}"))
-        })
-        .unwrap_or_default();
+        })?
+    } else {
+        Vec::new()
+    };
     if let Some(entry) = project_entries.first() {
         return Ok(Some(KanbanSnapshot {
             scope: "project",
@@ -882,4 +885,36 @@ pub(crate) async fn handle_tachi_complete(
 
     serde_json::to_string(&review_bundle)
         .map_err(|e| format!("Failed to serialize review bundle: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_kanban_snapshot_surfaces_project_read_failures() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let global_db = dir.path().join("global").join("memory.db");
+        let project_db = dir.path().join("project").join("memory.db");
+        std::fs::create_dir_all(global_db.parent().expect("global parent"))
+            .expect("create global parent");
+        std::fs::create_dir_all(project_db.parent().expect("project parent"))
+            .expect("create project parent");
+        let server =
+            MemoryServer::new(global_db, Some(project_db)).expect("server with project db");
+
+        server
+            .with_project_store(|store| {
+                store
+                    .connection()
+                    .execute("DROP TABLE memories", [])
+                    .map_err(|e| format!("drop memories: {e}"))?;
+                Ok(())
+            })
+            .expect("break project memories table");
+
+        let err = read_kanban_snapshot(&server, "dispatch-readback-failure")
+            .expect_err("project read failure should not be treated as a missing card");
+        assert!(err.contains("kanban list_by_path"), "{err}");
+    }
 }

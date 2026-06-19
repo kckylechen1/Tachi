@@ -10,8 +10,10 @@ use super::edges::OrphanRefs;
 use super::enrichment::EnrichmentFailureReset;
 use super::fts::FtsRebuild;
 use super::integrity::IntegrityCheck;
+use super::inventory::select_dbs;
 use super::jobs::JobsPurge;
 use super::junk::JunkCleanup;
+use super::plan_c::PlanCRepair;
 use super::quarantine::QuarantineSweep;
 use super::retention::RetentionBackfill;
 use super::{DbContext, RepairRule};
@@ -24,6 +26,15 @@ fn fresh_db(dir: &TempDir, name: &str) -> (PathBuf, Connection) {
     let mut conn = Connection::open(&path).unwrap();
     memory_core::db::init_schema_with_label_mut(&mut conn, "test", &path).unwrap();
     (path, conn)
+}
+
+fn fresh_db_at(path: &PathBuf, label: &str) -> Connection {
+    libsimple::enable_auto_extension().ok();
+    memory_core::db::register_sqlite_vec();
+    std::fs::create_dir_all(path.parent().expect("db parent")).unwrap();
+    let mut conn = Connection::open(path).unwrap();
+    memory_core::db::init_schema_with_label_mut(&mut conn, label, path).unwrap();
+    conn
 }
 
 fn open_ctx(path: &PathBuf, label: &str) -> DbContext {
@@ -108,6 +119,27 @@ fn r1_missing_fts_table_rebuilt() {
 
     let app = FtsRebuild.apply(&mut ctx).unwrap();
     assert_eq!(app.applied, 1);
+}
+
+#[test]
+fn inventory_accepts_explicit_absolute_tachi_db_outside_manifest() {
+    let dir = TempDir::new().unwrap();
+    let (path, conn) = fresh_db(&dir, "outside-manifest.db");
+    drop(conn);
+
+    let manifest = crate::manifest::Manifest::empty();
+    let entries = select_dbs(&manifest, Some(path.to_str().unwrap()));
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].path,
+        std::fs::canonicalize(&path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(entries[0].schema_kind, "tachi");
+    assert_eq!(entries[0].last_classification, "explicit_path");
 }
 
 /// Reproduces the `project:quant` failure mode: the parent virtual table
@@ -283,6 +315,20 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     );
     insert_memory(
         &conn,
+        "cache-2",
+        "/scratch/recall-cache/noisy",
+        "cache body by recall-cache path",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    conn.execute(
+        "UPDATE memories SET topic='recall_rerank_cache' WHERE id='cache-2'",
+        [],
+    )
+    .unwrap();
+    insert_memory(
+        &conn,
         "empty-turn",
         "/hermes/turns/1",
         "{}",
@@ -300,10 +346,10 @@ fn r8_junk_cleanup_removes_duplicate_and_cache_rows() {
     let mut ctx = open_ctx(&path, "test");
     let dry = JunkCleanup.dry_run(&mut ctx).unwrap();
     let total: usize = dry.findings.iter().map(|f| f.count).sum();
-    assert_eq!(total, 2, "expected 2 junk candidates, got {dry:?}");
+    assert_eq!(total, 3, "expected 3 junk candidates, got {dry:?}");
 
     let app = JunkCleanup.apply(&mut ctx).unwrap();
-    assert_eq!(app.applied, 2);
+    assert_eq!(app.applied, 3);
 
     let remaining: i64 = ctx
         .conn
@@ -626,6 +672,97 @@ fn r10_enrichment_failure_reset_clears_failed_markers_only() {
         )
         .unwrap();
     assert_eq!(complete_status.as_deref(), Some("complete"));
+}
+
+#[test]
+fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("TACHI_HOME");
+    let dir = TempDir::new().unwrap();
+    let tachi_home = dir.path().join("home");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+
+    let repo = dir.path().join("Split Brain Repo");
+    let local_db = repo.join(".tachi/memory.db");
+    let local_conn = fresh_db_at(&local_db, "project:Split_Brain_Repo");
+    insert_memory(
+        &local_conn,
+        "canonical-only",
+        "/project/canonical",
+        "canonical row stays authoritative",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    drop(local_conn);
+
+    let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
+    let alias_conn = fresh_db_at(&alias_db, "alias:Split_Brain_Repo");
+    insert_memory(
+        &alias_conn,
+        "alias-only",
+        "/project/alias",
+        "alias row should be merged by id",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    drop(alias_conn);
+
+    let mut ctx = open_ctx(&local_db, "project:Split_Brain_Repo");
+    let dry = PlanCRepair { backup_alias: true }
+        .dry_run(&mut ctx)
+        .unwrap();
+    assert!(
+        dry.findings
+            .iter()
+            .any(|finding| finding.kind == "plan_c_split_brain"),
+        "dry-run should surface split-brain: {dry:?}"
+    );
+
+    let applied = PlanCRepair { backup_alias: true }.apply(&mut ctx).unwrap();
+    assert!(
+        applied
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "plan_c_alias_relinked"),
+        "apply should report relink: {applied:?}"
+    );
+    assert!(applied.applied > 0, "apply should mutate: {applied:?}");
+    assert!(alias_db.is_symlink(), "alias should become a symlink");
+    assert!(
+        std::fs::read_link(&alias_db).is_ok_and(|target| target == local_db),
+        "alias symlink should point at canonical local db"
+    );
+
+    let merged_count: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id IN ('canonical-only', 'alias-only')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(merged_count, 2, "canonical DB should contain both rows");
+    assert!(
+        std::fs::read_dir(alias_db.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".bak.")),
+        "alias backup should be written before relink"
+    );
+    assert!(
+        crate::path_utils::plan_c_split_brain_for_local_db(&local_db).is_none(),
+        "post-repair split-brain detector should be clean"
+    );
+
+    if let Some(value) = saved {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
 }
 
 #[test]

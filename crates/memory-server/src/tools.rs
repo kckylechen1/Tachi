@@ -221,38 +221,21 @@ impl MemoryServer {
         description = "List the native Tachi tools visible to the current profile. Use before calling unfamiliar tools instead of guessing tool names."
     )]
     pub(crate) async fn tachi_tools(&self) -> Result<String, String> {
-        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
-            .ok()
-            .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
-            .filter(|patterns| !patterns.is_empty());
-        let profile = self.active_tool_profile();
-        let mut tools = crate::profiles::filter_tool_defs(
-            self.tool_router.list_all(),
-            profile,
-            env_patterns.as_deref(),
-        );
-        tools.sort_by(|a, b| a.name.as_ref().cmp(b.name.as_ref()));
-        let names = tools
+        let tools = self.native_tool_visibility();
+        let visible_tools = tools
             .iter()
-            .map(|tool| tool.name.as_ref().to_string())
+            .filter(|(_, _, visible)| *visible)
             .collect::<Vec<_>>();
-        let rows = tools
+        let rows = visible_tools
             .iter()
-            .map(|tool| {
-                let description = tool
-                    .description
-                    .as_ref()
-                    .map(|text| crate::utils::compact_text_line(text.as_ref(), 96))
-                    .unwrap_or_default();
-                format!("- `{}` — {}", tool.name, description)
-            })
+            .map(|(name, description, _)| format!("- `{name}` — {description}"))
             .collect::<Vec<_>>();
         Ok(format!(
             "## Tachi tools\nprofile: `{}`\ncount: {}\n\n{}\n\nUse exact names from this list; unknown tool names are treated as not connected/unsupported by some MCP hosts.",
-            profile
+            self.active_tool_profile()
                 .map(|p| p.as_str())
                 .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str()),
-            names.len(),
+            visible_tools.len(),
             rows.join("\n")
         ))
     }

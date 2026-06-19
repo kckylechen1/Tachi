@@ -148,6 +148,21 @@ Tachi uses SQLite with zero external dependencies:
 
 > **Safety**: Never place database files in cloud-synced folders (iCloud, Dropbox, OneDrive). SQLite WAL mode is incompatible with network filesystems.
 
+Plan C project routing keeps the repo-local project DB as canonical and uses
+`~/.tachi/projects/<sanitized-repo-name>/memory.db` only as a symlink alias.
+If `tachi status`, `tachi_memory(action="readiness")`, or daemon startup reports
+“Plan C split-brain”, the alias is a stale regular SQLite file. Repair it
+explicitly:
+
+```bash
+tachi repair --rule R11 --dry-run --db <label-from-status>
+tachi repair --rule R11 --apply --db <label-from-status>
+```
+
+The repair backs up the regular alias DB, copies alias-only memory ids into the
+repo-local DB without overwriting existing canonical ids, rebuilds FTS, then
+replaces the alias file with a symlink to `.tachi/memory.db`.
+
 ### Database Safety Rules
 
 | Rule | Why |

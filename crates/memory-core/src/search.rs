@@ -459,25 +459,6 @@ fn is_sft_training_entry(entry: &MemoryEntry) -> bool {
         || entry.topic.eq_ignore_ascii_case("sft-memory")
 }
 
-fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
-    entry
-        .source
-        .eq_ignore_ascii_case("foundry_recall_rerank_cache")
-        || entry
-            .topic
-            .eq_ignore_ascii_case("foundry_recall_rerank_cache")
-        || entry.topic.eq_ignore_ascii_case("recall_rerank_cache")
-        || entry.id.starts_with("foundry:recall-cache:")
-        || entry.path.contains("/recall-cache/")
-        || entry.path.contains("foundry_recall_rerank_cache")
-        || metadata_bool(entry, "recall_rerank_cache")
-        || entry
-            .metadata
-            .get("cache_key")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.eq_ignore_ascii_case("foundry_recall_rerank_cache"))
-}
-
 fn is_openclaw_low_signal_entry(entry: &MemoryEntry) -> bool {
     entry.path == "/openclaw/legacy"
         || entry.path.contains("/unnamed")
@@ -485,21 +466,7 @@ fn is_openclaw_low_signal_entry(entry: &MemoryEntry) -> bool {
 }
 
 fn is_search_noise_entry(entry: &MemoryEntry, path_prefix: Option<&str>) -> bool {
-    let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
-    let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
-    let wiki_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/wiki"));
-    let recall_cache_scoped = path_prefix.is_some_and(|prefix| prefix.contains("/recall-cache"));
-    (!wiki_scoped
-        && (entry.path == "/wiki/_log"
-            || metadata_bool(entry, "wiki_log")
-            || entry.topic.eq_ignore_ascii_case("wiki_log")))
-        || (!recall_cache_scoped && is_recall_cache_entry(entry))
-        || (!kanban_scoped
-            && (entry.path.starts_with("/kanban/")
-                || entry.category.eq_ignore_ascii_case("kanban")))
-        || (!handoff_scoped
-            && (entry.path.starts_with("/handoff/")
-                || entry.category.eq_ignore_ascii_case("handoff")))
+    crate::namespace::is_namespace_search_noise(entry, path_prefix)
 }
 
 fn quality_multiplier(entry: &MemoryEntry) -> f64 {

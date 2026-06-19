@@ -175,6 +175,45 @@ async fn tachi_init_project_db_creates_expected_path() {
 }
 
 #[tokio::test]
+async fn tachi_init_project_db_reports_plan_c_split_brain() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home
+        .temp_home
+        .join("Split Brain Repo")
+        .canonicalize()
+        .unwrap_or_else(|_| temp_home.temp_home.join("Split Brain Repo"));
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+
+    let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
+    std::fs::create_dir_all(alias_db.parent().expect("alias parent")).expect("create alias parent");
+    memory_core::MemoryStore::open(alias_db.to_str().expect("alias db")).expect("open alias db");
+
+    let response = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: ".tachi/memory.db".to_string(),
+        }))
+        .await
+        .expect("tachi_init_project_db should report split-brain without failing");
+    let json: serde_json::Value =
+        serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
+    assert_eq!(
+        json["plan_c_split_brain"]["project_name"],
+        json!("Split_Brain_Repo")
+    );
+    assert!(
+        json["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("Plan C split-brain detected")),
+        "note should surface split-brain guidance: {json}"
+    );
+    assert!(
+        !alias_db.is_symlink(),
+        "init must not silently replace a regular alias DB"
+    );
+}
+
+#[tokio::test]
 async fn tachi_init_project_db_rejects_path_traversal() {
     let server = make_server();
     let root = std::env::temp_dir().join(format!("tachi-project-escape-{}", uuid::Uuid::new_v4()));
@@ -402,6 +441,146 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
 }
 
 #[tokio::test]
+async fn tachi_search_excludes_recall_cache_rows_by_default() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut live = make_entry("recall-live-memory-row");
+            live.path = "/scratch/sigil/current".to_string();
+            live.text = "UniqueRecallCacheNeedle belongs in live memory.".to_string();
+            live.summary = "Live memory row".to_string();
+            store.upsert(&live).map_err(|e| e.to_string())?;
+
+            let mut cache = make_entry("foundry:recall-cache:boundary");
+            cache.path = "/scratch/sigil/recall-cache/boundary".to_string();
+            cache.text = "UniqueRecallCacheNeedle belongs in recall cache.".to_string();
+            cache.summary = "Recall cache row".to_string();
+            cache.topic = "recall_rerank_cache".to_string();
+            cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+            cache.metadata = json!({"recall_rerank_cache": true});
+            store.upsert(&cache).map_err(|e| e.to_string())
+        })
+        .expect("seed recall-cache boundary entries");
+
+    let response = server
+        .tachi_search(Parameters(TachiSearchParams {
+            query: "UniqueRecallCacheNeedle".to_string(),
+            scope: "memory".to_string(),
+            top_k: 5,
+            path_prefix: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            category: None,
+            include_archived: false,
+            include_training: false,
+            enable_rerank: false,
+            as_of: None,
+        }))
+        .await
+        .expect("memory scoped search");
+
+    assert!(response.contains("recall-live-memory-row"));
+    assert!(!response.contains("foundry:recall-cache:boundary"));
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "UniqueRecallCacheNeedle".to_string(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: Some("/scratch/sigil/recall-cache".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("recall-cache scoped search");
+    assert!(response.contains("foundry:recall-cache:boundary"));
+}
+
+#[tokio::test]
+async fn search_memory_keeps_exact_token_top_when_rerank_enabled() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut alpha = make_entry("recall-probe-alpha-20260607");
+            alpha.path = "/scratch/tachi/recall-probe-alpha-20260607".to_string();
+            alpha.summary = "Alpha recall probe".to_string();
+            alpha.text =
+                "RECALL_PROBE_ALPHA_20260607 clean-cli bridge dry-run force-delete subcommands"
+                    .to_string();
+            alpha.keywords = vec![
+                "recall-probe".to_string(),
+                "clean-cli".to_string(),
+                "dry-run".to_string(),
+            ];
+            store.upsert(&alpha).map_err(|e| e.to_string())?;
+
+            let mut beta = make_entry("recall-probe-beta-20260607");
+            beta.path = "/scratch/tachi/recall-probe-beta-20260607".to_string();
+            beta.summary = "Beta recall probe".to_string();
+            beta.text =
+                "RECALL_PROBE_BETA_20260607 cleanup defaults preview before deletion".to_string();
+            beta.keywords = vec!["recall-probe".to_string(), "cleanup".to_string()];
+            store.upsert(&beta).map_err(|e| e.to_string())?;
+
+            let mut delta = make_entry("recall-probe-delta-20260607");
+            delta.path = "/scratch/tachi/recall-probe-delta-20260607".to_string();
+            delta.summary = "Delta recall probe".to_string();
+            delta.text =
+                "RECALL_PROBE_DELTA_20260607 profile routing requested_profile tool_profile"
+                    .to_string();
+            delta.keywords = vec!["recall-probe".to_string(), "profile".to_string()];
+            store.upsert(&delta).map_err(|e| e.to_string())
+        })
+        .expect("seed recall probe entries");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "RECALL_PROBE_ALPHA_20260607".to_string(),
+            query_vec: None,
+            top_k: 1,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: true,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("exact probe search should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("search JSON");
+
+    assert_eq!(rows.len(), 1, "rerank gate should still honor top_k");
+    assert_eq!(rows[0]["id"], json!("recall-probe-alpha-20260607"));
+    assert_eq!(rows[0]["match_type"], json!("exact_token"));
+    assert_eq!(rows[0]["rerank_policy"], json!("skipped_exact_token"));
+}
+
+#[tokio::test]
 async fn tachi_search_surfaces_referenced_files() {
     let server = make_server();
     server
@@ -606,6 +785,79 @@ async fn find_similar_memory_excludes_sft_training_rows_by_default() {
         rows.iter()
             .any(|row| row["id"] == json!("similar-sft-training-row")),
         "training opt-in should surface training row: {rows:#?}"
+    );
+}
+
+#[tokio::test]
+async fn find_similar_memory_excludes_recall_cache_rows_by_default() {
+    let server = make_server();
+    if !server.global_vec_available {
+        return;
+    }
+    let mut query_vec = vec![0.0; 1024];
+    query_vec[0] = 1.0;
+
+    server
+        .with_global_store(|store| {
+            let mut live = make_entry("similar-recall-live-row");
+            live.path = "/scratch/sigil/current-similar".to_string();
+            live.text = "Similar vector live memory.".to_string();
+            live.summary = "Similar live memory".to_string();
+            live.vector = Some(query_vec.clone());
+            store.upsert(&live).map_err(|e| e.to_string())?;
+
+            let mut cache = make_entry("foundry:recall-cache:similar");
+            cache.path = "/scratch/sigil/recall-cache/similar".to_string();
+            cache.text = "Similar vector recall cache.".to_string();
+            cache.summary = "Similar recall cache".to_string();
+            cache.topic = "recall_rerank_cache".to_string();
+            cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+            cache.metadata = json!({"cache_key": memory_core::FOUNDRY_RECALL_CACHE_SOURCE});
+            cache.vector = Some(query_vec.clone());
+            store.upsert(&cache).map_err(|e| e.to_string())
+        })
+        .expect("seed similar recall-cache boundary entries");
+
+    let response = server
+        .find_similar_memory(Parameters(FindSimilarMemoryParams {
+            query_vec: query_vec.clone(),
+            top_k: 5,
+            path_prefix: None,
+            include_archived: false,
+            include_training: false,
+            candidates_per_channel: 20,
+        }))
+        .await
+        .expect("find similar should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("similar JSON");
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == json!("similar-recall-live-row")),
+        "live row should remain visible: {rows:#?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["id"] == json!("foundry:recall-cache:similar")),
+        "recall-cache row leaked through default find_similar_memory: {rows:#?}"
+    );
+
+    let response = server
+        .find_similar_memory(Parameters(FindSimilarMemoryParams {
+            query_vec,
+            top_k: 5,
+            path_prefix: Some("/scratch/sigil/recall-cache".to_string()),
+            include_archived: false,
+            include_training: false,
+            candidates_per_channel: 20,
+        }))
+        .await
+        .expect("find similar recall-cache scope should succeed");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("similar JSON");
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == json!("foundry:recall-cache:similar")),
+        "recall-cache scope should surface cache row: {rows:#?}"
     );
 }
 

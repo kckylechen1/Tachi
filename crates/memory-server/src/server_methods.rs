@@ -42,6 +42,32 @@ impl MemoryServer {
         self.agent_runtime_read().tool_profile
     }
 
+    pub(crate) fn native_tool_visibility(&self) -> Vec<(String, String, bool)> {
+        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
+            .ok()
+            .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+            .filter(|patterns| !patterns.is_empty());
+        let profile = self.active_tool_profile();
+        let mut tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| {
+                let name = tool.name.as_ref().to_string();
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(|text| crate::utils::compact_text_line(text.as_ref(), 96))
+                    .unwrap_or_default();
+                let visible =
+                    crate::profiles::tool_visible(&name, profile, env_patterns.as_deref());
+                (name, description, visible)
+            })
+            .collect::<Vec<_>>();
+        tools.sort_by(|a, b| a.0.cmp(&b.0));
+        tools
+    }
+
     #[cfg(test)]
     pub(crate) fn rate_limiter_entry_counts_for_tests(&self) -> (usize, usize) {
         let rl = self.rate_limiter_lock();

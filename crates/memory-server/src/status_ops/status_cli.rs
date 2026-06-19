@@ -230,6 +230,21 @@ async fn render_one(
                 orphans
             );
         }
+        if db.namespace.recall_cache_rows > 0
+            || db.namespace.wiki_rows > 0
+            || db.namespace.graph_edges > 0
+            || db.namespace.derived_items > 0
+        {
+            println!(
+                "       [i] namespace cache={} wiki={} wiki_non_source={} derived_items={} graph_edges={} graph_orphans={}",
+                db.namespace.recall_cache_rows,
+                db.namespace.wiki_rows,
+                db.namespace.wiki_non_source_rows,
+                db.namespace.derived_items,
+                db.namespace.graph_edges,
+                db.namespace.graph_orphan_edges,
+            );
+        }
         if let Some(job) = &db.latest_active_job {
             println!(
                 "       [i] latest_active kind={} status={} at={}",
@@ -438,6 +453,13 @@ async fn render_one(
         println!("Project Warnings");
         for warning in &snapshot.project_warnings {
             println!("  [!] {warning}");
+        }
+        println!();
+    }
+    if !snapshot.plan_c_split_brain.is_empty() {
+        println!("Plan C Warnings");
+        for issue in &snapshot.plan_c_split_brain {
+            println!("  [!] {}", issue.warning_message());
         }
         println!();
     }
