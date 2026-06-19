@@ -668,9 +668,14 @@ fn count_where(conn: &rusqlite::Connection, where_sql: &str) -> Result<usize, ru
 fn namespace_health(conn: &rusqlite::Connection) -> Result<NamespaceHealth, rusqlite::Error> {
     let recall_cache_rows = count_where(conn, RECALL_CACHE_WHERE)?;
     let wiki_rows = count_where(conn, WIKI_WHERE)?;
+    // A `/wiki/` path already marks a row as wiki (see is_wiki_entry / wiki
+    // recall, which key off the path). A wiki page legitimately carries a
+    // content-area domain (e.g. `equity_trading`), so only flag rows that are
+    // GENUINELY untagged: empty domain AND a non-wiki source. Those are the
+    // ones a domain/source backfill would actually help.
     let wiki_non_source_rows = count_where(
         conn,
-        &format!("({WIKI_WHERE}) AND source != 'wiki' AND COALESCE(domain, '') != 'wiki'"),
+        &format!("({WIKI_WHERE}) AND source != 'wiki' AND COALESCE(domain, '') = ''"),
     )?;
     let wiki_non_category_rows =
         count_where(conn, &format!("({WIKI_WHERE}) AND category != 'wiki'"))?;
@@ -2006,7 +2011,7 @@ fn build_status_warnings(
             .map(|d| d.label.as_str())
             .collect();
         warnings.push(format!(
-            "{wiki_non_source_rows} wiki row(s) are not tagged with source/domain wiki in: {}",
+            "{wiki_non_source_rows} untagged wiki row(s) (no domain, non-wiki source) in: {}",
             affected.join(", ")
         ));
     }
@@ -2027,15 +2032,22 @@ fn build_status_warnings(
             affected.join(", ")
         ));
     }
+    // derived_items is populated by consolidation/distill, which most DBs never
+    // run — so empty is normal for small/inactive DBs and flagging all of them
+    // is pure noise. Only warn for substantial DBs where empty derivation is
+    // genuinely surprising and worth investigating.
+    const DERIVED_ITEMS_EXPECTED_MIN_ROWS: usize = 1000;
     let derived_empty_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
-        .filter(|d| d.memory_total > 0 && d.namespace.derived_items == 0)
+        .filter(|d| {
+            d.memory_total >= DERIVED_ITEMS_EXPECTED_MIN_ROWS && d.namespace.derived_items == 0
+        })
         .map(|d| d.label.as_str())
         .collect();
     if !derived_empty_dbs.is_empty() {
         warnings.push(format!(
-            "derived_items is empty in {} active db(s): {}",
+            "derived_items is empty in {} large active db(s) (>={DERIVED_ITEMS_EXPECTED_MIN_ROWS} rows): {}",
             derived_empty_dbs.len(),
             derived_empty_dbs.join(", ")
         ));
