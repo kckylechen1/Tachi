@@ -4,7 +4,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
-use super::{
+use super::provider_health::{
     ChatLane, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip, CLAUDE_CLI_FAILURE_COOLDOWN,
 };
 
