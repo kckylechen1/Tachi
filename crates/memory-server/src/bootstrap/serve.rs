@@ -792,6 +792,40 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         });
     }
 
+    // Spawn periodic WAL TRUNCATE checkpoint task. SQLite's default PASSIVE
+    // auto-checkpoint merges WAL frames into the DB but never shrinks the `-wal`
+    // file; a write burst — or long-lived readers blocking truncation — lets it
+    // balloon (observed: a 25 MB orphaned WAL on a busy agent DB, causing slow
+    // reads and lock contention). A periodic TRUNCATE reclaims it when readers
+    // are quiet. Cadence via TACHI_WAL_CHECKPOINT_SECS (default 300s, min 30s;
+    // set 0 to disable).
+    {
+        let ckpt_secs = parse_env_u64("TACHI_WAL_CHECKPOINT_SECS").unwrap_or(300);
+        if ckpt_secs > 0 {
+            let ckpt_secs = ckpt_secs.max(30);
+            let ckpt_server = server.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(ckpt_secs));
+                interval.tick().await; // consume the immediate first tick
+                loop {
+                    interval.tick().await;
+                    if let Err(e) = ckpt_server.with_global_store(|store| {
+                        store.checkpoint_wal_truncate().map_err(|e| e.to_string())
+                    }) {
+                        eprintln!("[wal] global checkpoint skipped: {e}");
+                    }
+                    if ckpt_server.has_project_db() {
+                        if let Err(e) = ckpt_server.with_project_store(|store| {
+                            store.checkpoint_wal_truncate().map_err(|e| e.to_string())
+                        }) {
+                            eprintln!("[wal] project checkpoint skipped: {e}");
+                        }
+                    }
+                }
+            });
+        }
+    }
+
     if gc_enabled {
         eprintln!(
             "Background GC enabled (initial_delay={}s, interval={}s)",

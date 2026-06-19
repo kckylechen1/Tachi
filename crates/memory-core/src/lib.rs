@@ -478,6 +478,19 @@ impl MemoryStore {
         &self.conn
     }
 
+    /// Run a TRUNCATE WAL checkpoint to reclaim the `-wal` file.
+    ///
+    /// Default PASSIVE auto-checkpoints merge WAL frames into the DB but never
+    /// shrink the `-wal` file, so a write burst (or long-lived readers blocking
+    /// truncation) lets it balloon — observed as a 25 MB orphaned WAL on a busy
+    /// agent DB. A periodic TRUNCATE checkpoint reclaims it when readers are
+    /// quiet. Best-effort: returns Ok even if SQLite reports a busy checkpoint.
+    pub fn checkpoint_wal_truncate(&self) -> Result<(), MemoryError> {
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .map_err(MemoryError::from)
+    }
+
     /// Fetch multiple newest entries up to a limit (used for dedup).
     pub fn get_all(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
         self.get_all_with_options(limit, false)
@@ -778,6 +791,37 @@ mod tests {
             .expect("read-only search");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entry.id, "readonly-search");
+    }
+
+    #[test]
+    fn checkpoint_wal_truncate_reclaims_wal_file() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let db_path = temp.path().to_string_lossy().to_string();
+        let wal_path = format!("{db_path}-wal");
+
+        let mut store = MemoryStore::open(&db_path).expect("open writable store");
+        for i in 0..50 {
+            store
+                .upsert(&test_entry(&format!("wal-{i}")))
+                .expect("seed memory");
+        }
+        let wal_before = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+
+        store
+            .checkpoint_wal_truncate()
+            .expect("checkpoint should succeed");
+
+        let wal_after = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
+        assert!(
+            wal_after <= wal_before,
+            "TRUNCATE checkpoint must never grow the WAL (before={wal_before}, after={wal_after})"
+        );
+        if wal_before > 0 {
+            assert_eq!(
+                wal_after, 0,
+                "with this store as the only connection, TRUNCATE must fully reclaim the WAL"
+            );
+        }
     }
 
     #[test]
