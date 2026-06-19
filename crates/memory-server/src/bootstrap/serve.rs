@@ -821,6 +821,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                             eprintln!("[wal] project checkpoint skipped: {e}");
                         }
                     }
+                    // Named-project DBs under this home (e.g. hyperion, wiki)
+                    // accumulate WAL too — checkpoint each that exists.
+                    for name in crate::path_utils::list_named_projects() {
+                        if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
+                            store.checkpoint_wal_truncate().map_err(|e| e.to_string())
+                        }) {
+                            eprintln!("[wal] named-project '{name}' checkpoint skipped: {e}");
+                        }
+                    }
                 }
             });
         }
