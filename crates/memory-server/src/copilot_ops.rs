@@ -185,11 +185,6 @@ fn default_named_project_available(server: &MemoryServer, project_name: &str) ->
 }
 
 /// Identify and supersede wiki entries that duplicate the newly written entry.
-///
-/// Candidates are loaded via `list_by_path("/wiki")` and filtered in-memory.
-/// A future optimization could push the path-prefix or topic filter into SQL
-/// (`WHERE path LIKE '/wiki/%' AND (path = ? OR topic = ?)`) to avoid loading
-/// the full wiki set when it grows large.
 fn supersede_wiki_duplicates(
     store: &mut MemoryStore,
     canonical_id: &str,
@@ -197,8 +192,9 @@ fn supersede_wiki_duplicates(
     topic: &str,
     text: &str,
 ) -> Result<usize, String> {
+    let parent_path = wiki_parent_path(path);
     let candidates = store
-        .list_by_path("/wiki", 5000, false)
+        .list_wiki_duplicate_candidates(path, topic, &parent_path, 500)
         .map_err(|e| format!("wiki duplicate scan: {e}"))?;
     let mut changed = 0usize;
     let target_subject = wiki_subject_token(topic);
@@ -246,6 +242,14 @@ fn supersede_wiki_duplicates(
         }
     }
     Ok(changed)
+}
+
+fn wiki_parent_path(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit_once('/')
+        .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+        .unwrap_or("/wiki")
+        .to_string()
 }
 
 fn tokenize_task(input: &str) -> Vec<String> {
@@ -817,9 +821,18 @@ pub(crate) async fn handle_tachi_wiki_write(
     let duplicate_action = |store: &mut MemoryStore| {
         supersede_wiki_duplicates(store, &canonical_id, &path, &topic, &entry_text)
     };
-    let duplicates_superseded =
-        with_existing_wiki_store(server, &project_name, use_named_project, duplicate_action)
-            .unwrap_or(0);
+    let duplicates_superseded = match with_existing_wiki_store(
+        server,
+        &project_name,
+        use_named_project,
+        duplicate_action,
+    ) {
+        Ok(count) => count,
+        Err(err) => {
+            tracing::warn!(wiki_path = %path, wiki_topic = %topic, error = %err, "wiki duplicate scan failed");
+            0
+        }
+    };
     if let Some(obj) = response.as_object_mut() {
         obj.insert(
             "wiki_duplicates_superseded".to_string(),
