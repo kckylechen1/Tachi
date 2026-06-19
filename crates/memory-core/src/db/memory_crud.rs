@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection};
+use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
@@ -24,6 +25,32 @@ fn fnv1a_hash(s: &str) -> String {
         hash = hash.wrapping_mul(16_777_619);
     }
     format!("{hash:08x}")
+}
+
+fn numbered_placeholders(start: usize, count: usize) -> String {
+    (start..start + count)
+        .map(|idx| format!("?{idx}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn values_clause(start: usize, row_count: usize, width: usize) -> String {
+    (0..row_count)
+        .map(|row| {
+            let first = start + row * width;
+            let placeholders = numbered_placeholders(first, width);
+            format!("({placeholders})")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn unique_id_order(ids: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.iter()
+        .map(String::as_str)
+        .filter(|id| seen.insert(*id))
+        .collect()
 }
 
 /// Token-based Jaccard similarity between two texts.
@@ -1035,6 +1062,38 @@ pub fn list_by_path(
     Ok(out)
 }
 
+pub fn list_wiki_duplicate_candidates(
+    conn: &Connection,
+    path: &str,
+    topic: &str,
+    parent_path: &str,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let parent_like = format!("{}/%", parent_path.trim_end_matches('/'));
+    let sql = format!(
+        "SELECT {MEMORY_SELECT_COLUMNS}
+         FROM memories
+         WHERE archived = 0
+           AND superseded_by IS NULL
+           AND path LIKE '/wiki/%'
+           AND (path = ?1 OR (?2 != '' AND topic = ?2) OR path = ?3 OR path LIKE ?4)
+         ORDER BY CASE WHEN path = ?1 THEN 0 WHEN topic = ?2 THEN 1 ELSE 2 END,
+                  path ASC,
+                  timestamp DESC
+         LIMIT ?5"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![path, topic, parent_path, parent_like, limit],
+        row_to_entry,
+    )?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Find the canonical active wiki row for a path/topic pair.
 pub fn find_active_wiki_entry_by_path_or_topic(
     conn: &Connection,
@@ -1091,79 +1150,154 @@ pub(crate) fn record_access_with_updates(
     // atomic without widening the public search API to require `&mut Connection`.
     let tx = conn.unchecked_transaction()?;
 
-    // Build a set of FTS hit IDs for O(1) lookup
-    let fts_set: std::collections::HashSet<&str> = fts_hits.iter().map(String::as_str).collect();
-    let mut updates = HashMap::with_capacity(ids.len());
-    let mut seen_ids = std::collections::HashSet::with_capacity(ids.len());
-
-    for id in ids {
-        if !seen_ids.insert(id.as_str()) {
-            continue;
+    let unique_ids = unique_id_order(ids);
+    let mut existing_set = HashSet::with_capacity(unique_ids.len());
+    for batch in unique_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!("SELECT id FROM memories WHERE id IN ({placeholders})");
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            existing_set.insert(row?);
         }
-        // NOTE: do NOT bump `updated_at` or `revision` here — see original comment.
-        tx.execute(
+    }
+    let existing_ids = unique_ids
+        .into_iter()
+        .filter(|id| existing_set.contains(*id))
+        .collect::<Vec<_>>();
+    if existing_ids.is_empty() {
+        tx.commit()?;
+        return Ok(HashMap::new());
+    }
+
+    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(2, batch.len());
+        let sql = format!(
             "UPDATE memories
              SET access_count = access_count + 1, last_access = ?1
-             WHERE id = ?2",
-            params![&now, id],
-        )?;
-        // Record access timestamp + query hash for ACT-R / diversity tracking
-        tx.execute(
-            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
-            params![id, &now, &query_hash],
-        )?;
+             WHERE id IN ({placeholders})"
+        );
+        let mut values = Vec::with_capacity(batch.len() + 1);
+        values.push(Value::Text(now.clone()));
+        values.extend(batch.iter().map(|id| Value::Text((*id).to_string())));
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
 
-        // Increment recall_count for FTS hits (exact term retrieval signal)
-        if fts_set.contains(id.as_str()) {
-            tx.execute(
-                "UPDATE memories SET recall_count = recall_count + 1 WHERE id = ?1",
-                params![id],
-            )?;
+    for batch in existing_ids.chunks(IN_BATCH_SIZE / 3) {
+        let sql = format!(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES {}",
+            values_clause(1, batch.len(), 3)
+        );
+        let mut values = Vec::with_capacity(batch.len() * 3);
+        for id in batch {
+            values.push(Value::Text((*id).to_string()));
+            values.push(Value::Text(now.clone()));
+            values.push(Value::Text(query_hash.clone()));
         }
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
 
-        // Increment diversity only when this access introduces a new query hash.
-        if !query_hash.is_empty() {
-            let hash_count: i64 = tx
-                .query_row(
-                    "SELECT COUNT(*) FROM access_history
-                 WHERE memory_id = ?1 AND query_hash = ?2",
-                    params![id, &query_hash],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            if hash_count == 1 {
-                tx.execute(
-                    "UPDATE memories SET query_diversity = query_diversity + 1 WHERE id = ?1",
-                    params![id],
-                )?;
+    let fts_set = fts_hits.iter().map(String::as_str).collect::<HashSet<_>>();
+    let recall_ids = existing_ids
+        .iter()
+        .copied()
+        .filter(|id| fts_set.contains(*id))
+        .collect::<Vec<_>>();
+    for batch in recall_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!(
+            "UPDATE memories SET recall_count = recall_count + 1 WHERE id IN ({placeholders})"
+        );
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
+
+    if !query_hash.is_empty() {
+        let mut first_hash_ids = Vec::new();
+        for batch in existing_ids.chunks(IN_BATCH_SIZE - 1) {
+            let placeholders = numbered_placeholders(1, batch.len());
+            let hash_idx = batch.len() + 1;
+            let sql = format!(
+                "SELECT memory_id FROM access_history
+                 WHERE memory_id IN ({placeholders}) AND query_hash = ?{hash_idx}
+                 GROUP BY memory_id
+                 HAVING COUNT(*) = 1"
+            );
+            let mut values = batch
+                .iter()
+                .map(|id| Value::Text((*id).to_string()))
+                .collect::<Vec<_>>();
+            values.push(Value::Text(query_hash.clone()));
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            for row in rows {
+                first_hash_ids.push(row?);
             }
         }
+        for batch in first_hash_ids.chunks(IN_BATCH_SIZE) {
+            let placeholders = numbered_placeholders(1, batch.len());
+            let sql = format!(
+                "UPDATE memories SET query_diversity = query_diversity + 1 WHERE id IN ({placeholders})"
+            );
+            let values = batch
+                .iter()
+                .map(|id| Value::Text(id.clone()))
+                .collect::<Vec<_>>();
+            tx.execute(&sql, params_from_iter(values.iter()))?;
+        }
+    }
 
-        // Promotion gate: raw → consolidated when recall_count ≥ 3 AND query_diversity ≥ 3
-        tx.execute(
+    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!(
             "UPDATE memories SET tier = 'consolidated'
-             WHERE id = ?1
+             WHERE id IN ({placeholders})
                AND tier = 'raw'
                AND recall_count >= 3
-               AND query_diversity >= 3",
-            params![id],
-        )?;
+               AND query_diversity >= 3"
+        );
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        tx.execute(&sql, params_from_iter(values.iter()))?;
+    }
 
-        let update = match tx.query_row(
-            "SELECT access_count, last_access FROM memories WHERE id = ?1",
-            params![id],
-            |row| {
-                Ok(AccessUpdate {
-                    access_count: row.get(0)?,
-                    last_access: row.get(1)?,
-                })
-            },
-        ) {
-            Ok(update) => update,
-            Err(rusqlite::Error::QueryReturnedNoRows) => continue,
-            Err(err) => return Err(err.into()),
-        };
-        updates.insert(id.clone(), update);
+    let mut updates = HashMap::with_capacity(existing_ids.len());
+    for batch in existing_ids.chunks(IN_BATCH_SIZE) {
+        let placeholders = numbered_placeholders(1, batch.len());
+        let sql = format!(
+            "SELECT id, access_count, last_access FROM memories WHERE id IN ({placeholders})"
+        );
+        let values = batch
+            .iter()
+            .map(|id| Value::Text((*id).to_string()))
+            .collect::<Vec<_>>();
+        let mut stmt = tx.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                AccessUpdate {
+                    access_count: row.get(1)?,
+                    last_access: row.get(2)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (id, update) = row?;
+            updates.insert(id, update);
+        }
     }
 
     tx.commit()?;

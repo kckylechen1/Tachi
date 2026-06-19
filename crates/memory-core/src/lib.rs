@@ -521,6 +521,16 @@ impl MemoryStore {
         db::delete(&mut self.conn, id, self.vec_available)
     }
 
+    pub fn list_wiki_duplicate_candidates(
+        &self,
+        path: &str,
+        topic: &str,
+        parent_path: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_wiki_duplicate_candidates(&self.conn, path, topic, parent_path, limit)
+    }
+
     /// Run PRAGMA quick_check to detect database corruption early.
     /// Returns Ok(true) if healthy, Ok(false) if corrupt.
     pub fn quick_check(&self) -> Result<bool, MemoryError> {
