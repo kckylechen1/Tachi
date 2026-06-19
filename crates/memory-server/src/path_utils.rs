@@ -322,6 +322,31 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
     None
 }
 
+/// List named project names under `<tachi_home>/projects/` that contain a
+/// `memory.db` (regular file or a Plan-C symlink to a live repo DB). Used by the
+/// daemon's periodic WAL checkpoint so busy named projects (e.g. hyperion) get
+/// their `-wal` reclaimed too — not just the global + workspace-project stores.
+pub(crate) fn list_named_projects() -> Vec<String> {
+    let projects_dir = tachi_home().join("projects");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        // `exists()` follows the symlink, so Plan-C aliases pointing at a live
+        // repo DB count; broken aliases are skipped.
+        if entry.path().join("memory.db").exists() {
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +441,26 @@ mod tests {
             std::env::set_var("TACHI_HOME", "/tmp/custom-tachi-root");
             let path = PathBuf::from("/tmp/custom-tachi-root/projects/my_app/memory.db");
             assert_eq!(named_project_from_path(&path).as_deref(), Some("my_app"));
+            restore_env("TACHI_HOME", saved);
+        });
+    }
+
+    #[test]
+    fn list_named_projects_finds_dirs_with_memory_db() {
+        with_env_lock(|| {
+            let saved = std::env::var_os("TACHI_HOME");
+            let tmp = tempfile::tempdir().unwrap();
+            std::env::set_var("TACHI_HOME", tmp.path());
+            let projects = tmp.path().join("projects");
+            for name in ["alpha", "beta", "nodb"] {
+                std::fs::create_dir_all(projects.join(name)).unwrap();
+            }
+            std::fs::File::create(projects.join("alpha").join("memory.db")).unwrap();
+            std::fs::File::create(projects.join("beta").join("memory.db")).unwrap();
+            // "nodb" has no memory.db -> excluded.
+            let mut got = list_named_projects();
+            got.sort();
+            assert_eq!(got, vec!["alpha".to_string(), "beta".to_string()]);
             restore_env("TACHI_HOME", saved);
         });
     }
