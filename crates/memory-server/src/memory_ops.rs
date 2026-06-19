@@ -213,7 +213,8 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let app_home = crate::status_ops::resolve_app_home();
     let global_db_path = server.global_db_path_buf();
     let daemon = crate::status_ops::collect_daemon_status(&app_home, &global_db_path);
-    let process = crate::status_ops::runtime_observability_json(server, &app_home, Some(&daemon));
+    let process =
+        crate::status_ops::runtime_observability_json(server, &app_home, Some(&daemon), true);
 
     let project = server.project_db_path.as_ref().map(|path| {
         json!({

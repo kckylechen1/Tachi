@@ -1132,6 +1132,7 @@ pub(crate) fn runtime_observability_json(
     server: &crate::MemoryServer,
     app_home: &Path,
     daemon: Option<&DaemonStatus>,
+    verbose: bool,
 ) -> serde_json::Value {
     let current_pid = std::process::id();
     let binary = std::env::current_exe()
@@ -1225,7 +1226,7 @@ pub(crate) fn runtime_observability_json(
         })
     };
 
-    json!({
+    let mut out = json!({
         "pid": current_pid,
         "binary": binary,
         "mode": mode,
@@ -1247,10 +1248,27 @@ pub(crate) fn runtime_observability_json(
             "matches_current_process": serving_daemon,
         },
         "provider_secret_count": server.llm.provider_secret_count(),
-        "provider_health": server.llm.provider_health_status(),
-        "provider_pools": server.llm.provider_pool_statuses(),
         "vault": vault,
-    })
+    });
+    // The full provider_health/provider_pools arrays are heavy (~20 entries
+    // each) and duplicate what the status `api_keys` block already carries.
+    // Only emit them in verbose surfaces (runtime_info); the default `tachi
+    // status` runtime block stays a compact routing/identity signal.
+    if verbose {
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "provider_health".into(),
+                serde_json::to_value(server.llm.provider_health_status())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            obj.insert(
+                "provider_pools".into(),
+                serde_json::to_value(server.llm.provider_pool_statuses())
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    out
 }
 
 pub(crate) fn truncate(s: &str, max: usize) -> String {
@@ -1733,7 +1751,10 @@ async fn handle_tachi_status_detail(
         .collect();
     let readiness = status_health::agent_readiness_json(&app_home, &snapshot);
 
-    let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon));
+    // Full diagnostic keeps the heavy provider arrays in `runtime`; the compact
+    // agent surface gets a slim routing/identity block (api_keys already carries
+    // the provider detail there, so the arrays don't need repeating).
+    let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon), full);
     let mut warnings = build_status_warnings(&snapshot, &daemon_state);
     if runtime["daemon"]["running"].as_bool().unwrap_or(false)
         && !runtime["daemon"]["matches_current_process"]
@@ -1797,6 +1818,17 @@ async fn handle_tachi_status_detail(
                 "age": marker.age,
             })
         });
+        // Compact surface: the agent default doesn't need the full ~20-entry
+        // provider_pools array (it lives in `handle_tachi_status_full` and
+        // `runtime_info`). A {total, rate_limited} summary keeps it a glance.
+        let pool_statuses = server.llm.provider_pool_statuses();
+        let provider_pools_summary = json!({
+            "total": pool_statuses.len(),
+            "rate_limited": pool_statuses
+                .iter()
+                .filter(|p| !p.rate_limited_keys.is_empty())
+                .count(),
+        });
         serde_json::to_string(&json!({
             "detail": "agent",
             "daemon": daemon_state,
@@ -1822,7 +1854,7 @@ async fn handle_tachi_status_detail(
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
                 "provider_health": server.llm.provider_health_status(),
-                "provider_pools": server.llm.provider_pool_statuses(),
+                "provider_pools": provider_pools_summary,
             },
             "provider_probe_cache": snapshot.provider_probe_cache,
             "doctor_hint": readiness.get("doctor_hint"),

@@ -132,7 +132,7 @@ async fn runtime_observability_treats_stale_daemon_pid_as_single_process() {
     std::fs::create_dir_all(&app_home).expect("app home");
     std::fs::write(app_home.join("daemon.lock"), "999999").expect("daemon lock");
 
-    let runtime = crate::status_ops::runtime_observability_json(&server, &app_home, None);
+    let runtime = crate::status_ops::runtime_observability_json(&server, &app_home, None, false);
 
     assert_eq!(runtime["daemon"]["pid"], json!(999999));
     assert_eq!(runtime["daemon"]["running"], json!(false));
@@ -157,6 +157,7 @@ async fn runtime_observability_marks_stdio_daemon_client_when_daemon_is_alive() 
             pid: child.id() as i32,
             lock_path: app_home.path().join("daemon.lock"),
         }),
+        false,
     );
     let _ = child.kill();
     let _ = child.wait();
@@ -188,6 +189,7 @@ async fn runtime_observability_does_not_forward_to_foreign_daemon() {
             port: Some(6919),
             global_db: Some("/tmp/openclaw.db".to_string()),
         }),
+        false,
     );
     let _ = child.kill();
     let _ = child.wait();
