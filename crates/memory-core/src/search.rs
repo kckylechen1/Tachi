@@ -798,13 +798,15 @@ pub fn hybrid_search(
     } else {
         ranked.iter().map(|(id, _)| id.to_string()).collect()
     };
+    drop(entries_ref);
 
     // ── Build output ──────────────────────────────────────────────────────────
+    let mut entries_map = entries_map;
     let mut results: Vec<SearchResult> = ranked_ids
         .iter()
         .take(opts.top_k)
         .filter_map(|id| {
-            let entry = entries_map.get(id)?.clone();
+            let entry = entries_map.remove(id)?;
             let score = scores.get(id)?.clone();
             Some(SearchResult { entry, score })
         })
