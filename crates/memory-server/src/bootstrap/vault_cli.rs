@@ -14,7 +14,7 @@ pub(super) async fn run_vault_command(
 
     match action {
         VaultAction::Status => {
-            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 let out = crate::cli_client::call_daemon_tool(
                     &info,
                     "vault_status",
@@ -289,7 +289,7 @@ pub(super) async fn run_vault_command(
         }
 
         VaultAction::Lock => {
-            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 let out = crate::cli_client::call_daemon_tool(
                     &info,
                     "vault_lock",
@@ -320,7 +320,7 @@ pub(super) async fn run_vault_command(
                 insecure_password_file,
             )?;
 
-            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 let out = call_daemon_vault_unlock(app_home, &info, password).await?;
                 println!("{out}");
                 return Ok(());
@@ -532,7 +532,7 @@ pub(super) async fn run_vault_command(
             insecure_password_file,
             json,
         } => {
-            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 let mut args = serde_json::Map::new();
                 args.insert("name".to_string(), serde_json::json!(name));
                 if let Some(env_name) = env_name {
@@ -698,7 +698,7 @@ pub(super) async fn run_vault_command(
             password_file: _,
             insecure_password_file: _,
         } => {
-            if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
                 if let Ok(out) =
                     crate::cli_client::call_daemon_tool(&info, "vault_list", serde_json::Map::new())
                         .await
@@ -733,6 +733,32 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
     }
+}
+
+async fn detect_matching_daemon(
+    app_home: &Path,
+    global_db_path: &Path,
+) -> Option<crate::cli_client::DaemonInfo> {
+    if let Some(info) =
+        crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path).await
+    {
+        return Some(info);
+    }
+
+    let info = crate::cli_client::detect_daemon(app_home).await?;
+    if daemon_matches_vault_db(&info, global_db_path) {
+        Some(info)
+    } else {
+        eprintln!(
+            "[vault] foreign daemon global_db={:?}; using local vault DB",
+            info.global_db
+        );
+        None
+    }
+}
+
+fn daemon_matches_vault_db(info: &crate::cli_client::DaemonInfo, global_db_path: &Path) -> bool {
+    crate::cli_client::daemon_global_db_matches(info, global_db_path)
 }
 
 #[cfg(unix)]
@@ -1398,6 +1424,37 @@ mod tests {
 
     fn string_is_zeroed(value: &str) -> bool {
         value.as_bytes().iter().all(|byte| *byte == 0)
+    }
+
+    fn daemon_info(global_db: Option<&Path>) -> crate::cli_client::DaemonInfo {
+        crate::cli_client::DaemonInfo {
+            url: "http://127.0.0.1:6919/mcp".to_string(),
+            global_db: global_db.map(|path| path.display().to_string()),
+            project_db: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        }
+    }
+
+    #[test]
+    fn vault_cli_daemon_forwarding_requires_matching_global_db() {
+        let tachi_db = Path::new("/tmp/tachi/global/memory.db");
+        let openclaw_db = Path::new("/tmp/openclaw/agents/main/memory.db");
+
+        assert!(daemon_matches_vault_db(
+            &daemon_info(Some(tachi_db)),
+            tachi_db
+        ));
+        assert!(!daemon_matches_vault_db(
+            &daemon_info(Some(openclaw_db)),
+            tachi_db
+        ));
+    }
+
+    #[test]
+    fn vault_cli_daemon_forwarding_accepts_legacy_missing_global_db() {
+        let tachi_db = Path::new("/tmp/tachi/global/memory.db");
+
+        assert!(daemon_matches_vault_db(&daemon_info(None), tachi_db));
     }
 
     #[test]

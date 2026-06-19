@@ -18,7 +18,7 @@ use crate::{
         cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize,
         HybridWeights,
     },
-    types::{MemoryEntry, SearchResult},
+    types::{HybridScore, MemoryEntry, SearchResult},
 };
 
 const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
@@ -147,6 +147,13 @@ fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
         .unwrap_or(true);
 
     starts_before_as_of && ends_after_as_of
+}
+
+fn exact_memory_id_query(query: &str) -> Option<String> {
+    let trimmed = query.trim().trim_matches(|c| matches!(c, '`' | '"' | '\''));
+    uuid::Uuid::parse_str(trimmed)
+        .ok()
+        .map(|_| trimmed.to_string())
 }
 
 fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
@@ -581,12 +588,14 @@ pub fn hybrid_search(
         opts.path_prefix.as_deref(),
         as_of_utc.as_deref(),
     )?;
+    let exact_id = exact_memory_id_query(query);
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
     let candidate_ids: Vec<String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
         .chain(symbolic_candidate_entries.iter().map(|entry| &entry.id))
+        .chain(exact_id.as_ref())
         .cloned()
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
@@ -666,6 +675,18 @@ pub fn hybrid_search(
         &weights,
         &access_times,
     );
+    if let Some(exact_id) = exact_id.as_ref().filter(|id| entries_ref.contains_key(*id)) {
+        scores.insert(
+            exact_id.clone(),
+            HybridScore {
+                vector: 1.0,
+                fts: 1.0,
+                symbolic: 1.0,
+                decay: 1.0,
+                final_score: 10.0,
+            },
+        );
+    }
 
     if include_superseded {
         for id in &superseded_ids {
@@ -1015,6 +1036,36 @@ mod tests {
         let results = hybrid_search(&conn, "RECALL_PROBE_ALPHA_20260607", &opts).unwrap();
         assert_eq!(results[0].entry.id, "alpha");
         assert!(results[0].score.symbolic > results[1].score.symbolic);
+    }
+
+    #[test]
+    fn hybrid_search_promotes_exact_uuid_query() {
+        let mut conn = setup();
+        let exact_id = "11111111-1111-4111-8111-111111111111";
+        insert(
+            &mut conn,
+            exact_id,
+            "This row has unrelated prose and should still win by exact memory id.",
+            &["exact-id"],
+        );
+        insert(
+            &mut conn,
+            "distractor",
+            "11111111-1111-4111-8111-111111111111 appears only in text here.",
+            &["distractor"],
+        );
+
+        let opts = SearchOptions {
+            top_k: 2,
+            candidates_per_channel: 0,
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, exact_id, &opts).unwrap();
+
+        assert_eq!(results[0].entry.id, exact_id);
+        assert_eq!(results[0].score.symbolic, 1.0);
+        assert!(results[0].score.final_score >= 10.0);
     }
 
     #[test]

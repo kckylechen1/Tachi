@@ -164,7 +164,7 @@ fn tachi_orchestrator_action_schema(
     )
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiSearchParams {
     /// Search query text
     pub query: String,

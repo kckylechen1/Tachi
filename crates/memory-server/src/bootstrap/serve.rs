@@ -317,8 +317,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         //       stdio MCP instances that never write a pid
                         //       file (the common case: editor/IDE spawned
                         //       tachi as a subprocess).
-                        let daemon_alive =
-                            crate::cli_client::detect_daemon(&app_home).await.is_some();
+                        let daemon_alive = crate::cli_client::detect_daemon_for_global_db(
+                            &app_home,
+                            &manifest_global,
+                        )
+                        .await
+                        .is_some();
                         let db_held = db_path_held_by_other_process(&entry.path);
                         if !daemon_alive && !db_held {
                             return Err(format!(
@@ -357,6 +361,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     // BackfillVectors needs async (LLM client), handle it here before sync dispatch
     if let Commands::BackfillVectors {
         db,
+        project,
         batch_size,
         dry_run,
         include_cache,
@@ -364,6 +369,16 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     {
         let target_path = if let Some(p) = db {
             expand_user_path(p.to_string_lossy().as_ref())
+        } else if let Some(project) = project {
+            let path = crate::path_utils::plan_c_global_db_path(project);
+            if !path.exists() {
+                return Err(format!(
+                    "named project DB not found for '{project}': {}",
+                    path.display()
+                )
+                .into());
+            }
+            path
         } else {
             global_db_path.clone()
         };
@@ -629,7 +644,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Daemon { action } = &command {
-        return crate::status_ops::status_cli::run_daemon(action.clone(), &app_home).await;
+        return crate::status_ops::status_cli::run_daemon(
+            action.clone(),
+            &app_home,
+            &global_db_path,
+        )
+        .await;
     }
 
     if let Commands::Watcher { action } = &command {
@@ -752,60 +772,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     // Auto-unlock vault from macOS Keychain (service: tachi-vault, account: default)
-    {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine};
-        let vault_unlocked = (|| -> Result<bool, Box<dyn std::error::Error>> {
-            let config = server
-                .with_global_store_read(|store| {
-                    store.vault_get_config().map_err(|e| e.to_string())
-                })?
-                .ok_or("not initialized")?;
-
-            let output = std::process::Command::new("security")
-                .args([
-                    "find-generic-password",
-                    "-s",
-                    "tachi-vault",
-                    "-a",
-                    "default",
-                    "-w",
-                ])
-                .output()?;
-            if !output.status.success() {
-                return Err("keychain entry not found".into());
-            }
-            let password = String::from_utf8(output.stdout)?.trim().to_string();
-            if password.is_empty() {
-                return Err("empty keychain password".into());
-            }
-
-            let salt = B64.decode(&config.salt)?;
-            let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
-            if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
-                return Err("keychain password doesn't match vault".into());
-            }
-
-            {
-                let mut v = server.vault_write();
-                v.key = Some(crate::CachedVaultKey::copy_from(key.bytes()));
-                v.unlock_time = Some(std::time::Instant::now());
-            }
-            let loaded = server.refresh_llm_provider_secrets_from_vault()?;
-            eprintln!("[vault] materialized {loaded} provider key(s) (vault + config.env aliases)");
-            Ok(true)
-        })();
-
-        match vault_unlocked {
-            Ok(true) => eprintln!("[vault] auto-unlocked from Keychain"),
-            Err(e) => eprintln!("[vault] auto-unlock skipped: {e}"),
-            _ => {}
-        }
-    }
-
-    match server.refresh_llm_provider_secrets_from_vault() {
-        Ok(n) if n > 0 => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
-        Ok(_) => eprintln!("[provider] no provider keys materialized (Vault locked or empty)"),
-        Err(e) => eprintln!("[provider] warn: secret materialization failed: {e}"),
+    crate::provider_config::bootstrap_provider_runtime(&server);
+    match server.llm.provider_secret_count() {
+        0 => eprintln!("[provider] no provider keys materialized (Vault locked or empty)"),
+        n => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
     }
 
     // Spawn idle connection cleanup task
@@ -1137,12 +1107,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // mixed project context. Users can still opt into single-project mode
         // via explicit --project-db.
 
-        // PR-4 singleton enforcement: acquire ~/.tachi/daemon.lock (flock +
-        // PID file) before binding the HTTP port so a duplicate daemon
-        // fails fast with a clear error instead of racing the first one
-        // for DB writes. The guard is held for the whole daemon lifetime
-        // and Drop releases the flock + unlinks the file.
-        let lock_path = app_home.join("daemon.lock");
+        // PR-4 singleton enforcement: acquire a daemon lock scoped to the
+        // global DB before binding HTTP. Embedded runtimes can share the same
+        // app_home without blocking each other when their global DBs differ.
+        let lock_path = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &global_db_path);
         let _daemon_lock = match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
             Ok(g) => {
                 eprintln!(
@@ -1234,9 +1202,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
         let ct = CancellationToken::new();
         let ct_shutdown = ct.clone();
-        let port = cli.port;
+        let requested_bind_addr = format!("127.0.0.1:{}", cli.port);
+        let listener = tokio::net::TcpListener::bind(&requested_bind_addr).await?;
+        let local_addr = listener.local_addr()?;
+        let bind_addr = local_addr.to_string();
+        let port = local_addr.port();
 
-        let bind_addr = format!("127.0.0.1:{port}");
         let health_payload = serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
@@ -1244,14 +1215,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             "mcp": format!("http://{bind_addr}/mcp"),
         });
 
+        let mut http_config = StreamableHttpServerConfig::default();
+        http_config.stateful_mode = true;
+        http_config.cancellation_token = ct.child_token();
+
         let service = StreamableHttpService::new(
             move || Ok(server.clone()),
             Arc::new(LocalSessionManager::default()),
-            StreamableHttpServerConfig {
-                stateful_mode: true,
-                cancellation_token: ct.child_token(),
-                ..Default::default()
-            },
+            http_config,
         );
 
         let router = axum::Router::new()
@@ -1266,13 +1237,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 }),
             )
             .nest_service("/mcp", service);
-        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-
         eprintln!("Tachi daemon listening on http://{bind_addr}");
 
         // Write daemon discovery file so CLI invocations can forward writes
         // to the running daemon instead of contending for the DB write lock.
-        let pid_path = app_home.join("daemon.pid");
+        let pid_path = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global_db_path);
         let pid_payload = serde_json::json!({
             "pid": std::process::id(),
             "port": port,
@@ -1328,7 +1297,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     } else {
         // stdio mode (default) — auto-spawn daemon if not running
         {
-            let daemon_running = crate::cli_client::detect_daemon(&app_home).await.is_some();
+            let daemon_running =
+                crate::cli_client::detect_daemon_for_global_db(&app_home, &global_db_path)
+                    .await
+                    .is_some();
             let auto_daemon_disabled = std::env::var("TACHI_DISABLE_AUTO_DAEMON")
                 .map(|value| {
                     let value = value.trim();
@@ -1340,7 +1312,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             if !daemon_running && !auto_daemon_disabled {
                 match std::env::current_exe() {
                     Ok(exe) => {
-                        let port_str = cli.port.to_string();
+                        let port_str = "0".to_string();
                         match std::process::Command::new(&exe)
                             .args(["--daemon", "--port", &port_str])
                             .stdin(std::process::Stdio::null())
@@ -1357,19 +1329,20 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                                 tokio::spawn(async move {
                                     let _ = child.wait();
                                 });
-                                // Wait for daemon to become ready by polling the health endpoint
-                                let port_val = cli.port;
-                                let health_client = reqwest::Client::new();
-                                let health_url = format!("http://127.0.0.1:{port_val}/health");
+                                // Wait for daemon to become ready by polling scoped discovery.
+                                let ready_app_home = app_home.clone();
+                                let ready_global_db = global_db_path.clone();
                                 let ready = tokio::time::timeout(Duration::from_secs(5), async {
                                     for _ in 0..25 {
                                         tokio::time::sleep(Duration::from_millis(200)).await;
-                                        if let Ok(resp) =
-                                            health_client.get(&health_url).send().await
+                                        if crate::cli_client::detect_daemon_for_global_db(
+                                            &ready_app_home,
+                                            &ready_global_db,
+                                        )
+                                        .await
+                                        .is_some()
                                         {
-                                            if resp.status().is_success() {
-                                                return true;
-                                            }
+                                            return true;
                                         }
                                     }
                                     false

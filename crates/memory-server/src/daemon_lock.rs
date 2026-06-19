@@ -18,6 +18,33 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
+pub(crate) fn legacy_daemon_lock_path(app_home: &Path) -> PathBuf {
+    app_home.join("daemon.lock")
+}
+
+pub(crate) fn legacy_daemon_pid_path(app_home: &Path) -> PathBuf {
+    app_home.join("daemon.pid")
+}
+
+pub(crate) fn scoped_daemon_lock_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
+    app_home.join(format!("daemon-{}.lock", daemon_scope_id(global_db_path)))
+}
+
+pub(crate) fn scoped_daemon_pid_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
+    app_home.join(format!("daemon-{}.pid", daemon_scope_id(global_db_path)))
+}
+
+pub(crate) fn daemon_scope_id(global_db_path: &Path) -> String {
+    let normalized =
+        std::fs::canonicalize(global_db_path).unwrap_or_else(|_| global_db_path.into());
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in normalized.display().to_string().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
 /// Errors returned by [`DaemonLock::acquire`].
 #[derive(Debug)]
 pub enum DaemonLockError {
@@ -211,6 +238,32 @@ mod tests {
             !path.exists(),
             "PID file should be removed when DaemonLock is dropped"
         );
+    }
+
+    #[test]
+    fn scoped_daemon_paths_are_stable_per_global_db() {
+        let dir = tempdir().unwrap();
+        let global = dir.path().join("global").join("memory.db");
+        let other = dir.path().join("other").join("memory.db");
+
+        let lock = scoped_daemon_lock_path(dir.path(), &global);
+        let pid = scoped_daemon_pid_path(dir.path(), &global);
+        let other_lock = scoped_daemon_lock_path(dir.path(), &other);
+
+        assert_eq!(lock.parent(), Some(dir.path()));
+        assert_eq!(pid.parent(), Some(dir.path()));
+        assert_ne!(lock, other_lock);
+        assert!(lock
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("daemon-"));
+        assert!(lock
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".lock"));
+        assert!(pid.file_name().unwrap().to_string_lossy().ends_with(".pid"));
     }
 
     #[test]

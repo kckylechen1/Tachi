@@ -68,7 +68,7 @@ The target split is:
 
 There are also two curated minimal profiles for common hosts:
 
-- `standard` — default for IDE agents. Intersects the bundles with a 12-tool facade surface (`tachi_search`, `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`).
+- `standard` — default for IDE agents. Intersects the bundles with a 15-tool facade surface (`tachi_tools`, `runtime_info`, `tachi_status`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`, `tachi_memory`, `tachi_briefing`, `tachi_save`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `vault_status`, `tachi_gh`). The canonical list is `STANDARD_MINIMAL_TOOL_PATTERNS` in `crates/memory-server/src/profiles.rs`.
 - `delegate` — for worker subagents spawned by `tachi_dispatch`. A 7-tool surface with no dispatch and no handoff.
 
 Selection paths:

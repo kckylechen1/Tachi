@@ -5,7 +5,7 @@
 //! delegates to [`handle_tachi_search`].
 
 use crate::agent_markdown;
-use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
+use crate::memory_search_ops::{handle_search_memory_with_access, search_memory_rows_with_access};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::Value;
@@ -38,6 +38,12 @@ pub(crate) async fn handle_tachi_search(
     server: &MemoryServer,
     params: TachiSearchParams,
 ) -> Result<String, String> {
+    if let Some(body) =
+        crate::cli_client::maybe_forward_server_read(server, "tachi_search", &params).await?
+    {
+        return Ok(body);
+    }
+
     let (sections, scope_remapped, scope) = collect_tachi_search_sections(server, &params).await;
     let mut output = agent_markdown::format_search_sections(&params.query, &sections);
     if scope_remapped {
@@ -89,7 +95,7 @@ pub(crate) async fn collect_tachi_search_sections(
             as_of: params.as_of.clone(),
             include_metadata: false,
         };
-        match handle_search_memory(server, mem_params, false).await {
+        match handle_search_memory_with_access(server, mem_params, false, true).await {
             Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, top_k))),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
         }
@@ -124,7 +130,7 @@ pub(crate) async fn collect_tachi_search_sections(
             as_of: params.as_of.clone(),
             include_metadata: false,
         };
-        match search_memory_rows(server, wiki_params, false).await {
+        match search_memory_rows_with_access(server, wiki_params, false, true).await {
             Ok(rows) => sections.push(("Wiki".to_string(), Value::Array(rows))),
             Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
         }

@@ -8,11 +8,14 @@
 //!   3. If both succeed, forward via MCP `tools/call` over streamable HTTP.
 //!   4. If no compatible daemon is reached before dispatch, build an in-process
 //!      `MemoryServer` and call the handler directly. Once a compatible daemon
-//!      dispatch is attempted, fail closed instead of repeating writes locally.
+//!      dispatch is attempted, write paths fail closed instead of repeating
+//!      writes locally; read/result paths may fall back because they do not
+//!      commit user-authored content.
 //!
-//! All write paths (remember, wiki_write, extract_facts) use this so they go
-//! through capture gate, provenance, auto-link, and enrichment exactly the
-//! same way as the MCP tools.
+//! Write paths (remember, wiki_write, extract_facts) use this so they go through
+//! capture gate, provenance, auto-link, and enrichment exactly the same way as
+//! the MCP tools. Read/result paths use it so stdio MCP adapters stay
+//! consistent with the authoritative daemon's ranking and DB routing logic.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -47,6 +50,34 @@ impl DaemonCallError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardFallback {
+    /// Writes must not be replayed locally after the daemon might have handled
+    /// them, or agents can create duplicate memories/jobs.
+    Write,
+    /// Read/result tools do not create user-authored content, so the stdio
+    /// adapter can fall back to its local handler when daemon transport fails.
+    /// Search may duplicate access accounting in this rare path; that is
+    /// preferable to failing recall outright.
+    Read,
+}
+
+impl ForwardFallback {
+    fn allows_in_process_fallback(self, error: &DaemonCallError) -> bool {
+        match self {
+            Self::Write => error.allows_in_process_fallback(),
+            Self::Read => true,
+        }
+    }
+
+    fn fallback_label(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::Read => "read",
+        }
+    }
+}
+
 impl std::fmt::Display for DaemonCallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.message())
@@ -67,8 +98,30 @@ pub(crate) struct DaemonInfo {
 /// Look up `~/.tachi/daemon.pid` and verify the daemon is actually listening.
 /// Returns `None` if the file is missing, malformed, or the port is closed.
 pub(crate) async fn detect_daemon(app_home: &Path) -> Option<DaemonInfo> {
-    let pid_path = app_home.join("daemon.pid");
-    let raw = tokio::fs::read_to_string(&pid_path).await.ok()?;
+    detect_daemon_from_pid_path(&crate::daemon_lock::legacy_daemon_pid_path(app_home)).await
+}
+
+/// Detect the daemon for a specific global DB. Newer Tachi runtimes write a
+/// scoped discovery file so multiple embedded runtimes sharing one app_home do
+/// not steal each other's CLI/MCP writes. Legacy daemon.pid remains a fallback
+/// only when it matches the requested global DB.
+pub(crate) async fn detect_daemon_for_global_db(
+    app_home: &Path,
+    global_db_path: &Path,
+) -> Option<DaemonInfo> {
+    let scoped_pid = crate::daemon_lock::scoped_daemon_pid_path(app_home, global_db_path);
+    if let Some(info) = detect_daemon_from_pid_path(&scoped_pid).await {
+        if daemon_global_db_matches(&info, global_db_path) {
+            return Some(info);
+        }
+    }
+
+    let info = detect_daemon(app_home).await?;
+    daemon_global_db_matches(&info, global_db_path).then_some(info)
+}
+
+async fn detect_daemon_from_pid_path(pid_path: &Path) -> Option<DaemonInfo> {
+    let raw = tokio::fs::read_to_string(pid_path).await.ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
 
     parsed.get("pid").and_then(|v| v.as_u64())?;
@@ -224,7 +277,7 @@ pub(crate) fn daemon_matches_requested_dbs(
         && daemon_project_db_matches(info, project_db_path)
 }
 
-fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
+pub(crate) fn daemon_global_db_matches(info: &DaemonInfo, global_db_path: &Path) -> bool {
     let Some(daemon_global) = info.global_db.as_deref() else {
         return true;
     };
@@ -307,7 +360,45 @@ pub(crate) async fn maybe_forward_server_write<T: serde::Serialize>(
     params: &T,
 ) -> Result<Option<String>, String> {
     let project_db_path = server.project_db_path_buf();
-    maybe_forward_write(
+    maybe_forward_tool(
+        server.global_db_path.as_path(),
+        project_db_path.as_deref(),
+        tool_name,
+        params,
+        ForwardFallback::Write,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    tool_name: &str,
+    params: &T,
+) -> Result<Option<String>, String> {
+    maybe_forward_tool(
+        global_db_path,
+        project_db_path,
+        tool_name,
+        params,
+        ForwardFallback::Write,
+    )
+    .await
+}
+
+/// Forward a read-only tool to the running daemon when available.
+///
+/// Unlike writes, reads can safely fall back to the in-process handler if the
+/// daemon call fails after dispatch. This keeps old stdio adapters aligned with
+/// daemon-side search/routing fixes while preserving local resilience.
+pub(crate) async fn maybe_forward_server_read<T: serde::Serialize>(
+    server: &MemoryServer,
+    tool_name: &str,
+    params: &T,
+) -> Result<Option<String>, String> {
+    let project_db_path = server.project_db_path_buf();
+    maybe_forward_read(
         server.global_db_path.as_path(),
         project_db_path.as_deref(),
         tool_name,
@@ -316,11 +407,28 @@ pub(crate) async fn maybe_forward_server_write<T: serde::Serialize>(
     .await
 }
 
-pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
+pub(crate) async fn maybe_forward_read<T: serde::Serialize>(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
     tool_name: &str,
     params: &T,
+) -> Result<Option<String>, String> {
+    maybe_forward_tool(
+        global_db_path,
+        project_db_path,
+        tool_name,
+        params,
+        ForwardFallback::Read,
+    )
+    .await
+}
+
+async fn maybe_forward_tool<T: serde::Serialize>(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    tool_name: &str,
+    params: &T,
+    fallback: ForwardFallback,
 ) -> Result<Option<String>, String> {
     if is_daemon_process() {
         return Ok(None);
@@ -335,7 +443,7 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
         return Ok(None);
     };
     let app_home = app_home_from_global_db(global_db_path);
-    let Some(info) = detect_daemon(&app_home).await else {
+    let Some(info) = detect_daemon_for_global_db(&app_home, global_db_path).await else {
         return Ok(None);
     };
     if !daemon_version_matches(&info) {
@@ -351,9 +459,10 @@ pub(crate) async fn maybe_forward_write<T: serde::Serialize>(
     }
     match call_daemon_tool(&info, tool_name, args).await {
         Ok(body) => Ok(Some(body)),
-        Err(error) if error.allows_in_process_fallback() => {
+        Err(error) if fallback.allows_in_process_fallback(&error) => {
             eprintln!(
-                "[mcp] daemon forward '{tool_name}' failed before dispatch ({}); executing in-process",
+                "[mcp] daemon {} forward '{tool_name}' failed ({}); executing in-process",
+                fallback.fallback_label(),
                 error.message()
             );
             Ok(None)
@@ -373,6 +482,7 @@ pub(crate) fn build_in_process_server(
     project_db: Option<&PathBuf>,
 ) -> Result<MemoryServer, Box<dyn std::error::Error>> {
     let server = MemoryServer::new(global_db.clone(), project_db.cloned())?;
+    crate::provider_config::bootstrap_provider_runtime(&server);
     Ok(server)
 }
 

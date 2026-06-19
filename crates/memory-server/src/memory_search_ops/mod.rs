@@ -16,7 +16,9 @@ pub(crate) use search_helpers::named_project_from_db_path;
 pub(crate) use search_helpers::resolve_workspace_named_project;
 pub(crate) use search_memory::handle_find_similar_memory;
 pub(crate) use search_memory::handle_search_memory;
+pub(crate) use search_memory::handle_search_memory_with_access;
 pub(crate) use search_memory::search_memory_rows;
+pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use text_scrub::scrub_secrets;
 
 // Shared imports that sub-modules pull in via `use super::*`.

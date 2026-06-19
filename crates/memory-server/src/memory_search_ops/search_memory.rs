@@ -41,6 +41,125 @@ fn eval_recall_opted_in(params: &SearchMemoryParams) -> bool {
         .is_some_and(|prefix| is_eval_path(prefix.trim_end_matches('/')))
 }
 
+fn query_explicitly_requests_foreign_sigil_domain(query: &str, domain: Option<&str>) -> bool {
+    if domain.is_some() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    // ASCII terms must match a whole alphanumeric word, otherwise common coding
+    // queries trip them as substrings ("change"/"channel" → "chan",
+    // "quantity" → "quant", "inequity" → "equity") and silently disable the
+    // Sigil foreign-domain recall filter.
+    const WORD_TERMS: &[&str] = &[
+        "hyperion", "quant", "trading", "equity", "kronos", "warpcore", "chan", "v8",
+    ];
+    // CJK / numeric identifiers are specific enough to match as raw substrings;
+    // CJK is not whitespace-delimited so word splitting does not apply.
+    const SUBSTRING_TERMS: &[&str] = &["股票", "个股", "止损", "盘中", "持仓", "688981"];
+    let matches_word = q
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| WORD_TERMS.contains(&word));
+    matches_word || SUBSTRING_TERMS.iter().any(|term| q.contains(term))
+}
+
+fn is_foreign_sigil_memory(entry: &memory_core::MemoryEntry) -> bool {
+    let domain = entry.domain.as_deref().unwrap_or("").to_ascii_lowercase();
+    let path = entry.path.to_ascii_lowercase();
+    matches!(
+        domain.as_str(),
+        "equity_trading" | "trading" | "finance" | "hyperion"
+    ) || path.starts_with("/trading/")
+        || path.starts_with("/scratch/hyperion/")
+}
+
+fn project_scope_allows_memory(
+    project_name: &str,
+    params: &SearchMemoryParams,
+    entry: &memory_core::MemoryEntry,
+) -> bool {
+    if !project_name.eq_ignore_ascii_case("sigil") {
+        return true;
+    }
+    if query_explicitly_requests_foreign_sigil_domain(&params.query, params.domain.as_deref()) {
+        return true;
+    }
+    !is_foreign_sigil_memory(entry)
+}
+
+fn project_filter_name(params: &SearchMemoryParams, project_only: bool) -> Option<String> {
+    params.project.clone().or_else(|| {
+        if project_only {
+            crate::memory_search_ops::search_helpers::resolve_workspace_named_project()
+        } else {
+            infer_search_project(&params.query, params.domain.as_deref())
+        }
+    })
+}
+
+fn search_store(
+    store: &mut MemoryStore,
+    params: &SearchMemoryParams,
+    record_access: bool,
+) -> Result<Vec<memory_core::SearchResult>, String> {
+    let mut opts = params.to_search_options(store.vec_available);
+    opts.record_access = record_access;
+    store
+        .search(&params.query, Some(opts))
+        .map_err(|e| e.to_string())
+}
+
+fn with_named_project_search(
+    server: &MemoryServer,
+    project_name: &str,
+    params: &SearchMemoryParams,
+    record_access: bool,
+    context: impl Into<String>,
+) -> Result<Vec<memory_core::SearchResult>, String> {
+    let context = context.into();
+    let action = |store: &mut MemoryStore| {
+        search_store(store, params, record_access).map_err(|e| format!("{context}: {e}"))
+    };
+    if record_access {
+        server.with_named_project_store(project_name, action)
+    } else {
+        server.with_named_project_store_read(project_name, action)
+    }
+}
+
+fn with_project_search(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    record_access: bool,
+    context: impl Into<String>,
+) -> Result<Vec<memory_core::SearchResult>, String> {
+    let context = context.into();
+    let action = |store: &mut MemoryStore| {
+        search_store(store, params, record_access).map_err(|e| format!("{context}: {e}"))
+    };
+    if record_access {
+        server.with_project_store(action)
+    } else {
+        server.with_project_store_read(action)
+    }
+}
+
+fn with_global_search(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+    record_access: bool,
+    context: impl Into<String>,
+) -> Result<Vec<memory_core::SearchResult>, String> {
+    let context = context.into();
+    let action = |store: &mut MemoryStore| {
+        search_store(store, params, record_access).map_err(|e| format!("{context}: {e}"))
+    };
+    if record_access {
+        server.with_global_store(action)
+    } else {
+        server.with_global_store_read(action)
+    }
+}
+
 fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
     memory_core::path_prefix_opts_into_recall_cache(path_prefix)
 }
@@ -101,8 +220,17 @@ fn has_high_confidence_exact_token_top(rows: &[serde_json::Value], query: &str) 
 
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_with_access(server, params, project_only, false).await
+}
+
+pub(crate) async fn search_memory_rows_with_access(
+    server: &MemoryServer,
     mut params: SearchMemoryParams,
     project_only: bool,
+    record_access: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
     let wiki_path_prefix = params
         .path_prefix
@@ -140,6 +268,7 @@ pub(crate) async fn search_memory_rows(
             || named_project_vec_available
             || default_wiki_vec_available)
     {
+        server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
         match server.llm.embed_voyage(&params.query, "query").await {
             Ok(query_vec) => {
                 params.query_vec = Some(query_vec);
@@ -159,13 +288,13 @@ pub(crate) async fn search_memory_rows(
     let mut searched_named = false;
     if let Some(ref project_name) = params.project {
         if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
-            let project_results = server.with_named_project_store_read(project_name, |store| {
-                let vec_avail = store.vec_available;
-                let project_opts = params.to_search_options(vec_avail);
-                store
-                    .search(&params.query, Some(project_opts))
-                    .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
-            })?;
+            let project_results = with_named_project_search(
+                server,
+                project_name,
+                &params,
+                record_access,
+                format!("Search failed in project DB '{project_name}'"),
+            )?;
             combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             searched_named = true;
         } else if !project_only {
@@ -179,13 +308,13 @@ pub(crate) async fn search_memory_rows(
     }
 
     if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
-        match server.with_named_project_store_read("wiki", |store| {
-            let vec_avail = store.vec_available;
-            let project_opts = params.to_search_options(vec_avail);
-            store
-                .search(&params.query, Some(project_opts))
-                .map_err(|e| format!("Search failed in default wiki project DB: {e}"))
-        }) {
+        match with_named_project_search(
+            server,
+            "wiki",
+            &params,
+            record_access,
+            "Search failed in default wiki project DB",
+        ) {
             Ok(wiki_results) => {
                 combined_results.extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
                 searched_default_wiki = true;
@@ -214,49 +343,44 @@ pub(crate) async fn search_memory_rows(
                         .unwrap_or(false);
 
                     if !skip_workspace && server.has_project_db() {
-                        let project_opts = params.to_search_options(server.project_vec_available);
-                        let project_results = server.with_project_store_read(|store| {
-                            store
-                                .search(&params.query, Some(project_opts))
-                                .map_err(|e| format!("Search failed in workspace project DB: {e}"))
-                        })?;
+                        let project_results = with_project_search(
+                            server,
+                            &params,
+                            record_access,
+                            "Search failed in workspace project DB",
+                        )?;
                         combined_results
                             .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                     }
 
                     if named_path.is_some() {
-                        let project_results =
-                            server.with_named_project_store_read(project_name, |store| {
-                                let vec_avail = store.vec_available;
-                                let project_opts = params.to_search_options(vec_avail);
-                                store
-                                    .search(&params.query, Some(project_opts))
-                                    .map_err(|e| {
-                                        format!(
-                                        "Search failed in named project DB '{project_name}': {e}"
-                                    )
-                                    })
-                            })?;
+                        let project_results = with_named_project_search(
+                            server,
+                            project_name,
+                            &params,
+                            record_access,
+                            format!("Search failed in named project DB '{project_name}'"),
+                        )?;
                         combined_results
                             .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                     }
                 } else if server.has_project_db() {
-                    let project_opts = params.to_search_options(server.project_vec_available);
-                    let project_results = server.with_project_store_read(|store| {
-                        store
-                            .search(&params.query, Some(project_opts))
-                            .map_err(|e| format!("Search failed in workspace project DB: {e}"))
-                    })?;
+                    let project_results = with_project_search(
+                        server,
+                        &params,
+                        record_access,
+                        "Search failed in workspace project DB",
+                    )?;
                     combined_results
                         .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                 }
             } else if server.has_project_db() {
-                let project_opts = params.to_search_options(server.project_vec_available);
-                let project_results = server.with_project_store_read(|store| {
-                    store
-                        .search(&params.query, Some(project_opts))
-                        .map_err(|e| format!("Search failed in workspace project DB: {e}"))
-                })?;
+                let project_results = with_project_search(
+                    server,
+                    &params,
+                    record_access,
+                    "Search failed in workspace project DB",
+                )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         } else {
@@ -268,12 +392,8 @@ pub(crate) async fn search_memory_rows(
             let skip_workspace = inferred_db_path.is_some()
                 && workspace_db_path.as_ref() == inferred_db_path.as_ref();
 
-            let global_opts = params.to_search_options(server.global_vec_available);
-            let global_results = server.with_global_store_read(|store| {
-                store
-                    .search(&params.query, Some(global_opts))
-                    .map_err(|e| format!("Search failed in global DB: {}", e))
-            })?;
+            let global_results =
+                with_global_search(server, &params, record_access, "Search failed in global DB")?;
             combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
             if let Some(ref project_name) = inferred_project {
@@ -281,17 +401,13 @@ pub(crate) async fn search_memory_rows(
                     // Already searched the canonical wiki store above for
                     // unscoped /wiki queries.
                 } else {
-                    match server.with_named_project_store_read(project_name, |store| {
-                        let vec_avail = store.vec_available;
-                        let project_opts = params.to_search_options(vec_avail);
-                        store
-                            .search(&params.query, Some(project_opts))
-                            .map_err(|e| {
-                                format!(
-                                    "Search failed in inferred project DB '{project_name}': {e}"
-                                )
-                            })
-                    }) {
+                    match with_named_project_search(
+                        server,
+                        project_name,
+                        &params,
+                        record_access,
+                        format!("Search failed in inferred project DB '{project_name}'"),
+                    ) {
                         Ok(project_results) => {
                             combined_results
                                 .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -304,12 +420,12 @@ pub(crate) async fn search_memory_rows(
                     }
                 }
             } else if server.has_project_db() && !skip_workspace {
-                let project_opts = params.to_search_options(server.project_vec_available);
-                let project_results = server.with_project_store_read(|store| {
-                    store
-                        .search(&params.query, Some(project_opts))
-                        .map_err(|e| format!("Search failed in project DB: {}", e))
-                })?;
+                let project_results = with_project_search(
+                    server,
+                    &params,
+                    record_access,
+                    "Search failed in project DB",
+                )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         }
@@ -323,6 +439,12 @@ pub(crate) async fn search_memory_rows(
     }
     if !eval_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
+    }
+    if let Some(project_name) = project_filter_name(&params, project_only) {
+        combined_results.retain(|(result, db_scope)| match db_scope {
+            DbScope::Project => project_scope_allows_memory(&project_name, &params, &result.entry),
+            DbScope::Global => true,
+        });
     }
 
     apply_guide_context_boosts(
@@ -446,6 +568,15 @@ pub(crate) async fn handle_search_memory(
     params: SearchMemoryParams,
     project_only: bool,
 ) -> Result<String, String> {
+    handle_search_memory_with_access(server, params, project_only, false).await
+}
+
+pub(crate) async fn handle_search_memory_with_access(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+) -> Result<String, String> {
     let top_k = params.normalized_top_k();
     let mut search_params = params.clone();
     if params.enable_rerank {
@@ -455,7 +586,8 @@ pub(crate) async fn handle_search_memory(
             .max(search_params.top_k)
             .min(crate::tool_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL);
     }
-    let mut rows = search_memory_rows(server, search_params, project_only).await?;
+    let mut rows =
+        search_memory_rows_with_access(server, search_params, project_only, record_access).await?;
     if params.enable_rerank && rows.len() > top_k {
         if has_high_confidence_exact_token_top(&rows, &params.query) {
             if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
@@ -597,4 +729,126 @@ pub(crate) async fn handle_find_similar_memory(
     }
 
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(domain: Option<&str>, path: &str) -> memory_core::MemoryEntry {
+        memory_core::MemoryEntry {
+            id: "id".into(),
+            path: path.into(),
+            summary: "summary".into(),
+            text: "text".into(),
+            importance: 0.7,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".into(),
+            topic: String::new(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "test".into(),
+            scope: "project".into(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: domain.map(str::to_string),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".into(),
+        }
+    }
+
+    fn params(query: &str) -> SearchMemoryParams {
+        SearchMemoryParams {
+            query: query.into(),
+            query_vec: None,
+            top_k: 5,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 5,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            agent_role: None,
+            project: Some("sigil".into()),
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }
+    }
+
+    #[test]
+    fn sigil_project_scope_filters_foreign_domains_for_default_recall() {
+        let params = params("Tachi 召回 向量 有没有问题");
+
+        assert!(!project_scope_allows_memory(
+            "sigil",
+            &params,
+            &entry(Some("equity_trading"), "/")
+        ));
+        assert!(!project_scope_allows_memory(
+            "sigil",
+            &params,
+            &entry(Some("hyperion"), "/scratch/hyperion/v4")
+        ));
+        assert!(project_scope_allows_memory(
+            "sigil",
+            &params,
+            &entry(Some("scratch"), "/scratch/sigil/recall")
+        ));
+    }
+
+    #[test]
+    fn sigil_project_scope_allows_foreign_domains_when_query_requests_them() {
+        let params = params("Hyperion V8 股票召回");
+
+        assert!(project_scope_allows_memory(
+            "sigil",
+            &params,
+            &entry(Some("equity_trading"), "/")
+        ));
+    }
+
+    #[test]
+    fn sigil_project_scope_keeps_filtering_when_query_only_substring_matches_terms() {
+        // "change"/"channel"/"quantity" must NOT trip "chan"/"quant"; the
+        // foreign-domain filter has to stay active for ordinary coding queries.
+        for query in [
+            "refactor the channel change handler",
+            "compute the quantity of pending jobs",
+            "address inequity in scheduling",
+        ] {
+            let params = params(query);
+            assert!(
+                !project_scope_allows_memory("sigil", &params, &entry(Some("equity_trading"), "/")),
+                "query {query:?} should not unlock foreign trading memories"
+            );
+        }
+    }
+
+    #[test]
+    fn sigil_project_scope_allows_foreign_domains_on_whole_word_match() {
+        // Whole-word foreign terms (even without CJK) must still open the gate.
+        for query in ["quant trading recall", "v8 engine notes", "chan pump-fake"] {
+            let params = params(query);
+            assert!(
+                project_scope_allows_memory("sigil", &params, &entry(Some("equity_trading"), "/")),
+                "query {query:?} explicitly names a foreign domain term"
+            );
+        }
+    }
 }

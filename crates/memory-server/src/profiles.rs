@@ -514,7 +514,7 @@ pub(super) fn tool_visible(
         return true;
     }
 
-    // Curated minimal allow-lists: standard (12 tools) > delegate (7 tools).
+    // Curated minimal allow-lists: standard (15 tools) > delegate (7 tools).
     if profile.standard_minimal {
         if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
             return false;

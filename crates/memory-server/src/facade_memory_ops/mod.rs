@@ -26,6 +26,13 @@ pub(crate) async fn handle_tachi_memory(
     let action = params.action.to_ascii_lowercase();
     match action.as_str() {
         "search" => {
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params)
+                    .await?
+            {
+                return Ok(body);
+            }
+
             let query = params
                 .query
                 .clone()
@@ -65,6 +72,13 @@ pub(crate) async fn handle_tachi_memory(
             crate::facade_search_ops::handle_tachi_search(server, search_params).await
         }
         "get" => {
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params)
+                    .await?
+            {
+                return Ok(body);
+            }
+
             let id = params
                 .id
                 .clone()

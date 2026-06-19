@@ -66,6 +66,60 @@ async fn tachi_memory_search_defaults_to_json_and_keeps_markdown_escape_hatch() 
 }
 
 #[tokio::test]
+async fn tachi_memory_search_records_user_access_history() {
+    let server = make_server();
+    let entry_id = format!("explicit-recall-access-{}", uuid::Uuid::new_v4());
+    let mut entry = make_entry(&entry_id);
+    entry.summary = "explicit recall access sentinel".to_string();
+    entry.text = "explicit recall access sentinel should record access history".to_string();
+    entry.keywords = vec!["explicit".to_string(), "recall".to_string()];
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("seed: {e}")))
+        .expect("seed recall entry");
+
+    let mut params = tachi_memory_params("search");
+    params.format = None;
+    params.scope = Some("memory".to_string());
+    params.query = Some("explicit recall access sentinel".to_string());
+    params.top_k = 3;
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("search should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("search JSON");
+    let memory_rows = parsed["sections"]
+        .as_array()
+        .and_then(|sections| {
+            sections
+                .iter()
+                .find(|section| section["name"] == json!("Memory"))
+        })
+        .and_then(|section| section["rows"].as_array())
+        .expect("memory rows");
+    assert!(
+        memory_rows.iter().any(|row| row["id"] == json!(entry_id)),
+        "seeded row should be recalled: {memory_rows:?}"
+    );
+
+    let post = server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options(&entry_id, false)
+                .map_err(|e| format!("get: {e}"))
+        })
+        .expect("post-read")
+        .expect("seeded entry exists");
+    assert_eq!(
+        post.access_count, 1,
+        "user-facing search should bump access_count once"
+    );
+    assert!(
+        post.last_access.is_some(),
+        "user-facing search should set last_access"
+    );
+}
+
+#[tokio::test]
 async fn tachi_memory_search_caps_large_top_k() {
     let server = make_server();
     server

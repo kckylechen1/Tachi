@@ -305,7 +305,7 @@ pub(crate) struct RememberParams {
 
 // ─── Search ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct HybridWeightsParam {
     /// Semantic (vector) weight (default: 0.4)
     #[serde(default = "default_weight_semantic")]
@@ -324,7 +324,7 @@ pub(crate) struct HybridWeightsParam {
     pub use_rrf: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct SearchMemoryParams {
     /// Search query text
     pub query: String,
@@ -578,7 +578,7 @@ mod tests {
 
 // ─── Get / List / Delete / Archive ──────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct GetMemoryParams {
     /// Memory entry ID
     pub id: String,
