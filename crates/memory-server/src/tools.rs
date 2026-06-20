@@ -2397,6 +2397,12 @@ fn format_facade_response(
     let value = serde_json::from_str::<Value>(raw).map_err(|e| {
         format!("format {title} markdown response: expected JSON from action '{action}': {e}")
     })?;
+    if action == "recommend" {
+        return Ok(render_recommend_markdown(title, action, &value));
+    }
+    if action == "profiles" {
+        return Ok(render_profiles_markdown(title, action, &value));
+    }
     let mut lines = vec![format!("## {title}")];
     lines.push(format!("action: `{action}`"));
     append_known_field(&mut lines, &value, "arena_id");
@@ -2527,6 +2533,144 @@ fn format_facade_response(
         lines.push(format!("```json\n{}\n```", value));
     }
     Ok(lines.join("\n"))
+}
+
+/// Escape pipe characters so free-form text stays inside one markdown table cell.
+fn md_table_cell(text: &str) -> String {
+    text.replace('|', "\\|").replace('\n', " ")
+}
+
+fn md_opt_str(value: &Value, field: &str) -> String {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+        .map(md_table_cell)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn md_opt_num(value: &Value, field: &str) -> String {
+    match value.get(field) {
+        Some(Value::Number(n)) => {
+            if let Some(f) = n.as_f64() {
+                if f.fract().abs() < f64::EPSILON {
+                    format!("{}", f as i64)
+                } else {
+                    format!("{f:.2}")
+                }
+            } else {
+                "-".to_string()
+            }
+        }
+        _ => "-".to_string(),
+    }
+}
+
+/// Render the `recommend` action as a candidates table plus the resolved routing summary.
+fn render_recommend_markdown(title: &str, action: &str, value: &Value) -> String {
+    let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
+
+    if let Some(task) = value
+        .get("task")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+    {
+        lines.push(format!("task: {}", md_table_cell(task)));
+    }
+    lines.push(format!(
+        "recommended_profile: `{}`",
+        value
+            .get("recommended_profile")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    ));
+    lines.push(format!(
+        "recommended_transport: `{}`",
+        value
+            .get("recommended_transport")
+            .and_then(Value::as_str)
+            .unwrap_or("-")
+    ));
+    if let Some(chain) = value.get("fallback_chain").and_then(Value::as_array) {
+        let chain = chain
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" -> ");
+        if !chain.is_empty() {
+            lines.push(format!("fallback_chain: {chain}"));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("| profile | role | score | useful_rate | top reason |".to_string());
+    lines.push("| --- | --- | --- | --- | --- |".to_string());
+    if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+        for candidate in candidates {
+            let profile = md_opt_str(candidate, "profile");
+            let role = md_opt_str(candidate, "role");
+            let score = md_opt_num(candidate, "score");
+            let useful_rate = md_opt_num(candidate, "useful_rate");
+            let top_reason = candidate
+                .get("reasons")
+                .and_then(Value::as_array)
+                .and_then(|reasons| reasons.first())
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(md_table_cell)
+                .unwrap_or_else(|| "-".to_string());
+            lines.push(format!(
+                "| {profile} | {role} | {score} | {useful_rate} | {top_reason} |"
+            ));
+        }
+    }
+
+    lines.join("\n")
+}
+
+/// Render the `profiles` action as a table of configured dispatch profiles.
+fn render_profiles_markdown(title: &str, action: &str, value: &Value) -> String {
+    let mut lines = vec![format!("## {title}"), format!("action: `{action}`")];
+    lines.push(String::new());
+    lines.push(
+        "| name | role | stage | backend | cost | precision | speed | strong_against |".to_string(),
+    );
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |".to_string());
+    if let Some(profiles) = value.get("dispatch_profiles").and_then(Value::as_array) {
+        for profile in profiles {
+            let name = md_opt_str(profile, "name");
+            let role = md_opt_str(profile, "role");
+            let stage = md_opt_str(profile, "stage");
+            let backend = md_opt_str(profile, "backend");
+            let stats = profile
+                .get("mbit_card")
+                .and_then(|card| card.get("stats"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let cost = md_opt_num(&stats, "cost");
+            let precision = md_opt_num(&stats, "precision");
+            let speed = md_opt_num(&stats, "speed");
+            let strong_against = profile
+                .get("mbit_card")
+                .and_then(|card| card.get("strong_against"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .filter(|text| !text.is_empty())
+                .map(|text| md_table_cell(&text))
+                .unwrap_or_else(|| "-".to_string());
+            lines.push(format!(
+                "| {name} | {role} | {stage} | {backend} | {cost} | {precision} | {speed} | {strong_against} |"
+            ));
+        }
+    }
+
+    lines.join("\n")
 }
 
 #[derive(Debug, Default)]
@@ -2932,6 +3076,79 @@ mod tests {
             .expect_err("markdown formatting should fail on invalid JSON");
         assert!(err.contains("format Tachi shell plan markdown response"));
         assert!(err.contains("expected JSON"));
+    }
+
+    #[test]
+    fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
+        let recommend_raw = r#"{
+            "task": "harden the search path",
+            "recommended_profile": "codex_55_review",
+            "recommended_transport": "native_cli",
+            "fallback_chain": ["codex_55_review", "kimi_arch"],
+            "candidates": [
+                {"profile": "codex_55_review", "role": "reviewer", "score": 91.5,
+                 "useful_rate": 0.84, "reasons": ["live_useful_rate=0.84", "secondary"]},
+                {"profile": "kimi_arch", "role": "architect", "score": 77.0,
+                 "useful_rate": null, "reasons": ["mbit_fit"]}
+            ]
+        }"#;
+        let recommend = format_facade_response(
+            "Tachi task recommend",
+            "recommend",
+            recommend_raw,
+            Some("markdown"),
+        )
+        .unwrap();
+        assert!(
+            recommend.starts_with("## Tachi task recommend"),
+            "{recommend}"
+        );
+        assert!(
+            recommend.contains("| profile | role | score | useful_rate | top reason |"),
+            "{recommend}"
+        );
+        assert!(recommend.contains("codex_55_review"), "{recommend}");
+        assert!(
+            recommend.contains("recommended_profile: `codex_55_review`"),
+            "{recommend}"
+        );
+        assert!(
+            recommend.contains("fallback_chain: codex_55_review -> kimi_arch"),
+            "{recommend}"
+        );
+        assert!(!recommend.contains("```json"), "{recommend}");
+
+        // JSON remains the default when markdown is not requested.
+        let recommend_json =
+            format_facade_response("Tachi task recommend", "recommend", recommend_raw, None)
+                .unwrap();
+        assert_eq!(recommend_json, recommend_raw);
+
+        let profiles_raw = r#"{
+            "dispatch_profiles": [
+                {"name": "codex_55_review", "role": "reviewer", "stage": "review",
+                 "backend": "codex",
+                 "mbit_card": {"stats": {"cost": 72, "precision": 95, "speed": 55},
+                               "strong_against": ["regressions", "security"]}}
+            ]
+        }"#;
+        let profiles = format_facade_response(
+            "Tachi task profiles",
+            "profiles",
+            profiles_raw,
+            Some("markdown"),
+        )
+        .unwrap();
+        assert!(profiles.starts_with("## Tachi task profiles"), "{profiles}");
+        assert!(
+            profiles.contains(
+                "| name | role | stage | backend | cost | precision | speed | strong_against |"
+            ),
+            "{profiles}"
+        );
+        assert!(profiles.contains("codex_55_review"), "{profiles}");
+        assert!(profiles.contains("regressions, security"), "{profiles}");
+        assert!(!profiles.contains("```json"), "{profiles}");
     }
 
     #[test]
