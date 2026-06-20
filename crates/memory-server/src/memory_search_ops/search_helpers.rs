@@ -308,8 +308,9 @@ fn infer_search_project_with(
     }
 
     for route in &config.project_routes {
-        if named_project_db_exists(&route.project)
-            && route.terms.iter().any(|term| q_lower.contains(term))
+        // Check the cheap term match before the disk-I/O project-exists lookup.
+        if route.terms.iter().any(|term| q_lower.contains(term))
+            && named_project_db_exists(&route.project)
         {
             return Some(route.project.clone());
         }

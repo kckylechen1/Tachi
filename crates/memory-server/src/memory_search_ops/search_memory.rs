@@ -62,12 +62,12 @@ fn query_explicitly_requests_foreign_sigil_domain(query: &str, domain: Option<&s
 
 fn is_foreign_sigil_memory(entry: &memory_core::MemoryEntry) -> bool {
     let config = super::routing_config::RoutingConfig::get();
-    let domain = entry.domain.as_deref().unwrap_or("").to_ascii_lowercase();
+    let domain = entry.domain.as_deref().unwrap_or("");
     let path = entry.path.to_ascii_lowercase();
     config
         .foreign_domains
         .iter()
-        .any(|d| d.eq_ignore_ascii_case(&domain))
+        .any(|d| d.eq_ignore_ascii_case(domain))
         || config
             .foreign_path_prefixes
             .iter()

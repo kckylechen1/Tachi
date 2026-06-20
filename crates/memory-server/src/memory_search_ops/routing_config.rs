@@ -149,16 +149,16 @@ impl RoutingConfig {
     }
 
     fn config_path() -> Option<PathBuf> {
-        let home = dirs::home_dir()?;
-        let app_home = std::env::var("TACHI_HOME")
-            .map(|v| {
-                if let Some(rest) = v.strip_prefix("~/") {
-                    home.join(rest)
-                } else {
-                    PathBuf::from(v)
-                }
-            })
-            .unwrap_or_else(|_| home.join(".tachi"));
+        // Only resolve home_dir() when actually needed, so an absolute
+        // TACHI_HOME still works in sandboxed/headless environments where
+        // home_dir() returns None.
+        let app_home = match std::env::var("TACHI_HOME") {
+            Ok(home) => match home.strip_prefix("~/") {
+                Some(rest) => dirs::home_dir()?.join(rest),
+                None => PathBuf::from(home),
+            },
+            Err(_) => dirs::home_dir()?.join(".tachi"),
+        };
         Some(app_home.join("routing.json"))
     }
 }
