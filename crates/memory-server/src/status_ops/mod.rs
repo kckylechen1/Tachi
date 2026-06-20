@@ -225,13 +225,22 @@ pub(crate) struct LatestFailedJob {
     pub(crate) inferred_invalid_provider: Option<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct DistillMarkerStatus {
     pub(crate) path: String,
     pub(crate) last_run_at: String,
     pub(crate) age_seconds: i64,
     pub(crate) age: String,
     pub(crate) is_stale: bool,
+    /// Last batch's distill-quality summary, parsed from the JSON marker.
+    /// `None` for legacy bare-timestamp markers written before this field existed.
+    pub(crate) groups_distilled: Option<usize>,
+    pub(crate) groups_skipped: Option<usize>,
+    pub(crate) fallback_used: Option<usize>,
+    /// Hard errors during the last batch (groups that errored without failing the
+    /// whole run). These never surface as foundry_jobs rows, so they are the one
+    /// distill failure signal that is otherwise invisible to health.
+    pub(crate) errors: Option<usize>,
 }
 
 pub(crate) fn collect_snapshot(
@@ -1510,10 +1519,28 @@ fn find_last_daily_report(app_home: &Path) -> Option<String> {
 fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus> {
     let marker_path = app_home.join("foundry-runs").join(".last_distill_run");
     let raw = std::fs::read_to_string(&marker_path).ok()?;
-    let last_run_at = raw.trim().to_string();
-    if last_run_at.is_empty() {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return None;
     }
+    // Two on-disk formats. New: a JSON object `{"ts": <rfc3339>, "groups_distilled": …}`.
+    // Legacy: a bare RFC3339 timestamp. A bare timestamp is not valid JSON (the `-`
+    // after the year breaks number parsing), so `from_str` cleanly rejects it.
+    let (last_run_at, groups_distilled, groups_skipped, fallback_used, errors) =
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) if v.get("ts").and_then(|t| t.as_str()).is_some() => {
+                let ts = v["ts"].as_str().unwrap_or_default().to_string();
+                let field = |k: &str| v.get(k).and_then(|x| x.as_u64()).map(|n| n as usize);
+                (
+                    ts,
+                    field("groups_distilled"),
+                    field("groups_skipped"),
+                    field("fallback_used"),
+                    field("errors"),
+                )
+            }
+            _ => (trimmed.to_string(), None, None, None, None),
+        };
     let dt = DateTime::parse_from_rfc3339(&last_run_at)
         .ok()?
         .with_timezone(&Utc);
@@ -1525,6 +1552,10 @@ fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus> {
         age_seconds,
         age: status_health::format_elapsed(age),
         is_stale: age_seconds > DISTILL_STALE_THRESHOLD_SECS,
+        groups_distilled,
+        groups_skipped,
+        fallback_used,
+        errors,
     })
 }
 
@@ -2351,6 +2382,96 @@ mod tests {
     }
 
     #[test]
+    fn read_distill_marker_parses_json_quality_summary() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let runs = app_home.path().join("foundry-runs");
+        std::fs::create_dir_all(&runs).expect("runs dir");
+        std::fs::write(
+            runs.join(".last_distill_run"),
+            serde_json::json!({
+                "ts": Utc::now().to_rfc3339(),
+                "groups_distilled": 7,
+                "groups_skipped": 2,
+                "fallback_used": 1,
+                "errors": 3,
+            })
+            .to_string(),
+        )
+        .expect("write marker");
+
+        let marker = read_distill_marker(app_home.path()).expect("marker parsed");
+        assert_eq!(marker.groups_distilled, Some(7));
+        assert_eq!(marker.groups_skipped, Some(2));
+        assert_eq!(marker.fallback_used, Some(1));
+        assert_eq!(marker.errors, Some(3));
+        assert!(!marker.is_stale, "fresh marker must not be stale");
+    }
+
+    #[test]
+    fn read_distill_marker_accepts_legacy_bare_timestamp() {
+        let app_home = tempfile::tempdir().expect("temp app home");
+        let runs = app_home.path().join("foundry-runs");
+        std::fs::create_dir_all(&runs).expect("runs dir");
+        // Pre-JSON markers were a bare RFC3339 string; they must still parse with
+        // every quality field left None (not be mistaken for a JSON document).
+        std::fs::write(runs.join(".last_distill_run"), Utc::now().to_rfc3339())
+            .expect("write legacy marker");
+
+        let marker = read_distill_marker(app_home.path()).expect("legacy marker parsed");
+        assert_eq!(marker.groups_distilled, None);
+        assert_eq!(marker.errors, None);
+        assert!(!marker.is_stale);
+    }
+
+    #[test]
+    fn distill_hard_errors_dock_health_but_fallbacks_do_not() {
+        let base = DistillMarkerStatus {
+            path: "/tmp/marker".to_string(),
+            last_run_at: "2026-06-20T00:00:00Z".to_string(),
+            age_seconds: 0,
+            age: "0s ago".to_string(),
+            is_stale: false,
+            groups_distilled: Some(5),
+            groups_skipped: Some(4),
+            fallback_used: Some(9),
+            errors: Some(0),
+        };
+        let with_errors = DistillMarkerStatus {
+            errors: Some(2),
+            ..base.clone()
+        };
+        let daemon = DaemonStatus::Running {
+            pid: 1,
+            lock_path: PathBuf::from("/tmp/tachi.lock"),
+        };
+        let healthy = status_health::calculate_health_score(
+            &daemon,
+            &[],
+            Some(&base),
+            &[],
+            Some(&[]),
+            Some(&[]),
+        );
+        let errored = status_health::calculate_health_score(
+            &daemon,
+            &[],
+            Some(&with_errors),
+            &[],
+            Some(&[]),
+            Some(&[]),
+        );
+        // High fallback/skip counts alone keep a perfect score (graceful degradation).
+        assert_eq!(
+            healthy, 100,
+            "fallback_used/groups_skipped must not be scored"
+        );
+        assert!(
+            errored < healthy,
+            "hard distill errors must dock the health score (got {errored} vs {healthy})"
+        );
+    }
+
+    #[test]
     fn infer_provider_from_auth_error_maps_real_failures() {
         assert_eq!(
             status_health::infer_provider_from_failed_job(
@@ -2950,6 +3071,10 @@ mod tests {
                 age_seconds: 0,
                 age: "0s ago".to_string(),
                 is_stale: false,
+                groups_distilled: Some(4),
+                groups_skipped: Some(0),
+                fallback_used: Some(0),
+                errors: Some(0),
             }),
             &[],
             Some(&[]),
