@@ -1,5 +1,5 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { join, delimiter } from 'path';
 import { homedir } from 'os';
 import yaml from 'js-yaml';
 
@@ -65,7 +65,47 @@ export function getDataDir(): string {
   return config.paths.dataDir;
 }
 
+function findOnPath(name: string): string | undefined {
+  // On Windows, executables resolve via PATHEXT extensions (.exe/.cmd/.bat);
+  // elsewhere the bare name is used.
+  const extensions =
+    process.platform === 'win32'
+      ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(delimiter)]
+      : [''];
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = join(dir, `${name}${ext}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the real `tachi` binary (installed as `tachi`, usually a symlink to
+ * `memory-server`). The previous default — `~/.tachi/bin/tachi-daemon` — was a
+ * path nothing installs, so every daemon command failed. Resolution order:
+ *   1. `TACHI_BINARY` env override
+ *   2. `tachi` / `memory-server` on `PATH`
+ *   3. common cargo / home install locations
+ *   4. bare `tachi`, leaving final resolution to the OS at spawn time
+ */
 export function getBinaryPath(): string {
-  const dataDir = getDataDir();
-  return join(dataDir, 'bin', 'tachi-daemon');
+  const override = process.env.TACHI_BINARY;
+  if (override && existsSync(override)) return override;
+
+  const onPath = findOnPath('tachi') ?? findOnPath('memory-server');
+  if (onPath) return onPath;
+
+  const candidates = [
+    join(homedir(), '.cargo', 'bin', 'memory-server'),
+    join(homedir(), 'bin', 'tachi'),
+    join(homedir(), '.tachi', 'bin', 'tachi'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  return 'tachi';
 }
