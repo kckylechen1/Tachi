@@ -2434,6 +2434,23 @@ fn score_profile_candidate(
             score += 20.0;
             reasons.push("role_matches_verification_request".to_string());
         }
+        "research_request" | "explain_request"
+            if matches!(
+                profile.role,
+                "explore" | "planner" | "architect" | "ux_researcher"
+            ) =>
+        {
+            score += 30.0;
+            reasons.push("role_matches_read_only_request".to_string());
+        }
+        "research_request" | "explain_request" if profile.role == "executor" => {
+            // A read-only research/explain task produces no diff/tests_run/files_changed,
+            // so an executor's evidence contract is structurally unsatisfiable here.
+            // Deprioritize write-executors for read-only work so role/task fit, not
+            // sparse eval history, decides the route.
+            score -= 20.0;
+            reasons.push("executor_deprioritized_for_read_only_request".to_string());
+        }
         _ => {}
     }
 
@@ -4225,6 +4242,16 @@ mod tests {
         }
     }
 
+    fn verified_eval_row(profile: &str, task_type: crate::agent_eval::TaskType) -> EvalRow {
+        EvalRow {
+            completion_status: CompletionStatus::Completed,
+            verification_present: true,
+            failure_mode: None,
+            task_type,
+            ..failed_eval_row(profile)
+        }
+    }
+
     #[test]
     fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competitor() {
         let server = scoring_test_server();
@@ -4264,6 +4291,77 @@ mod tests {
             "role-correct executor ({}) must stay above role-wrong competitor ({})",
             executor_candidate.score,
             competitor_candidate.score
+        );
+    }
+
+    #[test]
+    fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
+        let server = scoring_test_server();
+
+        // A read-only research task (e.g. "list files and summarize each"): the
+        // explore role fits; an executor's diff/tests/files_changed evidence
+        // contract is unsatisfiable. Give the EXECUTOR the better live history
+        // (two verified successes) and the explorer NONE, then assert the explorer
+        // still wins on role/task fit — the routing-policy gap surfaced live where
+        // glm_51_impl(executor)=23.8 beat deepseek_explore(explore)=-0.2.
+        let risk = DispatchRisk {
+            task_type: "research_request".to_string(),
+            risk: "low".to_string(),
+            reasons: Vec::new(),
+            required_profiles: Vec::new(),
+            blocked_profiles: Vec::new(),
+        };
+
+        let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+        let explorer = resolve_dispatch_profile("deepseek_explore").expect("explore profile");
+
+        let executor_rows = vec![
+            verified_eval_row(executor.name, crate::agent_eval::TaskType::ResearchRequest),
+            verified_eval_row(executor.name, crate::agent_eval::TaskType::ResearchRequest),
+        ];
+
+        let executor_candidate =
+            score_profile_candidate(&server, executor, &risk, &executor_rows, &[], &[])
+                .expect("executor");
+        let explorer_candidate =
+            score_profile_candidate(&server, explorer, &risk, &[], &[], &[]).expect("explorer");
+
+        assert!(
+            explorer_candidate.score > executor_candidate.score,
+            "read-only research must prefer the explore role ({}) over a write-executor \
+             with better eval history ({})",
+            explorer_candidate.score,
+            executor_candidate.score
+        );
+
+        // explain_request shares the read-only treatment (same arm).
+        let explain_risk = DispatchRisk {
+            task_type: "explain_request".to_string(),
+            ..risk.clone()
+        };
+        let explain_executor = score_profile_candidate(
+            &server,
+            resolve_dispatch_profile("glm_51_impl").expect("executor"),
+            &explain_risk,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("explain executor");
+        let explain_explorer = score_profile_candidate(
+            &server,
+            resolve_dispatch_profile("deepseek_explore").expect("explorer"),
+            &explain_risk,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("explain explorer");
+        assert!(
+            explain_explorer.score > explain_executor.score,
+            "explain_request must also prefer the explore role ({}) over an executor ({})",
+            explain_explorer.score,
+            explain_executor.score
         );
     }
 }
