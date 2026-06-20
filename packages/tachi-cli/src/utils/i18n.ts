@@ -180,21 +180,28 @@ export function getLanguage(): Language {
   return currentLang;
 }
 
-export function t(path: string): string {
-  const keys = path.split('.');
-  let current: Translations = currentLang === 'zh' ? zh : en;
-  
-  for (const key of keys) {
-    if (typeof current === 'object' && key in current) {
-      const value = current[key];
-      if (typeof value === 'string') {
-        return value;
-      }
-      current = value as Translations;
+function lookup(dict: Translations, path: string): string | undefined {
+  let current: Translations | string = dict;
+  for (const key of path.split('.')) {
+    if (typeof current === 'object' && current !== null && key in current) {
+      current = (current as Translations)[key];
     } else {
-      return path;
+      return undefined;
     }
   }
-  
-  return path;
+  return typeof current === 'string' ? current : undefined;
+}
+
+export function t(path: string): string {
+  // Current language first, then fall back to English so a key missing only
+  // from the zh dictionary degrades to readable English rather than leaking the
+  // raw dotted key. As a last resort show the leaf segment, never the full path.
+  const primary = currentLang === 'zh' ? zh : en;
+  return (
+    lookup(primary, path) ??
+    // Only retry against English when it isn't already the primary dictionary.
+    (primary === en ? undefined : lookup(en, path)) ??
+    path.split('.').pop() ??
+    path
+  );
 }
