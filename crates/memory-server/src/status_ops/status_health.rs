@@ -1055,7 +1055,10 @@ pub(crate) fn calculate_health_score(
     if !matches!(daemon, crate::status_ops::DaemonStatus::Running { .. }) {
         score -= 20;
     }
-    let failed_jobs: usize = dbs.iter().map(|db| db.failed).sum();
+    // Only dead-lettered (retry-exhausted) jobs count as genuine, current
+    // failures. Transient failures are auto-retried with backoff and self-heal,
+    // so they no longer drag the score down for their full GC-retention window.
+    let failed_jobs: usize = dbs.iter().map(|db| db.dead_lettered).sum();
     score -= (failed_jobs as i32).min(25);
     let stuck_jobs: usize = dbs.iter().map(|db| db.stuck_in_progress).sum();
     score -= ((stuck_jobs as i32) * 5).min(20);
