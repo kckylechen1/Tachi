@@ -659,6 +659,7 @@ pub(crate) async fn handle_find_similar_memory(
         graph_relation_filter: None,
         domain: None,
         as_of: None,
+        precision_matchers: Vec::new(),
     };
 
     let global_results = server.with_global_store_read(|store| {
@@ -684,6 +685,7 @@ pub(crate) async fn handle_find_similar_memory(
             graph_relation_filter: None,
             domain: None,
             as_of: None,
+            precision_matchers: Vec::new(),
         };
 
         let project_results = server.with_project_store_read(|store| {

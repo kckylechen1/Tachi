@@ -202,6 +202,7 @@ pub(super) fn capture_search_options(
         graph_expand_hops: 0,
         graph_relation_filter: None,
         as_of: None,
+        precision_matchers: Vec::new(),
         vec_available,
         weights: HybridWeights {
             semantic: 1.0,

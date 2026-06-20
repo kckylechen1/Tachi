@@ -38,7 +38,7 @@ pub use namespace::{
 };
 pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};
-pub use scorer::{surprise_score, HybridWeights};
+pub use scorer::{generic_precision_multiplier, surprise_score, HybridWeights, PrecisionMatcher};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,

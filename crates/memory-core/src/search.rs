@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::{
     db::{
@@ -15,8 +16,8 @@ use crate::{
     },
     error::MemoryError,
     scorer::{
-        cosine_similarity, hybrid_score, precision_query_multiplier, symbolic_score, tokenize,
-        HybridWeights,
+        cosine_similarity, generic_precision_multiplier, hybrid_score, symbolic_score, tokenize,
+        HybridWeights, PrecisionMatcher,
     },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
@@ -60,6 +61,11 @@ pub struct SearchOptions {
     /// Point-in-time validity filter. When set, only memories valid at this ISO
     /// timestamp are returned.
     pub as_of: Option<String>,
+    /// Domain-specific precision boosters injected by the caller. The generic
+    /// engine applies only `generic_precision_multiplier`; each matcher here can
+    /// additionally multiply an entry's score when it judges the (query, entry)
+    /// pair an exact match in its domain. Default: empty (fully generic).
+    pub precision_matchers: Vec<Arc<dyn PrecisionMatcher>>,
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -104,6 +110,7 @@ impl Default for SearchOptions {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             as_of: None,
+            precision_matchers: Vec::new(),
         }
     }
 }
@@ -696,10 +703,16 @@ pub fn hybrid_search(
         }
     }
 
-    // Precision boosts for exact tickers and high-signal trading terms.
-    // In non-RRF mode, cap the multiplier so it amplifies but doesn't overwhelm.
+    // Precision boosts: the generic id-like exact-match boost plus any
+    // caller-injected domain matchers (tickers, ICD codes, …). In non-RRF mode,
+    // cap the multiplier so it amplifies but doesn't overwhelm.
     for (id, entry) in &entries_ref {
-        let mut multiplier = precision_query_multiplier(query, entry);
+        let mut multiplier = generic_precision_multiplier(query, entry);
+        for matcher in &opts.precision_matchers {
+            if let Some(boost) = matcher.boost(query, entry) {
+                multiplier = multiplier.max(boost);
+            }
+        }
         if multiplier > 1.0 {
             if !weights.use_rrf {
                 multiplier = multiplier.clamp(1.0, 3.0);

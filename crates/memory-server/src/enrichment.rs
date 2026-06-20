@@ -209,49 +209,10 @@ impl MemoryServer {
             }
         }
 
-        for (idx, item) in items.iter().enumerate() {
-            if !item.needs_metadata {
-                continue;
-            }
-            let (heur_keywords, heur_entities) =
-                memory_core::scorer::heuristic_metadata_from_text(&item.text);
-            if heur_entities.is_empty() && heur_keywords.is_empty() {
-                continue;
-            }
-            let mut entities = if item.entities.is_empty() {
-                Vec::new()
-            } else {
-                item.entities.clone()
-            };
-            if let Some(existing) = entities_out[idx].take() {
-                entities = existing;
-            }
-            for entity in heur_entities {
-                if !entities.iter().any(|e| e == &entity) {
-                    entities.push(entity);
-                }
-            }
-            if !entities.is_empty() {
-                entities_out[idx] = Some(entities);
-            }
-
-            let mut keywords = if item.keywords.is_empty() {
-                Vec::new()
-            } else {
-                item.keywords.clone()
-            };
-            if let Some(existing) = keywords_out[idx].take() {
-                keywords = existing;
-            }
-            for keyword in heur_keywords {
-                if !keywords.iter().any(|k| k == &keyword) {
-                    keywords.push(keyword);
-                }
-            }
-            if !keywords.is_empty() {
-                keywords_out[idx] = Some(keywords);
-            }
-        }
+        // Deterministic domain-specific metadata (e.g. A-share ticker tagging)
+        // is no longer derived in the generic engine — that domain logic lives
+        // in the host project. LLM enrichment above already populated
+        // keywords_out / entities_out.
 
         // 3. Batch embedding for items that need it
         let embed_indices: Vec<usize> = items
