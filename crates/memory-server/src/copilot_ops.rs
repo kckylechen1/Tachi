@@ -2089,8 +2089,9 @@ fn classify_task_intent(task: &str) -> &'static str {
         "summarize",
         "summary",
         "overview",
-        "map the",
+        "map out",
         "walk through",
+        "walkthrough",
         "学习",
         "研究",
         "查一下",
@@ -2718,6 +2719,16 @@ mod tests {
         );
         assert_eq!(
             classify_task_intent("梳理一下这个模块的结构"),
+            "research_request"
+        );
+        assert_eq!(
+            classify_task_intent("map out the module dependency graph"),
+            "research_request"
+        );
+        // Gemini guard: a coding task phrased with "map the ..." must NOT be
+        // misread as research (the reason "map the" was narrowed to "map out").
+        assert_ne!(
+            classify_task_intent("map the array values into the new struct fields"),
             "research_request"
         );
     }
