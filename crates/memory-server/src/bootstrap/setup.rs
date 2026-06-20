@@ -240,6 +240,7 @@ pub(crate) fn build_setup_report(
     if let Some(project_db_path) = project_db_path {
         vault_details.push(format!("project db: {}", project_db_path.display()));
     }
+    let vault_initialized = vault_status == "configured";
 
     let items = vec![
         build_cli_binary_item(),
@@ -292,9 +293,20 @@ pub(crate) fn build_setup_report(
     ];
 
     let mut next_steps = Vec::new();
-    if configured_api_keys < 2 {
+    if !vault_initialized {
+        // Vault not set up yet: steer the user to create it and import keys (this
+        // also fires when keys are already present-but-plaintext, so they get
+        // migrated into the encrypted vault rather than left in config.env).
         next_steps.push(format!(
-            "Add missing API keys to {}",
+            "Initialize the encrypted vault and import your API keys: run `tachi vault setup-keys` \
+             (creates the vault), then reference them in {} as `KEY=vault:KEY` aliases instead of \
+             plaintext values",
+            config_env_path.display()
+        ));
+    } else if configured_api_keys < 2 {
+        next_steps.push(format!(
+            "Add missing API keys to the encrypted vault (`tachi vault setup-keys`), then reference \
+             them in {} as `KEY=vault:KEY` aliases instead of plaintext values",
             config_env_path.display()
         ));
     }
@@ -334,7 +346,10 @@ pub(crate) fn build_setup_report(
         .unwrap_or(true)
     {
         next_steps.push(
-            "Initialize the vault after the daemon is running with the vault_init tool".to_string(),
+            "Initialize the encrypted vault and funnel provider keys into it with \
+             `tachi vault setup-keys` (or `tachi vault init` + `tachi vault set NAME`), then use \
+             `KEY=vault:KEY` aliases in config.env instead of plaintext keys"
+                .to_string(),
         );
     }
 

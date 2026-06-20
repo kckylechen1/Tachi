@@ -222,7 +222,54 @@ pub(super) async fn run_interactive_wizard(
         .find(|i| i.id == "vault")
         .map(|i| i.status == "configured")
         .unwrap_or(false);
-    if vault_already {
+
+    // Which of the keys the user just entered are API-key secrets eligible for
+    // encrypted-vault storage (vs. plaintext config.env)?
+    let collected_secret_keys: Vec<String> = new_entries
+        .iter()
+        .filter(|(k, _)| is_secret_key(k))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    if !collected_secret_keys.is_empty() {
+        // Default YES: funnel freshly-entered keys into the encrypted vault and
+        // write only `KEY=vault:KEY` alias lines to config.env instead of the
+        // plaintext values. Declining keeps the existing plaintext behavior.
+        let prompt = if vault_already {
+            "  Store the API keys you just entered in the encrypted vault (recommended)?"
+        } else {
+            "  Store the API keys you just entered in an encrypted vault instead of plaintext (recommended)?"
+        };
+        let use_vault = Confirm::with_theme(&theme)
+            .with_prompt(prompt)
+            .default(true)
+            .interact()?;
+
+        if use_vault {
+            match store_collected_keys_in_vault(
+                global_db_path,
+                vault_already,
+                &collected_secret_keys,
+                &mut new_entries,
+                &theme,
+            ) {
+                Ok(stored) => {
+                    println!(
+                        "  Stored {stored} key(s) in the vault; config.env will use `vault:` aliases (no plaintext)."
+                    );
+                }
+                Err(err) => {
+                    // Fall back to plaintext (unchanged behavior) so the wizard
+                    // never strands the user with half-applied state.
+                    println!(
+                        "  Vault storage failed ({err}); keeping plaintext config.env values."
+                    );
+                }
+            }
+        } else {
+            println!("  Keeping plaintext config.env values for the entered keys.");
+        }
+    } else if vault_already {
         println!("  Vault already initialized — skipping.");
     } else {
         let want_vault = Confirm::with_theme(&theme)
@@ -247,7 +294,10 @@ pub(super) async fn run_interactive_wizard(
     }
     println!("  Pending writes to {}:", config_env_path.display());
     for (k, v) in &new_entries {
-        let shown = if is_secret_key(k) {
+        // `vault:` alias lines hold no secret material — show them verbatim.
+        let shown = if crate::provider_config::is_vault_alias(v) {
+            v.clone()
+        } else if is_secret_key(k) {
             mask_secret(v)
         } else {
             v.clone()
@@ -334,6 +384,99 @@ fn init_vault_inline(
         .map_err(|e| format!("vault_set_config: {e}"))?;
 
     Ok(())
+}
+
+/// Store the freshly-entered API keys (`key_names`) in the encrypted vault and
+/// rewrite their `new_entries` rows from plaintext `KEY=VALUE` to the
+/// `KEY=vault:KEY` alias convention, so `config.env` never persists the secret
+/// value. Reuses the existing vault init + upsert crypto from `vault_cli`.
+///
+/// On a fresh vault we prompt for a new master password; on an existing vault we
+/// prompt for the current password to unlock. Returns the number of keys stored.
+fn store_collected_keys_in_vault(
+    global_db_path: &PathBuf,
+    vault_already: bool,
+    key_names: &[String],
+    new_entries: &mut [(String, String)],
+    theme: &ColorfulTheme,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    // Derive the vault key: init a new vault, or unlock the existing one.
+    let key = if vault_already {
+        let config = open_cli_store_read_only(global_db_path)?
+            .vault_get_config()
+            .map_err(|e| format!("vault_get_config: {e}"))?
+            .ok_or("vault reported initialized but config is missing")?;
+        let mut password = Password::with_theme(theme)
+            .with_prompt("    Current vault password")
+            .interact()?;
+        if password.is_empty() {
+            crate::vault_crypto::zero_string(&mut password);
+            return Err("password cannot be empty".into());
+        }
+        derive_verified_vault_key_for_wizard(&config, &mut password)?
+    } else {
+        let password = Password::with_theme(theme)
+            .with_prompt("    New vault password")
+            .with_confirmation("    Confirm password", "    Passwords do not match")
+            .interact()?;
+        if password.is_empty() {
+            return Err("password cannot be empty".into());
+        }
+        super::vault_cli::vault_init_with_password(global_db_path, password)?
+    };
+
+    upsert_keys_and_rewrite_aliases(global_db_path, &key, key_names, new_entries)
+}
+
+/// For each entry whose key is in `key_names`, move its plaintext value into the
+/// vault (encrypted) and replace the `new_entries` row with the non-secret
+/// `vault:KEY` alias so `config.env` never persists the value. Returns the count
+/// stored. Split out so it can be unit-tested with a pre-derived key (no prompt).
+fn upsert_keys_and_rewrite_aliases(
+    global_db_path: &PathBuf,
+    key: &crate::vault_crypto::DerivedVaultKey,
+    key_names: &[String],
+    new_entries: &mut [(String, String)],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut stored = 0usize;
+    for (name, value) in new_entries.iter_mut() {
+        if !key_names.iter().any(|k| k == name) {
+            continue;
+        }
+        let secret_value = std::mem::take(value);
+        super::vault_cli::vault_upsert_secret_with_key(
+            global_db_path,
+            key,
+            name,
+            "api_key",
+            "",
+            secret_value,
+        )?;
+        *value = format!("{}{}", crate::provider_config::VAULT_ALIAS_PREFIX, name);
+        stored += 1;
+    }
+    Ok(stored)
+}
+
+/// Derive + verify a vault key from a plaintext password, zeroing the password.
+/// Mirrors `vault_cli::derive_verified_vault_key_from_password` (which is
+/// private to that module) while keeping the wizard self-contained.
+fn derive_verified_vault_key_for_wizard(
+    config: &memory_core::vault::VaultConfig,
+    password: &mut String,
+) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let salt = B64
+        .decode(&config.salt)
+        .map_err(|e| format!("Invalid vault salt: {e}"))?;
+    let key_result = crate::vault_crypto::DerivedVaultKey::derive(password, &salt);
+    crate::vault_crypto::zero_string(password);
+    let key = key_result?;
+    if !crate::vault_crypto::verify_password(key.bytes(), &config.verifier)? {
+        return Err("Wrong password".into());
+    }
+    Ok(key)
 }
 
 const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
@@ -691,6 +834,70 @@ mod tests {
         let text = super::mcp_server_instructions();
         assert!(text.contains("action='save'"));
         assert!(text.contains("agent_end"));
+    }
+
+    #[test]
+    fn wizard_vault_funnel_emits_aliases_not_plaintext() {
+        // When the wizard funnels collected keys into the vault, the resulting
+        // config.env entries must become `KEY=vault:KEY` aliases and the
+        // plaintext value must be stored encrypted in the vault (not in env).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+
+        let key = super::super::vault_cli::vault_init_with_password(
+            &db_path,
+            "correct horse battery staple".to_string(),
+        )
+        .expect("init vault");
+
+        let mut new_entries = vec![
+            (
+                "VOYAGE_API_KEY".to_string(),
+                "voy_super_secret_value".to_string(),
+            ),
+            ("ENABLE_PIPELINE".to_string(), "true".to_string()),
+        ];
+        let key_names = vec!["VOYAGE_API_KEY".to_string()];
+
+        let stored = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
+            .expect("funnel keys into vault");
+        assert_eq!(stored, 1);
+
+        // The API key row is now a vault alias; no plaintext value remains.
+        let voyage = new_entries
+            .iter()
+            .find(|(k, _)| k == "VOYAGE_API_KEY")
+            .expect("voyage entry");
+        assert_eq!(voyage.1, "vault:VOYAGE_API_KEY");
+        assert!(
+            !new_entries
+                .iter()
+                .any(|(_, v)| v.contains("voy_super_secret_value")),
+            "plaintext secret value must not survive in config.env entries"
+        );
+        // Non-secret entries are untouched.
+        assert!(new_entries
+            .iter()
+            .any(|(k, v)| k == "ENABLE_PIPELINE" && v == "true"));
+
+        // The merged config.env body carries the alias line, never the secret.
+        let merged = merge_config_env("", &new_entries);
+        assert!(merged.contains("VOYAGE_API_KEY=vault:VOYAGE_API_KEY"));
+        assert!(!merged.contains("voy_super_secret_value"));
+
+        // And the value really is recoverable from the encrypted vault.
+        let store = open_cli_store_read_only(&db_path).expect("open store");
+        let entry = store
+            .vault_get_entry("VOYAGE_API_KEY")
+            .expect("get entry")
+            .expect("entry exists");
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+                .expect("decrypt");
+        assert_eq!(
+            String::from_utf8(decrypted).expect("utf8"),
+            "voy_super_secret_value"
+        );
     }
 
     #[test]

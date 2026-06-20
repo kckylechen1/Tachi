@@ -176,6 +176,23 @@ pub(super) async fn run_vault_command(
             Ok(())
         }
 
+        VaultAction::SetupKeys {
+            stdin_password,
+            keychain,
+            password_file,
+            confirm_password_file,
+            insecure_password_file,
+            include_deprecated,
+        } => run_vault_setup_keys(
+            global_db_path,
+            stdin_password,
+            keychain,
+            password_file.as_deref(),
+            confirm_password_file.as_deref(),
+            insecure_password_file,
+            include_deprecated,
+        ),
+
         VaultAction::SyncExport {
             output,
             allow_cloud,
@@ -926,6 +943,174 @@ fn derive_verified_vault_key_from_password(
     Ok(key)
 }
 
+/// Initialize the vault from a plaintext master password, reusing the exact
+/// crypto used by `VaultAction::Init`. Returns the derived key so the caller can
+/// immediately upsert secrets without re-deriving. The password is zeroed.
+///
+/// Callers MUST verify the vault is not already initialized before calling this.
+pub(super) fn vault_init_with_password(
+    global_db_path: &PathBuf,
+    mut password: String,
+) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+    let salt = crate::vault_crypto::generate_salt();
+    let key_result = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt);
+    crate::vault_crypto::zero_string(&mut password);
+    let key = key_result?;
+    let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
+    let salt_b64 = B64.encode(salt);
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let store = open_cli_store(global_db_path)?;
+    store
+        .vault_set_config(&memory_core::vault::VaultConfig {
+            salt: salt_b64,
+            verifier,
+            kdf_algorithm: "argon2id".to_string(),
+            kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            cipher: memory_core::vault::VaultCipher::Aes256Gcm,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+        .map_err(|e| format!("vault_set_config: {e}"))?;
+    Ok(key)
+}
+
+/// Encrypt + upsert a single secret using an already-derived vault key, reusing
+/// the same crypto/entry shape as `VaultAction::Set`. `secret_value` is zeroed.
+/// Returns true when a new entry was created (vs. updating an existing one).
+pub(super) fn vault_upsert_secret_with_key(
+    global_db_path: &PathBuf,
+    key: &crate::vault_crypto::DerivedVaultKey,
+    name: &str,
+    secret_type: &str,
+    description: &str,
+    mut secret_value: String,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    crate::vault_crypto::validate_secret_name(name)?;
+    if secret_value.is_empty() {
+        return Err("Secret value cannot be empty".into());
+    }
+
+    let encrypt_result = crate::vault_crypto::encrypt(key.bytes(), secret_value.as_bytes());
+    crate::vault_crypto::zero_string(&mut secret_value);
+    let (encrypted_value, nonce) = encrypt_result?;
+
+    let is_new = !open_cli_store_read_only(global_db_path)?
+        .vault_entry_exists(name)
+        .map_err(|e| format!("vault_entry_exists: {e}"))?;
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let entry = memory_core::vault::VaultEntry {
+        name: name.to_string(),
+        encrypted_value,
+        nonce,
+        secret_type: secret_type.to_string(),
+        description: description.to_string(),
+        allowed_agents: None,
+        created_at: if is_new { now.clone() } else { String::new() },
+        updated_at: now,
+        accessed_at: String::new(),
+        access_count: 0,
+    };
+
+    let store = open_cli_store(global_db_path)?;
+    store
+        .vault_upsert_entry(&entry)
+        .map_err(|e| format!("vault_upsert_entry: {e}"))?;
+    Ok(is_new)
+}
+
+/// Canonical provider API keys (deduped, in declaration order) used by both the
+/// setup wizard and `tachi vault setup-keys`. Reuses the shared `API_KEY_DEFS`
+/// list so the funnel stays aligned with `tachi status`.
+pub(super) fn canonical_provider_key_defs(
+    include_deprecated: bool,
+) -> Vec<(&'static str, &'static str)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for def in crate::status_ops::status_health::API_KEY_DEFS {
+        if def.deprecated && !include_deprecated {
+            continue;
+        }
+        if seen.insert(def.key) {
+            out.push((def.key, def.label));
+        }
+    }
+    out
+}
+
+/// Bulk key-entry: iterate the canonical provider keys, prompt for each via
+/// rpassword (blank skips), and upsert non-empty values encrypted. Initializes
+/// the vault first when needed, reusing existing init/upsert helpers.
+fn run_vault_setup_keys(
+    global_db_path: &PathBuf,
+    stdin_password: bool,
+    keychain: bool,
+    password_file: Option<&Path>,
+    confirm_password_file: Option<&Path>,
+    insecure_password_file: bool,
+    include_deprecated: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let existing_config = if vault_config_exists_cli(global_db_path)? {
+        Some(read_vault_config_for_key(global_db_path)?)
+    } else {
+        None
+    };
+
+    let key = if let Some(config) = existing_config {
+        println!("Vault already initialized; unlocking to add provider keys.");
+        read_verified_vault_key(
+            &config,
+            stdin_password,
+            keychain,
+            password_file,
+            insecure_password_file,
+        )?
+    } else {
+        println!("No vault found; initializing a new master-password vault.");
+        let password = read_vault_init_password(
+            stdin_password,
+            keychain,
+            password_file,
+            confirm_password_file,
+            insecure_password_file,
+        )?;
+        vault_init_with_password(global_db_path, password)?
+    };
+
+    let defs = canonical_provider_key_defs(include_deprecated);
+    let mut stored = 0usize;
+    let mut skipped = 0usize;
+    println!(
+        "Enter values for {} provider key(s). Press Enter on a blank line to skip a key.",
+        defs.len()
+    );
+    for (name, label) in defs {
+        let value = rpassword::prompt_password(format!("{name} ({label}) [blank=skip]: "))?;
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let is_new =
+            vault_upsert_secret_with_key(global_db_path, &key, name, "api_key", "", value)?;
+        // Never print the secret value; only the name and create/update status.
+        println!("  {name}: {}", if is_new { "stored" } else { "updated" });
+        stored += 1;
+    }
+
+    println!("Vault setup-keys complete: {stored} stored/updated, {skipped} skipped.");
+    if stored > 0 {
+        println!(
+            "Tip: reference these in ~/.tachi/config.env as `KEY=vault:KEY` (e.g. {}).",
+            crate::provider_config::vault_alias_line("VOYAGE_API_KEY")
+        );
+    }
+    Ok(())
+}
+
 fn decrypt_profile_secret_values(
     global_db_path: &PathBuf,
     profile: &crate::credential_profile::CredentialProfile,
@@ -1502,6 +1687,90 @@ mod tests {
             string_is_zeroed(&password),
             "password buffer was not zeroed"
         );
+    }
+
+    #[test]
+    fn setup_keys_init_and_upsert_roundtrip() {
+        // `tachi vault setup-keys` (and the wizard funnel) rely on
+        // vault_init_with_password + vault_upsert_secret_with_key. Verify the
+        // value is stored encrypted and decrypts back to the original.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+
+        let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+            .expect("init vault");
+
+        let is_new = vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            "SILICONFLOW_API_KEY",
+            "api_key",
+            "",
+            "sk-siliconflow-secret".to_string(),
+        )
+        .expect("upsert secret");
+        assert!(is_new, "first write should create a new entry");
+
+        let store = open_cli_store_read_only(&db_path).expect("open store");
+        let entry = store
+            .vault_get_entry("SILICONFLOW_API_KEY")
+            .expect("get entry")
+            .expect("entry exists");
+        assert_eq!(entry.secret_type, "api_key");
+        let decrypted =
+            crate::vault_crypto::decrypt(key.bytes(), &entry.encrypted_value, &entry.nonce)
+                .expect("decrypt");
+        assert_eq!(
+            String::from_utf8(decrypted).expect("utf8"),
+            "sk-siliconflow-secret"
+        );
+
+        // Re-upsert updates in place (is_new == false), value still recovers.
+        let is_new_again = vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            "SILICONFLOW_API_KEY",
+            "api_key",
+            "",
+            "sk-rotated".to_string(),
+        )
+        .expect("re-upsert");
+        assert!(!is_new_again, "second write should update existing entry");
+    }
+
+    #[test]
+    fn vault_upsert_rejects_empty_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let key = vault_init_with_password(&db_path, "correct horse battery staple".to_string())
+            .expect("init vault");
+        let err = vault_upsert_secret_with_key(
+            &db_path,
+            &key,
+            "VOYAGE_API_KEY",
+            "api_key",
+            "",
+            String::new(),
+        )
+        .expect_err("empty value should be rejected");
+        assert!(err.to_string().contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn canonical_provider_keys_dedup_and_exclude_deprecated() {
+        let defs = canonical_provider_key_defs(false);
+        let names: Vec<&str> = defs.iter().map(|(k, _)| *k).collect();
+        assert!(names.contains(&"VOYAGE_API_KEY"));
+        assert!(names.contains(&"SILICONFLOW_API_KEY"));
+        // No duplicates.
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "keys must be deduped");
+        // Deprecated keys (e.g. MINIMAX_API_KEY) excluded by default.
+        assert!(!names.contains(&"MINIMAX_API_KEY"));
+        let with_dep = canonical_provider_key_defs(true);
+        assert!(with_dep.len() >= defs.len());
     }
 
     #[test]
