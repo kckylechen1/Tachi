@@ -401,7 +401,9 @@ pub(crate) struct TachiMemoryParams {
     #[schemars(description = "[action=search|ask] Optional error message hint to bias recall.")]
     pub error_context: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=search|ask] Wiki category filter when scope includes wiki.")]
+    #[schemars(
+        description = "[action=search|ask|save|checkpoint] Wiki category filter (search/ask), or the category for the saved/checkpointed entry."
+    )]
     pub category: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -439,10 +441,14 @@ pub(crate) struct TachiMemoryParams {
     )]
     pub text: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=save] Optional title (wiki-style entries).")]
+    #[schemars(
+        description = "[action=save|checkpoint] Title for the saved entry or checkpoint (also used as a title override by briefing/progress)."
+    )]
     pub title: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=save] Short summary stored alongside text.")]
+    #[schemars(
+        description = "[action=save|checkpoint|progress] Short summary stored alongside the saved entry, checkpoint, or progress state."
+    )]
     pub summary: Option<String>,
     #[serde(default)]
     #[schemars(description = "[action=save] Topic label for the entry.")]
@@ -1186,7 +1192,7 @@ pub(crate) struct TachiTaskParams {
     // plan fields
     #[serde(default)]
     #[schemars(
-        description = "[action=plan|recommend|dispatch|route_simulate] Task description / prompt text."
+        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|pr_handoff|ux_matrix] Task description / prompt text."
     )]
     pub task: Option<String>,
     #[serde(default)]
@@ -1233,7 +1239,7 @@ pub(crate) struct TachiTaskParams {
     // dispatch / complete fields
     #[serde(default)]
     #[schemars(
-        description = "[action=dispatch|recommend] Agent backend, e.g. claude, codex, grok, kimi."
+        description = "[action=dispatch|recommend|complete] Agent backend, e.g. claude, codex, grok, kimi."
     )]
     pub agent: Option<String>,
     /// [action=complete] Outcome: success | failure | partial | aborted.
@@ -1398,17 +1404,17 @@ pub(crate) struct TachiTaskParams {
     pub number: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "[action=intake|link_pr|pr_status|pr_handoff] GitHub issue ref, e.g. owner/repo#123 or URL."
+        description = "[action=intake|link_pr|pr_status|pr_handoff|dispatch|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
     )]
     pub issue_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=link_pr|pr_status|pr_handoff|release_note] GitHub PR ref, e.g. owner/repo#123 or URL."
+        description = "[action=link_pr|pr_status|pr_handoff|release_note|dispatch|complete] GitHub PR ref, e.g. owner/repo#123 or URL."
     )]
     pub pr_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Tachi flow id for feature-scoped artifacts (briefing/intake/link_pr/pr_handoff/release_note/ux_matrix/close_loop/status/wait)."
+        description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/link_pr/pr_handoff/release_note/ux_matrix/close_loop/status/wait/dispatch/complete)."
     )]
     pub flow_id: Option<String>,
     /// [action=complete] Dispatch id linked to this completion.
@@ -1460,7 +1466,9 @@ pub(crate) struct TachiTaskParams {
     )]
     pub worktree: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=merge] Branch to merge from the local dispatched worktree.")]
+    #[schemars(
+        description = "[action=merge|pr_handoff] Branch to merge from the local dispatched worktree (merge), or the branch name to record in the handoff (pr_handoff)."
+    )]
     pub branch: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -1479,7 +1487,7 @@ pub(crate) struct TachiTaskParams {
     pub delete_worktree: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=merge] Confirm the local worktree merge (gate against accidents)."
+        description = "[action=merge|dispatch] Confirm the local worktree merge (merge), or bypass the leader confirmation gate when dispatching an issue flow (dispatch)."
     )]
     pub confirm: bool,
     // close_loop fields
