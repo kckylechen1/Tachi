@@ -37,7 +37,7 @@ async function tachiJson(args: string[]): Promise<unknown | null> {
  * longer reimplements any of that (it previously spawned the binary in stdio
  * mode with env vars it ignores, then HTTP-polled a server it never started).
  */
-export async function getDaemonStatus(): Promise<DaemonStatus> {
+export async function getDaemonStatus(enrich = true): Promise<DaemonStatus> {
   // Authoritative, cheap liveness check via the binary's own pid/lock file.
   const daemon = (await tachiJson(['daemon', 'status', '--json'])) as
     | { state?: string; pid?: number }
@@ -53,12 +53,15 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
     port: config.daemon.port,
   };
 
-  // Best-effort enrichment: total memory entries across all manifest DBs.
-  const full = (await tachiJson(['status', '--json'])) as
-    | { dbs?: { memory_total?: number }[] }
-    | null;
-  if (full && Array.isArray(full.dbs)) {
-    status.memoryCount = full.dbs.reduce((sum, db) => sum + (db.memory_total ?? 0), 0);
+  // Best-effort enrichment: total memory entries across all manifest DBs. Skip
+  // the heavier `tachi status` query for liveness-only checks (start/stop polls).
+  if (enrich) {
+    const full = (await tachiJson(['status', '--json'])) as
+      | { dbs?: { memory_total?: number }[] }
+      | null;
+    if (full && Array.isArray(full.dbs)) {
+      status.memoryCount = full.dbs.reduce((sum, db) => sum + (db.memory_total ?? 0), 0);
+    }
   }
 
   return status;
@@ -66,14 +69,14 @@ export async function getDaemonStatus(): Promise<DaemonStatus> {
 
 export async function startDaemon(): Promise<{ success: boolean; error?: string }> {
   const bin = getBinaryPath();
-  if (bin.includes('/') && !existsSync(bin)) {
+  if ((bin.includes('/') || bin.includes('\\')) && !existsSync(bin)) {
     return {
       success: false,
       error: `tachi binary not found at ${bin}. Install it (e.g. \`cargo install --path crates/memory-server\`) or set TACHI_BINARY.`,
     };
   }
 
-  if ((await getDaemonStatus()).online) {
+  if ((await getDaemonStatus(false)).online) {
     return { success: false, error: 'Daemon is already running' };
   }
 
@@ -89,7 +92,7 @@ export async function startDaemon(): Promise<{ success: boolean; error?: string 
   // Poll the binary's own status to confirm it actually came up.
   for (let i = 0; i < 10; i++) {
     await new Promise((resolve) => setTimeout(resolve, 400));
-    if ((await getDaemonStatus()).online) {
+    if ((await getDaemonStatus(false)).online) {
       return { success: true };
     }
   }
@@ -100,7 +103,7 @@ export async function startDaemon(): Promise<{ success: boolean; error?: string 
 }
 
 export async function stopDaemon(): Promise<{ success: boolean; error?: string }> {
-  if (!(await getDaemonStatus()).online) {
+  if (!(await getDaemonStatus(false)).online) {
     return { success: false, error: 'Daemon is not running' };
   }
   const bin = getBinaryPath();

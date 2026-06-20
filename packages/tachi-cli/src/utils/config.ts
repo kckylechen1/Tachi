@@ -66,10 +66,18 @@ export function getDataDir(): string {
 }
 
 function findOnPath(name: string): string | undefined {
+  // On Windows, executables resolve via PATHEXT extensions (.exe/.cmd/.bat);
+  // elsewhere the bare name is used.
+  const extensions =
+    process.platform === 'win32'
+      ? ['', ...(process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(delimiter)]
+      : [''];
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (!dir) continue;
-    const candidate = join(dir, name);
-    if (existsSync(candidate)) return candidate;
+    for (const ext of extensions) {
+      const candidate = join(dir, `${name}${ext}`);
+      if (existsSync(candidate)) return candidate;
+    }
   }
   return undefined;
 }
