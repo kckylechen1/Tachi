@@ -164,11 +164,25 @@ pub(crate) async fn handle_memory_briefing(
     let checkpoints = json!(checkpoints_res);
     let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
     let wiki_counts: serde_json::Value = wiki_counts_res?;
+    // Report the REAL health score — the same value tachi_status computes —
+    // instead of a placeholder, so the briefing and status surfaces never
+    // disagree (this used to hardcode 95/85 and diverged from the actual score).
+    // collect_snapshot does blocking SQLite I/O, so run it off the async
+    // executor via spawn_blocking.
+    let app_home = crate::status_ops::resolve_app_home();
+    let global_db = server.global_db_path_buf();
+    let project_db = server.project_db_path_buf();
+    let health_score = tokio::task::spawn_blocking(move || {
+        crate::status_ops::collect_snapshot(&app_home, &global_db, project_db.as_deref())
+            .health_score
+    })
+    .await
+    .unwrap_or(0);
     let health_summary = if compact {
-        json!({"health_score": 95, "warnings": [], "wiki": wiki_counts, "compact": true})
+        json!({"health_score": health_score, "warnings": [], "wiki": wiki_counts, "compact": true})
     } else {
         json!({
-            "health_score": if warnings.is_empty() { 95 } else { 85 },
+            "health_score": health_score,
             "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
             "wiki": wiki_counts,
         })
