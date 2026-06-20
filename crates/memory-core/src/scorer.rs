@@ -624,7 +624,19 @@ pub fn entry_has_exact_query_token(entry: &MemoryEntry, query: &str) -> bool {
 /// [`PrecisionMatcher`] list on `SearchOptions` — see the precision-boost loop
 /// in `hybrid_search`.
 pub fn generic_precision_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
-    if is_id_like_exact_query(query) && entry_has_exact_query_token(entry, query) {
+    generic_precision_multiplier_impl(is_id_like_exact_query(query), query, entry)
+}
+
+/// Same as [`generic_precision_multiplier`], but takes a precomputed
+/// `is_id_like` so the query-constant `is_id_like_exact_query` check (which
+/// tokenizes and allocates) isn't repeated for every candidate in the search
+/// hot loop.
+pub(crate) fn generic_precision_multiplier_impl(
+    is_id_like: bool,
+    query: &str,
+    entry: &MemoryEntry,
+) -> f64 {
+    if is_id_like && entry_has_exact_query_token(entry, query) {
         ID_LIKE_EXACT_MATCH_BOOST
     } else {
         1.0

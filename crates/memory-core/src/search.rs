@@ -16,8 +16,8 @@ use crate::{
     },
     error::MemoryError,
     scorer::{
-        cosine_similarity, generic_precision_multiplier, hybrid_score, symbolic_score, tokenize,
-        HybridWeights, PrecisionMatcher,
+        cosine_similarity, generic_precision_multiplier_impl, hybrid_score, is_id_like_exact_query,
+        symbolic_score, tokenize, HybridWeights, PrecisionMatcher,
     },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
@@ -706,11 +706,16 @@ pub fn hybrid_search(
     // Precision boosts: the generic id-like exact-match boost plus any
     // caller-injected domain matchers (tickers, ICD codes, …). In non-RRF mode,
     // cap the multiplier so it amplifies but doesn't overwhelm.
+    let is_id_like = is_id_like_exact_query(query);
     for (id, entry) in &entries_ref {
-        let mut multiplier = generic_precision_multiplier(query, entry);
+        let mut multiplier = generic_precision_multiplier_impl(is_id_like, query, entry);
         for matcher in &opts.precision_matchers {
             if let Some(boost) = matcher.boost(query, entry) {
-                multiplier = multiplier.max(boost);
+                // Guard against a buggy/malicious matcher returning NaN, Inf, or
+                // a value <= 1.0 corrupting or degrading the score.
+                if boost.is_finite() && boost > 1.0 {
+                    multiplier = multiplier.max(boost);
+                }
             }
         }
         if multiplier > 1.0 {
