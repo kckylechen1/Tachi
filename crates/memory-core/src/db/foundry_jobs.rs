@@ -267,7 +267,10 @@ pub fn requeue_retryable_foundry_jobs(
     policy: &FoundryRetryPolicy,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<RequeueOutcome, MemoryError> {
-    let mut stmt = conn.prepare(
+    // Batch all requeue/dead-letter writes into one transaction: a single
+    // commit/fsync instead of an implicit transaction per UPDATE.
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
         "SELECT id,
                 COALESCE(json_extract(metadata, '$.attempts'), 0) AS attempts,
                 updated_at
@@ -289,7 +292,7 @@ pub fn requeue_retryable_foundry_jobs(
     let mut outcome = RequeueOutcome::default();
     for (id, attempts, updated_at) in rows {
         if attempts >= policy.max_attempts {
-            conn.execute(
+            tx.execute(
                 "UPDATE foundry_jobs
                  SET updated_at = ?1,
                      metadata = json_set(
@@ -312,7 +315,7 @@ pub fn requeue_retryable_foundry_jobs(
             continue;
         }
 
-        conn.execute(
+        tx.execute(
             "UPDATE foundry_jobs
              SET status = 'queued',
                  updated_at = ?1,
@@ -324,6 +327,7 @@ pub fn requeue_retryable_foundry_jobs(
         )?;
         outcome.requeued += 1;
     }
+    tx.commit()?;
     Ok(outcome)
 }
 
