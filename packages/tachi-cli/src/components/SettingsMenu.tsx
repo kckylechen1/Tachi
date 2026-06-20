@@ -3,6 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import { t, setLanguage, type Language } from '../utils/i18n.js';
 import { colors } from '../utils/ui.js';
 import { loadConfig, saveConfig } from '../utils/config.js';
+import { KeyEntry } from './KeyEntry.js';
 
 interface SettingsMenuProps {
   onBack: () => void;
@@ -11,6 +12,8 @@ interface SettingsMenuProps {
 export function SettingsMenu({ onBack }: SettingsMenuProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [message, setMessage] = useState('');
+  // When true the API-key entry sub-view owns the keyboard.
+  const [showKeys, setShowKeys] = useState(false);
   const config = loadConfig();
 
   const handleLanguageChange = () => {
@@ -40,25 +43,38 @@ export function SettingsMenu({ onBack }: SettingsMenuProps) {
       label: `${t('settings.autoStart')}: ${config.daemon.autoStart ? '✓' : '✗'}`,
       action: handleAutoStartToggle 
     },
-    { 
-      id: 'datadir', 
+    {
+      id: 'apikeys',
+      label: t('settings.apiKeys'),
+      action: () => setShowKeys(true),
+    },
+    {
+      id: 'datadir',
       label: `${t('settings.dataDir')}: ${config.paths.dataDir}`,
-      action: () => {} 
+      action: () => {}
     },
     { id: 'back', label: t('daemon.back'), action: onBack },
   ];
 
-  useInput((input, key) => {
-    if (key.upArrow) {
-      setSelectedIndex(prev => (prev > 0 ? prev - 1 : menuItems.length - 1));
-    } else if (key.downArrow) {
-      setSelectedIndex(prev => (prev < menuItems.length - 1 ? prev + 1 : 0));
-    } else if (key.return) {
-      menuItems[selectedIndex].action();
-    } else if (input === 'q' || key.escape) {
-      onBack();
-    }
-  });
+  useInput(
+    (input, key) => {
+      if (key.upArrow) {
+        setSelectedIndex(prev => (prev > 0 ? prev - 1 : menuItems.length - 1));
+      } else if (key.downArrow) {
+        setSelectedIndex(prev => (prev < menuItems.length - 1 ? prev + 1 : 0));
+      } else if (key.return) {
+        menuItems[selectedIndex].action();
+      } else if (input === 'q' || key.escape) {
+        onBack();
+      }
+    },
+    // Hand keyboard control to the KeyEntry sub-view while it is open.
+    { isActive: !showKeys }
+  );
+
+  if (showKeys) {
+    return <KeyEntry onDone={() => setShowKeys(false)} />;
+  }
 
   return (
     <Box flexDirection="column" padding={1}>
