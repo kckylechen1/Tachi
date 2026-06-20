@@ -90,8 +90,8 @@ fn setup_report_detects_readiness_from_local_state() {
         report
             .next_steps
             .iter()
-            .any(|step| step.contains("vault_init")),
-        "expected vault next step"
+            .any(|step| step.contains("encrypted vault")),
+        "expected a vault-setup next step when the vault is not initialized"
     );
 
     let _ = std::fs::remove_dir_all(&home);

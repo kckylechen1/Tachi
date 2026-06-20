@@ -261,7 +261,9 @@ pub(super) async fn run_interactive_wizard(
                 Err(err) => {
                     // Fall back to plaintext (unchanged behavior) so the wizard
                     // never strands the user with half-applied state.
-                    println!("  Vault storage failed ({err}); keeping plaintext config.env values.");
+                    println!(
+                        "  Vault storage failed ({err}); keeping plaintext config.env values."
+                    );
                 }
             }
         } else {
@@ -849,14 +851,16 @@ mod tests {
         .expect("init vault");
 
         let mut new_entries = vec![
-            ("VOYAGE_API_KEY".to_string(), "voy_super_secret_value".to_string()),
+            (
+                "VOYAGE_API_KEY".to_string(),
+                "voy_super_secret_value".to_string(),
+            ),
             ("ENABLE_PIPELINE".to_string(), "true".to_string()),
         ];
         let key_names = vec!["VOYAGE_API_KEY".to_string()];
 
-        let stored =
-            upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
-                .expect("funnel keys into vault");
+        let stored = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
+            .expect("funnel keys into vault");
         assert_eq!(stored, 1);
 
         // The API key row is now a vault alias; no plaintext value remains.

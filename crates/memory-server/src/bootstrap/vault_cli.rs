@@ -1094,7 +1094,8 @@ fn run_vault_setup_keys(
             skipped += 1;
             continue;
         }
-        let is_new = vault_upsert_secret_with_key(global_db_path, &key, name, "api_key", "", value)?;
+        let is_new =
+            vault_upsert_secret_with_key(global_db_path, &key, name, "api_key", "", value)?;
         // Never print the secret value; only the name and create/update status.
         println!("  {name}: {}", if is_new { "stored" } else { "updated" });
         stored += 1;
