@@ -4,6 +4,22 @@ pub(super) const KANBAN_CATEGORY: &str = "kanban";
 pub(super) const KANBAN_PATH_PREFIX: &str = "/kanban/";
 pub(super) const DEFAULT_KANBAN_GC_MAX_AGE_DAYS: u64 = 30;
 
+/// Path prefix for dispatch ("board") cards. These are written as
+/// `category=fact`, `retention_policy=Pinned` rows with the run lifecycle in
+/// `metadata.a2a_state`, so they never match the `resolved`/`expired` kanban
+/// reaper and would otherwise accumulate forever.
+pub(super) const KANBAN_DISPATCH_PATH_PREFIX: &str = "/kanban/tasks/";
+
+/// Non-terminal `a2a_state` values for dispatch cards. A card stuck in one of
+/// these states for longer than the GC max age is from a long-dead run (the
+/// run-ledger has already been GC'd), so it is safe to purge without any
+/// status reconciliation.
+pub(super) const KANBAN_DISPATCH_NON_TERMINAL_STATES: &[&str] = &[
+    "TASK_STATE_WORKING",
+    "TASK_STATE_PENDING",
+    "TASK_STATE_INPUT_REQUIRED",
+];
+
 fn default_card_priority() -> String {
     "medium".to_string()
 }
@@ -189,35 +205,54 @@ pub(super) fn gc_expired_kanban_cards(
     let mut stmt = store
         .connection()
         .prepare(
-            "SELECT id, timestamp, metadata
+            "SELECT id, path, category, timestamp, metadata
              FROM memories
-             WHERE category = ?1 AND path LIKE ?2",
+             WHERE path LIKE ?1",
         )
         .map_err(|e| format!("prepare kanban GC query failed: {e}"))?;
     let rows = stmt
-        .query_map((KANBAN_CATEGORY, format!("{KANBAN_PATH_PREFIX}%")), |row| {
+        .query_map((format!("{KANBAN_PATH_PREFIX}%"),), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(|e| format!("query expired kanban cards failed: {e}"))?;
 
     let mut ids_to_delete = Vec::new();
     for row in rows {
-        let (id, timestamp, metadata_json) =
+        let (id, path, category, timestamp, metadata_json) =
             row.map_err(|e| format!("read expired kanban card candidate failed: {e}"))?;
         let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
             .map_err(|e| format!("parse kanban card metadata for '{id}' failed: {e}"))?;
-        let Some(status) = metadata
-            .get("status")
-            .and_then(|value| value.as_str())
-            .and_then(normalize_card_status)
-        else {
-            continue;
+
+        // A card is reapable when EITHER:
+        //   (a) it is a `category=kanban` card in a terminal status
+        //       (resolved/expired), or
+        //   (b) it is a dispatch ("board") card under /kanban/tasks/ that is
+        //       stuck in a non-terminal a2a_state from a long-dead run.
+        let reapable = if category == KANBAN_CATEGORY {
+            matches!(
+                metadata
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .and_then(normalize_card_status)
+                    .as_deref(),
+                Some("resolved") | Some("expired")
+            )
+        } else if path.starts_with(KANBAN_DISPATCH_PATH_PREFIX) {
+            metadata
+                .get("a2a_state")
+                .and_then(|value| value.as_str())
+                .map(|state| KANBAN_DISPATCH_NON_TERMINAL_STATES.contains(&state))
+                .unwrap_or(false)
+        } else {
+            false
         };
-        if status != "resolved" && status != "expired" {
+        if !reapable {
             continue;
         }
 
@@ -697,4 +732,106 @@ pub(crate) async fn handle_update_card(
         "revision": entry.revision + 1,
     }))
     .map_err(|e| format!("serialize: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_store() -> MemoryStore {
+        MemoryStore::open_in_memory().expect("test memory store")
+    }
+
+    /// Build a dispatch ("board") card mirroring how `init_kanban_task` writes
+    /// them: `category=fact`, path under `/kanban/tasks/`, `retention_policy=Pinned`,
+    /// lifecycle in `metadata.a2a_state`.
+    fn dispatch_card_entry(id: &str, a2a_state: &str, timestamp: String) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: format!("{KANBAN_DISPATCH_PATH_PREFIX}{id}"),
+            summary: format!("Kanban dispatch {id}"),
+            text: "Dispatch Task".to_string(),
+            importance: 0.7,
+            timestamp,
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: "kanban".to_string(),
+            keywords: vec!["kanban".to_string(), "dispatch".to_string()],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            metadata: json!({
+                "type": "a2a_task",
+                "dispatch_id": id,
+                "a2a_state": a2a_state,
+            }),
+            retention_policy: Some(memory_core::RetentionPolicy::Pinned.as_str().to_string()),
+            domain: Some("system".to_string()),
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
+
+    #[test]
+    fn gc_purges_stale_non_terminal_dispatch_cards_only() {
+        let mut store = test_store();
+
+        let stale = dispatch_card_entry(
+            "stale-working",
+            "TASK_STATE_WORKING",
+            (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        );
+        store.upsert(&stale).expect("upsert stale dispatch card");
+
+        let fresh = dispatch_card_entry(
+            "fresh-working",
+            "TASK_STATE_WORKING",
+            chrono::Utc::now().to_rfc3339(),
+        );
+        store.upsert(&fresh).expect("upsert fresh dispatch card");
+
+        let deleted =
+            gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS).expect("gc");
+        assert_eq!(deleted, 1, "only the stale dispatch card should be reaped");
+
+        assert!(
+            store.get("stale-working").expect("get stale").is_none(),
+            "stale 31d-old WORKING dispatch card must be deleted"
+        );
+        assert!(
+            store.get("fresh-working").expect("get fresh").is_some(),
+            "fresh WORKING dispatch card must be retained"
+        );
+    }
+
+    #[test]
+    fn gc_keeps_old_terminal_dispatch_cards() {
+        let mut store = test_store();
+
+        let old_completed = dispatch_card_entry(
+            "old-completed",
+            "TASK_STATE_COMPLETED",
+            (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        );
+        store
+            .upsert(&old_completed)
+            .expect("upsert old completed dispatch card");
+
+        let deleted =
+            gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS).expect("gc");
+        assert_eq!(deleted, 0, "terminal dispatch cards must not be reaped");
+        assert!(
+            store.get("old-completed").expect("get").is_some(),
+            "terminal (COMPLETED) dispatch card must be retained"
+        );
+    }
 }
