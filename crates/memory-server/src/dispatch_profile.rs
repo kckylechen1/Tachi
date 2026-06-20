@@ -2434,18 +2434,18 @@ fn score_profile_candidate(
             score += 20.0;
             reasons.push("role_matches_verification_request".to_string());
         }
-        "research_request"
+        "research_request" | "explain_request"
             if matches!(
                 profile.role,
                 "explore" | "planner" | "architect" | "ux_researcher"
             ) =>
         {
             score += 30.0;
-            reasons.push("role_matches_research_request".to_string());
+            reasons.push("role_matches_read_only_request".to_string());
         }
-        "research_request" if profile.role == "executor" => {
-            // A read-only research task produces no diff/tests_run/files_changed, so
-            // an executor's evidence contract is structurally unsatisfiable here.
+        "research_request" | "explain_request" if profile.role == "executor" => {
+            // A read-only research/explain task produces no diff/tests_run/files_changed,
+            // so an executor's evidence contract is structurally unsatisfiable here.
             // Deprioritize write-executors for read-only work so role/task fit, not
             // sparse eval history, decides the route.
             score -= 20.0;
@@ -4242,11 +4242,12 @@ mod tests {
         }
     }
 
-    fn verified_eval_row(profile: &str) -> EvalRow {
+    fn verified_eval_row(profile: &str, task_type: crate::agent_eval::TaskType) -> EvalRow {
         EvalRow {
             completion_status: CompletionStatus::Completed,
             verification_present: true,
             failure_mode: None,
+            task_type,
             ..failed_eval_row(profile)
         }
     }
@@ -4315,8 +4316,8 @@ mod tests {
         let explorer = resolve_dispatch_profile("deepseek_explore").expect("explore profile");
 
         let executor_rows = vec![
-            verified_eval_row(executor.name),
-            verified_eval_row(executor.name),
+            verified_eval_row(executor.name, crate::agent_eval::TaskType::ResearchRequest),
+            verified_eval_row(executor.name, crate::agent_eval::TaskType::ResearchRequest),
         ];
 
         let executor_candidate =
@@ -4331,6 +4332,36 @@ mod tests {
              with better eval history ({})",
             explorer_candidate.score,
             executor_candidate.score
+        );
+
+        // explain_request shares the read-only treatment (same arm).
+        let explain_risk = DispatchRisk {
+            task_type: "explain_request".to_string(),
+            ..risk.clone()
+        };
+        let explain_executor = score_profile_candidate(
+            &server,
+            resolve_dispatch_profile("glm_51_impl").expect("executor"),
+            &explain_risk,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("explain executor");
+        let explain_explorer = score_profile_candidate(
+            &server,
+            resolve_dispatch_profile("deepseek_explore").expect("explorer"),
+            &explain_risk,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("explain explorer");
+        assert!(
+            explain_explorer.score > explain_executor.score,
+            "explain_request must also prefer the explore role ({}) over an executor ({})",
+            explain_explorer.score,
+            explain_executor.score
         );
     }
 }
