@@ -72,6 +72,7 @@ mod hub_ops;
 mod kanban;
 mod llm;
 mod manifest;
+mod manifest_audit;
 mod mcp_connection;
 mod mcp_pool;
 mod mcp_proxy;
