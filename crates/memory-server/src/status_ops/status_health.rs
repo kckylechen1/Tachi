@@ -1064,7 +1064,7 @@ pub(crate) fn calculate_health_score(
     score -= ((stuck_jobs as i32) * 5).min(20);
     let low_vector_dbs = dbs
         .iter()
-        .filter(|db| db.memory_total > 0 && db.vector_coverage < 0.9)
+        .filter(|db| crate::status_ops::low_vector_coverage(db))
         .count();
     score -= ((low_vector_dbs as i32) * 10).min(25);
     let dim_mismatch_dbs = dbs
@@ -1074,7 +1074,7 @@ pub(crate) fn calculate_health_score(
     score -= ((dim_mismatch_dbs as i32) * 15).min(30);
     let enrichment_failed_dbs = dbs
         .iter()
-        .filter(|db| db.enrichment_failed_recent > 0)
+        .filter(|db| crate::status_ops::has_enrichment_failures(db))
         .count();
     let enrichment_failed_total: usize = dbs.iter().map(|db| db.enrichment_failed_recent).sum();
     score -= (((enrichment_failed_dbs as i32) * 5) + (enrichment_failed_total as i32 / 10)).min(20);

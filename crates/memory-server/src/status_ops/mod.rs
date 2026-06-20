@@ -1903,7 +1903,7 @@ fn build_status_warnings(
     let low_coverage_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
-        .filter(|d| d.memory_total > 0 && d.vector_coverage < 0.9)
+        .filter(|d| low_vector_coverage(d))
         .map(|d| d.label.as_str())
         .collect();
     let low_coverage_count = low_coverage_dbs.len();
@@ -1917,14 +1917,14 @@ fn build_status_warnings(
     let vector_orphan_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
-        .filter(|d| d.vector_orphans > 0)
+        .filter(|d| has_vector_orphans(d))
         .map(|d| d.label.as_str())
         .collect();
     let vector_orphan_count: usize = snapshot.dbs.iter().map(|d| d.vector_orphans).sum();
     let enrichment_failed_dbs: Vec<&str> = snapshot
         .dbs
         .iter()
-        .filter(|d| d.enrichment_failed_recent > 0)
+        .filter(|d| has_enrichment_failures(d))
         .map(|d| d.label.as_str())
         .collect();
     let enrichment_failed_count: usize = snapshot
@@ -2165,6 +2165,23 @@ fn truncate_probe_warning(message: &str) -> String {
 
 pub(crate) fn vector_dimension_mismatch(db: &DbStatus) -> bool {
     db.vector_count > 0 && db.vector_dimension != Some(EXPECTED_EMBEDDING_DIM)
+}
+
+/// Coverage threshold below which a populated DB is flagged as having low
+/// vector coverage. Single source of truth for the hand-copied `0.9` literal
+/// that previously lived inline in health scoring, status warnings, and the CLI.
+pub(crate) const LOW_VECTOR_COVERAGE: f64 = 0.9;
+
+pub(crate) fn low_vector_coverage(db: &DbStatus) -> bool {
+    db.memory_total > 0 && db.vector_coverage < LOW_VECTOR_COVERAGE
+}
+
+pub(crate) fn has_vector_orphans(db: &DbStatus) -> bool {
+    db.vector_orphans > 0
+}
+
+pub(crate) fn has_enrichment_failures(db: &DbStatus) -> bool {
+    db.enrichment_failed_recent > 0
 }
 
 #[cfg(test)]
