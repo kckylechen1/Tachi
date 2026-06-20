@@ -294,7 +294,8 @@ pub(crate) fn build_setup_report(
     let mut next_steps = Vec::new();
     if configured_api_keys < 2 {
         next_steps.push(format!(
-            "Add missing API keys to {}",
+            "Add missing API keys to the encrypted vault (`tachi vault setup-keys`), then reference \
+             them in {} as `KEY=vault:KEY` aliases instead of plaintext values",
             config_env_path.display()
         ));
     }
@@ -334,7 +335,10 @@ pub(crate) fn build_setup_report(
         .unwrap_or(true)
     {
         next_steps.push(
-            "Initialize the vault after the daemon is running with the vault_init tool".to_string(),
+            "Initialize the encrypted vault and funnel provider keys into it with \
+             `tachi vault setup-keys` (or `tachi vault init` + `tachi vault set NAME`), then use \
+             `KEY=vault:KEY` aliases in config.env instead of plaintext keys"
+                .to_string(),
         );
     }
 

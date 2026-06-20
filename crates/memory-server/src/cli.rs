@@ -1359,4 +1359,27 @@ pub(crate) enum VaultAction {
         #[arg(long, value_name = "PATH")]
         path: Option<PathBuf>,
     },
+    /// Bulk-enter the canonical provider API keys into the encrypted vault.
+    /// Iterates the known provider keys, prompts for each (blank skips), and
+    /// upserts non-empty values encrypted. Initializes the vault first if needed.
+    SetupKeys {
+        /// Read the vault password from stdin (first line) instead of prompting.
+        #[arg(long)]
+        stdin_password: bool,
+        /// Read the vault password from macOS Keychain.
+        #[arg(long)]
+        keychain: bool,
+        /// Read the vault password from a local file (first line only).
+        #[arg(long, value_name = "PATH")]
+        password_file: Option<PathBuf>,
+        /// Read the vault password confirmation from a local file (init only).
+        #[arg(long, value_name = "PATH")]
+        confirm_password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long)]
+        insecure_password_file: bool,
+        /// Include keys flagged deprecated in the canonical list.
+        #[arg(long)]
+        include_deprecated: bool,
+    },
 }
