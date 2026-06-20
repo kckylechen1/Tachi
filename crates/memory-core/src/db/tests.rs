@@ -1135,6 +1135,14 @@ fn record_access_with_updates_ignores_missing_ids() {
 
     assert!(updates.contains_key("touch-present"));
     assert!(!updates.contains_key("touch-missing"));
+    let missing_history: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM access_history WHERE memory_id = ?1",
+            params!["touch-missing"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(missing_history, 0);
 }
 
 #[test]
@@ -1362,6 +1370,48 @@ fn list_by_path_empty_prefix_returns_all() {
     upsert(&mut conn, &make_entry("lbe-2", "any other"), false).unwrap();
     let all = list_by_path(&conn, "/", 10, false).unwrap();
     assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn list_wiki_duplicate_candidates_pushes_path_topic_and_parent_filter_to_sql() {
+    let mut conn = make_conn();
+    let mut same_path = make_entry("wiki-same-path", "same path");
+    same_path.path = "/wiki/engineering/mcp".to_string();
+    same_path.topic = "mcp".to_string();
+    upsert(&mut conn, &same_path, false).unwrap();
+
+    let mut same_topic_elsewhere = make_entry("wiki-same-topic", "same topic");
+    same_topic_elsewhere.path = "/wiki/ops/mcp".to_string();
+    same_topic_elsewhere.topic = "mcp".to_string();
+    upsert(&mut conn, &same_topic_elsewhere, false).unwrap();
+
+    let mut parent_sibling = make_entry("wiki-parent-sibling", "sibling text candidate");
+    parent_sibling.path = "/wiki/engineering/other".to_string();
+    parent_sibling.topic = "other".to_string();
+    upsert(&mut conn, &parent_sibling, false).unwrap();
+
+    let mut unrelated = make_entry("wiki-unrelated", "unrelated text");
+    unrelated.path = "/wiki/product/roadmap".to_string();
+    unrelated.topic = "roadmap".to_string();
+    upsert(&mut conn, &unrelated, false).unwrap();
+
+    let candidates = list_wiki_duplicate_candidates(
+        &conn,
+        "/wiki/engineering/mcp",
+        "mcp",
+        "/wiki/engineering",
+        10,
+    )
+    .unwrap();
+    let ids = candidates
+        .into_iter()
+        .map(|entry| entry.id)
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(ids.contains("wiki-same-path"));
+    assert!(ids.contains("wiki-same-topic"));
+    assert!(ids.contains("wiki-parent-sibling"));
+    assert!(!ids.contains("wiki-unrelated"));
 }
 
 #[test]

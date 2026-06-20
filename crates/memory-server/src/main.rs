@@ -77,6 +77,7 @@ mod mcp_pool;
 mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
+mod network_safety;
 mod notes_ops;
 mod orchestrator_ops;
 mod pack_ops;

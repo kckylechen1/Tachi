@@ -14,7 +14,9 @@ fn ensure_test_env() {
         std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
         std::env::set_var("SILICONFLOW_MODEL", "test-model");
         std::env::set_var("SUMMARY_MODEL", "test-summary-model");
-        std::env::set_var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        if std::env::var_os("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST").is_none() {
+            std::env::set_var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+        }
         std::env::set_var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE", "1");
         // Tests use a single global DB and seed paths across the canonical
         // layout (wiki, project, etc.). Disable path-routing validation so

@@ -42,12 +42,5 @@
     "index.mjs",
     "index.d.ts",
     "*.node"
-  ],
-  "optionalDependencies": {
-    "@chaoxlabs/tachi-node-win32-x64-msvc": "1.5.6",
-    "@chaoxlabs/tachi-node-darwin-x64": "1.5.6",
-    "@chaoxlabs/tachi-node-darwin-arm64": "1.5.6",
-    "@chaoxlabs/tachi-node-linux-x64-gnu": "1.5.6",
-    "@chaoxlabs/tachi-node-linux-arm64-gnu": "1.5.6"
-  }
+  ]
 }

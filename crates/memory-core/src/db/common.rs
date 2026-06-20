@@ -39,26 +39,42 @@ pub fn normalize_utc_iso_or_now(ts: &str) -> String {
     normalize_utc_iso(ts).unwrap_or_else(|_| now_utc_iso())
 }
 
-fn json_string_array_column(row: &rusqlite::Row<'_>, column: &str) -> Vec<String> {
-    row.get::<_, String>(column)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+fn json_string_array_column(row: &rusqlite::Row<'_>, entry_id: &str, column: &str) -> Vec<String> {
+    let raw = match row.get::<_, String>(column) {
+        Ok(raw) => raw,
+        Err(err) => {
+            tracing::warn!(entry_id, column, error = %err, "memory row text column fallback");
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(values) => values,
+        Err(err) => {
+            tracing::warn!(entry_id, column, error = %err, "memory row JSON array fallback");
+            Vec::new()
+        }
+    }
 }
 
-fn optional_text_column(row: &rusqlite::Row<'_>, column: &str) -> String {
-    row.get::<_, String>(column).unwrap_or_default()
+fn optional_text_column(row: &rusqlite::Row<'_>, entry_id: &str, column: &str) -> String {
+    row.get::<_, String>(column).unwrap_or_else(|err| {
+        tracing::warn!(entry_id, column, error = %err, "memory row text column fallback");
+        String::new()
+    })
 }
 
 pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
+    let id: String = row.get("id")?;
     let metadata_str: String = row.get("metadata")?;
-    let metadata: serde_json::Value =
-        serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({}));
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str).unwrap_or_else(|err| {
+        tracing::warn!(entry_id = %id, column = "metadata", error = %err, "memory row JSON object fallback");
+        serde_json::json!({})
+    });
 
     let last_access = row.get("last_access").unwrap_or(None);
 
     Ok(MemoryEntry {
-        id: row.get("id")?,
+        id: id.clone(),
         path: row.get("path")?,
         summary: row.get("summary")?,
         text: row.get("text")?,
@@ -74,10 +90,10 @@ pub fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         valid_until: row.get("valid_until").unwrap_or(None),
         category: row.get("category")?,
         topic: row.get("topic")?,
-        keywords: json_string_array_column(row, "keywords"),
-        persons: json_string_array_column(row, "persons"),
-        entities: json_string_array_column(row, "entities"),
-        location: optional_text_column(row, "location"),
+        keywords: json_string_array_column(row, &id, "keywords"),
+        persons: json_string_array_column(row, &id, "persons"),
+        entities: json_string_array_column(row, &id, "entities"),
+        location: optional_text_column(row, &id, "location"),
         source: row.get("source")?,
         scope: row.get("scope")?,
         archived: row.get("archived")?,

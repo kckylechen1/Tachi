@@ -37,9 +37,10 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::AccessUpdate;
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
-    get_access_times, get_all, list_by_path, normalize_for_write, record_enrichment_failure,
-    release_event_claim, search_fts, search_symbolic_candidates, search_vec, supersede_memory,
-    try_claim_event, update_enrichment_fields, update_with_revision, upsert,
+    get_access_times, get_all, list_by_path, list_wiki_duplicate_candidates, normalize_for_write,
+    record_enrichment_failure, release_event_claim, search_fts, search_symbolic_candidates,
+    search_vec, supersede_memory, try_claim_event, update_enrichment_fields, update_with_revision,
+    upsert,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
