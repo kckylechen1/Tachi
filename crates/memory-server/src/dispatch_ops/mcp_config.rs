@@ -34,6 +34,27 @@ pub(super) async fn generate_mcp_config(
         if !env.is_empty() {
             entry["env"] = json!(env);
         }
+        // NOTE (doubled-prefix caveat): the server key here ("tachi") combines
+        // with each host's MCP tool-namespacing convention. The tools exported
+        // by `tachi serve` are already named `tachi_*` (e.g. `tachi_briefing`,
+        // `tachi_memory`), so the exposed name depends on the host backend:
+        //   - claude / grok / codex (`--mcp-config`): namespace as
+        //     `mcp__<serverKey>__<tool>` → `mcp__tachi__tachi_briefing`.
+        //   - opencode (acpx transport): namespaces as `<serverKey>_<tool>` →
+        //     `tachi_tachi_briefing` (the doubled prefix observed live as
+        //     "tachi_tachi_briefing Unknown").
+        // The worker prompt / `allowed_facades` reference the bare `tachi_*`
+        // names (see dispatch_profile.rs and dispatch_ops/prompt.rs `tool_access`),
+        // and the same prompt string is shared across all backends, so a single
+        // un-prefixed reference cannot match every host. This is NOT fixed here
+        // on purpose: stripping the redundant prefix would require renaming the
+        // tools exported by `tachi serve` (breaking the already-correct
+        // `mcp__tachi__tachi_briefing` exposure on claude and every leader
+        // reference), and renaming/altering the server key is opencode-specific
+        // behavior that cannot be verified in-repo. The host-correct fix is to
+        // make the worker contract reference host-prefixed tool names per
+        // backend (opencode → `tachi_tachi_*`, claude → `mcp__tachi__tachi_*`),
+        // resolved at prompt-assembly time once `params.agent` is known.
         mcp_servers.insert("tachi".to_string(), entry);
     }
 
