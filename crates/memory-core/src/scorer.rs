@@ -529,14 +529,6 @@ pub fn tokenize(s: &str) -> Vec<String> {
 
 // Re-use is_cjk from noise module (single source of truth)
 use crate::noise::is_cjk;
-use regex::Regex;
-use std::sync::OnceLock;
-
-/// Shared compiled regex for A-share 6-digit stock codes.
-static STOCK_CODE_RE: OnceLock<Regex> = OnceLock::new();
-fn stock_code_re() -> &'static Regex {
-    STOCK_CODE_RE.get_or_init(|| Regex::new(r"\b\d{6}\b").unwrap())
-}
 
 /// Compute a normalised query-token recall score [0, 1].
 /// Measures what fraction of query tokens appear in the entry's text/keywords/entities.
@@ -568,39 +560,30 @@ pub fn symbolic_score(
     (overlap as f64) / (query_tokens.len().max(1) as f64)
 }
 
-/// Extract A-share style 6-digit stock codes from a query.
-pub fn extract_stock_codes(query: &str) -> Vec<String> {
-    let re = stock_code_re();
-    re.find_iter(query)
-        .map(|m| m.as_str().to_string())
-        .collect()
-}
-
-pub fn entry_has_stock_code(entry: &MemoryEntry, code: &str) -> bool {
-    let code = code.trim();
-    if code.is_empty() {
-        return false;
-    }
-    entry.entities.iter().any(|e| e.trim() == code)
-        || entry.keywords.iter().any(|k| k.contains(code))
-        || entry.text.contains(code)
-        || entry.summary.contains(code)
-        || entry.path.contains(code)
-}
-
-/// Strong multiplier for exact ticker / trading-term precision matches.
+/// Boost applied when a long, structured, identifier-like query exactly
+/// matches a token in an entry (e.g. `RECALL_PROBE_ALPHA_20260607`).
 ///
-/// Rationale: A-share 6-digit codes (e.g. "688981") are extremely common
-/// numeric strings. Without boosting, FTS/symbolic channels dilute exact
-/// matches across thousands of unrelated entries. The 12.0x factor ensures
-/// an exact ticker match dominates hybrid ranking.
+/// This is the only precision boost the generic engine applies on its own.
+/// Every domain-specific precision boost (stock tickers, ICD codes, legal
+/// citations, …) is supplied by the caller via [`PrecisionMatcher`] so that
+/// `memory-core`, shared by many projects, stays domain-agnostic.
 ///
-/// When `use_rrf` is false (raw weighted-sum mode), the multiplier is
-/// clamped to [1.0, 3.0] so it amplifies rather than overwhelms.
-const TICKER_EXACT_MATCH_BOOST: f64 = 12.0;
+/// When `use_rrf` is false (raw weighted-sum mode), the applied multiplier is
+/// clamped to [1.0, 3.0] by the caller so it amplifies rather than overwhelms.
 const ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
-const IRON_RULE_BOOST: f64 = 5.0;
-const STOP_LOSS_BOOST: f64 = 4.0;
+
+/// A caller-injected, domain-specific precision booster.
+///
+/// A host project registers matchers through `SearchOptions::precision_matchers`
+/// to express "if this (query, entry) pair is an exact match in my domain,
+/// multiply its hybrid score". The engine never inspects the domain — it only
+/// applies whatever boost a matcher returns, under the same RRF clamp and
+/// symbolic-floor mechanics as the generic id-like boost.
+pub trait PrecisionMatcher: Send + Sync {
+    /// Return `Some(boost)` (expected `>= 1.0`) when `entry` is an exact
+    /// precision match for `query` in this matcher's domain; `None` to abstain.
+    fn boost(&self, query: &str, entry: &MemoryEntry) -> Option<f64>;
+}
 
 pub fn is_id_like_exact_query(query: &str) -> bool {
     let query = query.trim();
@@ -633,72 +616,31 @@ pub fn entry_has_exact_query_token(entry: &MemoryEntry, query: &str) -> bool {
         .any(|value| value.to_ascii_lowercase().contains(&query))
 }
 
-pub fn precision_query_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
-    for code in extract_stock_codes(query) {
-        if entry_has_stock_code(entry, &code) {
-            return TICKER_EXACT_MATCH_BOOST;
-        }
-    }
-
-    if is_id_like_exact_query(query) && entry_has_exact_query_token(entry, query) {
-        return ID_LIKE_EXACT_MATCH_BOOST;
-    }
-
-    let q = query.to_ascii_lowercase();
-    let path = entry.path.to_ascii_lowercase();
-
-    let mut mult: f64 = 1.0;
-    let needs_bundle = ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
-        || q.contains("stop loss")
-        || q.contains("stop-loss")
-        || query.contains("止损");
-
-    if !needs_bundle {
-        // Fast path: query doesn't contain any precision terms, skip expensive bundle construction
-        return mult;
-    }
-
-    let bundle = format!(
-        "{} {} {} {} {}",
-        entry.text.to_ascii_lowercase(),
-        entry.summary.to_ascii_lowercase(),
-        entry.keywords.join(" ").to_ascii_lowercase(),
-        entry.entities.join(" ").to_ascii_lowercase(),
-        entry.topic.to_ascii_lowercase(),
-    );
-
-    if ((q.contains("iron") && q.contains("rule")) || q.contains("iron_rules"))
-        && (path.contains("iron_rule")
-            || bundle.contains("iron rule")
-            || bundle.contains("iron_rules")
-            || bundle.contains("iron rules"))
-    {
-        mult = mult.max(IRON_RULE_BOOST);
-    }
-    if (q.contains("stop loss") || q.contains("stop-loss") || query.contains("止损"))
-        && (bundle.contains("stop loss")
-            || bundle.contains("止损")
-            || path.contains("iron_rule")
-            || path.contains("principles"))
-    {
-        mult = mult.max(STOP_LOSS_BOOST);
-    }
-    mult
+/// Generic, domain-agnostic precision boost.
+///
+/// Returns [`ID_LIKE_EXACT_MATCH_BOOST`] when `query` is a long, structured,
+/// identifier-like string that exactly matches a token in `entry`; otherwise
+/// `1.0`. Domain-specific boosts are layered on top by the caller via the
+/// [`PrecisionMatcher`] list on `SearchOptions` — see the precision-boost loop
+/// in `hybrid_search`.
+pub fn generic_precision_multiplier(query: &str, entry: &MemoryEntry) -> f64 {
+    generic_precision_multiplier_impl(is_id_like_exact_query(query), query, entry)
 }
 
-/// Deterministic ticker/entity hints from memory text (no LLM).
-pub fn heuristic_metadata_from_text(text: &str) -> (Vec<String>, Vec<String>) {
-    let re = stock_code_re();
-    let mut entities = Vec::new();
-    let mut keywords = Vec::new();
-    for m in re.find_iter(text) {
-        let code = m.as_str().to_string();
-        if !entities.iter().any(|e| e == &code) {
-            entities.push(code.clone());
-            keywords.push(format!("ticker:{code}"));
-        }
+/// Same as [`generic_precision_multiplier`], but takes a precomputed
+/// `is_id_like` so the query-constant `is_id_like_exact_query` check (which
+/// tokenizes and allocates) isn't repeated for every candidate in the search
+/// hot loop.
+pub(crate) fn generic_precision_multiplier_impl(
+    is_id_like: bool,
+    query: &str,
+    entry: &MemoryEntry,
+) -> f64 {
+    if is_id_like && entry_has_exact_query_token(entry, query) {
+        ID_LIKE_EXACT_MATCH_BOOST
+    } else {
+        1.0
     }
-    (entities, keywords)
 }
 
 #[cfg(test)]
@@ -776,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn symbolic_uses_entities_for_stock_codes() {
+    fn symbolic_score_credits_exact_entity_token() {
         let entities = vec!["688981".to_string()];
         let score = symbolic_score("688981", "无关正文", &[], &entities);
         assert!(score > 0.9, "score={score}");
@@ -835,43 +777,6 @@ mod tests {
     }
 
     #[test]
-    fn precision_multiplier_for_exact_ticker() {
-        use chrono::Utc;
-        let mut entry = crate::types::MemoryEntry {
-            id: "t".into(),
-            path: "/trading/journal".into(),
-            summary: "journal".into(),
-            text: "trade note".into(),
-            importance: 0.7,
-            timestamp: Utc::now().to_rfc3339(),
-            valid_from: String::new(),
-            valid_until: None,
-            category: "fact".into(),
-            topic: String::new(),
-            keywords: vec![],
-            persons: vec![],
-            entities: vec!["688981".into()],
-            location: String::new(),
-            source: "manual".into(),
-            scope: "project".into(),
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            metadata: serde_json::json!({}),
-            retention_policy: None,
-            domain: None,
-            vector: None,
-            recall_count: 0,
-            query_diversity: 0,
-            tier: "raw".to_string(),
-        };
-        assert!(precision_query_multiplier("688981 止损", &entry) >= 10.0);
-        entry.entities.clear();
-        assert!(precision_query_multiplier("688981 止损", &entry) <= 1.0);
-    }
-
-    #[test]
     fn precision_multiplier_for_id_like_exact_probe() {
         use chrono::Utc;
         let entry = crate::types::MemoryEntry {
@@ -904,9 +809,9 @@ mod tests {
             tier: "raw".to_string(),
         };
         assert!(is_id_like_exact_query("RECALL_PROBE_ALPHA_20260607"));
-        assert!(precision_query_multiplier("RECALL_PROBE_ALPHA_20260607", &entry) >= 10.0);
+        assert!(generic_precision_multiplier("RECALL_PROBE_ALPHA_20260607", &entry) >= 10.0);
         assert_eq!(
-            precision_query_multiplier("recall probe alpha", &entry),
+            generic_precision_multiplier("recall probe alpha", &entry),
             1.0
         );
     }
