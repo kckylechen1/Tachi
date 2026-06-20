@@ -8,8 +8,9 @@ use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
 /// Outcome of a memory-distill job. Carries a structured skip reason so
-/// foundry_jobs.metadata.skip_reason answers "why didn't this run?" instead
-/// of the previous opaque "worker reported no-op".
+/// foundry_jobs.metadata.terminal_reason answers "why didn't this run?" instead
+/// of the previous opaque "worker reported no-op". The reason is persisted under
+/// the metadata `$.terminal_reason` key by update_foundry_job_status_with_reason.
 pub(crate) enum DistillOutcome {
     Wrote,
     Skipped(String),
