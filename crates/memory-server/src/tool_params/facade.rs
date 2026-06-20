@@ -166,7 +166,8 @@ fn tachi_orchestrator_action_schema(
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct TachiSearchParams {
-    /// Search query text
+    /// Search query text. tachi_search is the human-readable/markdown alias of
+    /// tachi_memory(action=search) (which defaults to JSON); same retrieval, formatted output.
     pub query: String,
 
     /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "all" searches both (default), "sft" searches training/distillation corpus.
@@ -376,122 +377,146 @@ pub(crate) struct TachiMemoryParams {
 
     // --- search fields ---
     #[serde(default)]
-    #[schemars(description = "Search or ask query text (required for action=search or ask).")]
+    #[schemars(description = "[action=search|ask] Query text (required for these actions).")]
     pub query: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Recall scope for search/ask: \"all\" (default), \"memory\", \"wiki\", or \"sft\"."
+        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", or \"sft\"."
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
-    #[schemars(description = "Maximum results to return (default: 6, max: 100).")]
+    #[schemars(
+        description = "[action=search|ask] Maximum results to return (default: 6, max: 100)."
+    )]
     pub top_k: usize,
     #[serde(default)]
-    #[schemars(description = "Optional path prefix filter, e.g. /scratch/sigil/.")]
+    #[schemars(
+        description = "[action=search|ask] Optional path prefix filter, e.g. /scratch/sigil/."
+    )]
     pub path_prefix: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional open-file path hint to bias recall.")]
+    #[schemars(description = "[action=search|ask] Optional open-file path hint to bias recall.")]
     pub file_context: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional error message hint to bias recall.")]
+    #[schemars(description = "[action=search|ask] Optional error message hint to bias recall.")]
     pub error_context: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Wiki category filter when scope includes wiki.")]
+    #[schemars(
+        description = "[action=search|ask|save|checkpoint] Wiki category filter (search/ask), or the category for the saved/checkpointed entry."
+    )]
     pub category: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Include archived wiki/memory entries in search results.")]
+    #[schemars(
+        description = "[action=search|ask] Include archived wiki/memory entries in results."
+    )]
     pub include_archived: bool,
     #[serde(default)]
     #[schemars(
-        description = "Include training/distillation corpus entries such as /sft/ in normal recall. Defaults false; scope='sft' opts in."
+        description = "[action=search|ask] Include training/distillation corpus entries such as /sft/ in normal recall. Defaults false; scope='sft' opts in."
     )]
     pub include_training: bool,
     #[serde(default)]
     #[schemars(
-        description = "Enable adaptive Voyage reranking when top hybrid scores are close (search/ask)."
+        description = "[action=search|ask] Enable adaptive Voyage reranking when top hybrid scores are close."
     )]
     pub enable_rerank: bool,
     #[serde(default)]
     #[schemars(
-        description = "Point-in-time validity filter (ISO 8601). Returns only memories valid at this time."
+        description = "[action=search|ask] Point-in-time validity filter (ISO 8601). Returns only memories valid at this time."
     )]
     pub as_of: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "When action=ask or consolidate, call the configured LLM to synthesize from evidence."
+        description = "[action=ask|consolidate] Call the configured LLM to synthesize from evidence."
     )]
     pub synthesize: bool,
     #[serde(default)]
-    #[schemars(description = "Optional model override for ask/consolidate synthesis.")]
+    #[schemars(description = "[action=ask|consolidate] Optional model override for synthesis.")]
     pub model: Option<String>,
 
     // --- save fields ---
     #[serde(default)]
-    #[schemars(description = "Full text to save (action=save, checkpoint, extract_facts source).")]
+    #[schemars(
+        description = "[action=save|checkpoint|extract_facts] Full text to persist (or atomize source)."
+    )]
     pub text: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional title (wiki-style entries).")]
+    #[schemars(
+        description = "[action=save|checkpoint] Title for the saved entry or checkpoint (also used as a title override by briefing/progress)."
+    )]
     pub title: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Short summary stored alongside text.")]
+    #[schemars(
+        description = "[action=save|checkpoint|progress] Short summary stored alongside the saved entry, checkpoint, or progress state."
+    )]
     pub summary: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Topic label for the entry.")]
+    #[schemars(description = "[action=save] Topic label for the entry.")]
     pub topic: Option<String>,
     #[serde(default, alias = "indexed_tags")]
-    #[schemars(description = "Tags for recall/FTS, e.g. rust, mcp, refactor.")]
+    #[schemars(description = "[action=save] Tags for recall/FTS, e.g. rust, mcp, refactor.")]
     pub keywords: Vec<String>,
     #[serde(default)]
-    #[schemars(description = "Named entities, e.g. sigil, memory-server, postgres.")]
+    #[schemars(description = "[action=save] Named entities, e.g. sigil, memory-server, postgres.")]
     pub entities: Vec<String>,
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
-    #[schemars(description = "Importance score 0.0–1.0 (default: 0.5 on save).")]
+    #[schemars(description = "[action=save] Importance score 0.0–1.0 (default: 0.5).")]
     pub importance: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "Retention policy name (save).")]
+    #[schemars(description = "[action=save] Retention policy name.")]
     pub retention_policy: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Save kind hint: memory, note, or wiki (auto-detected if omitted).")]
+    #[schemars(
+        description = "[action=save] Kind hint: memory, note, or wiki (auto-detected if omitted)."
+    )]
     pub kind: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Hierarchical path for saving. Working notes: /scratch/<project>/..., review notes: /code-review/<project>/..., wiki: /wiki/... e.g. /scratch/sigil/schema-bug-fix"
+        description = "[action=save] Hierarchical path. Working notes: /scratch/<project>/..., review notes: /code-review/<project>/..., wiki: /wiki/... e.g. /scratch/sigil/schema-bug-fix"
     )]
     pub path: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Existing memory id to update (save) instead of creating a new row.")]
+    #[schemars(
+        description = "[action=get|save] Memory id to fetch (get) or to update in place instead of creating a new row (save)."
+    )]
     pub id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Bypass dedup guards on save when true.")]
+    #[schemars(description = "[action=save] Bypass dedup guards when true.")]
     pub force: bool,
     #[serde(default)]
-    #[schemars(description = "Provenance source label, e.g. cursor, codex, openclaw.")]
+    #[schemars(
+        description = "[action=save] Provenance source label, e.g. cursor, codex, openclaw."
+    )]
     pub source: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Validity start (ISO 8601) for time-bounded facts.")]
+    #[schemars(description = "[action=save] Validity start (ISO 8601) for time-bounded facts.")]
     pub valid_from: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Validity end (ISO 8601) for time-bounded facts.")]
+    #[schemars(description = "[action=save] Validity end (ISO 8601) for time-bounded facts.")]
     pub valid_until: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Arbitrary JSON metadata merged into the stored entry.")]
+    #[schemars(
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
+    )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
+    #[schemars(
+        description = "[action=save] Referenced source files, e.g. docs/SPEC.md, src/lib.rs."
+    )]
     pub files: Vec<String>,
 
     // --- progress / long-running command fields ---
     #[serde(default)]
-    #[schemars(description = "Flow id for action=progress (create or resume a tracked command).")]
+    #[schemars(description = "[action=progress] Flow id (create or resume a tracked command).")]
     pub flow_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Progress event name, e.g. step_done, failed.")]
+    #[schemars(description = "[action=progress] Event name, e.g. step_done, failed.")]
     pub event: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Progress state payload or status line for action=progress.")]
+    #[schemars(description = "[action=progress] State payload or status line.")]
     pub state: Option<String>,
 
     // --- shared ---
@@ -509,7 +534,7 @@ pub(crate) struct TachiMemoryParams {
     // --- briefing shape ---
     #[serde(default)]
     #[schemars(
-        description = "When true (action=briefing), emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
+        description = "[action=briefing] When true, emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
     )]
     pub compact: bool,
 }
@@ -1166,14 +1191,27 @@ pub(crate) struct TachiTaskParams {
     pub format: Option<String>,
     // plan fields
     #[serde(default)]
+    #[schemars(
+        description = "[action=plan|recommend|dispatch|route_simulate|complete|intake|pr_handoff|ux_matrix] Task description / prompt text."
+    )]
     pub task: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=plan|recommend|dispatch] Requesting agent id.")]
     pub agent_id: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=plan|recommend|briefing] Area tag (e.g. rust, mcp) to scope context."
+    )]
     pub domain: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=plan|recommend|briefing] Optional recall path prefix filter."
+    )]
     pub path_prefix: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=plan|recommend|briefing] Maximum context fragments to recall."
+    )]
     pub top_k: Option<usize>,
     // feature briefing fields
     #[serde(default)]
@@ -1200,99 +1238,126 @@ pub(crate) struct TachiTaskParams {
     pub compact: Option<bool>,
     // dispatch / complete fields
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch|recommend|complete] Agent backend, e.g. claude, codex, grok, kimi."
+    )]
     pub agent: Option<String>,
-    /// Outcome for action="complete": success | failure | partial | aborted.
+    /// [action=complete] Outcome: success | failure | partial | aborted.
     #[serde(default)]
     pub outcome: Option<String>,
-    /// Optional task id for action="complete".
+    /// [action=complete] Optional task id.
     #[serde(default)]
     pub task_id: Option<String>,
-    /// Standard task type for action="complete", e.g. fix_request or plan_request.
+    /// [action=complete] Standard task type, e.g. fix_request or plan_request.
     #[serde(default)]
     pub task_type: Option<String>,
-    /// Execution duration in milliseconds for action="complete".
+    /// [action=complete] Execution duration in milliseconds.
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
     pub duration_ms: Option<u64>,
-    /// Skills actually used during action="complete". Distinct from dispatch prompt skills.
+    /// [action=complete] Skills actually used. Distinct from dispatch prompt skills.
     #[serde(default)]
     pub skills_used: Vec<String>,
-    /// Cost in tokens for action="complete".
+    /// [action=complete] Cost in tokens.
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
     pub cost_tokens: Option<u64>,
-    /// Cost in USD for action="complete".
+    /// [action=complete] Cost in USD.
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
     pub cost_usd: Option<f64>,
-    /// Quality score 0.0-1.0 for action="complete".
+    /// [action=complete] Quality score 0.0-1.0.
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
     pub quality_score: Option<f64>,
-    /// Completion notes or summary for action="complete".
+    /// [action=complete] Completion notes or summary.
     #[serde(default)]
     pub notes: Option<String>,
-    /// Execution trajectory for action="complete". Store compact step objects, not raw transcripts.
+    /// [action=complete] Execution trajectory. Store compact step objects, not raw transcripts.
     #[serde(default)]
     pub trajectory: Option<serde_json::Value>,
-    /// Unified diff or patch evidence for action="complete".
+    /// [action=complete] Unified diff or patch evidence.
     #[serde(default)]
     pub diff: Option<String>,
-    /// Structured subagent eval records for action="complete".
+    /// [action=complete] Structured subagent eval records.
     #[serde(default)]
     pub subagents: Vec<TachiSubagentEvalParams>,
-    /// Feedback/prompt-quality rule ids that were applied to this task.
+    /// [action=complete] Feedback/prompt-quality rule ids that were applied to this task.
     #[serde(default)]
     pub feedback_rules_applied: Vec<String>,
-    /// Evidence references for action="complete" verification.
+    /// [action=complete] Evidence references for verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
-    /// Verification commands run for action="complete".
+    /// [action=complete] Verification commands run.
     #[serde(default)]
     pub tests_run: Vec<String>,
-    /// Whether a diff was present for action="complete"; inferred from diff if absent.
+    /// [action=complete] Whether a diff was present; inferred from diff if absent.
     #[serde(default)]
     pub diff_present: Option<bool>,
-    /// Target DB scope for action="complete": global or project.
+    /// [action=complete] Target DB scope: global or project.
     #[serde(default)]
     pub scope: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Working directory for the spawned agent.")]
     pub cwd: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Skill ids to inject into the agent prompt.")]
     pub skills: Vec<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Extra recall query; top hits are injected into the prompt."
+    )]
     pub context_query: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Model override for the spawned agent.")]
     pub model: Option<String>,
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(description = "[action=dispatch] Timeout in seconds for the spawned agent.")]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Permission profile, e.g. full, allowlist, default."
+    )]
     pub permission_profile: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Tool allowlist when permission_profile=allowlist."
+    )]
     pub allowed_tools: Vec<String>,
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u32_from_string_or_number"
     )]
+    #[schemars(
+        description = "[action=dispatch] Maximum conversation turns for the spawned agent."
+    )]
     pub max_turns: Option<u32>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Codex sandbox: workspace-write | danger-full-access | read-only."
+    )]
     pub sandbox: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Inject Tachi MCP when the backend supports it.")]
     pub inject_tachi_mcp: Option<bool>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Inject Hub MCPs when the backend supports it.")]
     pub inject_hub_mcps: Option<bool>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] Explicit command argv override for custom backends."
+    )]
     pub command: Vec<String>,
     #[serde(default)]
     #[schemars(
@@ -1305,8 +1370,14 @@ pub(crate) struct TachiTaskParams {
     )]
     pub harness_server_url: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Named project DB for context/dispatch. Shared across actions; omit for the daemon-bound workspace DB."
+    )]
     pub project: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch|recommend] Workflow stage hint, e.g. plan, build, review."
+    )]
     pub stage: Option<String>,
     #[serde(default, alias = "dispatch_profile")]
     #[schemars(
@@ -1332,12 +1403,21 @@ pub(crate) struct TachiTaskParams {
     )]
     pub number: Option<u64>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=intake|link_pr|pr_status|pr_handoff|dispatch|complete] GitHub issue ref, e.g. owner/repo#123 or URL."
+    )]
     pub issue_ref: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=link_pr|pr_status|pr_handoff|release_note|dispatch|complete] GitHub PR ref, e.g. owner/repo#123 or URL."
+    )]
     pub pr_ref: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/link_pr/pr_handoff/release_note/ux_matrix/close_loop/status/wait/dispatch/complete)."
+    )]
     pub flow_id: Option<String>,
-    /// Dispatch id linked to action="complete".
+    /// [action=complete] Dispatch id linked to this completion.
     #[serde(default)]
     pub dispatch_id: Option<String>,
     #[serde(default)]
@@ -1351,15 +1431,24 @@ pub(crate) struct TachiTaskParams {
     )]
     pub tool_profile: Option<String>,
     #[serde(default, alias = "include_capability_bundle")]
+    #[schemars(
+        description = "[action=dispatch|recommend] Include a capability bundle in the dispatch prompt when supported."
+    )]
     pub auto_capability_bundle: Option<bool>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=dispatch] MCP/GitHub access contract for the spawned agent."
+    )]
     pub mcp_access: Option<DispatchMcpAccessParams>,
     #[serde(default)]
+    #[schemars(description = "[action=dispatch] Hub MCP server ids the dispatch may inject.")]
     pub allowed_mcp_servers: Vec<String>,
     // board fields
     #[serde(default)]
+    #[schemars(description = "[action=board] Filter dispatch ledger rows by state.")]
     pub state_filter: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=board|proposals] Maximum ledger/proposal rows to return.")]
     pub limit: Option<usize>,
     #[serde(default)]
     #[schemars(
@@ -1377,6 +1466,9 @@ pub(crate) struct TachiTaskParams {
     )]
     pub worktree: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "[action=merge|pr_handoff] Branch to merge from the local dispatched worktree (merge), or the branch name to record in the handoff (pr_handoff)."
+    )]
     pub branch: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -1389,34 +1481,51 @@ pub(crate) struct TachiTaskParams {
     )]
     pub merge_policy: Option<String>,
     #[serde(default = "default_true")]
+    #[schemars(
+        description = "[action=merge] Remove the local worktree after a successful merge. Defaults true."
+    )]
     pub delete_worktree: bool,
     #[serde(default)]
+    #[schemars(
+        description = "[action=merge|dispatch] Confirm the local worktree merge (merge), or bypass the leader confirmation gate when dispatching an issue flow (dispatch)."
+    )]
     pub confirm: bool,
     // close_loop fields
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure entry title.")]
     pub wiki_title: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure entry body text.")]
     pub wiki_text: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure path, e.g. /wiki/....")]
     pub wiki_path: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure topic label.")]
     pub wiki_topic: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure short summary.")]
     pub wiki_summary: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure category.")]
     pub wiki_category: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure keywords/tags.")]
     pub wiki_keywords: Vec<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure named entities.")]
     pub wiki_entities: Vec<String>,
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(description = "[action=close_loop] Wiki closure importance 0.0-1.0.")]
     pub wiki_importance: Option<f64>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure scope: global or project.")]
     pub wiki_scope: Option<String>,
     #[serde(default)]
+    #[schemars(description = "[action=close_loop] Wiki closure area/domain tag.")]
     pub wiki_domain: Option<String>,
     #[serde(default)]
     #[schemars(
