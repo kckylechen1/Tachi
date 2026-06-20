@@ -1,6 +1,7 @@
 mod auto_link;
 mod confidence_reinforce;
 mod contradiction;
+mod routing_config;
 mod save_memory;
 mod search_helpers;
 mod search_memory;

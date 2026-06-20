@@ -45,31 +45,33 @@ fn query_explicitly_requests_foreign_sigil_domain(query: &str, domain: Option<&s
     if domain.is_some() {
         return true;
     }
+    let config = super::routing_config::RoutingConfig::get();
     let q = query.to_lowercase();
-    // ASCII terms must match a whole alphanumeric word, otherwise common coding
-    // queries trip them as substrings ("change"/"channel" → "chan",
-    // "quantity" → "quant", "inequity" → "equity") and silently disable the
-    // Sigil foreign-domain recall filter.
-    const WORD_TERMS: &[&str] = &[
-        "hyperion", "quant", "trading", "equity", "kronos", "warpcore", "chan", "v8",
-    ];
-    // CJK / numeric identifiers are specific enough to match as raw substrings;
-    // CJK is not whitespace-delimited so word splitting does not apply.
-    const SUBSTRING_TERMS: &[&str] = &["股票", "个股", "止损", "盘中", "持仓", "688981"];
+    // Whole-word ASCII terms (so common coding queries like "change"/"channel"
+    // → "chan", "quantity" → "quant" don't trip the filter) plus CJK/numeric
+    // substrings. Both term lists come from RoutingConfig, not hardcoded here.
     let matches_word = q
         .split(|c: char| !c.is_alphanumeric())
-        .any(|word| WORD_TERMS.contains(&word));
-    matches_word || SUBSTRING_TERMS.iter().any(|term| q.contains(term))
+        .any(|word| config.foreign_domain_word_terms.iter().any(|t| t == word));
+    matches_word
+        || config
+            .foreign_domain_substring_terms
+            .iter()
+            .any(|term| q.contains(term))
 }
 
 fn is_foreign_sigil_memory(entry: &memory_core::MemoryEntry) -> bool {
-    let domain = entry.domain.as_deref().unwrap_or("").to_ascii_lowercase();
+    let config = super::routing_config::RoutingConfig::get();
+    let domain = entry.domain.as_deref().unwrap_or("");
     let path = entry.path.to_ascii_lowercase();
-    matches!(
-        domain.as_str(),
-        "equity_trading" | "trading" | "finance" | "hyperion"
-    ) || path.starts_with("/trading/")
-        || path.starts_with("/scratch/hyperion/")
+    config
+        .foreign_domains
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(domain))
+        || config
+            .foreign_path_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix.as_str()))
 }
 
 fn project_scope_allows_memory(
