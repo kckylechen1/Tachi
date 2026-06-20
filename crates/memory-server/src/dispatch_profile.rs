@@ -2485,6 +2485,22 @@ fn score_profile_candidate(
     let mut latency_count = 0u32;
     let mut cost_sum = 0.0;
     let mut cost_count = 0u32;
+    // The performance matrix already aggregates a `leader`-scope bucket per
+    // profile+task_type from these same eval rows, and the perf-matrix loop
+    // below penalizes that bucket's *failures* — it never rewards successes.
+    // So only the raw-row *failure* penalty can double-count against the
+    // perf-matrix leader path; that one is gated under `!has_perf_leader_row`
+    // below. The success rewards are applied unconditionally because the
+    // perf-matrix path scores no successes — gating them would leave a leader
+    // profile with perf data penalized for failures but never credited for
+    // wins. Sample bookkeeping (live_samples/useful_rate/failure_count) is
+    // always accumulated so the candidate's reported stats stay complete.
+    let has_perf_leader_row = performance_matrix.iter().any(|perf| {
+        perf.scope == "leader"
+            && perf.profile.as_deref() == Some(profile.name)
+            && perf.task_type == risk.task_type
+    });
+    let mut raw_failure_count = 0u32;
     for row in rows {
         if row.profile.as_deref() == Some(profile.name) {
             live_samples += 1;
@@ -2495,16 +2511,24 @@ fn score_profile_candidate(
                 score += 5.0;
                 useful_sum += 0.6;
             } else {
-                score -= 8.0;
+                raw_failure_count += 1;
                 failure_count += 1;
             }
             useful_count += 1;
         }
     }
+    if !has_perf_leader_row && raw_failure_count > 0 {
+        // Sample-weight and clamp the aggregate failure contribution to mirror
+        // the perf-matrix path so sparse failures can no longer alone push the
+        // score down without bound (previously a bare -8.0 per failed row that
+        // could remove -24 unweighted and unclamped).
+        let weight = (raw_failure_count as f64).min(20.0) / 20.0;
+        let raw_failure_penalty = (raw_failure_count as f64 * 4.0).min(16.0) * weight;
+        score -= raw_failure_penalty;
+        reasons.push(format!("live_eval_failures={raw_failure_count}"));
+    }
     for sub in subagent_scores {
-        let role_match = sub.role == profile.role
-            || (profile.role.contains("review") && sub.role.contains("review"))
-            || (profile.role == "architect" && sub.role == "critic");
+        let role_match = profile_role_matches(profile, &sub.role);
         let agent_match = sub.agent == profile.backend;
         let task_match = sub.task_type == risk.task_type;
         if role_match && agent_match && task_match {
@@ -2528,12 +2552,10 @@ fn score_profile_candidate(
             continue;
         }
         let role_match = perf.scope == "leader"
-            || perf.role.as_deref().is_some_and(|role| {
-                role == profile.role
-                    || (profile.role.contains("review") && role.contains("review"))
-                    || (profile.role == "architect" && role == "critic")
-                    || (profile.role == "executor" && role == "implementer")
-            });
+            || perf
+                .role
+                .as_deref()
+                .is_some_and(|role| profile_role_matches(profile, role));
         if !role_match {
             continue;
         }
@@ -4173,5 +4195,75 @@ mod tests {
 
         assert_eq!(risk.risk, "high");
         assert_eq!(count, 1);
+    }
+
+    fn scoring_test_server() -> MemoryServer {
+        let db_path = std::env::temp_dir().join(format!(
+            "dispatch-scoring-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("test memory server")
+    }
+
+    fn failed_eval_row(profile: &str) -> EvalRow {
+        EvalRow {
+            agent: "custom".to_string(),
+            profile: Some(profile.to_string()),
+            model: None,
+            mode: None,
+            task_type: crate::agent_eval::TaskType::FixRequest,
+            turns: 0,
+            tool_calls: 0,
+            verification_present: false,
+            failure_mode: Some("blocked".to_string()),
+            completion_status: CompletionStatus::Blocked,
+            cost_usd: None,
+            cost_tokens: None,
+            quality_score: None,
+            latency_ms: None,
+            subagents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competitor() {
+        let server = scoring_test_server();
+
+        // A fix_request: the executor role is correct, the senior reviewer is not.
+        // The lone signal (dispatch_refactor) is something the reviewer is
+        // strong_against but the executor is neither strong nor weak against, so
+        // it isolates the eval-failure penalty as the only differentiator.
+        let risk = DispatchRisk {
+            task_type: "fix_request".to_string(),
+            risk: "low".to_string(),
+            reasons: vec!["touched_area:dispatch_refactor".to_string()],
+            required_profiles: Vec::new(),
+            blocked_profiles: Vec::new(),
+        };
+
+        let executor = resolve_dispatch_profile("glm_51_impl").expect("executor profile");
+        let competitor = resolve_dispatch_profile("codex_55_review").expect("reviewer profile");
+
+        // Sparse failures (3) for the role-correct executor. Under the old bare
+        // -8.0-per-row penalty these alone removed -24, sinking the role bonus
+        // below the role-wrong competitor; the bounded/weighted path must not.
+        let rows = vec![
+            failed_eval_row(executor.name),
+            failed_eval_row(executor.name),
+            failed_eval_row(executor.name),
+        ];
+
+        let executor_candidate =
+            score_profile_candidate(&server, executor, &risk, &rows, &[], &[]).expect("executor");
+        let competitor_candidate =
+            score_profile_candidate(&server, competitor, &risk, &[], &[], &[]).expect("competitor");
+
+        assert_eq!(executor_candidate.failure_count, 3);
+        assert!(
+            executor_candidate.score > competitor_candidate.score,
+            "role-correct executor ({}) must stay above role-wrong competitor ({})",
+            executor_candidate.score,
+            competitor_candidate.score
+        );
     }
 }
