@@ -266,12 +266,25 @@ pub(crate) fn resolve_workspace_named_project() -> Option<String> {
 }
 
 pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
-    if matches!(
-        domain.map(str::trim),
-        Some("equity_trading") | Some("trading") | Some("finance") | Some("hyperion")
-    ) && named_project_db_exists("hyperion")
-    {
-        return Some("hyperion".to_string());
+    infer_search_project_with(query, domain, super::routing_config::RoutingConfig::get())
+}
+
+/// Config-injectable core. Domain-specific routing (tickers, finance terms) is
+/// supplied by [`RoutingConfig`] rather than hardcoded here; the engine itself
+/// stays domain-agnostic.
+fn infer_search_project_with(
+    query: &str,
+    domain: Option<&str>,
+    config: &super::routing_config::RoutingConfig,
+) -> Option<String> {
+    if let Some(domain) = domain.map(str::trim).filter(|d| !d.is_empty()) {
+        for route in &config.domain_routes {
+            if route.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+                && named_project_db_exists(&route.project)
+            {
+                return Some(route.project.clone());
+            }
+        }
     }
 
     let q = query.trim();
@@ -280,10 +293,12 @@ pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<
     }
     let q_lower = q.to_lowercase();
 
-    static TICKER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let ticker_re = TICKER_RE.get_or_init(|| regex::Regex::new(r"\b\d{6}\b").unwrap());
-    if ticker_re.is_match(q) && named_project_db_exists("hyperion") {
-        return Some("hyperion".to_string());
+    if let Some(project) = config.ticker_route_project.as_deref() {
+        static TICKER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+        let ticker_re = TICKER_RE.get_or_init(|| regex::Regex::new(r"\b\d{6}\b").unwrap());
+        if ticker_re.is_match(q) && named_project_db_exists(project) {
+            return Some(project.to_string());
+        }
     }
 
     for project in list_available_named_projects() {
@@ -292,30 +307,11 @@ pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<
         }
     }
 
-    const ROUTES: &[(&str, &[&str])] = &[
-        (
-            "hyperion",
-            &[
-                "hyperion",
-                "radar",
-                "warpcore",
-                "hapi",
-                "hermes",
-                "trading",
-                "止损",
-                "iron rules",
-                "牛市",
-                "daemon",
-            ],
-        ),
-        (
-            "sigil",
-            &["sigil", "memory-server", "tachi", "mcp", "foundry"],
-        ),
-    ];
-    for (project, terms) in ROUTES {
-        if named_project_db_exists(project) && terms.iter().any(|term| q_lower.contains(term)) {
-            return Some((*project).to_string());
+    for route in &config.project_routes {
+        if named_project_db_exists(&route.project)
+            && route.terms.iter().any(|term| q_lower.contains(term))
+        {
+            return Some(route.project.clone());
         }
     }
 
@@ -364,13 +360,40 @@ mod tests {
         if !named_project_db_exists("hyperion") {
             return;
         }
+        // Use the default config explicitly so the test is deterministic
+        // regardless of any ~/.tachi/routing.json on the test host.
+        let config = crate::memory_search_ops::routing_config::RoutingConfig::default();
         assert_eq!(
-            infer_search_project("688981 止损记录", None).as_deref(),
+            infer_search_project_with("688981 止损记录", None, &config).as_deref(),
             Some("hyperion")
         );
         assert_eq!(
-            infer_search_project("portfolio risk", Some("equity_trading")).as_deref(),
+            infer_search_project_with("portfolio risk", Some("equity_trading"), &config).as_deref(),
             Some("hyperion")
+        );
+    }
+
+    #[test]
+    fn empty_routing_config_makes_engine_domain_agnostic() {
+        // With every routing list emptied, no finance/ticker term routes anywhere
+        // — the engine is fully generic. Only an explicit project-name match
+        // (handled separately) would still route.
+        let config = crate::memory_search_ops::routing_config::RoutingConfig {
+            domain_routes: Vec::new(),
+            ticker_route_project: None,
+            project_routes: Vec::new(),
+            foreign_domain_word_terms: Vec::new(),
+            foreign_domain_substring_terms: Vec::new(),
+            foreign_domains: Vec::new(),
+            foreign_path_prefixes: Vec::new(),
+        };
+        assert_eq!(
+            infer_search_project_with("688981 止损记录", None, &config),
+            None
+        );
+        assert_eq!(
+            infer_search_project_with("portfolio risk", Some("equity_trading"), &config),
+            None
         );
     }
 
