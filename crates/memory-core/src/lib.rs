@@ -20,8 +20,9 @@ pub mod vault;
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
-    job_status_histogram, load_pending_foundry_jobs, update_foundry_job_status_with_reason,
-    FoundryJobLease, FoundryJobSummary, JobStatusHistogram, PersistedFoundryJob,
+    job_status_histogram, load_pending_foundry_jobs, requeue_retryable_foundry_jobs,
+    update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryRetryPolicy,
+    JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
 pub use error::MemoryError;

@@ -184,6 +184,16 @@ pub fn job_status_histogram(
         )
         .unwrap_or(0) as usize;
 
+    hist.dead_lettered = conn
+        .query_row(
+            "SELECT COUNT(*) FROM foundry_jobs
+             WHERE status = 'failed'
+               AND COALESCE(json_extract(metadata, '$.dead_letter'), 0) != 0",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as usize;
+
     Ok(hist)
 }
 
@@ -197,15 +207,143 @@ pub struct JobStatusHistogram {
     pub failed: usize,
     pub skipped: usize,
     pub other: Vec<(String, usize)>,
+    /// Failed jobs that have exhausted their retries (dead-lettered). These are
+    /// the only failures the health score treats as genuine/current.
+    pub dead_lettered: usize,
     /// Number of terminal-state jobs older than the GC threshold (would be deleted next GC).
     pub gc_eligible: usize,
 }
 
+/// Retry policy for failed Foundry jobs.
+///
+/// A failed job is re-queued up to `max_attempts` times once an exponential
+/// backoff (measured from the last failure) has elapsed. After the attempts are
+/// exhausted it is parked in the **dead-letter** state: it stops being retried
+/// and is what the health score treats as a genuine, current failure.
+#[derive(Debug, Clone, Copy)]
+pub struct FoundryRetryPolicy {
+    pub max_attempts: u32,
+    pub base_backoff_secs: i64,
+    pub max_backoff_secs: i64,
+}
+
+impl Default for FoundryRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_backoff_secs: 300,     // 5 min
+            max_backoff_secs: 6 * 3600, // 6 h
+        }
+    }
+}
+
+impl FoundryRetryPolicy {
+    /// Backoff before the next retry given how many attempts have already been
+    /// made (exponential with `base * 2^attempts`, capped at `max_backoff_secs`).
+    fn backoff_secs(&self, attempts: u32) -> i64 {
+        let factor = 1i64.checked_shl(attempts.min(20)).unwrap_or(i64::MAX);
+        self.base_backoff_secs
+            .saturating_mul(factor)
+            .min(self.max_backoff_secs)
+    }
+}
+
+/// Result of a retry sweep.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+pub struct RequeueOutcome {
+    pub requeued: usize,
+    pub dead_lettered: usize,
+}
+
+/// Re-queue failed jobs whose backoff has elapsed and dead-letter the ones that
+/// have exhausted their attempts.
+///
+/// All retry logic lives here so the many failure sites can keep simply marking
+/// jobs `failed`; `attempts` / `dead_letter` are tracked in the existing
+/// `metadata` JSON column (no schema migration). Idempotent and safe to call
+/// before any replay.
+pub fn requeue_retryable_foundry_jobs(
+    conn: &Connection,
+    policy: &FoundryRetryPolicy,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<RequeueOutcome, MemoryError> {
+    // Batch all requeue/dead-letter writes into one transaction: a single
+    // commit/fsync instead of an implicit transaction per UPDATE.
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "SELECT id,
+                COALESCE(json_extract(metadata, '$.attempts'), 0) AS attempts,
+                updated_at
+         FROM foundry_jobs
+         WHERE status = 'failed'
+           AND COALESCE(json_extract(metadata, '$.dead_letter'), 0) = 0",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let attempts: i64 = row.get(1)?;
+            let updated_at: String = row.get(2)?;
+            Ok((id, attempts.max(0) as u32, updated_at))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    let now_str = now.to_rfc3339();
+    let mut outcome = RequeueOutcome::default();
+    for (id, attempts, updated_at) in rows {
+        if attempts >= policy.max_attempts {
+            tx.execute(
+                "UPDATE foundry_jobs
+                 SET updated_at = ?1,
+                     metadata = json_set(
+                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                         '$.dead_letter', 1)
+                 WHERE id = ?2 AND status = 'failed'",
+                params![now_str, id],
+            )?;
+            outcome.dead_lettered += 1;
+            continue;
+        }
+
+        let ready = chrono::DateTime::parse_from_rfc3339(&updated_at)
+            .map(|last| {
+                (now - last.with_timezone(&chrono::Utc)).num_seconds()
+                    >= policy.backoff_secs(attempts)
+            })
+            .unwrap_or(true);
+        if !ready {
+            continue;
+        }
+
+        tx.execute(
+            "UPDATE foundry_jobs
+             SET status = 'queued',
+                 updated_at = ?1,
+                 metadata = json_set(
+                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                     '$.attempts', ?2)
+             WHERE id = ?3 AND status = 'failed'",
+            params![now_str, (attempts + 1) as i64, id],
+        )?;
+        outcome.requeued += 1;
+    }
+    tx.commit()?;
+    Ok(outcome)
+}
+
 /// Load queued jobs plus stale running jobs for startup/safety-net replay.
+///
+/// First runs a retry sweep ([`requeue_retryable_foundry_jobs`]) so failed jobs
+/// whose backoff has elapsed are recovered — and exhausted ones dead-lettered —
+/// before work is loaded.
 pub fn load_pending_foundry_jobs(
     conn: &Connection,
     running_before: &str,
 ) -> Result<Vec<PersistedFoundryJob>, MemoryError> {
+    // Best-effort: never block replay if the retry sweep hits an error.
+    let _ =
+        requeue_retryable_foundry_jobs(conn, &FoundryRetryPolicy::default(), chrono::Utc::now());
+
     let mut stmt = conn.prepare(
         "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
                 target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at
@@ -348,6 +486,35 @@ mod tests {
         .unwrap();
     }
 
+    fn backdate_updated_at(conn: &Connection, id: &str, secs_ago: i64) {
+        let ts = (chrono::Utc::now() - chrono::Duration::seconds(secs_ago)).to_rfc3339();
+        conn.execute(
+            "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = ?2",
+            params![ts, id],
+        )
+        .unwrap();
+    }
+
+    fn status_of(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT status FROM foundry_jobs WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn metadata_of(conn: &Connection, id: &str) -> serde_json::Value {
+        let s: String = conn
+            .query_row(
+                "SELECT metadata FROM foundry_jobs WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&s).unwrap()
+    }
+
     #[test]
     fn update_with_reason_grafts_terminal_reason_into_metadata() {
         let conn = open_test_db();
@@ -416,6 +583,83 @@ mod tests {
         assert_eq!(
             h.gc_eligible, 1,
             "only the backdated 'completed' should be GC-eligible"
+        );
+    }
+
+    #[test]
+    fn requeue_recovers_failed_job_after_backoff_and_increments_attempts() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "f1", "failed");
+        backdate_updated_at(&conn, "f1", 3600); // well past the 300s base backoff
+
+        let out = requeue_retryable_foundry_jobs(
+            &conn,
+            &FoundryRetryPolicy::default(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(out.requeued, 1);
+        assert_eq!(out.dead_lettered, 0);
+        assert_eq!(status_of(&conn, "f1"), "queued");
+        assert_eq!(metadata_of(&conn, "f1")["attempts"], 1);
+    }
+
+    #[test]
+    fn requeue_respects_backoff_window() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "f2", "failed"); // updated_at = now, no backoff elapsed
+
+        let out = requeue_retryable_foundry_jobs(
+            &conn,
+            &FoundryRetryPolicy::default(),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(out.requeued, 0);
+        assert_eq!(status_of(&conn, "f2"), "failed");
+    }
+
+    #[test]
+    fn requeue_dead_letters_after_max_attempts_then_stops_retrying() {
+        let conn = open_test_db();
+        let policy = FoundryRetryPolicy {
+            max_attempts: 2,
+            base_backoff_secs: 1,
+            max_backoff_secs: 10,
+        };
+        insert_job_with_metadata(&conn, "f3", "failed", r#"{"attempts":2}"#);
+        backdate_updated_at(&conn, "f3", 3600);
+
+        let out = requeue_retryable_foundry_jobs(&conn, &policy, chrono::Utc::now()).unwrap();
+        assert_eq!(out.dead_lettered, 1);
+        assert_eq!(out.requeued, 0);
+        assert_eq!(status_of(&conn, "f3"), "failed");
+        assert_eq!(metadata_of(&conn, "f3")["dead_letter"], 1);
+
+        // A dead-lettered job is excluded from every later sweep.
+        let again = requeue_retryable_foundry_jobs(&conn, &policy, chrono::Utc::now()).unwrap();
+        assert_eq!(again.requeued, 0);
+        assert_eq!(again.dead_lettered, 0);
+
+        let h = job_status_histogram(&conn, 30).unwrap();
+        assert_eq!(h.dead_lettered, 1);
+        assert_eq!(
+            h.failed, 1,
+            "dead-lettered jobs still report as failed for display"
+        );
+    }
+
+    #[test]
+    fn load_pending_recovers_backed_off_failed_jobs() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "f4", "failed");
+        backdate_updated_at(&conn, "f4", 3600);
+
+        let running_cutoff = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        let jobs = load_pending_foundry_jobs(&conn, &running_cutoff).unwrap();
+        assert!(
+            jobs.iter().any(|j| j.spec.id == "f4"),
+            "a backed-off failed job should be recovered to queued and replayed"
         );
     }
 
