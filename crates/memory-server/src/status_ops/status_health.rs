@@ -1083,6 +1083,13 @@ pub(crate) fn calculate_health_score(
     if distill_marker.map(|m| m.is_stale).unwrap_or(true) {
         score -= 10;
     }
+    // Hard errors inside the last distill batch are not foundry_jobs rows, so unlike
+    // agent-evolution failures (which dead-letter) they would otherwise never reach
+    // the health score. `fallback_used`/`groups_skipped` are graceful degradation,
+    // not failure, so they stay informational (surfaced in status, not scored).
+    if let Some(distill_errors) = distill_marker.and_then(|m| m.errors) {
+        score -= ((distill_errors as i32) * 3).min(10);
+    }
     let missing_required_keys = api_keys
         .iter()
         .filter(|key| key.required && key.status == "missing")
@@ -1265,6 +1272,20 @@ pub(crate) fn agent_readiness_json(
         "mcp_configs": mcp,
         "runs_root": crate::shell_ops::shell_runs_root().display().to_string(),
         "last_distill_marker": snapshot.distill_marker.as_ref().map(|m| m.path.clone()),
+        "last_distill": snapshot.distill_marker.as_ref().and_then(|m| {
+            // Only emit the quality block for new-format (JSON) markers; legacy
+            // bare-timestamp markers leave every field None.
+            (m.groups_distilled.is_some()
+                || m.groups_skipped.is_some()
+                || m.fallback_used.is_some()
+                || m.errors.is_some())
+            .then(|| json!({
+                "groups_distilled": m.groups_distilled,
+                "groups_skipped": m.groups_skipped,
+                "fallback_used": m.fallback_used,
+                "errors": m.errors,
+            }))
+        }),
         "doctor_hint": format!("tachi doctor --jobs --probe-keys --roots {}", shell_quote(&app_home.display().to_string())),
     })
 }

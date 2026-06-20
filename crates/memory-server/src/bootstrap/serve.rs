@@ -1071,9 +1071,20 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                                     return;
                                 }
                             }
-                            if let Err(err) =
-                                tokio::fs::write(&marker, chrono::Utc::now().to_rfc3339()).await
-                            {
+                            // Marker carries the batch quality summary (not just a
+                            // timestamp) so `tachi_status` can surface distill
+                            // degradation and so hard errors reach the health score.
+                            // read_distill_marker stays backward-compatible with the
+                            // legacy bare-timestamp format.
+                            let marker_body = serde_json::json!({
+                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "groups_distilled": report.groups_distilled,
+                                "groups_skipped": report.groups_skipped,
+                                "fallback_used": report.fallback_used,
+                                "errors": report.errors.len(),
+                            })
+                            .to_string();
+                            if let Err(err) = tokio::fs::write(&marker, marker_body).await {
                                 eprintln!(
                                     "[distill] failed to write marker {}: {err}",
                                     marker.display()
