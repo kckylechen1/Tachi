@@ -1119,7 +1119,15 @@ async fn tachi_memory_briefing_uses_bound_project_db_when_cwd_project_is_unknown
         .expect("briefing should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
 
-    assert_eq!(parsed["project"], json!("Bound_Project_Repo"));
+    // The project alias name now carries a stable-hash suffix; it still starts
+    // with the sanitized repo basename.
+    let expected_project =
+        crate::path_utils::plan_c_dir_name_from_root(&root).expect("alias name");
+    assert!(
+        expected_project.starts_with("Bound_Project_Repo-"),
+        "{expected_project}"
+    );
+    assert_eq!(parsed["project"], json!(expected_project));
     assert!(
         parsed["memories"]
             .as_array()

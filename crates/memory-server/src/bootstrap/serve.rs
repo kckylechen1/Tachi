@@ -1156,10 +1156,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         // re-forwarding to ourselves over HTTP.
         std::env::set_var("TACHI_DAEMON", "1");
 
-        // HTTP daemon mode
-        // In daemon mode, project DB auto-detection is disabled above to avoid
-        // mixed project context. Users can still opt into single-project mode
-        // via explicit --project-db.
+        // HTTP daemon mode.
+        // In daemon mode the cwd-derived repo-local project DB is RETAINED
+        // (see the `cli.daemon && project_db_path.is_some()` block above): the
+        // multi-DB FoundryScheduler gives every manifest DB equal coverage, so
+        // we keep the auto-detected project and only emit a warning that the
+        // daemon's bound project follows the launch cwd. Users can still pin a
+        // single project explicitly via --project-db.
 
         // PR-4 singleton enforcement: acquire a daemon lock scoped to the
         // global DB before binding HTTP. Embedded runtimes can share the same

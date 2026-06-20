@@ -53,10 +53,86 @@ pub(crate) fn tachi_home() -> PathBuf {
     home.join(".tachi")
 }
 
-/// Sanitized directory name for Plan C: `~/.tachi/projects/<name>/memory.db`.
+/// Project-DB addressing convention (read this before touching Plan C code):
+///
+///   * `<repo>/.tachi/memory.db` is the **per-repo source of truth** — the real
+///     data file, addressed repo-locally (see `bootstrap/serve.rs`).
+///   * `~/.tachi/global/memory.db` is the **machine-global** store.
+///   * `~/.tachi/projects/<name>/` is an **addressing alias, not a data store**.
+///     On Unix it is a symlink to the repo-local DB; named-project recall resolves
+///     a name to a DB path and should prefer the manifest-recorded repo-local path
+///     so resolution does not depend on the symlink existing (helps non-Unix).
+///
+/// Sanitized directory name for the Plan C alias
+/// (`~/.tachi/projects/<name>/memory.db`).
+///
+/// The name is `<sanitized-basename>-<hash8>`, where `<hash8>` is the first 8 hex
+/// of a stable hash of the canonical absolute git-root path. The hash suffix keeps
+/// two different repos that share a basename (e.g. `~/work/api` and `~/oss/api`)
+/// from colliding on a single alias directory (which previously produced a
+/// split-brain warning only). For repos that already have a legacy un-hashed alias
+/// dir on disk, resolution falls back to it via
+/// [`plan_c_existing_alias_db_for_root`] so existing data is never orphaned.
 pub(crate) fn plan_c_dir_name_from_root(project_root: &Path) -> Option<String> {
+    let base = plan_c_legacy_dir_name_from_root(project_root)?;
+    let canonical = std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .to_string();
+    let hash = crate::utils::stable_hash(&canonical);
+    Some(format!("{base}-{}", &hash[..8]))
+}
+
+/// Legacy (pre-hash) sanitized alias directory name: just the sanitized basename.
+///
+/// Retained so we can resolve and keep using alias directories created before the
+/// stable-hash suffix was introduced (backward compatibility — do not orphan).
+pub(crate) fn plan_c_legacy_dir_name_from_root(project_root: &Path) -> Option<String> {
     let raw = project_root.file_name()?.to_str()?;
     Some(crate::utils::sanitize_safe_path_name(raw))
+}
+
+/// Return the alias `memory.db` path that should be USED for a given repo root,
+/// preferring the hashed dir but falling back to a pre-existing legacy un-hashed
+/// dir when the hashed one does not yet exist. Used when creating/resolving the
+/// alias so repos that predate the hash suffix keep addressing their old data.
+///
+/// Returns `None` only when the root has no usable directory name.
+pub(crate) fn plan_c_alias_db_for_root(project_root: &Path) -> Option<PathBuf> {
+    let hashed = plan_c_dir_name_from_root(project_root)?;
+    let hashed_db = plan_c_global_db_path(&hashed);
+    // Use the hashed path if it already exists OR no legacy dir exists.
+    if hashed_db.exists() {
+        return Some(hashed_db);
+    }
+    if let Some(legacy) = plan_c_legacy_dir_name_from_root(project_root) {
+        // Avoid treating the hashed name's own (legacy==hashed is impossible
+        // since hashed always carries a suffix) — only fall back to a distinct,
+        // already-materialized legacy alias.
+        let legacy_db = plan_c_global_db_path(&legacy);
+        if legacy != hashed && legacy_db.exists() {
+            return Some(legacy_db);
+        }
+    }
+    Some(hashed_db)
+}
+
+/// Like [`plan_c_alias_db_for_root`] but only returns a path when an alias DB
+/// (hashed or legacy) actually exists on disk. Used by reverse lookups.
+pub(crate) fn plan_c_existing_alias_db_for_root(project_root: &Path) -> Option<PathBuf> {
+    let hashed = plan_c_dir_name_from_root(project_root)?;
+    let hashed_db = plan_c_global_db_path(&hashed);
+    if hashed_db.exists() {
+        return Some(hashed_db);
+    }
+    let legacy = plan_c_legacy_dir_name_from_root(project_root)?;
+    if legacy != hashed {
+        let legacy_db = plan_c_global_db_path(&legacy);
+        if legacy_db.exists() {
+            return Some(legacy_db);
+        }
+    }
+    None
 }
 
 pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {
@@ -125,18 +201,21 @@ pub(crate) fn resolve_project_db_path(project_root: &Path, rel: &Path) -> Result
 /// Global Plan C symlink for a repo-local project DB (Unix only).
 #[cfg(unix)]
 pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
-    let Some(dir_name) = plan_c_dir_name_from_root(project_root) else {
-        return PlanCLinkOutcome::Skipped("project root has no directory name");
-    };
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
         return PlanCLinkOutcome::Skipped("local db is already under the Plan C projects root");
     }
-    let global_project_dir = projects_root.join(&dir_name);
+    // Prefer the hashed alias dir, but keep using a pre-existing legacy un-hashed
+    // dir so repos created before the hash suffix are not orphaned.
+    let Some(global_link) = plan_c_alias_db_for_root(project_root) else {
+        return PlanCLinkOutcome::Skipped("project root has no directory name");
+    };
+    let Some(global_project_dir) = global_link.parent().map(Path::to_path_buf) else {
+        return PlanCLinkOutcome::Skipped("project root has no directory name");
+    };
     if std::fs::create_dir_all(&global_project_dir).is_err() {
         return PlanCLinkOutcome::Skipped("failed to create Plan C project directory");
     }
-    let global_link = global_project_dir.join("memory.db");
     let link_is_correct = global_link.is_symlink()
         && std::fs::read_link(&global_link)
             .is_ok_and(|target| target == local_db || canonical_paths_equal(&target, local_db));
@@ -184,12 +263,21 @@ pub(crate) fn plan_c_split_brain_for_local_db(local_db: &Path) -> Option<PlanCSp
 }
 
 pub(crate) fn plan_c_split_brain(local_db: &Path, project_root: &Path) -> Option<PlanCSplitBrain> {
-    let project_name = plan_c_dir_name_from_root(project_root)?;
     let projects_root = tachi_home().join("projects");
     if local_db.starts_with(&projects_root) {
         return None;
     }
-    let alias_db = plan_c_global_db_path(&project_name);
+    // Inspect the alias that would actually be used (hashed, or a pre-existing
+    // legacy un-hashed dir) so split-brain detection matches creation behavior.
+    let alias_db = plan_c_alias_db_for_root(project_root)?;
+    // Report the name of the alias dir we actually inspected so the warning's
+    // project name matches the on-disk alias (legacy vs hashed).
+    let project_name = alias_db
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+        .or_else(|| plan_c_dir_name_from_root(project_root))?;
     let alias_meta = std::fs::symlink_metadata(&alias_db).ok()?;
     if !alias_meta.file_type().is_file() {
         return None;
@@ -289,13 +377,20 @@ pub(crate) fn named_project_for_db_path(db_path: &Path) -> Option<String> {
                 .then(|| parent.parent())
                 .flatten()
         }) {
-            if let Some(name) = plan_c_dir_name_from_root(project_root) {
-                let named_path = plan_c_global_db_path(&name);
+            // Fast-path: check the alias that would actually be used for this
+            // root (hashed, falling back to a pre-existing legacy un-hashed dir).
+            if let Some(named_path) = plan_c_existing_alias_db_for_root(project_root) {
                 if std::fs::canonicalize(&named_path)
                     .map(|path| path == canonical)
                     .unwrap_or(false)
                 {
-                    return Some(name);
+                    if let Some(name) = named_path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|n| n.to_str())
+                    {
+                        return Some(name.to_string());
+                    }
                 }
             }
         }
@@ -485,9 +580,14 @@ mod tests {
             std::fs::write(&local_db, b"").expect("local db placeholder");
             ensure_plan_c_symlink(&local_db, &repo);
 
+            // The alias dir name now carries the stable-hash suffix; the reverse
+            // lookup must return exactly that name and it must start with the
+            // sanitized basename.
+            let expected = plan_c_dir_name_from_root(&repo).expect("dir name");
+            assert!(expected.starts_with("Quant_Analyzer-"), "{expected}");
             assert_eq!(
                 named_project_for_db_path(&local_db).as_deref(),
-                Some("Quant_Analyzer")
+                Some(expected.as_str())
             );
 
             restore_env("TACHI_HOME", saved);
@@ -540,9 +640,43 @@ mod tests {
     #[test]
     fn plan_c_dir_name_sanitizes_spaces() {
         let root = PathBuf::from("/tmp/My Cool Repo");
+        // Legacy name is the bare sanitized basename; the current name carries a
+        // stable-hash suffix but still starts with the sanitized basename.
         assert_eq!(
-            plan_c_dir_name_from_root(&root).as_deref(),
+            plan_c_legacy_dir_name_from_root(&root).as_deref(),
             Some("My_Cool_Repo")
         );
+        let name = plan_c_dir_name_from_root(&root).expect("dir name");
+        assert!(name.starts_with("My_Cool_Repo-"), "{name}");
+    }
+
+    #[test]
+    fn plan_c_dir_name_same_basename_distinct_roots_differ() {
+        // Two different absolute roots that share a basename must produce
+        // DISTINCT alias dir names so they no longer collide on one alias path.
+        let a = PathBuf::from("/tmp/workspace-a/api");
+        let b = PathBuf::from("/tmp/workspace-b/api");
+        let name_a = plan_c_dir_name_from_root(&a).expect("a");
+        let name_b = plan_c_dir_name_from_root(&b).expect("b");
+        assert!(name_a.starts_with("api-"), "{name_a}");
+        assert!(name_b.starts_with("api-"), "{name_b}");
+        assert_ne!(
+            name_a, name_b,
+            "same-basename repos must get distinct alias dirs"
+        );
+    }
+
+    #[test]
+    fn plan_c_dir_name_is_stable_for_same_root() {
+        // The same root must always hash to the same alias dir name.
+        let root = PathBuf::from("/tmp/workspace/service");
+        let first = plan_c_dir_name_from_root(&root).expect("first");
+        let second = plan_c_dir_name_from_root(&root).expect("second");
+        assert_eq!(first, second);
+        assert!(first.starts_with("service-"), "{first}");
+        // 8 hex chars of suffix after the "service-" prefix.
+        let suffix = first.strip_prefix("service-").expect("suffix");
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{suffix}");
     }
 }

@@ -580,9 +580,14 @@ mod tests {
             &global,
             None,
         );
+        // The alias dir name now carries a stable-hash suffix; the route must
+        // carry that exact name (so resolve_named_project_db_path can find the
+        // hashed alias dir). It still starts with the sanitized basename.
+        let expected = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("name");
+        assert!(expected.starts_with("Quant_Analyzer-"), "{expected}");
         match r {
-            Route::NamedProject(n) => assert_eq!(n, "Quant_Analyzer"),
-            other => panic!("expected NamedProject(Quant_Analyzer), got {other:?}"),
+            Route::NamedProject(n) => assert_eq!(n, expected),
+            other => panic!("expected NamedProject({expected}), got {other:?}"),
         }
 
         if let Some(v) = saved {
