@@ -2487,12 +2487,14 @@ fn score_profile_candidate(
     let mut cost_count = 0u32;
     // The performance matrix already aggregates a `leader`-scope bucket per
     // profile+task_type from these same eval rows, and the perf-matrix loop
-    // below penalizes that bucket's failures. To avoid double-counting leader
-    // success/failure scoring (once here, once in the perf-matrix leader path),
-    // only apply the raw-row score contributions when no perf-matrix leader row
-    // covers this profile+task_type. Sample bookkeeping
-    // (live_samples/useful_rate/failure_count) is always accumulated so the
-    // candidate's reported stats stay complete either way.
+    // below penalizes that bucket's *failures* — it never rewards successes.
+    // So only the raw-row *failure* penalty can double-count against the
+    // perf-matrix leader path; that one is gated under `!has_perf_leader_row`
+    // below. The success rewards are applied unconditionally because the
+    // perf-matrix path scores no successes — gating them would leave a leader
+    // profile with perf data penalized for failures but never credited for
+    // wins. Sample bookkeeping (live_samples/useful_rate/failure_count) is
+    // always accumulated so the candidate's reported stats stay complete.
     let has_perf_leader_row = performance_matrix.iter().any(|perf| {
         perf.scope == "leader"
             && perf.profile.as_deref() == Some(profile.name)
@@ -2503,14 +2505,10 @@ fn score_profile_candidate(
         if row.profile.as_deref() == Some(profile.name) {
             live_samples += 1;
             if row.completion_status == CompletionStatus::Completed && row.verification_present {
-                if !has_perf_leader_row {
-                    score += 12.0;
-                }
+                score += 12.0;
                 useful_sum += 1.0;
             } else if row.completion_status == CompletionStatus::Completed {
-                if !has_perf_leader_row {
-                    score += 5.0;
-                }
+                score += 5.0;
                 useful_sum += 0.6;
             } else {
                 raw_failure_count += 1;
