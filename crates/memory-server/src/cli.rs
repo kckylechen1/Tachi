@@ -784,6 +784,22 @@ pub(crate) enum ManifestAction {
         #[arg(long)]
         json: bool,
     },
+    /// Audit centralized `~/.tachi/projects/*/memory.db` and print a relocation
+    /// plan. DRY-RUN by default: classifies each project DB as
+    /// {symlink-alias, symlink-broken, real-file-with-owning-repo,
+    /// real-file-home-resident, uuid-smoke-test-garbage} and proposes actions
+    /// WITHOUT moving or deleting anything. `--apply` is reserved for a future
+    /// guarded mutation pass and currently refuses to act.
+    AuditProjects {
+        /// Output JSON instead of human text.
+        #[arg(long)]
+        json: bool,
+        /// Reserved: actually perform relocations/GC. Currently refuses; the
+        /// audit is plan-only by design. (Takes a backup and refuses on
+        /// ambiguity once implemented.)
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

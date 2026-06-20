@@ -435,5 +435,72 @@ pub(super) async fn run_manifest_command(
                 Ok(())
             }
         }
+        ManifestAction::AuditProjects { json, apply } => {
+            run_audit_projects(apply, json, app_home, git_root, &manifest_path)
+        }
     }
+}
+
+/// DRY-RUN project-DB relocation audit. Enumerates
+/// `<app_home>/projects/*/memory.db`, classifies each, and prints a relocation
+/// plan. Moves/deletes NOTHING. `--apply` is intentionally refused for now —
+/// any real mutation must take a backup and refuse on ambiguity, which is out of
+/// scope for this read-only audit surface.
+fn run_audit_projects(
+    apply: bool,
+    json: bool,
+    app_home: &std::path::Path,
+    git_root: Option<&PathBuf>,
+    manifest_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::manifest_audit::{build_plan, gather_project_inputs, render_plan};
+
+    let projects_dir = app_home.join("projects");
+
+    // (scope_hint, path) pairs for project-role entries, used to resolve owning
+    // repos from repo-local `.tachi/memory.db` paths already in the manifest.
+    let manifest = crate::manifest::Manifest::load_or_empty(manifest_path);
+    let manifest_project_paths: Vec<(String, String)> = manifest
+        .dbs
+        .iter()
+        .filter(|e| matches!(e.role, crate::manifest::DbRole::Project))
+        .map(|e| (e.scope_hint.clone(), e.path.clone()))
+        .collect();
+
+    // Candidate git roots: the current invocation's git root (if any). Kept
+    // minimal and read-only; the manifest path resolution covers most cases.
+    let candidate_git_roots: Vec<PathBuf> = git_root.into_iter().cloned().collect();
+
+    let inputs =
+        gather_project_inputs(&projects_dir, &manifest_project_paths, &candidate_git_roots)?;
+    let plan = build_plan(&inputs);
+
+    if json {
+        print_pretty_json(&serde_json::to_value(&plan)?)?;
+    } else {
+        print!("{}", render_plan(&plan, &projects_dir));
+        println!(
+            "\nsummary: {} relocatable, {} home-resident, {} symlink-alias, {} broken-symlink, {} garbage",
+            plan.n_relocatable,
+            plan.n_home_resident,
+            plan.n_symlink_alias,
+            plan.n_symlink_broken,
+            plan.n_garbage,
+        );
+        println!("(DRY-RUN: nothing was moved or deleted)");
+    }
+
+    if apply {
+        // Explicit refusal: this audit surface is plan-only by design. A real
+        // mutation pass must back up first and refuse on ambiguity; until that
+        // is built and reviewed, --apply must not touch real per-project data.
+        return Err(
+            "--apply is not yet implemented for `manifest audit-projects`: this command is \
+             plan-only and refuses to move or delete real project data. Review the printed plan \
+             and relocate manually, or wait for the guarded --apply pass."
+                .into(),
+        );
+    }
+
+    Ok(())
 }
