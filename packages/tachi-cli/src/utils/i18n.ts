@@ -196,9 +196,11 @@ export function t(path: string): string {
   // Current language first, then fall back to English so a key missing only
   // from the zh dictionary degrades to readable English rather than leaking the
   // raw dotted key. As a last resort show the leaf segment, never the full path.
+  const primary = currentLang === 'zh' ? zh : en;
   return (
-    lookup(currentLang === 'zh' ? zh : en, path) ??
-    lookup(en, path) ??
+    lookup(primary, path) ??
+    // Only retry against English when it isn't already the primary dictionary.
+    (primary === en ? undefined : lookup(en, path)) ??
     path.split('.').pop() ??
     path
   );
