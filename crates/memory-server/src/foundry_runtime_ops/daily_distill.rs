@@ -234,7 +234,10 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         if name.eq_ignore_ascii_case("wiki") {
             continue; // wiki has its own curation path
         }
-        if bound_name.as_deref() == Some(name.as_str()) {
+        if bound_name
+            .as_deref()
+            .is_some_and(|bound| bound.eq_ignore_ascii_case(&name))
+        {
             continue; // already handled as the bound project above
         }
         report.projects_scanned += 1;
