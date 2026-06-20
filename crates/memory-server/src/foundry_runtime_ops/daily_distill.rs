@@ -211,20 +211,65 @@ struct SourceManifestEntry {
 }
 
 /// Entry point invoked by the bootstrap scheduler.
+///
+/// Distills the daemon's bound project DB **and** every other named-project DB
+/// in the manifest, so their `derived_items` populate too — previously only the
+/// single bound project was ever scanned, leaving named-project/agent DBs with
+/// permanently-empty derived items.
 pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBatchReport, String> {
     let mut report = DistillBatchReport::default();
 
-    if !server.has_project_db() {
-        return Ok(report);
-    }
-    report.projects_scanned = 1;
+    let bound_name = server
+        .project_db_path_buf()
+        .and_then(|p| crate::path_utils::named_project_for_db_path(&p));
 
-    let candidates = collect_candidate_groups(server)?;
+    // 1. The daemon's bound project DB (existing behavior).
+    if server.has_project_db() {
+        report.projects_scanned += 1;
+        distill_one_project(server, None, derive_project_label(server), &mut report).await;
+    }
+
+    // 2. Every other named-project DB in the manifest.
+    for name in crate::path_utils::list_named_projects() {
+        if name.eq_ignore_ascii_case("wiki") {
+            continue; // wiki has its own curation path
+        }
+        if bound_name.as_deref() == Some(name.as_str()) {
+            continue; // already handled as the bound project above
+        }
+        report.projects_scanned += 1;
+        // Best-effort per project: a failure on one must not abort the rest.
+        distill_one_project(server, Some(&name), name.clone(), &mut report).await;
+    }
+
+    // Opportunistically prune stale foundry-runs subdirs once per run.
+    let _ = server.claude_pool.cleanup_expired();
+
+    Ok(report)
+}
+
+/// Run the distill batch against one target DB: the bound project when
+/// `project` is `None`, otherwise the named project. Errors are recorded in
+/// `report.errors` rather than propagated so one project cannot abort the run.
+async fn distill_one_project(
+    server: &MemoryServer,
+    project: Option<&str>,
+    project_label: String,
+    report: &mut DistillBatchReport,
+) {
+    let candidates = match collect_candidate_groups(server, project) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            report
+                .errors
+                .push(format!("collect candidates [{project_label}]: {err}"));
+            return;
+        }
+    };
     if candidates.is_empty() {
-        return Ok(report);
+        return;
     }
 
-    let project_label = derive_project_label(server);
     let batch_run_id = format!(
         "{}-{}",
         Utc::now().format("%Y%m%dT%H%M%S"),
@@ -251,8 +296,9 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
                     chunk_idx,
                     &project_label,
                     &batch_run_id,
-                    &mut report,
+                    report,
                     &mut manifest,
+                    project,
                 )
                 .await;
             }
@@ -261,9 +307,10 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
                     server,
                     chunk,
                     chunk_idx,
-                    &mut report,
+                    report,
                     &mut manifest,
                     &batch_run_id,
+                    project,
                 )
                 .await;
             }
@@ -278,7 +325,7 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         "backend": backend.as_str(),
         "batch_size": batch_size,
         "generated_at": Utc::now().to_rfc3339(),
-        "report": &report,
+        "report": &*report,
         "groups": manifest,
     })) {
         Ok(body) => {
@@ -293,11 +340,6 @@ pub async fn run_daily_batch_distill(server: &MemoryServer) -> Result<DistillBat
         }
         Err(err) => tracing::warn!("failed to serialize distill source manifest: {err}"),
     }
-
-    // Opportunistically prune stale foundry-runs subdirs.
-    let _ = server.claude_pool.cleanup_expired();
-
-    Ok(report)
 }
 
 async fn process_claude_batch(
@@ -308,6 +350,7 @@ async fn process_claude_batch(
     batch_run_id: &str,
     report: &mut DistillBatchReport,
     manifest: &mut Vec<SourceManifestEntry>,
+    project: Option<&str>,
 ) {
     report.batches_dispatched += 1;
     let label = format!("distill-{}-b{}", project_label, chunk_idx);
@@ -324,6 +367,7 @@ async fn process_claude_batch(
                     false,
                     report,
                     manifest,
+                    project,
                 )
                 .await;
             }
@@ -332,7 +376,8 @@ async fn process_claude_batch(
                     .errors
                     .push(format!("parse claude batch {chunk_idx}: {err}"));
                 for group in chunk {
-                    fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                    fallback_one_group(server, group, batch_run_id, report, manifest, project)
+                        .await;
                 }
             }
         },
@@ -341,7 +386,7 @@ async fn process_claude_batch(
                 .errors
                 .push(format!("claude batch {chunk_idx}: {err}"));
             for group in chunk {
-                fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                fallback_one_group(server, group, batch_run_id, report, manifest, project).await;
             }
         }
     }
@@ -354,6 +399,7 @@ async fn process_api_batch(
     report: &mut DistillBatchReport,
     manifest: &mut Vec<SourceManifestEntry>,
     batch_run_id: &str,
+    project: Option<&str>,
 ) {
     let mut pending: Vec<(&[CandidateGroup], usize)> = vec![(chunk, 0)];
     let max_depth = 8;
@@ -374,6 +420,7 @@ async fn process_api_batch(
                         false,
                         report,
                         manifest,
+                        project,
                     )
                     .await;
                 }
@@ -391,7 +438,8 @@ async fn process_api_batch(
                         .errors
                         .push(format!("parse api batch {chunk_idx}: {err}"));
                     for group in batch {
-                        fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                        fallback_one_group(server, group, batch_run_id, report, manifest, project)
+                            .await;
                     }
                 }
             },
@@ -407,7 +455,8 @@ async fn process_api_batch(
             Err(err) => {
                 report.errors.push(format!("api batch {chunk_idx}: {err}"));
                 for group in batch {
-                    fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                    fallback_one_group(server, group, batch_run_id, report, manifest, project)
+                        .await;
                 }
             }
         }
@@ -423,6 +472,7 @@ async fn apply_parsed_groups(
     fallback_used: bool,
     report: &mut DistillBatchReport,
     manifest: &mut Vec<SourceManifestEntry>,
+    project: Option<&str>,
 ) {
     let backend_label = backend.as_str();
     for group in chunk {
@@ -436,6 +486,7 @@ async fn apply_parsed_groups(
                     batch_run_id,
                     backend_label,
                     fallback_used,
+                    project,
                 ) {
                     Ok(id) => {
                         report.groups_distilled += 1;
@@ -479,7 +530,7 @@ async fn apply_parsed_groups(
                 });
             }
             None => {
-                fallback_one_group(server, group, batch_run_id, report, manifest).await;
+                fallback_one_group(server, group, batch_run_id, report, manifest, project).await;
             }
         }
     }
@@ -506,10 +557,19 @@ async fn fallback_one_group(
     batch_run_id: &str,
     report: &mut DistillBatchReport,
     manifest: &mut Vec<SourceManifestEntry>,
+    project: Option<&str>,
 ) {
     match fallback_distill(&server.llm, group).await {
         Ok(payload) => {
-            match persist_distill_memory(server, group, &payload, batch_run_id, "raw_api", true) {
+            match persist_distill_memory(
+                server,
+                group,
+                &payload,
+                batch_run_id,
+                "raw_api",
+                true,
+                project,
+            ) {
                 Ok(id) => {
                     report.groups_distilled += 1;
                     report.fallback_used += 1;
@@ -581,71 +641,102 @@ fn should_skip_distill_candidate(entry: &MemoryEntry, wiki_project: bool) -> boo
         || (!wiki_project && memory_core::is_wiki_entry(entry))
 }
 
-fn collect_candidate_groups(server: &MemoryServer) -> Result<Vec<CandidateGroup>, String> {
+/// Read + filter distill candidate memories from one already-open store. Pure
+/// store logic, identical for the bound project and any named-project DB.
+fn scan_distill_inputs(
+    store: &mut MemoryStore,
+    processed_scan_limit: i64,
+    candidate_scan_limit: i64,
+    wiki_project: bool,
+) -> Result<Vec<MemoryEntry>, String> {
+    let conn = store.connection();
+    let mut processed_ids: HashSet<String> = HashSet::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT metadata FROM memories
+             WHERE archived = 0 AND source = ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare distill metadata query: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![FOUNDRY_DISTILL_SOURCE, processed_scan_limit],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("query distill metadata rows: {e}"))?;
+    for row in rows {
+        let raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
+        let metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
+        let ids = metadata
+            .get("source_memory_ids")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        processed_ids.extend(ids);
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
+              FROM memories
+              WHERE archived = 0 AND source != ?1
+              ORDER BY timestamp ASC
+              LIMIT ?2",
+        )
+        .map_err(|e| format!("prepare candidate query: {e}"))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![FOUNDRY_DISTILL_SOURCE, candidate_scan_limit],
+            memory_core::row_to_entry,
+        )
+        .map_err(|e| format!("query candidate rows: {e}"))?;
+
+    let mut entries: Vec<MemoryEntry> = Vec::new();
+    for row in rows {
+        let entry = row.map_err(|e| format!("read candidate row: {e}"))?;
+        if processed_ids.contains(&entry.id) {
+            continue;
+        }
+        if !should_skip_distill_candidate(&entry, wiki_project) {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+/// Collect distill candidate groups for either the bound project DB
+/// (`project = None`) or a specific named-project DB (`project = Some(name)`).
+fn collect_candidate_groups(
+    server: &MemoryServer,
+    project: Option<&str>,
+) -> Result<Vec<CandidateGroup>, String> {
     let processed_scan_limit = resolve_processed_scan_limit() as i64;
     let candidate_scan_limit = resolve_candidate_scan_limit() as i64;
-    let wiki_project = is_wiki_project_db(server);
-    let (processed_ids, candidate_entries) = server.with_project_store_read(|store| {
-        let conn = store.connection();
-        let mut processed_ids: HashSet<String> = HashSet::new();
-        let mut stmt = conn
-            .prepare(
-                "SELECT metadata FROM memories
-                 WHERE archived = 0 AND source = ?1
-                 ORDER BY timestamp DESC
-                 LIMIT ?2",
+    let wiki_project = match project {
+        Some(name) => name.eq_ignore_ascii_case("wiki"),
+        None => is_wiki_project_db(server),
+    };
+    let candidate_entries = match project {
+        Some(name) => server.with_named_project_store_read(name, |store| {
+            scan_distill_inputs(
+                store,
+                processed_scan_limit,
+                candidate_scan_limit,
+                wiki_project,
             )
-            .map_err(|e| format!("prepare distill metadata query: {e}"))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![FOUNDRY_DISTILL_SOURCE, processed_scan_limit],
-                |row| row.get::<_, String>(0),
+        }),
+        None => server.with_project_store_read(|store| {
+            scan_distill_inputs(
+                store,
+                processed_scan_limit,
+                candidate_scan_limit,
+                wiki_project,
             )
-            .map_err(|e| format!("query distill metadata rows: {e}"))?;
-        for row in rows {
-            let raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
-            let metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
-            let ids = metadata
-                .get("source_memory_ids")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|v| v.as_str())
-                .map(ToOwned::to_owned);
-            processed_ids.extend(ids);
-        }
-
-        let mut stmt = conn
-            .prepare(
-                "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
-                  FROM memories
-                  WHERE archived = 0 AND source != ?1
-                  ORDER BY timestamp ASC
-                  LIMIT ?2",
-            )
-            .map_err(|e| format!("prepare candidate query: {e}"))?;
-        let rows = stmt
-            .query_map(
-                rusqlite::params![FOUNDRY_DISTILL_SOURCE, candidate_scan_limit],
-                memory_core::row_to_entry,
-            )
-            .map_err(|e| format!("query candidate rows: {e}"))?;
-
-        let mut entries: Vec<MemoryEntry> = Vec::new();
-        for row in rows {
-            let entry = row.map_err(|e| format!("read candidate row: {e}"))?;
-            if processed_ids.contains(&entry.id) {
-                continue;
-            }
-            if !should_skip_distill_candidate(&entry, wiki_project) {
-                entries.push(entry);
-            }
-        }
-        Ok((processed_ids, entries))
-    })?;
-
-    // processed_ids is only used inside the closure above; ignore here.
-    let _ = processed_ids;
+        }),
+    }?;
 
     if candidate_entries.is_empty() {
         return Ok(Vec::new());
@@ -890,6 +981,37 @@ fn build_fallback_user_payload(group: &CandidateGroup) -> String {
     buf
 }
 
+/// Write a single distilled memory + its provenance edges to the target store
+/// (bound project or a named project), independent of which DB it targets.
+fn write_distill_entry(
+    store: &mut MemoryStore,
+    entry: &MemoryEntry,
+    source_entries: &[MemoryEntry],
+    derived_id: &str,
+) -> Result<(), String> {
+    store
+        .upsert(entry)
+        .map_err(|e| format!("upsert distill memory: {e}"))?;
+    for edge in build_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
+        store
+            .add_edge(&edge)
+            .map_err(|e| format!("add distill edge: {e}"))?;
+    }
+    store
+        .save_derived_with_id(
+            derived_id,
+            &entry.text,
+            &entry.path,
+            &entry.summary,
+            entry.importance,
+            &entry.source,
+            &entry.scope,
+            &entry.metadata,
+        )
+        .map_err(|e| format!("save derived distill item: {e}"))?;
+    Ok(())
+}
+
 fn persist_distill_memory(
     server: &MemoryServer,
     group: &CandidateGroup,
@@ -897,6 +1019,7 @@ fn persist_distill_memory(
     batch_run_id: &str,
     backend: &str,
     fallback_used: bool,
+    project: Option<&str>,
 ) -> Result<String, String> {
     let agent_id = server
         .agent_runtime_read()
@@ -986,29 +1109,14 @@ fn persist_distill_memory(
     };
 
     let derived_id = format!("derived:{memory_id}");
-    server.with_project_store(|store| {
-        store
-            .upsert(&entry)
-            .map_err(|e| format!("upsert distill memory: {e}"))?;
-        for edge in build_distill_edges(&entry, &group.entries, "daily_batch", &entry.timestamp) {
-            store
-                .add_edge(&edge)
-                .map_err(|e| format!("add distill edge: {e}"))?;
-        }
-        store
-            .save_derived_with_id(
-                &derived_id,
-                &entry.text,
-                &entry.path,
-                &entry.summary,
-                entry.importance,
-                &entry.source,
-                &entry.scope,
-                &entry.metadata,
-            )
-            .map_err(|e| format!("save derived distill item: {e}"))?;
-        Ok(())
-    })?;
+    match project {
+        Some(name) => server.with_named_project_store(name, |store| {
+            write_distill_entry(store, &entry, &group.entries, &derived_id)
+        }),
+        None => server.with_project_store(|store| {
+            write_distill_entry(store, &entry, &group.entries, &derived_id)
+        }),
+    }?;
 
     Ok(memory_id)
 }
@@ -1111,7 +1219,7 @@ mod tests {
                 })
                 .expect("seed candidate memories");
 
-            let groups = collect_candidate_groups(&server).expect("collect candidate groups");
+            let groups = collect_candidate_groups(&server, None).expect("collect candidate groups");
             assert_eq!(groups.len(), 1);
             let ids = groups[0]
                 .entries
@@ -1165,7 +1273,7 @@ mod tests {
             })
             .expect("seed candidate memories");
 
-        let groups = collect_candidate_groups(&server).expect("collect candidate groups");
+        let groups = collect_candidate_groups(&server, None).expect("collect candidate groups");
         assert_eq!(groups.len(), 1);
         let ids = groups[0]
             .entries
@@ -1207,9 +1315,16 @@ mod tests {
             skip_reason: None,
         };
 
-        let memory_id =
-            persist_distill_memory(&server, &group, &payload, "batch-test", "raw_api", false)
-                .expect("persist distill");
+        let memory_id = persist_distill_memory(
+            &server,
+            &group,
+            &payload,
+            "batch-test",
+            "raw_api",
+            false,
+            None,
+        )
+        .expect("persist distill");
 
         server
             .with_project_store_read(|store| {
