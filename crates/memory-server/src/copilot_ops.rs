@@ -2084,10 +2084,22 @@ fn classify_task_intent(task: &str) -> &'static str {
     } else if contains_any(&[
         "research",
         "investigate",
+        "explore",
+        "exploration",
+        "summarize",
+        "summary",
+        "overview",
+        "map the",
+        "walk through",
         "学习",
         "研究",
         "查一下",
         "看一下资料",
+        "探索",
+        "梳理",
+        "概览",
+        "盘点",
+        "通读",
     ]) {
         "research_request"
     } else if contains_any(&["migration", "migrate", "迁移", "schema"]) {
@@ -2690,6 +2702,24 @@ mod tests {
             "review_request"
         );
         assert_eq!(classify_task_intent("看一下 PRs"), "review_request");
+    }
+
+    #[test]
+    fn task_brief_router_classifies_exploration_as_research() {
+        assert_eq!(
+            classify_task_intent(
+                "List the .rs files under crates/memory-core/src and produce a one-line summary of each."
+            ),
+            "research_request"
+        );
+        assert_eq!(
+            classify_task_intent("explore the codebase and give an overview"),
+            "research_request"
+        );
+        assert_eq!(
+            classify_task_intent("梳理一下这个模块的结构"),
+            "research_request"
+        );
     }
 
     #[test]
