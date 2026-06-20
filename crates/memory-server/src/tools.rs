@@ -2552,7 +2552,12 @@ fn md_opt_str(value: &Value, field: &str) -> String {
 fn md_opt_num(value: &Value, field: &str) -> String {
     match value.get(field) {
         Some(Value::Number(n)) => {
-            if let Some(f) = n.as_f64() {
+            // Integers (incl. large ones that would lose precision as f64) render
+            // exactly via as_i64; non-integers fall back to 2dp, and whole-number
+            // floats (e.g. 3.0) still render without a trailing ".00".
+            if let Some(i) = n.as_i64() {
+                format!("{i}")
+            } else if let Some(f) = n.as_f64() {
                 if f.fract().abs() < f64::EPSILON {
                     format!("{}", f as i64)
                 } else {
@@ -2642,14 +2647,14 @@ fn render_profiles_markdown(title: &str, action: &str, value: &Value) -> String 
             let role = md_opt_str(profile, "role");
             let stage = md_opt_str(profile, "stage");
             let backend = md_opt_str(profile, "backend");
+            let null_stats = Value::Null;
             let stats = profile
                 .get("mbit_card")
                 .and_then(|card| card.get("stats"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let cost = md_opt_num(&stats, "cost");
-            let precision = md_opt_num(&stats, "precision");
-            let speed = md_opt_num(&stats, "speed");
+                .unwrap_or(&null_stats);
+            let cost = md_opt_num(stats, "cost");
+            let precision = md_opt_num(stats, "precision");
+            let speed = md_opt_num(stats, "speed");
             let strong_against = profile
                 .get("mbit_card")
                 .and_then(|card| card.get("strong_against"))
