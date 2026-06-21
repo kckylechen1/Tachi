@@ -7,8 +7,13 @@ async fn workflow_close_loop_writes_wiki_with_references() {
         .tachi_workflow(Parameters(TachiWorkflowParams {
             action: "close_loop".to_string(),
             issue_ref: Some("kckylechen1/tachi#150".to_string()),
+            pr_ref: None,
             doc_paths: vec!["docs/wiki-references-spec.md".to_string()],
+            spec_paths: vec![],
             related_issues: vec!["#149".to_string()],
+            // Keep the smoke test offline: do not attempt a real gh comment.
+            post_comment: Some(false),
+            flow_id: None,
             wiki_title: Some("Closure smoke".to_string()),
             wiki_text: Some("Closed loop lesson for issue 150.".to_string()),
             wiki_path: None,
@@ -28,6 +33,22 @@ async fn workflow_close_loop_writes_wiki_with_references() {
 
     let json: Value = serde_json::from_str(&resp).expect("json");
     assert_eq!(json["ok"], json!(true));
+
+    // Phase 2: close_loop now fans out closure actions. With post_comment=false
+    // it must NOT post, and it should still emit the spec-drift advisory.
+    assert_eq!(
+        json["closure_actions"]["issue_comment"]["posted"],
+        json!(false)
+    );
+    assert_eq!(
+        json["closure_actions"]["spec_advisory"]["status"],
+        json!("advisory"),
+        "docs referenced but no spec_paths → spec-drift advisory expected"
+    );
+    assert!(json["closure_actions"]["comment_body"]
+        .as_str()
+        .is_some_and(|body| body.contains("close_loop")));
+
     let wiki_id = json["wiki"]["id"].as_str().expect("wiki id");
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {

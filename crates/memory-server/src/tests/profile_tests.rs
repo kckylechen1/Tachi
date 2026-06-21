@@ -252,12 +252,7 @@ async fn rate_limit_burst_allows_different_args() {
 
 #[tokio::test]
 async fn rate_limit_rpm_blocks_when_exceeded() {
-    ensure_test_env();
-    let db_path = std::env::temp_dir().join(format!(
-        "memory-server-test-rpm-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("failed to create test server");
+    let server = make_server();
 
     // Override RPM to a very low value for testing.
     // Since rate_limit_rpm is not pub, we use agent profile override instead.

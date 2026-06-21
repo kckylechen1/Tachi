@@ -97,13 +97,54 @@ impl Drop for TempHomeGuard {
     }
 }
 
-pub(crate) fn make_server() -> MemoryServer {
+/// Test-only wrapper that deletes the temporary SQLite database (and its
+/// `-wal`/`-shm` sidecars) when the test scope ends. Historically `make_server`
+/// handed back a bare `MemoryServer` and the temp file was never removed, so
+/// every test run leaked a `memory-server-test-*.sqlite` into the system temp
+/// dir (25k+ files / ~23 GB observed on a dev machine). Deref lets the ~250
+/// existing `server.method()` call sites keep working unchanged; the inner
+/// server is held in an `Option` so consumers that need ownership (e.g.
+/// `call_tool_via_server`) can `take()` it while cleanup still runs on drop.
+pub(crate) struct TestServer {
+    server: Option<MemoryServer>,
+    db_path: std::path::PathBuf,
+}
+
+impl std::ops::Deref for TestServer {
+    type Target = MemoryServer;
+    fn deref(&self) -> &Self::Target {
+        self.server
+            .as_ref()
+            .expect("TestServer used after its inner server was taken")
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        // Drop the server first so the SQLite connection closes before we
+        // remove the files (otherwise an open handle can recreate the WAL).
+        let _ = self.server.take();
+        let _ = std::fs::remove_file(&self.db_path);
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = self.db_path.clone().into_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+        }
+    }
+}
+
+pub(crate) fn make_server() -> TestServer {
     ensure_test_env();
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    MemoryServer::new(db_path, None).expect("failed to create test server")
+    let server =
+        MemoryServer::new(db_path.clone(), None).expect("failed to create test server");
+    TestServer {
+        server: Some(server),
+        db_path,
+    }
 }
 
 fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
@@ -238,10 +279,17 @@ fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
 }
 
 async fn call_tool_via_server(
-    server: MemoryServer,
+    mut server: TestServer,
     tool_name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+    // Take ownership of the inner server for `serve_directly` (which consumes
+    // it). The `server` wrapper, now holding `None`, lives to end of scope and
+    // cleans up the temp db files on drop.
+    let inner = server
+        .server
+        .take()
+        .expect("TestServer inner server already taken");
     let mut params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
     if let Some(arguments) = arguments.filter(|args| !args.is_empty()) {
         params = params.with_arguments(arguments);
@@ -253,7 +301,7 @@ async fn call_tool_via_server(
         rmcp::transport::OneshotTransport::<rmcp::service::RoleServer>::new(
             rmcp::model::ClientJsonRpcMessage::request(request, rmcp::model::RequestId::Number(1)),
         );
-    let service = rmcp::service::serve_directly(server, transport, None);
+    let service = rmcp::service::serve_directly(inner, transport, None);
 
     let message = tokio::time::timeout(std::time::Duration::from_secs(3), receiver.recv())
         .await
@@ -322,10 +370,12 @@ fn make_skill_capability(
 }
 
 mod bootstrap_tests;
+mod closure_scan_tests;
 mod credential_tests;
 mod dispatch_tests;
 mod docs_tests;
 mod facade_tests;
+mod gh_comment_tests;
 mod handoff_tests;
 mod hub_tests;
 mod kanban_tests;

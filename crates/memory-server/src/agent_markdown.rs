@@ -21,6 +21,7 @@ pub(crate) fn format_briefing(
     verification: &Value,
     kanban: &Value,
     checkpoints: &Value,
+    open_loops: &[Value],
     compact: bool,
 ) -> String {
     let memory_cap = if compact { 6 } else { 12 };
@@ -45,6 +46,20 @@ pub(crate) fn format_briefing(
         "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='briefing')` for feature-scoped canonical docs/specs."
             .to_string(),
     );
+
+    if !open_loops.is_empty() {
+        out.push("\n### ⚠️ Open Loops (closure debt) [AUTHORITY: WORKFLOW STATE]".to_string());
+        out.push(
+            "_Work done but the loop never closed. Close cheaply now — it won't resurface on its own._".to_string(),
+        );
+        for item in open_loops {
+            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
+            match item.get("action").and_then(Value::as_str) {
+                Some(action) => out.push(format!("- {detail} → `{action}`")),
+                None => out.push(format!("- {detail}")),
+            }
+        }
+    }
 
     if let Some(handoffs) = cross_project.as_array() {
         if !handoffs.is_empty() {
@@ -478,6 +493,7 @@ mod tests {
             &serde_json::json!([]),
             &kanban,
             &checkpoints,
+            &[],
             false,
         );
 
@@ -535,6 +551,7 @@ mod tests {
             &serde_json::json!([]),
             &kanban,
             &serde_json::json!(checkpoints),
+            &[],
             true,
         );
         let full = format_briefing(
@@ -547,6 +564,7 @@ mod tests {
             &serde_json::json!([]),
             &kanban,
             &serde_json::json!(checkpoints),
+            &[],
             false,
         );
 
@@ -627,6 +645,7 @@ mod tests {
             &serde_json::json!(verification),
             &kanban,
             &empty,
+            &[],
             true,
         );
         let gate_rows = compact

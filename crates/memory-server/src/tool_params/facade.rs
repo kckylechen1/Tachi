@@ -1088,10 +1088,27 @@ pub(crate) struct TachiWorkflowParams {
     pub action: String,
     #[serde(default)]
     pub issue_ref: Option<String>,
+    /// Optional PR reference ("owner/repo#123" or URL); when set, close_loop also
+    /// posts the write-back comment to the PR.
+    #[serde(default)]
+    pub pr_ref: Option<String>,
     #[serde(default)]
     pub doc_paths: Vec<String>,
+    /// Spec/contract file paths this change touched. Used for the close_loop
+    /// spec-drift advisory (specs are the source of truth and must stay current).
+    #[serde(default)]
+    pub spec_paths: Vec<String>,
     #[serde(default)]
     pub related_issues: Vec<String>,
+    /// Whether close_loop posts the write-back comment to the issue/PR.
+    /// Defaults to true (best-effort; never fails the closure if GitHub is down).
+    #[serde(default)]
+    pub post_comment: Option<bool>,
+    /// Optional Tachi flow id. When set and wiki_title/wiki_text are omitted,
+    /// close_loop drafts them from the flow's result.md (lowers the activation
+    /// energy to actually close the loop).
+    #[serde(default)]
+    pub flow_id: Option<String>,
     #[serde(default)]
     pub wiki_title: Option<String>,
     #[serde(default)]

@@ -188,6 +188,11 @@ pub(crate) async fn handle_memory_briefing(
         })
     };
 
+    // Cross-flow closure debt: surface unclosed loops / stale specs at the
+    // session-start surface the agent actually opens, not just the per-flow
+    // feature briefing (which only sees the flow already in scope).
+    let open_loops = crate::shell_ops::scan_open_loops(8);
+
     if wants_json(params.format.as_deref()) {
         return json_string(&json!({
             "status": "completed",
@@ -199,6 +204,7 @@ pub(crate) async fn handle_memory_briefing(
             "health": health_summary,
             "verification": verification,
             "kanban": board,
+            "open_loops": open_loops,
             "recent_checkpoints": checkpoints,
             "layer_authority": {
                 "docs_specs": "highest; use tachi_task(action='briefing') for feature-scoped canonical docs/specs",
@@ -230,6 +236,7 @@ pub(crate) async fn handle_memory_briefing(
         &verification,
         &board,
         &checkpoints,
+        &open_loops,
         compact,
     ))
 }

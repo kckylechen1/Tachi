@@ -4,7 +4,7 @@ use serde::Deserialize;
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "pr_list", "pr_read", "pr_comments", "pr_review_digest", "safe_merge"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge"
     pub action: String,
     /// Repository in "owner/repo" format
     pub repo: String,
@@ -97,6 +97,19 @@ pub(crate) struct GhIssueCreateParams {
     /// Labels to add
     #[serde(default)]
     pub labels: Vec<String>,
+}
+
+/// Parameters for posting a comment to a GitHub issue or PR (write-back arc).
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct GhCommentParams {
+    /// Repository in "owner/repo" format
+    pub repo: String,
+    /// Issue or PR number to comment on
+    pub number: u64,
+    /// Comment body (markdown)
+    pub body: Option<String>,
+    /// When true, return a preview of the comment WITHOUT posting it.
+    pub dry_run: bool,
 }
 
 /// Parameters for reading a GitHub PR

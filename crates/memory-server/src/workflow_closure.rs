@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Footer stamped on every closure write-back comment. Also the idempotency
+/// key: if an issue/PR already carries a comment containing this, close_loop
+/// skips re-posting instead of spamming on re-run.
+const CLOSURE_COMMENT_MARKER: &str = "_Posted automatically by the Tachi closure loop._";
+
 /// Build validated `references[]` for wiki closure (issue + docs + related issues).
 pub(crate) fn build_closure_references(
     issue_ref: &str,
@@ -127,6 +132,141 @@ pub(crate) fn build_promotion_plan(issue_ref: &str, references: &[String]) -> Va
     })
 }
 
+/// Templated closure comment posted back to the source issue/PR. Deterministic
+/// (not free-form) so the loop's write-back can't spam your own issues.
+fn build_closure_comment_body(
+    wiki_title: &str,
+    wiki_path: Option<&str>,
+    doc_paths: &[String],
+    spec_paths: &[String],
+    references: &[String],
+) -> String {
+    let mut body = String::from("✅ **Tachi close_loop**\n\n");
+    body.push_str(&format!("Durable lesson saved to wiki: **{wiki_title}**"));
+    if let Some(p) = wiki_path.map(str::trim).filter(|s| !s.is_empty()) {
+        body.push_str(&format!(" (`{p}`)"));
+    }
+    body.push('\n');
+    if !doc_paths.is_empty() {
+        body.push_str(&format!("\nDocs: {}\n", doc_paths.join(", ")));
+    }
+    if !spec_paths.is_empty() {
+        body.push_str(&format!("\nSpec touched: {}\n", spec_paths.join(", ")));
+    }
+    if !references.is_empty() {
+        body.push_str(&format!("\nReferences: {}\n", references.join(", ")));
+    }
+    body.push('\n');
+    body.push_str(CLOSURE_COMMENT_MARKER);
+    body
+}
+
+/// Spec is the source of truth; flag when a closure may have left it stale.
+fn spec_advisory(spec_paths: &[String], doc_paths: &[String]) -> Value {
+    if !spec_paths.is_empty() {
+        json!({
+            "status": "recorded",
+            "spec_paths": spec_paths,
+            "note": "Confirm these specs reflect the merged behavior.",
+        })
+    } else if !doc_paths.is_empty() {
+        json!({
+            "status": "advisory",
+            "note": "Docs referenced but no spec_paths recorded. If this change altered behavior, update the canonical spec so it does not drift.",
+        })
+    } else {
+        json!({ "status": "none", "note": "No docs/specs referenced." })
+    }
+}
+
+/// Best-effort write-back: post the closure comment to an issue or PR. Never
+/// fails the closure — if GitHub is unreachable the result records it as debt
+/// for the briefing to resurface.
+async fn post_closure_comment(
+    server: &MemoryServer,
+    target_ref: &str,
+    is_pr: bool,
+    body: &str,
+) -> Value {
+    let parsed = if is_pr {
+        crate::task_lifecycle::parse_pr_ref(target_ref)
+    } else {
+        crate::task_lifecycle::parse_issue_ref(target_ref, None)
+    };
+    let Some(target) = parsed else {
+        return json!({ "posted": false, "reason": format!("could not parse ref '{target_ref}'") });
+    };
+    let kind = if is_pr { "pr" } else { "issue" };
+    let label = format!("{}#{}", target.repo, target.number);
+
+    // Idempotency: don't re-post the closure comment if one is already there
+    // (re-run, retry, or a loop firing close_loop twice). Best-effort — if the
+    // probe can't reach GitHub it returns false and we proceed.
+    if crate::gh_ops::gh_comment_marker_present(
+        server,
+        kind,
+        &target.repo,
+        target.number,
+        CLOSURE_COMMENT_MARKER,
+    ) {
+        return json!({ "posted": false, "ref": label, "reason": "closure comment already present (idempotent skip)" });
+    }
+
+    match crate::gh_ops::handle_gh_comment(
+        server,
+        kind,
+        crate::tool_params::GhCommentParams {
+            repo: target.repo,
+            number: target.number,
+            body: Some(body.to_string()),
+            dry_run: false,
+        },
+    )
+    .await
+    {
+        Ok(result) => json!({
+            "posted": true,
+            "ref": label,
+            "result": serde_json::from_str::<Value>(&result).unwrap_or(json!(result)),
+        }),
+        Err(e) => json!({ "posted": false, "ref": label, "error": e }),
+    }
+}
+
+/// Draft a wiki title + body from a flow's `result.md` when the caller didn't
+/// supply them. Deterministic (no LLM): title from the first markdown heading
+/// or the issue ref, body from the result (capped). Lowers the activation
+/// energy to close a loop — the agent can call close_loop with just a flow_id.
+/// Returns None when there's no readable result to draft from.
+fn draft_from_result(flow_id: &str, issue_ref: &str) -> Option<(String, String)> {
+    let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).ok()?;
+    let result = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
+    let trimmed = result.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let title = trimmed
+        .lines()
+        .find_map(|line| {
+            let heading = line.trim_start();
+            let text = heading.trim_start_matches('#').trim();
+            if heading.starts_with('#') && !text.is_empty() {
+                Some(text.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| format!("Closure: {issue_ref}"));
+    const MAX_BODY_CHARS: usize = 4000;
+    let body = if trimmed.chars().count() > MAX_BODY_CHARS {
+        let capped: String = trimmed.chars().take(MAX_BODY_CHARS).collect();
+        format!("{capped}\n\n_(drafted from result.md; truncated at {MAX_BODY_CHARS} chars — edit before relying on it)_")
+    } else {
+        trimmed.to_string()
+    };
+    Some((title, body))
+}
+
 pub(crate) async fn handle_workflow(
     server: &MemoryServer,
     params: TachiWorkflowParams,
@@ -141,16 +281,29 @@ pub(crate) async fn handle_workflow(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "issue_ref is required for close_loop".to_string())?
                 .to_string();
-            let title = params
-                .wiki_title
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "wiki_title is required for close_loop".to_string())?;
-            let text = params
-                .wiki_text
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "wiki_text is required for close_loop".to_string())?;
+            // Resolve the wiki title/text. If either is omitted, draft it from
+            // the flow's result.md (Gap C: lower the cost of closing the loop).
+            let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
+            let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
+            let mut auto_drafted = false;
+            let (title, text) = match (explicit_title.clone(), explicit_text.clone()) {
+                (Some(t), Some(x)) => (t, x),
+                (maybe_t, maybe_x) => {
+                    let drafted = params
+                        .flow_id
+                        .as_deref()
+                        .and_then(|fid| draft_from_result(fid, &issue_ref));
+                    match drafted {
+                        Some((dt, dx)) => {
+                            auto_drafted = maybe_t.is_none() || maybe_x.is_none();
+                            (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx))
+                        }
+                        None => {
+                            return Err("close_loop needs wiki_title + wiki_text, or a flow_id whose result.md can be drafted from".to_string());
+                        }
+                    }
+                }
+            };
 
             let references =
                 build_closure_references(&issue_ref, &params.doc_paths, &params.related_issues);
@@ -163,6 +316,17 @@ pub(crate) async fn handle_workflow(
                 &references,
             );
             let promotion_plan = build_promotion_plan(&issue_ref, &references);
+
+            // Build the write-back comment BEFORE the wiki write moves `title`
+            // and `references` into WikiWriteParams.
+            let comment_body = build_closure_comment_body(
+                &title,
+                params.wiki_path.as_deref(),
+                &params.doc_paths,
+                &params.spec_paths,
+                &references,
+            );
+            let spec_advisory = spec_advisory(&params.spec_paths, &params.doc_paths);
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
                 server,
@@ -193,12 +357,35 @@ pub(crate) async fn handle_workflow(
             )
             .await?;
 
+            // Write-back arc: post the closure comment to the source issue (and
+            // PR, if given). Best-effort — a GitHub outage never fails the wiki
+            // closure; the failure is recorded so the briefing can resurface it.
+            let post = params.post_comment.unwrap_or(true);
+            let issue_comment = if post {
+                post_closure_comment(server, &issue_ref, false, &comment_body).await
+            } else {
+                json!({ "posted": false, "reason": "post_comment=false" })
+            };
+            let pr_comment = match (post, params.pr_ref.as_deref()) {
+                (true, Some(pr)) if !pr.trim().is_empty() => {
+                    post_closure_comment(server, pr, true, &comment_body).await
+                }
+                _ => json!({ "posted": false, "reason": "no pr_ref or post_comment=false" }),
+            };
+
             serde_json::to_string(&json!({
                 "ok": true,
                 "action": "close_loop",
                 "issue_ref": issue_ref,
                 "promotion_plan": promotion_plan,
                 "wiki": serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result)),
+                "closure_actions": {
+                    "comment_body": comment_body,
+                    "issue_comment": issue_comment,
+                    "pr_comment": pr_comment,
+                    "spec_advisory": spec_advisory,
+                    "auto_drafted": auto_drafted,
+                },
             }))
             .map_err(|e| format!("serialize close_loop: {e}"))
         }
