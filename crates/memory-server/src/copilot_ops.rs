@@ -1168,6 +1168,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
     let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
+    let open_loops = crate::shell_ops::scan_open_loops(8);
     let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
     let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));
     let eval_evidence = compact_layer_rows(eval_rows, top_k.min(5), Some("eval"), Some("evidence"));
@@ -1218,6 +1219,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "eval_evidence": eval_evidence,
         "doc_index": doc_index,
         "next_action": next_action,
+        "open_loops": open_loops,
         "layering": {
             "project_work_record": "GitHub issues/PRs and linked flow state; source of truth for active work",
             "docs": "canonical repo specs/design docs; source of truth for feature/API truth",
@@ -1617,6 +1619,7 @@ fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
         "result.md",
         "validation.md",
         "status.json",
+        "close_loop.json",
         "events.jsonl",
         "progress.jsonl",
         "trajectory.jsonl",
@@ -1903,6 +1906,18 @@ fn format_feature_briefing_markdown(value: &Value) -> String {
         value.get("eval_evidence").and_then(Value::as_array),
         "No matching eval evidence.",
     ));
+    if let Some(loops) = value
+        .get("open_loops")
+        .and_then(Value::as_array)
+        .filter(|loops| !loops.is_empty())
+    {
+        out.push("\n## ⚠️ Open Loops (closure debt)".to_string());
+        for item in loops {
+            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
+            let action = item.get("action").and_then(Value::as_str).unwrap_or("");
+            out.push(format!("- {detail} → `{action}`"));
+        }
+    }
     out.push(format!(
         "\n## Next Action\n{}",
         value

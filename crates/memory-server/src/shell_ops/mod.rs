@@ -138,6 +138,72 @@ pub(crate) fn run_dir_for_flow_id(flow_id: &str) -> Result<PathBuf, String> {
     Ok(shell_runs_root().join(flow_id))
 }
 
+/// Cross-flow closure-debt scan. Walks every flow run dir and surfaces:
+///   - `unclosed_loop`: work produced a `result.md` but close_loop never ran
+///     (issue/PR not written back, lesson not sunk, spec drift not flagged), and
+///   - `spec_drift`: a flow that closed with an unresolved spec advisory
+///     (docs referenced but no spec recorded — the canonical spec may be stale).
+///
+/// This is the session-start safety net for an agent's cross-session
+/// forgetfulness: a per-flow briefing only sees the flow in scope, which is
+/// exactly when a reminder is NOT needed. Output is capped at `limit`; if more
+/// debt exists, a final summary item reports the overflow (never a silent cap).
+pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
+    let runs_root = shell_runs_root();
+    let Ok(entries) = std::fs::read_dir(&runs_root) else {
+        return Vec::new();
+    };
+    let mut debts = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let flow_id = entry.file_name().to_string_lossy().to_string();
+        let close_loop_path = dir.join("close_loop.json");
+        let has_close_loop = close_loop_path.exists();
+        if dir.join("result.md").exists() && !has_close_loop {
+            debts.push(json!({
+                "kind": "unclosed_loop",
+                "flow_id": flow_id,
+                "detail": "Flow produced a result but close_loop has not run: issue/PR not written back, lesson not sunk to wiki, spec drift not flagged.",
+                "action": format!("tachi_task(action='close_loop', flow_id='{flow_id}')"),
+                "authority": "closure_debt",
+            }));
+        } else if has_close_loop {
+            let spec_unresolved = std::fs::read_to_string(&close_loop_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|v| {
+                    v.get("closure_actions")
+                        .and_then(|c| c.get("spec_advisory"))
+                        .and_then(|s| s.get("status"))
+                        .and_then(Value::as_str)
+                        .map(|status| status == "advisory")
+                })
+                .unwrap_or(false);
+            if spec_unresolved {
+                debts.push(json!({
+                    "kind": "spec_drift",
+                    "flow_id": flow_id,
+                    "detail": "Loop closed with docs referenced but no spec recorded — the canonical spec may be stale.",
+                    "action": "Update the canonical spec, then re-run close_loop with spec_paths once corrected.",
+                    "authority": "closure_debt",
+                }));
+            }
+        }
+    }
+    if debts.len() > limit {
+        let overflow = debts.len() - limit;
+        debts.truncate(limit);
+        debts.push(json!({
+            "kind": "more",
+            "detail": format!("{overflow} more closure-debt item(s) not shown (showing {limit})."),
+        }));
+    }
+    debts
+}
+
 fn validate_slice_id(id: &str) -> Result<(), String> {
     if id.is_empty()
         || id.contains('/')

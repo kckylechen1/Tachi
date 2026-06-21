@@ -2047,8 +2047,12 @@ impl MemoryServer {
                 let workflow_params = TachiWorkflowParams {
                     action: action.clone(),
                     issue_ref: params.issue_ref.clone(),
+                    pr_ref: params.pr_ref.clone(),
                     doc_paths: params.doc_paths.clone(),
+                    spec_paths: params.spec_paths.clone(),
                     related_issues: params.related_issues.clone(),
+                    post_comment: None,
+                    flow_id: params.flow_id.clone(),
                     wiki_title: params.wiki_title.clone(),
                     wiki_text: params.wiki_text.clone(),
                     wiki_path: params.wiki_path.clone(),
@@ -2092,7 +2096,7 @@ impl MemoryServer {
     // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
 
     #[tool(
-        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, pr_list, pr_read, pr_comments, pr_review_digest, safe_merge. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates plus a leader-verdict routing plan for PR comments, GitHub issues, feedback rules, guide/wiki promotion, repo docs/specs, and eval evidence. safe_merge is for GitHub PR merges, returns requested_mode=preview unless confirm=true and dry_run!=true, and reports merge_attempted/merge_executed separately. When flow_id is supplied, safe_merge consumes .tachi/runs/<flow_id>/verification.json from tachi_verify; standard/strict wait on missing required verification and block on failed/stale verification. Use approve_merge/tachi_task for local dispatched worktree merges. Requires GH_TOKEN in Vault or environment."
+        description = "GitHub operations: repo_view, issue_list, issue_read, issue_create, issue_comment, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge. issue_comment/pr_comment post a comment to an existing issue/PR (the closure-loop write-back); both require number+body and support dry_run=true for a preview without posting. pr_comments returns review submissions plus inline review comments. pr_review_digest filters bot/reviewer comments (author_filter defaults to gemini), writes .tachi/reviews digest artifacts by default, and returns memory/handbook candidates plus a leader-verdict routing plan for PR comments, GitHub issues, feedback rules, guide/wiki promotion, repo docs/specs, and eval evidence. safe_merge is for GitHub PR merges, returns requested_mode=preview unless confirm=true and dry_run!=true, and reports merge_attempted/merge_executed separately. When flow_id is supplied, safe_merge consumes .tachi/runs/<flow_id>/verification.json from tachi_verify; standard/strict wait on missing required verification and block on failed/stale verification. Use approve_merge/tachi_task for local dispatched worktree merges. Requires GH_TOKEN in Vault or environment."
     )]
     pub(crate) async fn tachi_gh(
         &self,
