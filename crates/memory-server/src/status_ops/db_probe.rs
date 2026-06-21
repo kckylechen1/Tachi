@@ -370,3 +370,45 @@ fn infer_vector_dimension(conn: &rusqlite::Connection) -> Result<Option<usize>, 
     Ok(None)
 }
 
+
+fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
+    let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::seconds(STUCK_THRESHOLD_SECS);
+    let cutoff_s = cutoff.to_rfc3339();
+    conn.query_row(
+        "SELECT COUNT(*) FROM foundry_jobs WHERE status = 'running' AND updated_at < ?1",
+        rusqlite::params![cutoff_s],
+        |row| row.get::<_, i64>(0).map(|n| n as usize),
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(0),
+        other => {
+            tracing::warn!("count_stuck_in_progress query failed: {other}");
+            Err(other)
+        }
+    })
+}
+
+pub(crate) fn is_orphan_entry(
+    entry: &crate::manifest::DbEntry,
+    db_path: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> bool {
+    if paths_equal(db_path, global_db_path) {
+        return false;
+    }
+    if let Some(project) = project_db_path {
+        if paths_equal(db_path, project) {
+            return false;
+        }
+    }
+    if crate::path_utils::named_project_for_db_path(db_path).is_some() {
+        return false;
+    }
+    !(entry.allow_write
+        && entry.schema_kind == "tachi"
+        && matches!(
+            entry.role,
+            DbRole::Agent | DbRole::Foundry | DbRole::Unknown
+        ))
+}
