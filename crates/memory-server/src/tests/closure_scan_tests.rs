@@ -91,6 +91,9 @@ async fn close_loop_drafts_wiki_from_result_when_missing() {
     let json: Value = serde_json::from_str(&resp).expect("json");
     assert_eq!(json["ok"], json!(true));
     assert_eq!(json["closure_actions"]["auto_drafted"], json!(true));
+    // TACHI_DISABLE_LLM_DRAFT (set in ensure_test_env) forces the deterministic
+    // fallback, so no network call is made and the source is the raw result.
+    assert_eq!(json["closure_actions"]["draft_source"], json!("result_md"));
     // Drafted title (from the result.md heading) flowed into the comment body.
     assert!(json["closure_actions"]["comment_body"]
         .as_str()

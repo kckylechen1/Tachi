@@ -234,17 +234,27 @@ async fn post_closure_comment(
 }
 
 /// Draft a wiki title + body from a flow's `result.md` when the caller didn't
-/// supply them. Deterministic (no LLM): title from the first markdown heading
-/// or the issue ref, body from the result (capped). Lowers the activation
-/// energy to close a loop — the agent can call close_loop with just a flow_id.
-/// Returns None when there's no readable result to draft from.
-fn draft_from_result(flow_id: &str, issue_ref: &str) -> Option<(String, String)> {
+/// supply them — lowering the activation energy to close a loop (the agent can
+/// call close_loop with just a flow_id).
+///
+/// Title is deterministic (first markdown heading, or the issue ref). For the
+/// body the backend model DRAFTS a distilled, reusable lesson; the raw-result
+/// dump is the guaranteed fallback. The model is purely advisory: the call is
+/// best-effort + time-bounded and NEVER blocks or fails the closure (GitHub
+/// outage, missing provider key, slow model → fall back). Returns the draft
+/// plus its source ("llm" | "result_md"), or None if there's nothing to draft.
+async fn draft_from_result(
+    server: &MemoryServer,
+    flow_id: &str,
+    issue_ref: &str,
+) -> Option<(String, String, &'static str)> {
     let run_dir = crate::shell_ops::run_dir_for_flow_id(flow_id).ok()?;
     let result = std::fs::read_to_string(run_dir.join("result.md")).ok()?;
     let trimmed = result.trim();
     if trimmed.is_empty() {
         return None;
     }
+
     let title = trimmed
         .lines()
         .find_map(|line| {
@@ -257,14 +267,40 @@ fn draft_from_result(flow_id: &str, issue_ref: &str) -> Option<(String, String)>
             }
         })
         .unwrap_or_else(|| format!("Closure: {issue_ref}"));
+
+    // Deterministic fallback body: the capped raw result. Always available.
     const MAX_BODY_CHARS: usize = 4000;
-    let body = if trimmed.chars().count() > MAX_BODY_CHARS {
+    let fallback_body = if trimmed.chars().count() > MAX_BODY_CHARS {
         let capped: String = trimmed.chars().take(MAX_BODY_CHARS).collect();
         format!("{capped}\n\n_(drafted from result.md; truncated at {MAX_BODY_CHARS} chars — edit before relying on it)_")
     } else {
         trimmed.to_string()
     };
-    Some((title, body))
+
+    // Preferred: let the backend model distill the result into a reusable
+    // lesson. `TACHI_DISABLE_LLM_DRAFT` (set in tests) forces the deterministic
+    // path so the suite never makes a network call.
+    if std::env::var_os("TACHI_DISABLE_LLM_DRAFT").is_none() {
+        const MAX_INPUT_CHARS: usize = 8000;
+        let input = format!(
+            "Distill the durable, reusable lesson from this completed work on {issue_ref}:\n\n{}",
+            trimmed.chars().take(MAX_INPUT_CHARS).collect::<String>()
+        );
+        let llm = server.llm.clone();
+        let distilled = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async move { llm.generate_distill(&input).await },
+        )
+        .await;
+        if let Ok(Ok(body)) = distilled {
+            let body = body.trim();
+            if !body.is_empty() {
+                return Some((title, body.to_string(), "llm"));
+            }
+        }
+    }
+
+    Some((title, fallback_body, "result_md"))
 }
 
 pub(crate) async fn handle_workflow(
@@ -286,16 +322,18 @@ pub(crate) async fn handle_workflow(
             let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
             let explicit_text = params.wiki_text.clone().filter(|s| !s.trim().is_empty());
             let mut auto_drafted = false;
+            let mut draft_source = "explicit";
             let (title, text) = match (explicit_title.clone(), explicit_text.clone()) {
                 (Some(t), Some(x)) => (t, x),
                 (maybe_t, maybe_x) => {
-                    let drafted = params
-                        .flow_id
-                        .as_deref()
-                        .and_then(|fid| draft_from_result(fid, &issue_ref));
+                    let drafted = match params.flow_id.as_deref() {
+                        Some(fid) => draft_from_result(server, fid, &issue_ref).await,
+                        None => None,
+                    };
                     match drafted {
-                        Some((dt, dx)) => {
+                        Some((dt, dx, src)) => {
                             auto_drafted = maybe_t.is_none() || maybe_x.is_none();
+                            draft_source = src;
                             (maybe_t.unwrap_or(dt), maybe_x.unwrap_or(dx))
                         }
                         None => {
@@ -385,6 +423,7 @@ pub(crate) async fn handle_workflow(
                     "pr_comment": pr_comment,
                     "spec_advisory": spec_advisory,
                     "auto_drafted": auto_drafted,
+                    "draft_source": draft_source,
                 },
             }))
             .map_err(|e| format!("serialize close_loop: {e}"))
