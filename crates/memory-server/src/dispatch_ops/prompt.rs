@@ -1,5 +1,5 @@
-use super::*;
-use crate::tool_params::GetMemoryParams;
+use crate::tool_params::{GetMemoryParams, SearchMemoryParams, TachiDispatchParams};
+use crate::MemoryServer;
 use serde_json::{json, Value};
 
 // ─── Prompt assembly (v2) ─────────────────────────────────────────────────
