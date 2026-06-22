@@ -11,10 +11,16 @@
 //! at the bottom of this file and are covered by unit tests; the dialoguer
 //! flow itself is intentionally not unit-tested.
 
-use super::*;
+use super::{
+    count_matching_entries, open_cli_store, open_cli_store_read_only, vault_cli, SetupReport,
+    SETUP_API_KEYS,
+};
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Confirm, Password};
+use std::collections::HashMap;
+use std::error::Error;
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Result of a wizard run, returned to the dispatcher in `setup.rs`.
 pub(super) struct SetupWizardOutcome {
@@ -33,7 +39,7 @@ pub(super) async fn run_interactive_wizard(
     report: &SetupReport,
     env_vars: &HashMap<String, String>,
     global_db_path: &PathBuf,
-) -> Result<SetupWizardOutcome, Box<dyn std::error::Error>> {
+) -> Result<SetupWizardOutcome, Box<dyn Error>> {
     let theme = ColorfulTheme::default();
 
     println!("───────────────────────────────────────────────");
@@ -341,7 +347,7 @@ pub(super) async fn run_interactive_wizard(
 fn init_vault_inline(
     global_db_path: &PathBuf,
     theme: &ColorfulTheme,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     if global_db_path.exists() {
@@ -399,7 +405,7 @@ fn store_collected_keys_in_vault(
     key_names: &[String],
     new_entries: &mut [(String, String)],
     theme: &ColorfulTheme,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<usize, Box<dyn Error>> {
     // Derive the vault key: init a new vault, or unlock the existing one.
     let key = if vault_already {
         let config = open_cli_store_read_only(global_db_path)?
@@ -422,7 +428,7 @@ fn store_collected_keys_in_vault(
         if password.is_empty() {
             return Err("password cannot be empty".into());
         }
-        super::vault_cli::vault_init_with_password(global_db_path, password)?
+        vault_cli::vault_init_with_password(global_db_path, password)?
     };
 
     upsert_keys_and_rewrite_aliases(global_db_path, &key, key_names, new_entries)
@@ -437,14 +443,14 @@ fn upsert_keys_and_rewrite_aliases(
     key: &crate::vault_crypto::DerivedVaultKey,
     key_names: &[String],
     new_entries: &mut [(String, String)],
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<usize, Box<dyn Error>> {
     let mut stored = 0usize;
     for (name, value) in new_entries.iter_mut() {
         if !key_names.iter().any(|k| k == name) {
             continue;
         }
         let secret_value = value.clone();
-        super::vault_cli::vault_upsert_secret_with_key(
+        vault_cli::vault_upsert_secret_with_key(
             global_db_path,
             key,
             name,
@@ -465,7 +471,7 @@ fn upsert_keys_and_rewrite_aliases(
 fn derive_verified_vault_key_for_wizard(
     config: &memory_core::vault::VaultConfig,
     password: &mut String,
-) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn std::error::Error>> {
+) -> Result<crate::vault_crypto::DerivedVaultKey, Box<dyn Error>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
     let salt = B64
@@ -572,7 +578,7 @@ fn merge_managed_block(existing: &str, block: &str) -> String {
     out
 }
 
-fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let markdown_candidates = [
         home.join(".claude").join("CLAUDE.md"),
         home.join(".codex").join("AGENTS.md"),
