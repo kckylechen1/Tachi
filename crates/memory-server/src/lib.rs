@@ -118,23 +118,9 @@ use crate::foundry_runtime_ops::FoundryWorkerStats;
 use crate::profiles::ToolProfile;
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
-#[cfg(test)]
-use crate::utils::lock_or_recover;
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
-#[cfg(test)]
-use chrono::Utc;
 use clap::Parser;
-#[cfg(test)]
-use memory_core::{HubCapability, MemoryEntry, MemoryStore};
-#[cfg(test)]
-use rmcp::handler::server::wrapper::Parameters;
-#[cfg(test)]
-use serde_json::{json, Value};
-#[cfg(test)]
-use std::collections::HashMap;
-#[cfg(test)]
-use std::time::{Duration, Instant};
 
 use crate::cli::Cli;
 use crate::mcp_pool::McpClientPool;
