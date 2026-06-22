@@ -337,13 +337,16 @@ pub(crate) fn gh_comment_marker_present(
     serde_json::from_str::<Value>(&output)
         .ok()
         .and_then(|value| {
-            value.get("comments").and_then(Value::as_array).map(|comments| {
-                comments.iter().any(|c| {
-                    c.get("body")
-                        .and_then(Value::as_str)
-                        .is_some_and(|body| body.contains(marker))
+            value
+                .get("comments")
+                .and_then(Value::as_array)
+                .map(|comments| {
+                    comments.iter().any(|c| {
+                        c.get("body")
+                            .and_then(Value::as_str)
+                            .is_some_and(|body| body.contains(marker))
+                    })
                 })
-            })
         })
         .unwrap_or(false)
 }

@@ -43,12 +43,12 @@ pub use memory_crud::{
     search_vec, supersede_memory, try_claim_event, update_enrichment_fields, update_with_revision,
     upsert,
 };
+pub use pack_db::{
+    pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
+};
 pub use recall_cache::{
     recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,
     recall_cache_stats, RecallCacheHit, RecallCacheStats,
-};
-pub use pack_db::{
-    pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,
 };
 pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,

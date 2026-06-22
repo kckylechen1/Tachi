@@ -143,8 +143,7 @@ pub(crate) fn make_server() -> TestServer {
         "memory-server-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
-    let server =
-        MemoryServer::new(db_path.clone(), None).expect("failed to create test server");
+    let server = MemoryServer::new(db_path.clone(), None).expect("failed to create test server");
     TestServer {
         server: Some(server),
         db_path,

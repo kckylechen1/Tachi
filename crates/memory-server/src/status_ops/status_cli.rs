@@ -736,7 +736,11 @@ fn reap_stale_processes(
     let verb = if apply { "reaped" } else { "would reap" };
     println!(
         "tachi process sweep: {verb} {reaped}, kept {kept} healthy{}",
-        if apply { "" } else { " (dry-run — pass --apply to act)" }
+        if apply {
+            ""
+        } else {
+            " (dry-run — pass --apply to act)"
+        }
     );
     for f in &findings {
         let mark = if f["reap"].as_bool().unwrap_or(false) {
@@ -746,7 +750,10 @@ fn reap_stale_processes(
         };
         println!(
             "  [{mark}] pid={} ppid={} {} :: {}",
-            f["pid"], f["ppid"], f["kind"].as_str().unwrap_or(""), f["command"].as_str().unwrap_or("")
+            f["pid"],
+            f["ppid"],
+            f["kind"].as_str().unwrap_or(""),
+            f["command"].as_str().unwrap_or("")
         );
     }
     if !stale_files.is_empty() {
