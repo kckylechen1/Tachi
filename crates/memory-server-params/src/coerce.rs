@@ -1,9 +1,7 @@
 use serde::de;
 use serde::Deserialize;
 
-pub(crate) fn opt_u64_from_string_or_number<'de, D>(
-    deserializer: D,
-) -> Result<Option<u64>, D::Error>
+pub fn opt_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
 where
     D: de::Deserializer<'de>,
 {
@@ -27,9 +25,7 @@ where
     }
 }
 
-pub(crate) fn opt_u32_from_string_or_number<'de, D>(
-    deserializer: D,
-) -> Result<Option<u32>, D::Error>
+pub fn opt_u32_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
     D: de::Deserializer<'de>,
 {
@@ -54,9 +50,7 @@ where
     }
 }
 
-pub(crate) fn opt_i64_from_string_or_number<'de, D>(
-    deserializer: D,
-) -> Result<Option<i64>, D::Error>
+pub fn opt_i64_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: de::Deserializer<'de>,
 {
@@ -80,9 +74,7 @@ where
     }
 }
 
-pub(crate) fn opt_f64_from_string_or_number<'de, D>(
-    deserializer: D,
-) -> Result<Option<f64>, D::Error>
+pub fn opt_f64_from_string_or_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
 where
     D: de::Deserializer<'de>,
 {

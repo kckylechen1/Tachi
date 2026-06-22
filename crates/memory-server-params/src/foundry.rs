@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_top_k() -> usize {
     6
@@ -75,7 +76,7 @@ fn default_wiki_project_name() -> String {
 // ─── Recall ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RecallContextParams {
+pub struct RecallContextParams {
     /// User or agent query that should be used to recall prior context
     pub query: String,
 
@@ -131,7 +132,7 @@ pub(crate) struct RecallContextParams {
 // ─── Capture ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct CaptureSessionParams {
+pub struct CaptureSessionParams {
     /// Conversation identifier
     pub conversation_id: String,
 
@@ -168,7 +169,7 @@ pub(crate) struct CaptureSessionParams {
 // ─── Compact ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct CompactContextParams {
+pub struct CompactContextParams {
     /// Canonical agent id for pathing / provenance
     pub agent_id: String,
 
@@ -211,7 +212,7 @@ pub(crate) struct CompactContextParams {
 }
 
 #[derive(Debug, Clone, JsonSchema)]
-pub(crate) struct CompactArtifactItemParams {
+pub struct CompactArtifactItemParams {
     /// Stable id for the compacted artifact, if already assigned
     #[serde(default)]
     pub item_id: Option<String>,
@@ -280,7 +281,7 @@ impl<'de> Deserialize<'de> for CompactArtifactItemParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct CompactRollupParams {
+pub struct CompactRollupParams {
     /// Canonical agent id for provenance
     pub agent_id: String,
 
@@ -320,7 +321,7 @@ pub(crate) struct CompactRollupParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct CompactSessionMemoryParams {
+pub struct CompactSessionMemoryParams {
     /// Canonical agent id for pathing / provenance
     pub agent_id: String,
 
@@ -366,7 +367,7 @@ pub(crate) struct CompactSessionMemoryParams {
 // ─── Section Build ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SectionBuildParams {
+pub struct SectionBuildParams {
     /// Logical section layer: static | session | live | other
     #[serde(default = "default_section_layer")]
     pub layer: String,
@@ -403,7 +404,7 @@ pub(crate) struct SectionBuildParams {
 // ─── Recommend / Bundle ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RecommendCapabilityParams {
+pub struct RecommendCapabilityParams {
     /// Natural language task or intent query
     pub query: String,
 
@@ -429,7 +430,7 @@ pub(crate) struct RecommendCapabilityParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RecommendSkillParams {
+pub struct RecommendSkillParams {
     /// Natural language task or intent query
     pub query: String,
 
@@ -447,7 +448,7 @@ pub(crate) struct RecommendSkillParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RecommendToolchainParams {
+pub struct RecommendToolchainParams {
     /// Natural language task or intent query
     pub query: String,
 
@@ -469,7 +470,7 @@ pub(crate) struct RecommendToolchainParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PrepareCapabilityBundleParams {
+pub struct PrepareCapabilityBundleParams {
     /// Natural language task or intent query
     pub query: String,
 
@@ -497,7 +498,7 @@ pub(crate) struct PrepareCapabilityBundleParams {
 // ─── Memory Graph ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct MemoryGraphParams {
+pub struct MemoryGraphParams {
     /// Optional seed memory id
     #[serde(default)]
     pub memory_id: Option<String>,

@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiGhParams {
+pub struct TachiGhParams {
     /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge"
     pub action: String,
     /// Repository in "owner/repo" format
@@ -61,7 +61,7 @@ pub(crate) struct TachiGhParams {
 
 /// Parameters for reading a GitHub issue
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhIssueReadParams {
+pub struct GhIssueReadParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Issue number
@@ -70,7 +70,7 @@ pub(crate) struct GhIssueReadParams {
 
 /// Parameters for listing GitHub issues
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhIssueListParams {
+pub struct GhIssueListParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Filter by state: "open", "closed", "all" (default: "open")
@@ -86,7 +86,7 @@ pub(crate) struct GhIssueListParams {
 
 /// Parameters for creating a GitHub issue
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhIssueCreateParams {
+pub struct GhIssueCreateParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Issue title
@@ -101,7 +101,7 @@ pub(crate) struct GhIssueCreateParams {
 
 /// Parameters for posting a comment to a GitHub issue or PR (write-back arc).
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhCommentParams {
+pub struct GhCommentParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Issue or PR number to comment on
@@ -114,7 +114,7 @@ pub(crate) struct GhCommentParams {
 
 /// Parameters for reading a GitHub PR
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhPrReadParams {
+pub struct GhPrReadParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// PR number
@@ -123,7 +123,7 @@ pub(crate) struct GhPrReadParams {
 
 /// Parameters for reading GitHub PR review submissions and inline comments
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhPrCommentsParams {
+pub struct GhPrCommentsParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// PR number
@@ -132,7 +132,7 @@ pub(crate) struct GhPrCommentsParams {
 
 /// Parameters for listing GitHub PRs
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhPrListParams {
+pub struct GhPrListParams {
     /// Repository in "owner/repo" format
     pub repo: String,
     /// Filter by state: "open", "closed", "merged", "all" (default: "open")
@@ -145,7 +145,7 @@ pub(crate) struct GhPrListParams {
 
 /// Parameters for viewing repository info
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GhRepoViewParams {
+pub struct GhRepoViewParams {
     /// Repository in "owner/repo" format
     pub repo: String,
 }

@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_hub_version() -> u32 {
     1
@@ -61,7 +62,7 @@ where
 // ─── Registration / Discovery ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RunSkillParams {
+pub struct RunSkillParams {
     /// ID of the skill capability to execute (e.g. "skill:code-review")
     pub skill_id: String,
 
@@ -71,7 +72,7 @@ pub(crate) struct RunSkillParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DistillTrajectoryParams {
+pub struct DistillTrajectoryParams {
     /// Natural-language task description
     pub task_description: String,
 
@@ -112,7 +113,7 @@ pub(crate) struct DistillTrajectoryParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubRegisterParams {
+pub struct HubRegisterParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
     pub id: String,
     /// Type: "skill" | "plugin" | "mcp"
@@ -140,7 +141,7 @@ pub(crate) struct HubRegisterParams {
 /// register reports `auto_approval_eligible: false` — i.e. for an untrusted
 /// stdio MCP command. This keeps the trusted-command allowlist authoritative.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubQuickAddParams {
+pub struct HubQuickAddParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
     pub id: String,
     /// Type: "skill" | "plugin" | "mcp"
@@ -166,7 +167,7 @@ pub(crate) struct HubQuickAddParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubDiscoverParams {
+pub struct HubDiscoverParams {
     /// Optional search query (searches name + description)
     #[serde(default)]
     pub query: Option<String>,
@@ -179,13 +180,13 @@ pub(crate) struct HubDiscoverParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubGetParams {
+pub struct HubGetParams {
     /// Capability ID to retrieve
     pub id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubFeedbackParams {
+pub struct HubFeedbackParams {
     /// Capability ID
     pub id: String,
     /// Whether the invocation was successful
@@ -201,7 +202,7 @@ pub(crate) struct HubFeedbackParams {
 // ─── Call / Proxy ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubCallParams {
+pub struct HubCallParams {
     /// MCP server capability ID (e.g. "mcp:github")
     pub server_id: String,
     /// Tool name to call on the child MCP server
@@ -216,7 +217,7 @@ pub(crate) struct HubCallParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub(crate) struct HubDisconnectParams {
+pub struct HubDisconnectParams {
     /// MCP server capability ID (e.g. "mcp:longbridge") or server name
     pub server_id: String,
 }
@@ -224,7 +225,7 @@ pub(crate) struct HubDisconnectParams {
 // ─── Review / Governance ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubSetEnabledParams {
+pub struct HubSetEnabledParams {
     /// Capability ID
     pub id: String,
     /// Whether to enable (true) or disable (false)
@@ -232,7 +233,7 @@ pub(crate) struct HubSetEnabledParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubReviewParams {
+pub struct HubReviewParams {
     /// Capability ID
     pub id: String,
     /// Governance review status: pending | approved | rejected
@@ -244,7 +245,7 @@ pub(crate) struct HubReviewParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HubSetActiveVersionParams {
+pub struct HubSetActiveVersionParams {
     /// Alias capability id (logical entrypoint)
     pub alias_id: String,
     /// Concrete capability id routed by this alias
@@ -254,7 +255,7 @@ pub(crate) struct HubSetActiveVersionParams {
 // ─── Virtual Capability ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VirtualCapabilityRegisterParams {
+pub struct VirtualCapabilityRegisterParams {
     /// Virtual capability ID, e.g. "vc:web_search"
     pub id: String,
     /// Human-readable name
@@ -280,7 +281,7 @@ pub(crate) struct VirtualCapabilityRegisterParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VirtualCapabilityBindParams {
+pub struct VirtualCapabilityBindParams {
     /// Virtual capability ID, e.g. "vc:web_search"
     pub vc_id: String,
     /// Concrete target capability ID, e.g. "mcp:exa"
@@ -303,7 +304,7 @@ pub(crate) struct VirtualCapabilityBindParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct VirtualCapabilityResolveParams {
+pub struct VirtualCapabilityResolveParams {
     /// Virtual capability ID to resolve
     pub id: String,
 }
@@ -311,7 +312,7 @@ pub(crate) struct VirtualCapabilityResolveParams {
 // ─── Export / Evolve / Chain ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ExportSkillsParams {
+pub struct ExportSkillsParams {
     /// Target agent format: "claude", "openclaw", "cursor", "generic"
     /// Defaults to "claude" if omitted.
     #[serde(default = "default_export_agent")]
@@ -340,7 +341,7 @@ pub(crate) struct ExportSkillsParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SkillEvolveParams {
+pub struct SkillEvolveParams {
     /// Skill capability ID to evolve (e.g. "skill:code-review")
     pub skill_id: String,
 
@@ -358,7 +359,7 @@ pub(crate) struct SkillEvolveParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ChainStep {
+pub struct ChainStep {
     /// Skill capability ID (e.g. "skill:summarize")
     pub skill_id: String,
     /// Extra arguments to merge with piped input
@@ -367,7 +368,7 @@ pub(crate) struct ChainStep {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ChainSkillsParams {
+pub struct ChainSkillsParams {
     /// Ordered list of skill steps to execute
     pub steps: Vec<ChainStep>,
     /// Input for the first step
@@ -377,7 +378,7 @@ pub(crate) struct ChainSkillsParams {
 // ─── Audit Log ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AuditLogParams {
+pub struct AuditLogParams {
     /// Maximum entries to return (default: 50)
     #[serde(default = "default_audit_limit")]
     pub limit: usize,

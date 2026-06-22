@@ -1,9 +1,10 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 // ─── Dead Letter Queue ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DlqListParams {
+pub struct DlqListParams {
     /// Filter by status: "pending", "retrying", "resolved", "abandoned"
     #[serde(default)]
     pub status_filter: Option<String>,
@@ -13,7 +14,7 @@ pub(crate) struct DlqListParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DlqRetryParams {
+pub struct DlqRetryParams {
     /// ID of the dead letter entry to retry
     pub dead_letter_id: String,
 }

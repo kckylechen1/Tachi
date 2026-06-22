@@ -1,4 +1,5 @@
 use super::*;
+use crate::server_state::{RATE_LIMIT_MAX_BURST_KEYS, RATE_LIMIT_MAX_SESSIONS};
 
 #[tokio::test]
 async fn standard_profile_direct_add_edge_call_is_rejected() {

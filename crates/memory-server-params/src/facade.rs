@@ -11,9 +11,9 @@ fn default_facade_top_k() -> usize {
     6
 }
 
-pub(crate) const MAX_FACADE_TOP_K: usize = 100;
+pub const MAX_FACADE_TOP_K: usize = 100;
 
-pub(crate) fn clamp_facade_top_k(top_k: usize) -> usize {
+pub fn clamp_facade_top_k(top_k: usize) -> usize {
     top_k.clamp(1, MAX_FACADE_TOP_K)
 }
 
@@ -165,7 +165,7 @@ fn tachi_orchestrator_action_schema(
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct TachiSearchParams {
+pub struct TachiSearchParams {
     /// Search query text. tachi_search is the human-readable/markdown alias of
     /// tachi_memory(action=search) (which defaults to JSON); same retrieval, formatted output.
     pub query: String,
@@ -231,7 +231,7 @@ fn default_web_search_top_k() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiWebSearchParams {
+pub struct TachiWebSearchParams {
     /// Web search query text
     pub query: String,
 
@@ -259,7 +259,7 @@ pub(crate) struct TachiWebSearchParams {
 // ─── Facade: unified save ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiSaveParams {
+pub struct TachiSaveParams {
     /// Full text content
     pub text: String,
 
@@ -363,7 +363,7 @@ fn default_memory_top_k() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct TachiMemoryParams {
+pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
         description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
@@ -546,7 +546,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiHandoffParams {
+pub struct TachiHandoffParams {
     /// Action: "leave" to leave a handoff memo, "check" to check for pending memos, "promote_issue" to create a GitHub issue from a memo
     pub action: String,
 
@@ -606,7 +606,7 @@ fn default_dispatch_timeout() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct DispatchMcpAccessParams {
+pub struct DispatchMcpAccessParams {
     /// Whether the resolved dispatch contract should inject Tachi MCP when the backend supports it.
     #[serde(default)]
     pub inject_tachi_mcp: Option<bool>,
@@ -645,7 +645,7 @@ pub(crate) struct DispatchMcpAccessParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiDispatchParams {
+pub struct TachiDispatchParams {
     /// Agent backend: "claude" | "codex" | "grok" | "kimi" | "custom" (aliases accepted)
     #[serde(default)]
     pub agent: Option<String>,
@@ -774,7 +774,7 @@ pub(crate) struct TachiDispatchParams {
 // ─── Facade: worktree merge ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiApproveMergeParams {
+pub struct TachiApproveMergeParams {
     /// Path to the git worktree to merge
     pub worktree: String,
 
@@ -801,7 +801,7 @@ pub(crate) struct TachiApproveMergeParams {
 // ─── Facade: task completion + eval ledger ───────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct TachiSubagentEvalParams {
+pub struct TachiSubagentEvalParams {
     /// Subagent role: explore | critic | specialist | executor | verifier | other
     pub role: String,
 
@@ -900,7 +900,7 @@ pub(crate) struct TachiSubagentEvalParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiCompleteParams {
+pub struct TachiCompleteParams {
     /// Task ID (if absent, one is generated from timestamp + agent)
     #[serde(default)]
     pub task_id: Option<String>,
@@ -1023,7 +1023,7 @@ pub(crate) struct TachiCompleteParams {
 // ─── Facade: wiki (search / browse / write) ──────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct TachiWikiParams {
+pub struct TachiWikiParams {
     /// Action: "search", "browse", "read", or "write"
     #[schemars(schema_with = "tachi_wiki_action_schema")]
     pub action: String,
@@ -1083,7 +1083,7 @@ pub(crate) struct TachiWikiParams {
 // ─── Facade: workflow closure (Issue → Doc → Memory) ─────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiWorkflowParams {
+pub struct TachiWorkflowParams {
     /// close_loop | build_references
     pub action: String,
     #[serde(default)]
@@ -1143,7 +1143,7 @@ pub(crate) struct TachiWorkflowParams {
 // ─── Facade: skill (discover / run / bundle / loadout) ───────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiSkillParams {
+pub struct TachiSkillParams {
     /// Action: "discover", "run", "bundle", or "loadout"
     #[schemars(schema_with = "tachi_skill_action_schema")]
     pub action: String,
@@ -1182,7 +1182,7 @@ pub(crate) struct TachiSkillParams {
 // ─── Facade: task (plan / recommend / dispatch / board / merge / lifecycle) ──
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiTaskParams {
+pub struct TachiTaskParams {
     /// Action: "plan", "briefing", "doc_index", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "status", "cancel", "board", "wait", "merge", "intake", "link_pr", "pr_status", "pr_handoff", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
@@ -1554,7 +1554,7 @@ pub(crate) struct TachiTaskParams {
 // ─── Facade: tachi_arena (tracked worker mission ledger) ────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiArenaParams {
+pub struct TachiArenaParams {
     /// Action: "open", "spawn", "board", "collect", "abort", "reap", or "close"
     #[schemars(schema_with = "tachi_arena_action_schema")]
     pub action: String,
@@ -1683,7 +1683,7 @@ pub(crate) struct TachiArenaParams {
 // ─── Facade: tachi_verify (background verification ledger) ──────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiVerifyParams {
+pub struct TachiVerifyParams {
     /// Action: "start", "record", "status", or "board".
     #[schemars(schema_with = "tachi_verify_action_schema")]
     pub action: String,
@@ -1758,7 +1758,7 @@ pub(crate) struct TachiVerifyParams {
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiShellDispatchSliceParams {
+pub struct TachiShellDispatchSliceParams {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -1786,7 +1786,7 @@ pub(crate) struct TachiShellDispatchSliceParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiShellParams {
+pub struct TachiShellParams {
     /// Action: "brainstorm" | "plan" | "dispatch" | "kanban" | "status" | "review" | "ship"
     #[schemars(schema_with = "tachi_shell_action_schema")]
     pub action: String,
@@ -1871,7 +1871,7 @@ pub(crate) struct TachiShellParams {
 // ─── Facade: orchestrator (persistent TODO / handoff) ────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiOrchestratorParams {
+pub struct TachiOrchestratorParams {
     /// todo_list | todo_update | handoff_write | handoff_read | recovery_briefing
     #[schemars(schema_with = "tachi_orchestrator_action_schema")]
     pub action: String,
@@ -1920,7 +1920,7 @@ pub(crate) struct TachiOrchestratorParams {
 // ─── Facade: agent eval harness ──────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiAgentEvalParams {
+pub struct TachiAgentEvalParams {
     /// aggregate_live | telemetry | perf. aggregate replays a local JSONL fixture only when
     /// TACHI_AGENT_EVAL_ALLOW_FIXTURE=1 is set.
     pub action: String,
@@ -1933,7 +1933,7 @@ pub(crate) struct TachiAgentEvalParams {
 // ─── Facade: agent registry / router ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiAgentsParams {
+pub struct TachiAgentsParams {
     /// list | select
     pub action: String,
     #[serde(default)]
@@ -1945,7 +1945,7 @@ pub(crate) struct TachiAgentsParams {
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiBoardParams {
+pub struct TachiBoardParams {
     /// Filter by state: "working", "completed", "failed", "all" (default: "all")
     #[serde(default)]
     pub state_filter: Option<String>,

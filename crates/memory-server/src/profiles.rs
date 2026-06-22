@@ -853,7 +853,7 @@ mod tests {
                 "non-admin write tool '{tool_name}' must belong to a bundle"
             );
             assert!(
-                crate::CACHE_INVALIDATING_TOOLS.contains(tool_name),
+                crate::server_state::CACHE_INVALIDATING_TOOLS.contains(tool_name),
                 "non-admin write tool '{tool_name}' must invalidate the read cache"
             );
         }

@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_project_db_relpath() -> String {
     ".tachi/memory.db".to_string()
@@ -7,7 +8,7 @@ fn default_project_db_relpath() -> String {
 // ─── Project DB ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct InitProjectDbParams {
+pub struct InitProjectDbParams {
     /// Optional target repository root. Defaults to current git root.
     #[serde(default)]
     pub project_root: Option<String>,
@@ -19,20 +20,20 @@ pub(crate) struct InitProjectDbParams {
 // ─── Pack System ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PackListParams {
+pub struct PackListParams {
     /// If true, only return enabled packs (default: false)
     #[serde(default)]
     pub enabled_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PackGetParams {
+pub struct PackGetParams {
     /// Pack identifier, e.g. "garrytan/gstack" or "obra/superpowers"
     pub id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PackRegisterParams {
+pub struct PackRegisterParams {
     /// Pack identifier, e.g. "garrytan/gstack"
     pub id: String,
 
@@ -62,7 +63,7 @@ pub(crate) struct PackRegisterParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PackRemoveParams {
+pub struct PackRemoveParams {
     /// Pack identifier to remove
     pub id: String,
 
@@ -72,7 +73,7 @@ pub(crate) struct PackRemoveParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct PackProjectParams {
+pub struct PackProjectParams {
     /// Pack identifier to project
     pub pack_id: String,
 
@@ -81,7 +82,7 @@ pub(crate) struct PackProjectParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ProjectionListParams {
+pub struct ProjectionListParams {
     /// Filter by agent kind (optional)
     #[serde(default)]
     pub agent: Option<String>,

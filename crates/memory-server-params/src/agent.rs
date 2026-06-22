@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_true() -> bool {
     true
@@ -23,7 +24,7 @@ fn default_copilot_top_k() -> usize {
 // ─── Agent Registration ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentRegisterParams {
+pub struct AgentRegisterParams {
     /// Unique agent identifier (e.g. "claude-code", "openclaw", "cursor", "codex")
     pub agent_id: String,
 
@@ -56,7 +57,7 @@ pub(crate) struct AgentRegisterParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentWhoamiParams {
+pub struct AgentWhoamiParams {
     /// No parameters needed — returns the current agent profile for this session.
     #[serde(default)]
     pub _placeholder: Option<String>,
@@ -65,7 +66,7 @@ pub(crate) struct AgentWhoamiParams {
 // ─── Handoff ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HandoffLeaveParams {
+pub struct HandoffLeaveParams {
     /// Summary of what was accomplished in this session
     pub summary: String,
 
@@ -83,7 +84,7 @@ pub(crate) struct HandoffLeaveParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HandoffCheckParams {
+pub struct HandoffCheckParams {
     /// Agent ID checking for handoff memos. If omitted, returns all pending memos.
     #[serde(default)]
     pub agent_id: Option<String>,
@@ -94,7 +95,7 @@ pub(crate) struct HandoffCheckParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct HandoffPromoteIssueParams {
+pub struct HandoffPromoteIssueParams {
     /// Handoff memo ID to promote (with or without "handoff:" prefix)
     pub memo_id: String,
     /// GitHub repo in "owner/repo" format
@@ -116,7 +117,7 @@ pub(crate) struct HandoffPromoteIssueParams {
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TaskBriefParams {
+pub struct TaskBriefParams {
     /// Natural-language task the agent is about to work on.
     pub task: String,
 
@@ -142,7 +143,7 @@ pub(crate) struct TaskBriefParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ProgressCheckParams {
+pub struct ProgressCheckParams {
     /// Natural-language task currently being attempted.
     pub task: String,
 
@@ -178,7 +179,7 @@ pub(crate) struct ProgressCheckParams {
 // ─── Agent Evolution ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentEvolutionDocumentParams {
+pub struct AgentEvolutionDocumentParams {
     /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
     pub kind: String,
 
@@ -191,7 +192,7 @@ pub(crate) struct AgentEvolutionDocumentParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentEvolutionDocumentPathParams {
+pub struct AgentEvolutionDocumentPathParams {
     /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
     pub kind: String,
 
@@ -200,7 +201,7 @@ pub(crate) struct AgentEvolutionDocumentPathParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentEvolutionEvidenceParams {
+pub struct AgentEvolutionEvidenceParams {
     /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
     pub kind: String,
 
@@ -225,7 +226,7 @@ pub(crate) struct AgentEvolutionEvidenceParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentEvolutionEvidencePathParams {
+pub struct AgentEvolutionEvidencePathParams {
     /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
     pub kind: String,
 
@@ -246,7 +247,7 @@ pub(crate) struct AgentEvolutionEvidencePathParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AgentEvolutionMemoryQueryParams {
+pub struct AgentEvolutionMemoryQueryParams {
     /// Search query used to pull supporting evidence from memory
     pub query: String,
 
@@ -272,7 +273,7 @@ pub(crate) struct AgentEvolutionMemoryQueryParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SynthesizeAgentEvolutionParams {
+pub struct SynthesizeAgentEvolutionParams {
     /// Canonical target agent id
     pub agent_id: String,
 
@@ -310,7 +311,7 @@ pub(crate) struct SynthesizeAgentEvolutionParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ListAgentEvolutionProposalsParams {
+pub struct ListAgentEvolutionProposalsParams {
     /// Canonical target agent id
     pub agent_id: String,
 
@@ -324,7 +325,7 @@ pub(crate) struct ListAgentEvolutionProposalsParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ReviewAgentEvolutionProposalParams {
+pub struct ReviewAgentEvolutionProposalParams {
     /// Derived proposal id returned by synthesize/queue/list operations
     pub proposal_id: String,
 
@@ -337,7 +338,7 @@ pub(crate) struct ReviewAgentEvolutionProposalParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ProjectAgentProfileParams {
+pub struct ProjectAgentProfileParams {
     /// Canonical target agent id
     pub agent_id: String,
 

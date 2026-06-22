@@ -1,4 +1,20 @@
-use super::*;
+use crate::hub_helpers::should_expose_mcp_tools;
+use crate::mcp_proxy::{
+    filter_mcp_tools_by_permissions, resolve_mcp_tool_exposure, McpToolExposureMode,
+};
+use crate::server_state::{
+    CachedResult, MemoryServer, CACHEABLE_TOOLS, CACHE_INVALIDATING_TOOLS, TOOL_CACHE_MAX_ENTRIES,
+    TOOL_CACHE_TTL,
+};
+use crate::shared_defs::{
+    categorize_error, push_dead_letter_with_limits, should_enqueue_dlq, DeadLetter,
+};
+use crate::utils::{lock_or_recover, stable_hash};
+use chrono::Utc;
+use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::ServerHandler;
+use std::future::Future;
+use std::time::{Duration, Instant};
 
 fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     std::env::var("TACHI_EXPOSED_TOOLS")
@@ -389,6 +405,7 @@ impl ServerHandler for MemoryServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn tool_error_results_are_not_cacheable() {

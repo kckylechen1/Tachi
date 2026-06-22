@@ -119,8 +119,7 @@ use crate::foundry_runtime_ops::{
     FoundryWorkerStats,
 };
 use crate::hub_helpers::{
-    build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
-    make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
+    capability_callable, capability_visibility_for_cap, review_status_allows_call,
     should_expose_skill_tool, CapabilityVisibility,
 };
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
@@ -132,9 +131,8 @@ use crate::mcp_proxy::{
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
-    categorize_error, dlq_mutation_is_unsafe, prune_expired_dead_letters,
-    push_dead_letter_with_limits, should_enqueue_dlq, slim_entry, slim_entry_with_enrichment,
-    slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
+    prune_expired_dead_letters, push_dead_letter_with_limits, slim_entry,
+    slim_entry_with_enrichment, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::tool_params::*;
 use crate::utils::{
@@ -151,16 +149,13 @@ use memory_core::{
 };
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
     schemars,
     schemars::JsonSchema,
     transport::StreamableHttpClientTransport,
-    ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -176,10 +171,7 @@ use crate::mcp_pool::McpClientPool;
 
 pub(crate) mod server_state;
 pub(crate) use server_state::{
-    configured_memory_read_pool_size, AgentProfile, CachedResult, CachedVaultKey, DbScope,
-    HandoffMemo, MemoryServer, ProjectDbState, ReadStorePool, VaultState, CACHEABLE_TOOLS,
-    CACHE_INVALIDATING_TOOLS, RATE_LIMIT_BURST_WINDOW, RATE_LIMIT_MAX_BURST_KEYS,
-    RATE_LIMIT_MAX_SESSIONS, STUCK_SOFT_WARN_THRESHOLD, TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL,
+    AgentProfile, CachedVaultKey, DbScope, HandoffMemo, MemoryServer, VaultState, TOOL_CACHE_TTL,
 };
 
 // Enrichment batcher methods are in enrichment.rs

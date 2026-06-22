@@ -1,4 +1,5 @@
-use super::*;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_access_level() -> String {
     "read".to_string()
@@ -39,7 +40,7 @@ fn default_sandbox_exec_audit_limit() -> usize {
 // ─── Sandbox Access Rules ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxSetRuleParams {
+pub struct SandboxSetRuleParams {
     /// Agent role (e.g. "code-review", "finance", "admin")
     pub agent_role: String,
     /// Path pattern to match (e.g. "/finance/*", "/project/secrets")
@@ -50,7 +51,7 @@ pub(crate) struct SandboxSetRuleParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxCheckParams {
+pub struct SandboxCheckParams {
     /// Agent role to check access for
     pub agent_role: String,
     /// Memory path to check
@@ -63,7 +64,7 @@ pub(crate) struct SandboxCheckParams {
 // ─── Sandbox Execution Policies ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxSetPolicyParams {
+pub struct SandboxSetPolicyParams {
     /// Capability ID (typically MCP capability id, e.g. "mcp:exa")
     pub capability_id: String,
     /// Runtime type: "process" | "wasm"
@@ -96,13 +97,13 @@ pub(crate) struct SandboxSetPolicyParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxGetPolicyParams {
+pub struct SandboxGetPolicyParams {
     /// Capability ID to query
     pub capability_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxListPoliciesParams {
+pub struct SandboxListPoliciesParams {
     /// Only return enabled policies
     #[serde(default)]
     pub enabled_only: bool,
@@ -112,7 +113,7 @@ pub(crate) struct SandboxListPoliciesParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SandboxExecAuditParams {
+pub struct SandboxExecAuditParams {
     /// Optional capability filter (e.g. "mcp:exa")
     #[serde(default)]
     pub capability_id: Option<String>,

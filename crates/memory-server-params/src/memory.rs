@@ -1,4 +1,7 @@
-use super::*;
+use chrono::Utc;
+use memory_core::{HybridWeights, MemoryEntry, SearchOptions};
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 
 fn default_path() -> String {
     "/".to_string()
@@ -28,8 +31,8 @@ fn default_candidates() -> usize {
     20
 }
 
-pub(crate) const MAX_SEARCH_TOP_K: usize = 100;
-pub(crate) const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
+pub const MAX_SEARCH_TOP_K: usize = 100;
+pub const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
 
 fn default_mmr_threshold() -> Option<f64> {
     Some(0.85)
@@ -142,7 +145,7 @@ fn default_contradiction_threshold() -> f64 {
 // ─── Save / Update ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct SaveMemoryParams {
+pub struct SaveMemoryParams {
     /// Full text content of the memory
     pub text: String,
 
@@ -241,7 +244,7 @@ pub(crate) struct SaveMemoryParams {
 /// to `handle_save_memory`, so the capture gate, noise filter, provenance, and
 /// enrichment pipeline all run identically to a `save_memory` call.
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct RememberParams {
+pub struct RememberParams {
     /// Full text content to remember.
     pub text: String,
 
@@ -306,7 +309,7 @@ pub(crate) struct RememberParams {
 // ─── Search ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct HybridWeightsParam {
+pub struct HybridWeightsParam {
     /// Semantic (vector) weight (default: 0.4)
     #[serde(default = "default_weight_semantic")]
     pub semantic: f64,
@@ -325,7 +328,7 @@ pub(crate) struct HybridWeightsParam {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct SearchMemoryParams {
+pub struct SearchMemoryParams {
     /// Search query text
     pub query: String,
 
@@ -412,11 +415,11 @@ pub(crate) struct SearchMemoryParams {
 }
 
 impl SearchMemoryParams {
-    pub(crate) fn normalized_top_k(&self) -> usize {
+    pub fn normalized_top_k(&self) -> usize {
         self.top_k.clamp(1, MAX_SEARCH_TOP_K)
     }
 
-    pub(crate) fn normalized_candidates_per_channel(&self) -> usize {
+    pub fn normalized_candidates_per_channel(&self) -> usize {
         let requested = if self.candidates_per_channel == 0 {
             default_candidates()
         } else {
@@ -428,7 +431,7 @@ impl SearchMemoryParams {
     }
 
     /// Build SearchOptions from params, only differing by vec_available per DB.
-    pub(crate) fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+    pub fn to_search_options(&self, vec_available: bool) -> SearchOptions {
         let weights = match &self.weights {
             Some(w) => HybridWeights {
                 semantic: w.semantic,
@@ -460,7 +463,7 @@ impl SearchMemoryParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct FindSimilarMemoryParams {
+pub struct FindSimilarMemoryParams {
     /// Query embedding vector (same dimension as stored embeddings)
     pub query_vec: Vec<f32>,
 
@@ -487,11 +490,11 @@ pub(crate) struct FindSimilarMemoryParams {
 }
 
 impl FindSimilarMemoryParams {
-    pub(crate) fn normalized_top_k(&self) -> usize {
+    pub fn normalized_top_k(&self) -> usize {
         self.top_k.clamp(1, MAX_SEARCH_TOP_K)
     }
 
-    pub(crate) fn normalized_candidates_per_channel(&self) -> usize {
+    pub fn normalized_candidates_per_channel(&self) -> usize {
         let requested = if self.candidates_per_channel == 0 {
             default_candidates()
         } else {
@@ -579,7 +582,7 @@ mod tests {
 // ─── Get / List / Delete / Archive ──────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct GetMemoryParams {
+pub struct GetMemoryParams {
     /// Memory entry ID
     pub id: String,
 
@@ -594,7 +597,7 @@ pub(crate) struct GetMemoryParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ListMemoriesParams {
+pub struct ListMemoriesParams {
     /// Path prefix to filter
     #[serde(default = "default_path")]
     pub path_prefix: String,
@@ -609,13 +612,13 @@ pub(crate) struct ListMemoriesParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DeleteMemoryParams {
+pub struct DeleteMemoryParams {
     /// Memory entry ID to delete
     pub id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ArchiveMemoryParams {
+pub struct ArchiveMemoryParams {
     /// Memory entry ID to archive
     pub id: String,
 }
@@ -623,7 +626,7 @@ pub(crate) struct ArchiveMemoryParams {
 // ─── Graph Edges ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct AddEdgeParams {
+pub struct AddEdgeParams {
     /// Source memory ID
     pub source_id: String,
     /// Target memory ID
@@ -643,7 +646,7 @@ pub(crate) struct AddEdgeParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GetEdgesParams {
+pub struct GetEdgesParams {
     /// Memory entry ID
     pub memory_id: String,
     /// Direction: "outgoing", "incoming", or "both" (default: "both")
@@ -661,7 +664,7 @@ pub(crate) struct GetEdgesParams {
 // ─── Sync ───────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SyncMemoriesParams {
+pub struct SyncMemoriesParams {
     /// Unique agent identifier for tracking known state
     pub agent_id: String,
     /// Optional path prefix to scope the sync (e.g. "/project")
@@ -675,7 +678,7 @@ pub(crate) struct SyncMemoriesParams {
 // ─── State / Extraction / Ingest ────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct SetStateParams {
+pub struct SetStateParams {
     /// State key
     pub key: String,
 
@@ -684,13 +687,13 @@ pub(crate) struct SetStateParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GetStateParams {
+pub struct GetStateParams {
     /// State key
     pub key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct ExtractFactsParams {
+pub struct ExtractFactsParams {
     /// Text to extract facts from
     pub text: String,
 
@@ -706,7 +709,7 @@ pub(crate) struct ExtractFactsParams {
 /// boundary so callers get deterministic tool behavior instead of serde
 /// transport errors.
 #[derive(Debug, Clone, serde::Serialize, JsonSchema)]
-pub(crate) struct Message {
+pub struct Message {
     /// Role of the message sender (e.g., "user", "assistant", "system")
     #[serde(skip_serializing_if = "String::is_empty")]
     pub role: String,
@@ -745,7 +748,7 @@ fn default_message_role() -> String {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct IngestEventParams {
+pub struct IngestEventParams {
     /// Conversation identifier
     #[serde(default)]
     pub conversation_id: String,
@@ -795,7 +798,7 @@ pub(crate) struct IngestEventParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct IngestSourceParams {
+pub struct IngestSourceParams {
     /// Raw source content to ingest
     pub content: String,
 
@@ -853,7 +856,7 @@ pub(crate) struct IngestSourceParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct IngestParams {
+pub struct IngestParams {
     /// Ingest mode: "event" or "source"
     #[serde(default = "default_ingest_type")]
     pub ingest_type: String,
@@ -934,7 +937,7 @@ pub(crate) struct IngestParams {
 // ─── Domain Management ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct RegisterDomainParams {
+pub struct RegisterDomainParams {
     /// Unique domain name (e.g. "finance", "code-review")
     pub name: String,
 
@@ -963,26 +966,26 @@ pub(crate) struct RegisterDomainParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct GetDomainParams {
+pub struct GetDomainParams {
     /// Domain name to retrieve
     pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct ListDomainsParams {
+pub struct ListDomainsParams {
     /// Placeholder (no filters currently needed)
     #[serde(default)]
     pub _placeholder: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct DeleteDomainParams {
+pub struct DeleteDomainParams {
     /// Domain name to delete
     pub name: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct WikiLintParams {
+pub struct WikiLintParams {
     /// Path prefix to lint (default: /wiki)
     #[serde(default = "default_wiki_path_prefix_opt")]
     pub path_prefix: Option<String>,
@@ -1013,7 +1016,7 @@ pub(crate) struct WikiLintParams {
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
-pub(crate) struct WikiWriteParams {
+pub struct WikiWriteParams {
     /// Short title for the wiki entry.
     pub title: String,
 
@@ -1092,7 +1095,7 @@ fn default_wiki_browse_limit() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct WikiSearchParams {
+pub struct WikiSearchParams {
     /// Search query text.
     pub query: String,
 
@@ -1138,7 +1141,7 @@ pub(crate) struct WikiSearchParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct WikiBrowseParams {
+pub struct WikiBrowseParams {
     /// Wiki category path to browse, e.g. "/wiki/quant/strategy" or just "quant".
     /// If omitted, returns top-level category stats.
     #[serde(default)]
@@ -1154,7 +1157,7 @@ pub(crate) struct WikiBrowseParams {
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiWikiIngestParams {
+pub struct TachiWikiIngestParams {
     /// URL or file path to ingest.
     pub source: String,
 
@@ -1167,10 +1170,10 @@ pub(crate) struct TachiWikiIngestParams {
     pub update_related: bool,
 }
 
-pub(crate) const MIN_FACT_CHAR_COUNT: usize = 30;
+pub const MIN_FACT_CHAR_COUNT: usize = 30;
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
-pub(crate) fn fact_to_entry(
+pub fn fact_to_entry(
     fact: &serde_json::Value,
     source: &str,
     metadata: serde_json::Value,
@@ -1262,7 +1265,7 @@ pub(crate) fn fact_to_entry(
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub(crate) struct TachiWikiOrganizeParams {
+pub struct TachiWikiOrganizeParams {
     /// Absolute path to the docs directory to organize.
     pub dir_path: String,
     /// When true, report planned moves / frontmatter / task-sync changes
