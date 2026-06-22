@@ -1,5 +1,7 @@
 use super::*;
-use crate::mcp_proxy::McpToolExposureMode;
+use crate::mcp_proxy::{
+    filter_mcp_tools_by_permissions, resolve_mcp_tool_exposure, McpToolExposureMode,
+};
 
 #[tokio::test]
 async fn proxy_call_blocks_disabled_capability_even_directly() {

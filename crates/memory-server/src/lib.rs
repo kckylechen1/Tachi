@@ -120,10 +120,7 @@ use crate::hub_helpers::{
     should_expose_skill_tool, CapabilityVisibility,
 };
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
-use crate::mcp_proxy::{
-    append_warning, clear_mcp_discovery_metadata, filter_mcp_tools_by_permissions,
-    resolve_mcp_tool_exposure, set_mcp_discovery_failure, set_mcp_discovery_success,
-};
+use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
