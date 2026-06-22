@@ -1617,6 +1617,7 @@ mod tests {
             global_db: global_db.map(|path| path.display().to_string()),
             project_db: None,
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pid: Some(std::process::id() as i64),
         }
     }
 

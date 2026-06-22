@@ -140,6 +140,70 @@ fn daily_distill_marker_path(app_home: &std::path::Path) -> std::path::PathBuf {
     app_home.join("foundry-runs").join(".last_distill_run")
 }
 
+/// Idle window after which a detached daemon self-terminates. `None` disables
+/// the reaper (env value `0`). Defaults to 30 minutes.
+fn daemon_idle_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var("TACHI_DAEMON_IDLE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1800);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+/// Resolves when the launching parent has exited. An orphaned stdio MCP server
+/// has no host left to talk to, so it should exit rather than linger as an
+/// init/launchd-reparented process. Unix-only; default on, disable with
+/// `TACHI_STDIO_PARENT_DEATH_EXIT=0`. On non-Unix (or when the process was
+/// already parentless at startup) it never resolves, leaving the other
+/// `select!` arms in control.
+async fn wait_for_parent_death() {
+    #[cfg(unix)]
+    {
+        let disabled = std::env::var("TACHI_STDIO_PARENT_DEATH_EXIT")
+            .map(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
+            .unwrap_or(false);
+        // SAFETY: getppid() is always safe — it reads the caller's parent pid.
+        let original_ppid = unsafe { libc::getppid() };
+        if disabled || original_ppid <= 1 {
+            // Already parentless (or opted out): nothing to watch.
+            std::future::pending::<()>().await;
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // Reparented to init/launchd or a userspace subreaper ⇒ the host died.
+            if unsafe { libc::getppid() } != original_ppid {
+                return;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Resolves on SIGTERM (Unix). Hosts and the version-skew daemon-replace path
+/// send SIGTERM, not SIGINT, so both serve loops must catch it for a graceful
+/// shutdown (flush + pid-file cleanup) instead of an abrupt default kill. Never
+/// resolves on non-Unix or if the handler can't be installed.
+async fn sigterm() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::future::pending::<()>().await;
+    }
+}
+
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
@@ -1265,6 +1329,34 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         let bind_addr = local_addr.to_string();
         let port = local_addr.port();
 
+        // Idle reaper: a detached daemon has no parent whose death would signal
+        // it to stop, so without this it lingers forever — one per global DB,
+        // accumulating across every host restart. After
+        // TACHI_DAEMON_IDLE_TIMEOUT_SECS with no MCP tool call (default 1800s;
+        // 0 disables) it cancels its own serve token; the next stdio invocation
+        // auto-respawns one on demand.
+        if let Some(idle_timeout) = daemon_idle_timeout() {
+            let clock = server.activity_clock();
+            let ct_idle = ct.clone();
+            let tick = std::time::Duration::from_secs(idle_timeout.as_secs().clamp(5, 60));
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tick).await;
+                    let last = clock.load(std::sync::atomic::Ordering::Relaxed);
+                    let idle_ms = chrono::Utc::now().timestamp_millis() - last;
+                    if idle_ms >= idle_timeout.as_millis() as i64 {
+                        eprintln!(
+                            "[idle-reaper] daemon idle {}s (limit {}s); shutting down — will auto-respawn on demand",
+                            idle_ms / 1000,
+                            idle_timeout.as_secs()
+                        );
+                        ct_idle.cancel();
+                        break;
+                    }
+                }
+            });
+        }
+
         let health_payload = serde_json::json!({
             "status": "ok",
             "version": env!("CARGO_PKG_VERSION"),
@@ -1347,6 +1439,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 eprintln!("Received SIGINT, shutting down gracefully...");
                 ct.cancel();
             }
+            _ = sigterm() => {
+                eprintln!("Received SIGTERM, shutting down gracefully...");
+                ct.cancel();
+            }
         }
 
         // Best-effort cleanup of daemon discovery file
@@ -1354,10 +1450,6 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     } else {
         // stdio mode (default) — auto-spawn daemon if not running
         {
-            let daemon_running =
-                crate::cli_client::detect_daemon_for_global_db(&app_home, &global_db_path)
-                    .await
-                    .is_some();
             let auto_daemon_disabled = std::env::var("TACHI_DISABLE_AUTO_DAEMON")
                 .map(|value| {
                     let value = value.trim();
@@ -1366,6 +1458,52 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                         || value.eq_ignore_ascii_case("yes")
                 })
                 .unwrap_or(false);
+
+            // Version-skew replace: if a daemon is already running but STRICTLY
+            // OLDER than this binary, a new-binary child cannot forward to it
+            // (version mismatch ⇒ in-process fallback), so multiple OS processes
+            // would write the same SQLite file directly and contend (5s
+            // SQLITE_BUSY stalls). Replacing the stale daemon keeps a single
+            // current-version writer. Safeguards: only when strictly older
+            // (never a newer daemon mid-rollout); only the SAME global DB
+            // (detect_* guarantees it); SIGTERM is graceful (cleans its pid
+            // file); and flock arbitrates the respawn race if several children
+            // detect the old daemon at once.
+            if !auto_daemon_disabled {
+                if let Some(info) =
+                    crate::cli_client::detect_daemon_for_global_db(&app_home, &global_db_path).await
+                {
+                    if crate::cli_client::daemon_is_older_than_current(&info) {
+                        if let Some(pid) = info.pid {
+                            eprintln!(
+                                "[auto-daemon] replacing stale daemon pid={pid} v{} (< v{})",
+                                info.version.as_deref().unwrap_or("?"),
+                                env!("CARGO_PKG_VERSION")
+                            );
+                            #[cfg(unix)]
+                            {
+                                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                                // Wait (≤3s) for it to release its flock / exit
+                                // so our respawn can bind cleanly.
+                                for _ in 0..30 {
+                                    if !crate::daemon_lock::process_alive(pid as i32) {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(100)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-detect after the possible replacement (the dead daemon's port
+            // is closed, so detect's TCP probe returns None even if a stale pid
+            // file lingers).
+            let daemon_running =
+                crate::cli_client::detect_daemon_for_global_db(&app_home, &global_db_path)
+                    .await
+                    .is_some();
             if !daemon_running && !auto_daemon_disabled {
                 match std::env::current_exe() {
                     Ok(exe) => {
@@ -1429,13 +1567,23 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         let transport = (stdin(), stdout());
         let running = rmcp::service::serve_server(server, transport).await?;
 
-        // Graceful shutdown: wait for either MCP quit or SIGINT/SIGTERM
+        // Graceful shutdown: MCP quit (stdin EOF / client disconnect), SIGINT,
+        // or parent-death. A well-behaved host closes stdin on disconnect so
+        // `running.waiting()` resolves; the parent-death branch is the backstop
+        // for hosts that leak the child (it gets reparented to init/launchd and
+        // would otherwise linger forever).
         tokio::select! {
             quit_reason = running.waiting() => {
                 eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
             }
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("Received SIGINT, shutting down gracefully...");
+            }
+            _ = sigterm() => {
+                eprintln!("Received SIGTERM, shutting down gracefully...");
+            }
+            _ = wait_for_parent_death() => {
+                eprintln!("[parent-death] host process exited; shutting down orphaned stdio server");
             }
         }
     }

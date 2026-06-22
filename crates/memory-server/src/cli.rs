@@ -668,6 +668,18 @@ pub(crate) enum DaemonAction {
         #[arg(long)]
         force: bool,
     },
+    /// Sweep stale tachi processes machine-wide: orphaned stdio servers (the
+    /// launching host died) and daemons whose backing global DB no longer
+    /// exists, plus stale daemon lock files. Previews by default; pass --apply
+    /// to actually SIGTERM / unlink. Self and healthy live processes are never
+    /// touched.
+    Reap {
+        /// Actually terminate / unlink. Without this it is a dry-run preview.
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

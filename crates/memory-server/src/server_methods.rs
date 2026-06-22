@@ -254,6 +254,21 @@ impl MemoryServer {
         self.global_read_pool.with_store("global_read_pool", f)
     }
 
+    /// Stamp "now" as the last MCP activity. Lock-free; called centrally from
+    /// `ServerHandler::call_tool` on every tool invocation (including calls a
+    /// stdio child forwards to this daemon).
+    pub(crate) fn touch_activity(&self) {
+        self.last_activity_ms.store(
+            chrono::Utc::now().timestamp_millis(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Shared handle to the last-activity clock, for the serve-loop idle reaper.
+    pub(crate) fn activity_clock(&self) -> Arc<std::sync::atomic::AtomicI64> {
+        Arc::clone(&self.last_activity_ms)
+    }
+
     pub(super) fn with_project_store<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,

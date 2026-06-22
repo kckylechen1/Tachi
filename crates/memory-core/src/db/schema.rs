@@ -423,6 +423,27 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             created_at        TEXT NOT NULL DEFAULT '',
             updated_at        TEXT NOT NULL DEFAULT ''
         );
+
+        -- Recall cache: rendered hybrid-search result rows keyed by a query
+        -- context hash. Lives OUTSIDE `memories` on purpose — a prior design
+        -- stored these as memory rows and they leaked into every long-lived
+        -- DB. The foreground recall path writes through after computing
+        -- results and short-circuits a full hybrid-search round trip on a
+        -- fresh cache hit; the background rerank job upgrades entries with
+        -- reranked orderings (reranked=1). Staleness is bounded by a TTL on
+        -- `updated_at`, checked at read time.
+        CREATE TABLE IF NOT EXISTS recall_cache (
+            cache_id      TEXT PRIMARY KEY,
+            query         TEXT NOT NULL DEFAULT '',
+            rows_json     TEXT NOT NULL DEFAULT '[]',
+            result_count  INTEGER NOT NULL DEFAULT 0,
+            reranked      INTEGER NOT NULL DEFAULT 0,
+            hit_count     INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT '',
+            updated_at    TEXT NOT NULL DEFAULT '',
+            last_hit_at   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_recall_cache_updated ON recall_cache(updated_at);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before

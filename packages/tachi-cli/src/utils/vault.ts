@@ -72,9 +72,11 @@ export function vaultSet(
 
   return new Promise<VaultSetResult>((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: VaultSetResult) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       resolve(result);
     };
 
@@ -85,6 +87,8 @@ export function vaultSet(
       finish({ success: false, error: (err as Error).message });
       return;
     }
+
+    child.stdin?.on('error', () => {});
 
     let stderr = '';
     child.stderr?.on('data', (chunk) => {
@@ -99,13 +103,12 @@ export function vaultSet(
     });
 
     const timeoutMs = opts.timeoutMs ?? 15_000;
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish({ success: false, error: 'Timed out waiting for `tachi vault set`.' });
     }, timeoutMs);
 
     child.on('close', (code) => {
-      clearTimeout(timer);
       if (code === 0) {
         finish({ success: true });
       } else {

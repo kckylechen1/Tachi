@@ -443,7 +443,7 @@ fn upsert_keys_and_rewrite_aliases(
         if !key_names.iter().any(|k| k == name) {
             continue;
         }
-        let secret_value = std::mem::take(value);
+        let secret_value = value.clone();
         super::vault_cli::vault_upsert_secret_with_key(
             global_db_path,
             key,
@@ -452,6 +452,7 @@ fn upsert_keys_and_rewrite_aliases(
             "",
             secret_value,
         )?;
+        crate::vault_crypto::zero_string(value);
         *value = format!("{}{}", crate::provider_config::VAULT_ALIAS_PREFIX, name);
         stored += 1;
     }
@@ -898,6 +899,34 @@ mod tests {
             String::from_utf8(decrypted).expect("utf8"),
             "voy_super_secret_value"
         );
+    }
+
+    #[test]
+    fn wizard_vault_funnel_preserves_plaintext_on_write_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("memory.db");
+        let key = super::super::vault_cli::vault_init_with_password(
+            &db_path,
+            "correct horse battery staple".to_string(),
+        )
+        .expect("init vault");
+        let missing_parent_db = dir.path().join("missing").join("memory.db");
+        let mut new_entries = vec![(
+            "VOYAGE_API_KEY".to_string(),
+            "voy_super_secret_value".to_string(),
+        )];
+        let key_names = vec!["VOYAGE_API_KEY".to_string()];
+
+        let err =
+            upsert_keys_and_rewrite_aliases(&missing_parent_db, &key, &key_names, &mut new_entries)
+                .expect_err("invalid db path should fail");
+
+        assert!(
+            err.to_string().contains("open")
+                || err.to_string().contains("No such file")
+                || err.to_string().contains("unable")
+        );
+        assert_eq!(new_entries[0].1, "voy_super_secret_value");
     }
 
     #[test]

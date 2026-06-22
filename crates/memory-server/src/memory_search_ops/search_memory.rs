@@ -166,6 +166,54 @@ fn recall_cache_recall_opted_in(path_prefix: Option<&str>) -> bool {
     memory_core::path_prefix_opts_into_recall_cache(path_prefix)
 }
 
+/// Master gate for the recall-cache read short-circuit + write-through.
+/// Off by default; enabled per-deployment via `~/.tachi/config.env`.
+fn recall_cache_read_enabled() -> bool {
+    parse_env_bool("TACHI_ENABLE_RECALL_CACHE").unwrap_or(false)
+}
+
+/// Freshness window for a cached entry, in seconds. A short default bounds how
+/// long a just-added memory can stay hidden behind a stale entry; write-through
+/// keeps actually-run queries fresh.
+fn recall_cache_ttl_secs() -> i64 {
+    std::env::var("TACHI_RECALL_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(900)
+}
+
+fn normalize_cache_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Build the opaque recall-cache key from every `SearchMemoryParams` field that
+/// changes which rows are returned. Keep this in sync with the read-side
+/// filters below — a result-affecting field missing here would let one query
+/// serve another's cached rows. `enable_rerank` is deliberately excluded so the
+/// background rerank job can upgrade the same entry in place; rerank intent is
+/// reconciled against the stored `reranked` flag at read time.
+fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: bool) -> String {
+    let seed = format!(
+        "rcv1|{q}|{proj}|{prefix}|{domain}|{top_k}|{po}|{tr}|{ar}|{meta}|{role}",
+        q = normalize_cache_query(&params.query),
+        proj = params.project.as_deref().unwrap_or(""),
+        prefix = params.path_prefix.as_deref().unwrap_or(""),
+        domain = params.domain.as_deref().unwrap_or(""),
+        top_k = top_k,
+        po = project_only as u8,
+        tr = params.include_training as u8,
+        ar = params.include_archived as u8,
+        meta = params.include_metadata as u8,
+        role = params.agent_role.as_deref().unwrap_or(""),
+    );
+    format!("rc:{}", stable_hash(&seed))
+}
+
 fn row_text_for_exact_match(row: &serde_json::Value) -> String {
     ["id", "path", "topic", "summary", "excerpt"]
         .into_iter()
@@ -580,6 +628,44 @@ pub(crate) async fn handle_search_memory_with_access(
     record_access: bool,
 ) -> Result<String, String> {
     let top_k = params.normalized_top_k();
+
+    // ── Recall-cache read short-circuit ──────────────────────────────────
+    // A fresh hit returns the rendered rows verbatim, skipping the entire
+    // hybrid-search (+ optional rerank) round trip. Gated behind
+    // TACHI_ENABLE_RECALL_CACHE. We never key on a caller-supplied embedding
+    // (the key is the query text) or cache trivial queries. The cache lives in
+    // the global DB so cross-DB merged results have a single home. A cache hit
+    // intentionally does not bump per-memory access_count (skipping the search
+    // is the whole point); hit_count on the cache row carries the telemetry.
+    let cache_key = (recall_cache_read_enabled()
+        && params.query_vec.is_none()
+        && !memory_core::should_skip_query(&params.query))
+    .then(|| recall_cache_key(&params, top_k, project_only));
+
+    if let Some(ref key) = cache_key {
+        let ttl = recall_cache_ttl_secs();
+        if let Ok(Some(hit)) = server.with_global_store_read(|store| {
+            store
+                .recall_cache_lookup(key, ttl)
+                .map_err(|e| e.to_string())
+        }) {
+            // If the caller asked for a reranked ordering but the cache only
+            // holds the hybrid one, fall through and do the real work.
+            if !params.enable_rerank || hit.reranked {
+                let server_clone = (*server).clone();
+                let key_clone = key.clone();
+                std::mem::drop(tokio::task::spawn_blocking(move || {
+                    let _ = server_clone.with_global_store(|store| {
+                        store
+                            .recall_cache_record_hit(&key_clone)
+                            .map_err(|e| e.to_string())
+                    });
+                }));
+                return Ok(hit.rows_json);
+            }
+        }
+    }
+
     let mut search_params = params.clone();
     if params.enable_rerank {
         search_params.top_k = top_k.saturating_mul(3);
@@ -619,7 +705,30 @@ pub(crate) async fn handle_search_memory_with_access(
         rows.truncate(top_k);
     }
     normalize_json_relevance(&mut rows);
-    serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))
+    let serialized =
+        serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))?;
+
+    // ── Recall-cache write-through ───────────────────────────────────────
+    // Cache the rendered rows so the next identical query short-circuits.
+    // Skip empty result sets so a transiently-empty answer never masks
+    // newly-added memories until the TTL elapses. `reranked` records whether
+    // this run actually reranked, so the read side can honor rerank intent.
+    if let Some(key) = cache_key {
+        if !rows.is_empty() {
+            let _ = server.with_global_store(|store| {
+                store
+                    .recall_cache_store(
+                        &key,
+                        &params.query,
+                        &serialized,
+                        rows.len() as i64,
+                        params.enable_rerank,
+                    )
+                    .map_err(|e| e.to_string())
+            });
+        }
+    }
+    Ok(serialized)
 }
 
 pub(crate) async fn handle_find_similar_memory(
@@ -793,6 +902,75 @@ mod tests {
             as_of: None,
             include_metadata: false,
         }
+    }
+
+    #[test]
+    fn recall_cache_key_is_stable_and_normalizes_query() {
+        let a = recall_cache_key(&params("Hello   World"), 5, false);
+        let b = recall_cache_key(&params("hello world"), 5, false);
+        assert_eq!(a, b, "case + collapsed whitespace map to the same key");
+        assert_eq!(
+            a,
+            recall_cache_key(&params("Hello   World"), 5, false),
+            "key is deterministic"
+        );
+    }
+
+    #[test]
+    fn recall_cache_key_separates_result_affecting_fields() {
+        let base = params("same query");
+        let base_key = recall_cache_key(&base, 5, false);
+
+        assert_ne!(
+            base_key,
+            recall_cache_key(&params("other query"), 5, false),
+            "query"
+        );
+        assert_ne!(base_key, recall_cache_key(&base, 6, false), "top_k");
+        assert_ne!(base_key, recall_cache_key(&base, 5, true), "project_only");
+
+        let mut p = base.clone();
+        p.path_prefix = Some("/wiki".into());
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "path_prefix");
+
+        let mut p = base.clone();
+        p.project = Some("other".into());
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "project");
+
+        let mut p = base.clone();
+        p.domain = Some("finance".into());
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "domain");
+
+        let mut p = base.clone();
+        p.agent_role = Some("reader".into());
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "agent_role");
+
+        let mut p = base.clone();
+        p.include_metadata = true;
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_metadata");
+
+        let mut p = base.clone();
+        p.include_training = true;
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_training");
+
+        let mut p = base.clone();
+        p.include_archived = true;
+        assert_ne!(base_key, recall_cache_key(&p, 5, false), "include_archived");
+    }
+
+    #[test]
+    fn recall_cache_key_ignores_rerank_intent() {
+        // enable_rerank is intentionally NOT part of the key — the background
+        // rerank job upgrades the same entry, and rerank intent is reconciled
+        // against the stored `reranked` flag at read time.
+        let mut a = params("q");
+        a.enable_rerank = false;
+        let mut b = params("q");
+        b.enable_rerank = true;
+        assert_eq!(
+            recall_cache_key(&a, 5, false),
+            recall_cache_key(&b, 5, false)
+        );
     }
 
     #[test]
