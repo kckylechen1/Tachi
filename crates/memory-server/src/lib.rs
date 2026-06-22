@@ -118,12 +118,11 @@ use crate::foundry_runtime_ops::{enqueue_foundry_capture_maintenance, FoundryWor
 use crate::hub_helpers::{
     capability_callable, review_status_allows_call, should_expose_skill_tool,
 };
-use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
-    push_dead_letter_with_limits, slim_entry, slim_entry_with_enrichment, slim_search_result,
-    DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
+    push_dead_letter_with_limits, slim_entry, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
+    DLQ_TTL_SECS,
 };
 use crate::tool_params::*;
 use crate::utils::{
