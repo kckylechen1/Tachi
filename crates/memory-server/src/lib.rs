@@ -120,18 +120,14 @@ use crate::hub_helpers::{
 };
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
-use crate::shared_defs::{
-    push_dead_letter_with_limits, slim_entry, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
-};
+use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
-use crate::utils::{
-    find_git_root, lock_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
-};
+use crate::utils::{find_git_root, lock_or_recover, sanitize_safe_path_name};
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
 use clap::Parser;
-use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{HubCapability, MemoryEntry, MemoryStore};
 use rmcp::{
     handler::server::wrapper::Parameters, schemars, schemars::JsonSchema,
     transport::StreamableHttpClientTransport,
@@ -147,9 +143,7 @@ use crate::cli::Cli;
 use crate::mcp_pool::McpClientPool;
 
 pub(crate) mod server_state;
-pub(crate) use server_state::{
-    AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState, TOOL_CACHE_TTL,
-};
+pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
 
 // Enrichment batcher methods are in enrichment.rs
 
