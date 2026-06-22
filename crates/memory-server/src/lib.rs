@@ -127,8 +127,8 @@ use crate::mcp_proxy::{
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
-    prune_expired_dead_letters, push_dead_letter_with_limits, slim_entry,
-    slim_entry_with_enrichment, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
+    push_dead_letter_with_limits, slim_entry, slim_entry_with_enrichment, slim_search_result,
+    DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
 };
 use crate::tool_params::*;
 use crate::utils::{
