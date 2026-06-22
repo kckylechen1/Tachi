@@ -116,11 +116,9 @@ mod workflow_closure;
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{enqueue_foundry_capture_maintenance, FoundryWorkerStats};
 use crate::hub_helpers::{
-    capability_callable, capability_visibility_for_cap, review_status_allows_call,
-    should_expose_skill_tool,
+    capability_callable, review_status_allows_call, should_expose_skill_tool,
 };
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
-use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::{
@@ -129,8 +127,8 @@ use crate::shared_defs::{
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool,
-    render_skill_prompt_template, sanitize_safe_path_name, stable_hash, value_to_template_text,
+    find_git_root, lock_or_recover, parse_env_bool, render_skill_prompt_template,
+    sanitize_safe_path_name, stable_hash, value_to_template_text,
 };
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
