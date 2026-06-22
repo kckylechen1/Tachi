@@ -115,16 +115,13 @@ mod workflow_closure;
 
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::FoundryWorkerStats;
-use crate::hub_helpers::{
-    capability_callable, review_status_allows_call, should_expose_skill_tool,
-};
+use crate::hub_helpers::review_status_allows_call;
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
 #[cfg(test)]
 use crate::utils::lock_or_recover;
-use crate::utils::sanitize_safe_path_name;
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
