@@ -27,7 +27,9 @@ use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
-use super::*;
+use super::scrub_agent_noise;
+use crate::llm::LlmClient;
+use crate::server_state::MemoryServer;
 use crate::tool_params::TachiSaveParams;
 use memory_core::types::MemoryEntry;
 
@@ -259,7 +261,7 @@ async fn synthesize_wiki_draft(
         .iter()
         .take(MAX_ENTRIES_PER_CLUSTER)
         .filter_map(|e| {
-            let text = crate::foundry_runtime_ops::scrub_agent_noise(&e.text);
+            let text = scrub_agent_noise(&e.text);
             if text.trim().len() < MIN_TEXT_LEN {
                 return None;
             }
@@ -293,7 +295,7 @@ async fn synthesize_wiki_draft(
 }
 
 fn parse_wiki_draft(raw: &str, fallback_topic: &str) -> Result<WikiDraft, String> {
-    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    let stripped = LlmClient::strip_code_fence(raw);
     let start = stripped.find('{').unwrap_or(0);
     let end = stripped.rfind('}').map(|i| i + 1).unwrap_or(stripped.len());
     let obj: Value = serde_json::from_str(&stripped[start..end]).map_err(|e| {
