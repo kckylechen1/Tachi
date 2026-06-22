@@ -133,7 +133,7 @@ use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
 use clap::Parser;
-use memory_core::{HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     handler::server::wrapper::Parameters, schemars, schemars::JsonSchema,
     transport::StreamableHttpClientTransport,
