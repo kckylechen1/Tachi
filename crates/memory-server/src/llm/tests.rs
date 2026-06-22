@@ -5,7 +5,7 @@ use super::provider_health::{
     ClaudeCliFailureKind, KeyAvailability, CLAUDE_CLI_FAILURE_COOLDOWN, HEALTH_OK,
     HEALTH_RATE_LIMITED,
 };
-use super::*;
+use super::{LlmClient, ProviderSecret};
 use chrono::Utc;
 use memory_core::vault::VaultKeyHealth;
 use reqwest::header::AUTHORIZATION;
