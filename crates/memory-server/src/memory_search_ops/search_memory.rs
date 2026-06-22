@@ -1,9 +1,14 @@
 use super::auto_link::is_training_seed;
-use super::*;
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
     named_project_db_exists, normalize_json_relevance, normalize_search_relevance, search_score,
 };
+use crate::shared_defs::{slim_entry, slim_l0_rule, slim_search_result};
+use crate::tool_params::{FindSimilarMemoryParams, SearchMemoryParams};
+use crate::utils::{is_active_global_rule, parse_env_bool, stable_hash};
+use crate::{DbScope, MemoryServer};
+use memory_core::{MemoryStore, SearchOptions};
+use serde_json::json;
 use std::collections::HashSet;
 
 fn is_training_path(path: &str) -> bool {
