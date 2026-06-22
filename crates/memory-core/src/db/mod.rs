@@ -9,6 +9,7 @@ mod hub_db;
 mod memory_crud;
 pub mod migrations;
 mod pack_db;
+mod recall_cache;
 mod sandbox;
 mod schema;
 mod sqlite_vec;
@@ -41,6 +42,10 @@ pub use memory_crud::{
     record_enrichment_failure, release_event_claim, search_fts, search_symbolic_candidates,
     search_vec, supersede_memory, try_claim_event, update_enrichment_fields, update_with_revision,
     upsert,
+};
+pub use recall_cache::{
+    recall_cache_get, recall_cache_purge_stale, recall_cache_put, recall_cache_record_hit,
+    recall_cache_stats, RecallCacheHit, RecallCacheStats,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,

@@ -181,6 +181,54 @@ impl MemoryStore {
         db::upsert(&mut self.conn, entry, self.vec_available)
     }
 
+    /// Recall-cache lookup by a precomputed context-hash key. Returns a fresh
+    /// hit (within `ttl_secs`; non-positive disables the freshness check) or
+    /// `None`. The key is opaque here — callers build it from the query
+    /// context. See `db::recall_cache`.
+    pub fn recall_cache_lookup(
+        &self,
+        cache_id: &str,
+        ttl_secs: i64,
+    ) -> Result<Option<db::RecallCacheHit>, MemoryError> {
+        db::recall_cache_get(&self.conn, cache_id, ttl_secs, chrono::Utc::now())
+    }
+
+    /// Write-through a rendered result set into the recall cache. `reranked`
+    /// marks entries upgraded by the background rerank job.
+    pub fn recall_cache_store(
+        &self,
+        cache_id: &str,
+        query: &str,
+        rows_json: &str,
+        result_count: i64,
+        reranked: bool,
+    ) -> Result<(), MemoryError> {
+        db::recall_cache_put(
+            &self.conn,
+            cache_id,
+            query,
+            rows_json,
+            result_count,
+            reranked,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+    }
+
+    /// Best-effort hit telemetry bump for a cache id.
+    pub fn recall_cache_record_hit(&self, cache_id: &str) -> Result<(), MemoryError> {
+        db::recall_cache_record_hit(&self.conn, cache_id, &chrono::Utc::now().to_rfc3339())
+    }
+
+    /// Aggregate recall-cache stats for diagnostics.
+    pub fn recall_cache_stats(&self) -> Result<db::RecallCacheStats, MemoryError> {
+        db::recall_cache_stats(&self.conn)
+    }
+
+    /// Delete recall-cache entries older than `cutoff_rfc3339` (housekeeping).
+    pub fn recall_cache_purge_stale(&self, cutoff_rfc3339: &str) -> Result<usize, MemoryError> {
+        db::recall_cache_purge_stale(&self.conn, cutoff_rfc3339)
+    }
+
     /// Atomically try to claim an event for processing.
     /// Returns true if claimed (first processor), false if already processed.
     pub fn try_claim_event(
