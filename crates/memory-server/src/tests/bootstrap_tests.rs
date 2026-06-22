@@ -1,4 +1,6 @@
-use super::*;
+use super::make_entry;
+use memory_core::MemoryStore;
+use std::collections::HashMap;
 
 #[test]
 fn setup_report_detects_readiness_from_local_state() {

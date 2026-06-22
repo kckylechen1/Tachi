@@ -1,4 +1,14 @@
-use super::*;
+use super::make_server;
+use crate::server_state::CachedVaultKey;
+use crate::vault_crypto;
+use crate::vault_ops::{
+    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
+    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
+};
+use rmcp::handler::server::wrapper::Parameters;
+use serde_json::{json, Value};
+use std::time::{Duration, Instant};
 
 #[test]
 fn cached_vault_key_copies_source_buffer() {
