@@ -128,14 +128,12 @@ use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 use chrono::Utc;
 use clap::Parser;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore};
-use rmcp::{
-    handler::server::wrapper::Parameters, schemars, schemars::JsonSchema,
-    transport::StreamableHttpClientTransport,
-};
+#[cfg(test)]
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::{schemars, schemars::JsonSchema, transport::StreamableHttpClientTransport};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
