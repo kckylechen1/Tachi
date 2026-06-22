@@ -1,6 +1,5 @@
 use crate::kanban::{PostCardParams, UpdateCardParams};
-use crate::server_state::{AgentProfile, CachedVaultKey, MemoryServer};
-use crate::shared_defs::DeadLetter;
+use crate::server_state::{CachedVaultKey, MemoryServer};
 use crate::tool_params::*;
 use crate::utils::lock_or_recover;
 use crate::vault_crypto;
