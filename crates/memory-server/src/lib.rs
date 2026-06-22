@@ -136,9 +136,9 @@ use crate::shared_defs::{
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, find_project_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, read_or_recover, render_skill_prompt_template, sanitize_safe_path_name,
-    stable_hash, value_to_template_text, write_or_recover,
+    find_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool, parse_env_u64,
+    read_or_recover, render_skill_prompt_template, sanitize_safe_path_name, stable_hash,
+    value_to_template_text, write_or_recover,
 };
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
@@ -162,10 +162,9 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
-use tokio::io::{stdin, stdout};
 use tokio::sync::mpsc;
 
-use crate::cli::{Cli, Commands, HubAction, ManifestAction, RescueAction};
+use crate::cli::Cli;
 use crate::enrichment::EnrichmentItem;
 use crate::mcp_pool::McpClientPool;
 
