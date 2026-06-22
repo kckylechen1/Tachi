@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    atty_stdout, collect_memory_db_files, open_cli_store, open_cli_store_read_only,
+    print_pretty_json, TidyAppliedStep, TidyApplySummary, TidyExecuteSummary, TidyFinding,
+    TidyGroupSummary, TidyMigration, TidyMigrationOutcome, TidyPlanStep, TidyReport,
+};
+use serde_json::json;
+use std::path::PathBuf;
 
 pub(super) fn classify_tidy_scope(path: &std::path::Path, git_root: Option<&PathBuf>) -> String {
     if let Some(root) = git_root {
