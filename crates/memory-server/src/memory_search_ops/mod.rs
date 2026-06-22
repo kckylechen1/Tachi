@@ -30,6 +30,4 @@ use crate::DbScope;
 use crate::MemoryServer;
 use chrono::Utc;
 use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use serde_json::json;
