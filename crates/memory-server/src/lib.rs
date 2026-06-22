@@ -122,7 +122,9 @@ use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
-use crate::utils::{lock_or_recover, sanitize_safe_path_name};
+#[cfg(test)]
+use crate::utils::lock_or_recover;
+use crate::utils::sanitize_safe_path_name;
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
@@ -130,9 +132,10 @@ use clap::Parser;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore};
 #[cfg(test)]
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{schemars, schemars::JsonSchema, transport::StreamableHttpClientTransport};
+use rmcp::{schemars, schemars::JsonSchema};
 use serde::Deserialize;
 use serde_json::{json, Value};
+#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
