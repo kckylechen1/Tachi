@@ -1,4 +1,7 @@
-use super::*;
+use crate::{DbScope, MemoryServer};
+use chrono::Utc;
+use serde_json::json;
+use std::path::Path;
 
 fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key)
@@ -108,7 +111,7 @@ pub(super) fn inject_provenance(
 /// lineage is preserved.
 pub(super) fn restamp_provenance_for_destination(
     metadata: serde_json::Value,
-    destination_db_path: &std::path::Path,
+    destination_db_path: &Path,
     destination_scope: DbScope,
 ) -> serde_json::Value {
     let mut metadata_obj = match metadata {
