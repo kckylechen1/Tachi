@@ -1,5 +1,18 @@
-use super::*;
-use crate::cli::CardAction;
+use super::{
+    evaluate_cli_capability_enabled, gc_expired_kanban_cards, open_cli_store,
+    open_cli_store_read_only, print_pretty_json, DEFAULT_KANBAN_GC_MAX_AGE_DAYS,
+};
+use crate::cli::{CardAction, Commands, HubAction};
+use crate::server_state::MemoryServer;
+use crate::tool_params::{
+    ExtractFactsParams, GetMemoryParams, ListMemoriesParams, PackProjectParams, PackRegisterParams,
+    RememberParams, SearchMemoryParams, TachiTaskParams, WikiSearchParams, WikiWriteParams,
+};
+use memory_core::HubCapability;
+use rmcp::handler::server::wrapper::Parameters;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub(super) async fn run_cli_command(
     command: Commands,
