@@ -151,8 +151,6 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 

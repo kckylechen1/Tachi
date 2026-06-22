@@ -1,4 +1,9 @@
-use super::*;
+use memory_core::MemoryEntry;
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
+use std::path::PathBuf;
+use std::sync::{Mutex as StdMutex, RwLock as StdRwLock};
 
 const MAX_APPEND_ONLY_JSONL_LINE_BYTES: usize = 256 * 1024;
 
