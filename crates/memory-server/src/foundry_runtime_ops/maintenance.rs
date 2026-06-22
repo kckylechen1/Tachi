@@ -1,11 +1,24 @@
-use super::capture::*;
-use super::helpers::*;
+use super::capture::{
+    merge_capture_entries, persist_capture_entry, queue_capture_enrichment,
+    search_similar_capture_entries,
+};
+use super::helpers::{build_foundry_agent_root, dedup_strings, round3};
 use super::recall_cache::process_recall_rerank_cache_job;
-use super::*;
+use super::{
+    FoundryMaintenanceItem, CAPTURE_DEDUP_THRESHOLD, CAPTURE_MERGE_THRESHOLD, FOUNDRY_DISTILL_KEEP,
+    FOUNDRY_DISTILL_SOURCE, FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
+    FOUNDRY_RECALL_RERANK_TOP_K, FOUNDRY_RELATED_LIMIT,
+};
+use crate::server_state::{DbScope, MemoryServer};
+use crate::utils::{sanitize_safe_path_name, stable_hash};
+use chrono::Utc;
+use memory_core::{MemoryEntry, MemoryStore};
 use regex::Regex;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
+use tokio::sync::mpsc;
 
 /// Outcome of a memory-distill job. Carries a structured skip reason so
 /// foundry_jobs.metadata.terminal_reason answers "why didn't this run?" instead
