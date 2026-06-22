@@ -1,4 +1,4 @@
-use crate::cli::{Cli, Commands, HubAction, ManifestAction};
+use crate::cli::{Cli, Commands, HubAction};
 use crate::hub_helpers::should_expose_skill_tool;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::filter_mcp_tools_by_permissions;
