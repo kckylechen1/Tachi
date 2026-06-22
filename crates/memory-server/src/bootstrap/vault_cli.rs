@@ -1,6 +1,6 @@
-use super::*;
+use super::{open_cli_store, open_cli_store_read_only, vault_sync};
 use std::io::{BufRead, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
 
@@ -170,9 +170,9 @@ pub(super) async fn run_vault_command(
         }
 
         VaultAction::SyncStatus { path } => {
-            let path = super::vault_sync::resolve_vault_sync_path(path)?;
-            let status = super::vault_sync::vault_sync_status(&path)?;
-            super::vault_sync::print_status(&status);
+            let path = vault_sync::resolve_vault_sync_path(path)?;
+            let status = vault_sync::vault_sync_status(&path)?;
+            vault_sync::print_status(&status);
             Ok(())
         }
 
@@ -201,7 +201,7 @@ pub(super) async fn run_vault_command(
             password_file,
             insecure_password_file,
         } => {
-            let output = super::vault_sync::resolve_vault_sync_path(output)?;
+            let output = vault_sync::resolve_vault_sync_path(output)?;
             let config = read_vault_config_for_key(global_db_path)?;
             let key = read_verified_vault_key(
                 &config,
@@ -210,14 +210,10 @@ pub(super) async fn run_vault_command(
                 password_file.as_deref(),
                 insecure_password_file,
             )?;
-            let status = super::vault_sync::export_vault_bundle(
-                global_db_path,
-                &output,
-                allow_cloud,
-                key.bytes(),
-            )?;
+            let status =
+                vault_sync::export_vault_bundle(global_db_path, &output, allow_cloud, key.bytes())?;
             println!("Vault sync export complete.");
-            super::vault_sync::print_status(&status);
+            vault_sync::print_status(&status);
             println!(
                 "  contents: signed encrypted Vault config, entries, and key-rotation metadata"
             );
@@ -232,11 +228,11 @@ pub(super) async fn run_vault_command(
             password_file,
             insecure_password_file,
         } => {
-            let input = super::vault_sync::resolve_vault_sync_path(input)?;
-            let key = if allow_unsigned && !super::vault_sync::bundle_has_signature(&input)? {
+            let input = vault_sync::resolve_vault_sync_path(input)?;
+            let key = if allow_unsigned && !vault_sync::bundle_has_signature(&input)? {
                 None
             } else {
-                let config = super::vault_sync::read_bundle_vault_config(&input)?;
+                let config = vault_sync::read_bundle_vault_config(&input)?;
                 Some(read_verified_vault_key(
                     &config,
                     stdin_password,
@@ -245,7 +241,7 @@ pub(super) async fn run_vault_command(
                     insecure_password_file,
                 )?)
             };
-            let report = super::vault_sync::import_vault_bundle(
+            let report = vault_sync::import_vault_bundle(
                 global_db_path,
                 &input,
                 key.as_ref().map(|key| key.bytes()),
