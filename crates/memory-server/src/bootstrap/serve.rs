@@ -1,4 +1,17 @@
-use super::*;
+use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
+use crate::cli::{Cli, Commands};
+use crate::hub_helpers::should_expose_skill_tool;
+use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
+use crate::mcp_proxy::filter_mcp_tools_by_permissions;
+use crate::server_state::MemoryServer;
+use crate::utils::{find_project_git_root, lock_or_recover, parse_env_bool, parse_env_u64};
+use chrono::Utc;
+use memory_core::MemoryStore;
+use serde_json::json;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{stdin, stdout};
 
 fn primary_log_path(app_home: &std::path::Path) -> std::path::PathBuf {
     app_home.join("logs").join("tachi.log")
@@ -557,7 +570,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
         let server = MemoryServer::new(global_db_path.clone(), Some(target_project.clone()))?;
         let report = crate::foundry_runtime_ops::run_daily_batch_distill(&server).await?;
-        super::print_pretty_json(&serde_json::to_value(report)?)?;
+        print_pretty_json(&serde_json::to_value(report)?)?;
         return Ok(());
     }
 

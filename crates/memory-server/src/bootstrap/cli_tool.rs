@@ -1,8 +1,8 @@
 use super::{
-    evaluate_cli_capability_enabled, gc_expired_kanban_cards, open_cli_store,
-    open_cli_store_read_only, print_pretty_json, DEFAULT_KANBAN_GC_MAX_AGE_DAYS,
+    evaluate_cli_capability_enabled, open_cli_store, open_cli_store_read_only, print_pretty_json,
 };
 use crate::cli::{CardAction, Commands, HubAction};
+use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
     ExtractFactsParams, GetMemoryParams, ListMemoriesParams, PackProjectParams, PackRegisterParams,
