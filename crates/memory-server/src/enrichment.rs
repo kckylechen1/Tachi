@@ -1,4 +1,9 @@
-use super::*;
+use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
+use crate::server_state::{DbScope, MemoryServer};
+use memory_core::{MemoryEntry, MemoryStore};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 // ─── Enrichment Batcher ──────────────────────────────────────────────────────
 

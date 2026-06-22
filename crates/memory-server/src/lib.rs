@@ -114,7 +114,7 @@ mod wiki_ops;
 mod workflow_closure;
 
 use crate::builtins::seed_builtin_capabilities;
-use crate::foundry_runtime_ops::{enqueue_foundry_capture_maintenance, FoundryWorkerStats};
+use crate::foundry_runtime_ops::FoundryWorkerStats;
 use crate::hub_helpers::{
     capability_callable, review_status_allows_call, should_expose_skill_tool,
 };
@@ -143,7 +143,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
 use crate::cli::Cli;
 use crate::mcp_pool::McpClientPool;
