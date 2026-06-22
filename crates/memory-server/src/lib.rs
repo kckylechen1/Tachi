@@ -117,7 +117,7 @@ use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{enqueue_foundry_capture_maintenance, FoundryWorkerStats};
 use crate::hub_helpers::{
     capability_callable, capability_visibility_for_cap, review_status_allows_call,
-    should_expose_skill_tool, CapabilityVisibility,
+    should_expose_skill_tool,
 };
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
