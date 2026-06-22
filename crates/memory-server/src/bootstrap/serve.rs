@@ -171,8 +171,8 @@ async fn wait_for_parent_death() {
         }
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            // Reparented to init/launchd (pid 1) ⇒ the host died.
-            if unsafe { libc::getppid() } == 1 {
+            // Reparented to init/launchd or a userspace subreaper ⇒ the host died.
+            if unsafe { libc::getppid() } != original_ppid {
                 return;
             }
         }
@@ -1338,8 +1338,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         if let Some(idle_timeout) = daemon_idle_timeout() {
             let clock = server.activity_clock();
             let ct_idle = ct.clone();
-            let tick =
-                std::time::Duration::from_secs(idle_timeout.as_secs().clamp(5, 60));
+            let tick = std::time::Duration::from_secs(idle_timeout.as_secs().clamp(5, 60));
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(tick).await;

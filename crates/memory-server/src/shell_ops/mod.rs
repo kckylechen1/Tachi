@@ -193,6 +193,11 @@ pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
             }
         }
     }
+    debts.sort_by(|a, b| {
+        let a_id = a.get("flow_id").and_then(Value::as_str).unwrap_or("");
+        let b_id = b.get("flow_id").and_then(Value::as_str).unwrap_or("");
+        a_id.cmp(b_id)
+    });
     if debts.len() > limit {
         let overflow = debts.len() - limit;
         debts.truncate(limit);

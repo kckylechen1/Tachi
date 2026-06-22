@@ -644,15 +644,23 @@ pub(crate) async fn handle_search_memory_with_access(
 
     if let Some(ref key) = cache_key {
         let ttl = recall_cache_ttl_secs();
-        if let Ok(Some(hit)) = server
-            .with_global_store_read(|store| store.recall_cache_lookup(key, ttl).map_err(|e| e.to_string()))
-        {
+        if let Ok(Some(hit)) = server.with_global_store_read(|store| {
+            store
+                .recall_cache_lookup(key, ttl)
+                .map_err(|e| e.to_string())
+        }) {
             // If the caller asked for a reranked ordering but the cache only
             // holds the hybrid one, fall through and do the real work.
-            if !(params.enable_rerank && !hit.reranked) {
-                let _ = server.with_global_store(|store| {
-                    store.recall_cache_record_hit(key).map_err(|e| e.to_string())
-                });
+            if !params.enable_rerank || hit.reranked {
+                let server_clone = (*server).clone();
+                let key_clone = key.clone();
+                std::mem::drop(tokio::task::spawn_blocking(move || {
+                    let _ = server_clone.with_global_store(|store| {
+                        store
+                            .recall_cache_record_hit(&key_clone)
+                            .map_err(|e| e.to_string())
+                    });
+                }));
                 return Ok(hit.rows_json);
             }
         }

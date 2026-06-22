@@ -270,7 +270,7 @@ async fn draft_from_result(
 
     // Deterministic fallback body: the capped raw result. Always available.
     const MAX_BODY_CHARS: usize = 4000;
-    let fallback_body = if trimmed.chars().count() > MAX_BODY_CHARS {
+    let fallback_body = if trimmed.chars().take(MAX_BODY_CHARS + 1).count() > MAX_BODY_CHARS {
         let capped: String = trimmed.chars().take(MAX_BODY_CHARS).collect();
         format!("{capped}\n\n_(drafted from result.md; truncated at {MAX_BODY_CHARS} chars — edit before relying on it)_")
     } else {
@@ -287,10 +287,9 @@ async fn draft_from_result(
             trimmed.chars().take(MAX_INPUT_CHARS).collect::<String>()
         );
         let llm = server.llm.clone();
-        let distilled = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            async move { llm.generate_distill(&input).await },
-        )
+        let distilled = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+            llm.generate_distill(&input).await
+        })
         .await;
         if let Ok(Ok(body)) = distilled {
             let body = body.trim();
@@ -317,6 +316,8 @@ pub(crate) async fn handle_workflow(
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "issue_ref is required for close_loop".to_string())?
                 .to_string();
+            let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
+            let spec_paths = trimmed_nonempty_unique(&params.spec_paths);
             // Resolve the wiki title/text. If either is omitted, draft it from
             // the flow's result.md (Gap C: lower the cost of closing the loop).
             let explicit_title = params.wiki_title.clone().filter(|s| !s.trim().is_empty());
@@ -344,11 +345,11 @@ pub(crate) async fn handle_workflow(
             };
 
             let references =
-                build_closure_references(&issue_ref, &params.doc_paths, &params.related_issues);
+                build_closure_references(&issue_ref, &doc_paths, &params.related_issues);
             crate::wiki_ops::validate_references(&references)?;
             let metadata = build_close_loop_metadata(
                 &issue_ref,
-                &params.doc_paths,
+                &doc_paths,
                 &params.related_issues,
                 params.wiki_path.as_deref(),
                 &references,
@@ -360,11 +361,11 @@ pub(crate) async fn handle_workflow(
             let comment_body = build_closure_comment_body(
                 &title,
                 params.wiki_path.as_deref(),
-                &params.doc_paths,
-                &params.spec_paths,
+                &doc_paths,
+                &spec_paths,
                 &references,
             );
-            let spec_advisory = spec_advisory(&params.spec_paths, &params.doc_paths);
+            let spec_advisory = spec_advisory(&spec_paths, &doc_paths);
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
                 server,
@@ -430,8 +431,9 @@ pub(crate) async fn handle_workflow(
         }
         "build_references" => {
             let issue_ref = params.issue_ref.as_deref().unwrap_or("");
+            let doc_paths = trimmed_nonempty_unique(&params.doc_paths);
             let references =
-                build_closure_references(issue_ref, &params.doc_paths, &params.related_issues);
+                build_closure_references(issue_ref, &doc_paths, &params.related_issues);
             crate::wiki_ops::validate_references(&references)?;
             let promotion_plan = build_promotion_plan(issue_ref, &references);
             serde_json::to_string(&json!({

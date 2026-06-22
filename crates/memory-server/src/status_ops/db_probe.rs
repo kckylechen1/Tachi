@@ -361,15 +361,15 @@ fn infer_vector_dimension(conn: &rusqlite::Connection) -> Result<Option<usize>, 
     let Some(sql) = sql else {
         return Ok(None);
     };
-    if let Some(idx) = sql.find("float[") {
-        let rest = &sql[idx + "float[".len()..];
+    let sql_lower = sql.to_ascii_lowercase();
+    if let Some(idx) = sql_lower.find("float[") {
+        let rest = &sql_lower[idx + "float[".len()..];
         if let Some(end) = rest.find(']') {
             return Ok(rest[..end].parse::<usize>().ok());
         }
     }
     Ok(None)
 }
-
 
 fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
     let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::seconds(STUCK_THRESHOLD_SECS);
@@ -411,4 +411,21 @@ pub(crate) fn is_orphan_entry(
             entry.role,
             DbRole::Agent | DbRole::Foundry | DbRole::Unknown
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn infer_vector_dimension_handles_uppercase_float_decl() {
+        let conn = rusqlite::Connection::open_in_memory().expect("memory db");
+        conn.execute(
+            "CREATE TABLE memories_vec (id TEXT PRIMARY KEY, embedding FLOAT[1024])",
+            [],
+        )
+        .expect("create vector table");
+
+        assert_eq!(infer_vector_dimension(&conn).expect("infer"), Some(1024));
+    }
 }
