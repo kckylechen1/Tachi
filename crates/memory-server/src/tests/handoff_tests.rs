@@ -1,4 +1,9 @@
-use super::*;
+use super::make_server;
+use crate::tool_params::{
+    AgentRegisterParams, GetMemoryParams, HandoffCheckParams, HandoffLeaveParams,
+};
+use rmcp::handler::server::wrapper::Parameters;
+use serde_json::json;
 
 // ─── Handoff Tests ───────────────────────────────────────────────────────────
 
