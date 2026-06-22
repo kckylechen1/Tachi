@@ -3,9 +3,17 @@
 //! that opens a manifest DB read-only and assembles its health picture.
 //! Extracted from `status_ops::mod` (no behavior change).
 
-// All of `tachi status`'s shared imports (Path, MemoryStore, rusqlite traits,
-// json!, the foundry/namespace types) are reachable through the parent module.
-use super::*;
+use super::{
+    latest_failed_job, latest_foundry_job, latest_foundry_job_with_statuses, paths_equal,
+    EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob, NamespaceHealth, RelationCount,
+    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+};
+use crate::manifest::DbRole;
+use chrono::{DateTime, Utc};
+use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
+use rusqlite::OptionalExtension;
+use serde_json::json;
+use std::path::Path;
 
 #[derive(Debug, Default)]
 pub(crate) struct VectorHealth {

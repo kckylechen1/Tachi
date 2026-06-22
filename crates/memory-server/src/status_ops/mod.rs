@@ -30,15 +30,13 @@ pub(crate) use warnings::*;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use memory_core::MemoryEntry;
-use rusqlite::OptionalExtension;
 use serde_json::json;
 
-use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
+use memory_core::MemoryStore;
 
 use crate::daemon_lock::{process_alive, read_pid_file};
-use crate::manifest::{DbRole, Manifest};
+use crate::manifest::Manifest;
 
 pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
 const DISPATCH_STALE_THRESHOLD_SECS: i64 = 6 * 60 * 60;
@@ -1048,6 +1046,8 @@ async fn handle_tachi_status_detail(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::DbRole;
+    use chrono::{DateTime, Utc};
 
     fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
         crate::manifest::DbEntry {
