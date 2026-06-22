@@ -624,15 +624,21 @@ mod tests {
     fn daemon_is_older_only_when_strictly_behind_current() {
         let current = env!("CARGO_PKG_VERSION");
         // The running daemon reporting our exact version is NOT older.
-        assert!(!daemon_is_older_than_current(&daemon_versioned(Some(current))));
+        assert!(!daemon_is_older_than_current(&daemon_versioned(Some(
+            current
+        ))));
         // A clearly ancient version IS older.
-        assert!(daemon_is_older_than_current(&daemon_versioned(Some("0.0.1"))));
+        assert!(daemon_is_older_than_current(&daemon_versioned(Some(
+            "0.0.1"
+        ))));
         // A clearly future version is NOT older (never replace ahead-of-us).
         assert!(!daemon_is_older_than_current(&daemon_versioned(Some(
             "999.0.0"
         ))));
         // Unknown / unparseable / missing → never treated as older (safe).
-        assert!(!daemon_is_older_than_current(&daemon_versioned(Some("weird"))));
+        assert!(!daemon_is_older_than_current(&daemon_versioned(Some(
+            "weird"
+        ))));
         assert!(!daemon_is_older_than_current(&daemon_versioned(None)));
     }
 }

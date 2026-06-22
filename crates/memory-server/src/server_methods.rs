@@ -411,16 +411,13 @@ impl MemoryServer {
         for entry in &manifest.dbs {
             let db_path = std::path::Path::new(&entry.path);
             // Only consider repo-local `<repo>/.tachi/memory.db` shapes.
-            let Some(project_root) =
-                crate::path_utils::plan_c_project_root_from_local_db(db_path)
+            let Some(project_root) = crate::path_utils::plan_c_project_root_from_local_db(db_path)
             else {
                 continue;
             };
-            let matches = crate::path_utils::plan_c_dir_name_from_root(&project_root)
-                .as_deref()
+            let matches = crate::path_utils::plan_c_dir_name_from_root(&project_root).as_deref()
                 == Some(safe_name)
-                || crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
-                    .as_deref()
+                || crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root).as_deref()
                     == Some(safe_name);
             if matches {
                 return Some(db_path.to_path_buf());
@@ -1181,8 +1178,7 @@ mod resolve_named_project_tests {
             // The hashed alias name for this repo resolves to the repo-local DB
             // even though no ~/.tachi/projects/<name>/ alias exists on disk.
             let name = crate::path_utils::plan_c_dir_name_from_root(&repo).expect("name");
-            let resolved =
-                MemoryServer::resolve_named_project_db_path(&name).expect("resolve");
+            let resolved = MemoryServer::resolve_named_project_db_path(&name).expect("resolve");
             assert_eq!(resolved, local_db);
 
             restore_env("TACHI_HOME", saved);

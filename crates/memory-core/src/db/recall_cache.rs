@@ -171,8 +171,17 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let now = Utc::now();
-        recall_cache_put(&c, "rc:1", "q", "[{\"id\":\"a\"}]", 1, false, &now.to_rfc3339()).unwrap();
-        let hit = recall_cache_get(&c, "rc:1", 900, now).unwrap();
+        recall_cache_put(
+            c,
+            "rc:1",
+            "q",
+            "[{\"id\":\"a\"}]",
+            1,
+            false,
+            &now.to_rfc3339(),
+        )
+        .unwrap();
+        let hit = recall_cache_get(c, "rc:1", 900, now).unwrap();
         assert!(hit.is_some());
         let hit = hit.unwrap();
         assert_eq!(hit.rows_json, "[{\"id\":\"a\"}]");
@@ -184,18 +193,22 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let written = Utc::now() - chrono::Duration::seconds(3600);
-        recall_cache_put(&c, "rc:2", "q", "[]", 0, false, &written.to_rfc3339()).unwrap();
+        recall_cache_put(c, "rc:2", "q", "[]", 0, false, &written.to_rfc3339()).unwrap();
         // ttl 900s, written 3600s ago → stale → miss
-        assert!(recall_cache_get(&c, "rc:2", 900, Utc::now()).unwrap().is_none());
+        assert!(recall_cache_get(c, "rc:2", 900, Utc::now())
+            .unwrap()
+            .is_none());
         // ttl 0 disables the freshness check → hit
-        assert!(recall_cache_get(&c, "rc:2", 0, Utc::now()).unwrap().is_some());
+        assert!(recall_cache_get(c, "rc:2", 0, Utc::now())
+            .unwrap()
+            .is_some());
     }
 
     #[test]
     fn get_misses_for_unknown_key() {
         let s = store();
         let c = &s.conn;
-        assert!(recall_cache_get(&c, "rc:missing", 900, Utc::now())
+        assert!(recall_cache_get(c, "rc:missing", 900, Utc::now())
             .unwrap()
             .is_none());
     }
@@ -205,9 +218,9 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let t0 = Utc::now() - chrono::Duration::seconds(10);
-        recall_cache_put(&c, "rc:3", "q1", "[1]", 1, false, &t0.to_rfc3339()).unwrap();
+        recall_cache_put(c, "rc:3", "q1", "[1]", 1, false, &t0.to_rfc3339()).unwrap();
         let t1 = Utc::now();
-        recall_cache_put(&c, "rc:3", "q2", "[1,2]", 2, true, &t1.to_rfc3339()).unwrap();
+        recall_cache_put(c, "rc:3", "q2", "[1,2]", 2, true, &t1.to_rfc3339()).unwrap();
         let created: String = c
             .query_row(
                 "SELECT created_at FROM recall_cache WHERE cache_id='rc:3'",
@@ -215,8 +228,14 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(created, t0.to_rfc3339(), "created_at preserved across upsert");
-        let hit = recall_cache_get(&c, "rc:3", 900, Utc::now()).unwrap().unwrap();
+        assert_eq!(
+            created,
+            t0.to_rfc3339(),
+            "created_at preserved across upsert"
+        );
+        let hit = recall_cache_get(c, "rc:3", 900, Utc::now())
+            .unwrap()
+            .unwrap();
         assert_eq!(hit.rows_json, "[1,2]");
         assert!(hit.reranked, "reranked flag updated on upsert");
     }
@@ -226,14 +245,14 @@ mod tests {
         let s = store();
         let c = &s.conn;
         let now = Utc::now();
-        recall_cache_put(&c, "rc:4", "q", "[1]", 1, false, &now.to_rfc3339()).unwrap();
-        recall_cache_record_hit(&c, "rc:4", &now.to_rfc3339()).unwrap();
-        let stats = recall_cache_stats(&c).unwrap();
+        recall_cache_put(c, "rc:4", "q", "[1]", 1, false, &now.to_rfc3339()).unwrap();
+        recall_cache_record_hit(c, "rc:4", &now.to_rfc3339()).unwrap();
+        let stats = recall_cache_stats(c).unwrap();
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.total_hits, 1);
         // purge everything older than "now + 1s" → removes the row
         let cutoff = (now + chrono::Duration::seconds(1)).to_rfc3339();
-        assert_eq!(recall_cache_purge_stale(&c, &cutoff).unwrap(), 1);
-        assert_eq!(recall_cache_stats(&c).unwrap().entries, 0);
+        assert_eq!(recall_cache_purge_stale(c, &cutoff).unwrap(), 1);
+        assert_eq!(recall_cache_stats(c).unwrap().entries, 0);
     }
 }

@@ -559,7 +559,9 @@ mod tests {
     #[test]
     fn uuid_detection_matches_expected_shapes() {
         // Canonical dashed UUID.
-        assert!(is_uuid_smoke_test_name("8f14e45f-ceea-467a-9c8a-1b2c3d4e5f60"));
+        assert!(is_uuid_smoke_test_name(
+            "8f14e45f-ceea-467a-9c8a-1b2c3d4e5f60"
+        ));
         // UUID embedded with a prefix.
         assert!(is_uuid_smoke_test_name(
             "run-8f14e45f-ceea-467a-9c8a-1b2c3d4e5f60"

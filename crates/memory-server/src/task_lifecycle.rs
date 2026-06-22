@@ -2416,7 +2416,10 @@ mod tests {
         assert!(parse_issue_ref("", None).is_none());
         assert!(parse_issue_ref("#9", None).is_none(), "no default repo");
         assert!(parse_issue_ref("#9", Some("noslash")).is_none(), "bad repo");
-        assert!(parse_issue_ref("owner/repo#abc", None).is_none(), "non-numeric");
+        assert!(
+            parse_issue_ref("owner/repo#abc", None).is_none(),
+            "non-numeric"
+        );
         assert!(parse_issue_ref("a/b/c#1", None).is_none(), "two slashes");
         // a PR URL is not an issue ref
         assert!(parse_issue_ref("https://github.com/o/r/pull/7", None).is_none());
