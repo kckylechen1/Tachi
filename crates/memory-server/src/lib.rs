@@ -114,10 +114,7 @@ mod wiki_ops;
 mod workflow_closure;
 
 use crate::builtins::seed_builtin_capabilities;
-use crate::foundry_runtime_ops::{
-    enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker, FoundryMaintenanceItem,
-    FoundryWorkerStats,
-};
+use crate::foundry_runtime_ops::{enqueue_foundry_capture_maintenance, FoundryWorkerStats};
 use crate::hub_helpers::{
     capability_callable, capability_visibility_for_cap, review_status_allows_call,
     should_expose_skill_tool, CapabilityVisibility,
@@ -126,7 +123,6 @@ use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::{
     append_warning, clear_mcp_discovery_metadata, filter_mcp_tools_by_permissions,
     resolve_mcp_tool_exposure, set_mcp_discovery_failure, set_mcp_discovery_success,
-    McpToolExposureMode,
 };
 use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
@@ -136,9 +132,8 @@ use crate::shared_defs::{
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool, parse_env_u64,
-    read_or_recover, render_skill_prompt_template, sanitize_safe_path_name, stable_hash,
-    value_to_template_text, write_or_recover,
+    find_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool,
+    render_skill_prompt_template, sanitize_safe_path_name, stable_hash, value_to_template_text,
 };
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
@@ -148,16 +143,13 @@ use memory_core::{
     HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions, VirtualCapabilityBinding,
 };
 use rmcp::{
-    handler::server::{tool::ToolRouter, wrapper::Parameters},
-    schemars,
-    schemars::JsonSchema,
+    handler::server::wrapper::Parameters, schemars, schemars::JsonSchema,
     transport::StreamableHttpClientTransport,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
@@ -165,7 +157,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::cli::Cli;
-use crate::enrichment::EnrichmentItem;
 use crate::mcp_pool::McpClientPool;
 
 pub(crate) mod server_state;
