@@ -1,4 +1,15 @@
-use super::*;
+use crate::llm;
+use crate::memory_search_ops::search_memory_rows;
+use crate::server_state::{DbScope, MemoryServer};
+#[cfg(test)]
+use crate::tool_params::AgentEvolutionMemoryQueryParams;
+use crate::tool_params::{
+    AgentEvolutionDocumentParams, ListAgentEvolutionProposalsParams, ProjectAgentProfileParams,
+    ReviewAgentEvolutionProposalParams, SearchMemoryParams, SynthesizeAgentEvolutionParams,
+};
+use crate::utils::{find_git_root, sanitize_safe_path_name};
+use chrono::Utc;
+use serde_json::{json, Value};
 
 const AGENT_EVOLUTION_PROPOSAL_SOURCE: &str = "foundry_agent_evolution";
 const FOUNDRY_JOB_NAMESPACE: &str = "foundry_job";

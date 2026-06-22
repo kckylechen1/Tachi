@@ -122,7 +122,7 @@ use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
-use crate::utils::{find_git_root, lock_or_recover, sanitize_safe_path_name};
+use crate::utils::{lock_or_recover, sanitize_safe_path_name};
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use chrono::Utc;
