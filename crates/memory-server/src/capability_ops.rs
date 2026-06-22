@@ -1,8 +1,16 @@
-use super::*;
-use crate::hub_helpers::sanitize_skill_tool_name;
+use crate::hub_helpers::{
+    capability_callable, capability_visibility_for_cap, sanitize_skill_tool_name,
+    CapabilityVisibility,
+};
+use crate::tool_params::{
+    PrepareCapabilityBundleParams, RecommendCapabilityParams, RecommendSkillParams,
+    RecommendToolchainParams,
+};
+use crate::MemoryServer;
 use memory_core::{AgentProjection, HubCapability, Pack};
 use serde::Serialize;
 use serde_json::json;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 struct CapabilityRecord {
