@@ -177,6 +177,10 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
+            // Idle reaper: every tool call (including ones a stdio child
+            // forwards to this daemon) counts as activity, so an idle daemon is
+            // genuinely unused and safe to self-terminate.
+            self.touch_activity();
             let name = params.name.as_ref();
             let env_patterns = current_exposed_tool_patterns();
 

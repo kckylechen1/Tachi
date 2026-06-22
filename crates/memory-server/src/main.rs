@@ -498,6 +498,12 @@ struct MemoryServer {
     // ─── Phantom Tools (result caching — lock-free counters) ──────────────
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
+    // ─── Idle reaper clock ────────────────────────────────────────────────────
+    /// Unix-millis timestamp of the last MCP tool call. Bumped centrally in
+    /// `ServerHandler::call_tool` (so forwarded calls from stdio children count
+    /// too). Drives the daemon idle-timeout: a detached daemon with no recent
+    /// activity exits itself instead of lingering forever.
+    last_activity_ms: Arc<std::sync::atomic::AtomicI64>,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrichment: EnrichmentRuntime,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
@@ -677,6 +683,9 @@ impl MemoryServer {
             tool_router: Self::tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
+                chrono::Utc::now().timestamp_millis(),
+            )),
             enrichment: EnrichmentRuntime { enrich_tx },
             foundry: FoundryRuntime {
                 foundry_tx,

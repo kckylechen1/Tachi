@@ -93,6 +93,7 @@ pub(crate) struct DaemonInfo {
     pub global_db: Option<String>,
     pub project_db: Option<String>,
     pub version: Option<String>,
+    pub pid: Option<i64>,
 }
 
 /// Look up `~/.tachi/daemon.pid` and verify the daemon is actually listening.
@@ -124,7 +125,7 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Option<DaemonInfo> {
     let raw = tokio::fs::read_to_string(pid_path).await.ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
 
-    parsed.get("pid").and_then(|v| v.as_u64())?;
+    let pid = parsed.get("pid").and_then(|v| v.as_u64())?;
     let port = u16::try_from(parsed.get("port").and_then(|v| v.as_u64())?).ok()?;
     let url = daemon_url_from_pid(&parsed, port)?;
 
@@ -148,8 +149,36 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Option<DaemonInfo> {
                 .get("version")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
+            pid: i64::try_from(pid).ok(),
         }),
         _ => None,
+    }
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` prefix into a comparable tuple, ignoring any
+/// `-pre`/`+build` suffix. Returns `None` if the three core numbers aren't all
+/// present — callers treat that as "unknown, do not act".
+fn semver_triple(v: &str) -> Option<(u64, u64, u64)> {
+    let core = v.trim().split(['-', '+']).next().unwrap_or("");
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    let patch = it.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// True only when the running daemon's version is STRICTLY OLDER than this
+/// binary. Used to decide whether to replace a stale daemon on stdio startup.
+/// Conservative by design: an equal, newer, or unparseable version returns
+/// false so we never kill a current or ahead-of-us daemon (e.g. mid-rollout).
+pub(crate) fn daemon_is_older_than_current(info: &DaemonInfo) -> bool {
+    let current = match semver_triple(env!("CARGO_PKG_VERSION")) {
+        Some(c) => c,
+        None => return false,
+    };
+    match info.version.as_deref().and_then(semver_triple) {
+        Some(running) => running < current,
+        None => false,
     }
 }
 
@@ -496,6 +525,7 @@ mod tests {
             global_db: global.map(|path| path.display().to_string()),
             project_db: project.map(|path| path.display().to_string()),
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pid: Some(std::process::id() as i64),
         }
     }
 
@@ -569,5 +599,40 @@ mod tests {
             .expect("non-object args should not fail the write path");
 
         assert!(result.is_none());
+    }
+
+    fn daemon_versioned(version: Option<&str>) -> DaemonInfo {
+        DaemonInfo {
+            url: "http://127.0.0.1:6919/mcp".to_string(),
+            global_db: None,
+            project_db: None,
+            version: version.map(str::to_string),
+            pid: Some(1234),
+        }
+    }
+
+    #[test]
+    fn semver_triple_parses_core_and_ignores_suffix() {
+        assert_eq!(semver_triple("1.5.6"), Some((1, 5, 6)));
+        assert_eq!(semver_triple("1.5.6-rc.1"), Some((1, 5, 6)));
+        assert_eq!(semver_triple("1.5.6+build.9"), Some((1, 5, 6)));
+        assert_eq!(semver_triple("1.5"), None); // incomplete → unknown
+        assert_eq!(semver_triple("garbage"), None);
+    }
+
+    #[test]
+    fn daemon_is_older_only_when_strictly_behind_current() {
+        let current = env!("CARGO_PKG_VERSION");
+        // The running daemon reporting our exact version is NOT older.
+        assert!(!daemon_is_older_than_current(&daemon_versioned(Some(current))));
+        // A clearly ancient version IS older.
+        assert!(daemon_is_older_than_current(&daemon_versioned(Some("0.0.1"))));
+        // A clearly future version is NOT older (never replace ahead-of-us).
+        assert!(!daemon_is_older_than_current(&daemon_versioned(Some(
+            "999.0.0"
+        ))));
+        // Unknown / unparseable / missing → never treated as older (safe).
+        assert!(!daemon_is_older_than_current(&daemon_versioned(Some("weird"))));
+        assert!(!daemon_is_older_than_current(&daemon_versioned(None)));
     }
 }
