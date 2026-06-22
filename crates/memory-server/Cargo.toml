@@ -41,6 +41,10 @@ libsimple = "~0.7"
 tempfile = "3"
 libsimple = "~0.7"
 
+[lib]
+name = "memory_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "memory-server"
 path = "src/main.rs"

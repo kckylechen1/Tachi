@@ -1,0 +1,210 @@
+// lib.rs - Memory MCP Server runtime
+//
+// Rust MCP server using rmcp SDK to expose memory-core functionality.
+// Stateless design: each tool opens its own DB connection per-request.
+
+#![allow(
+    clippy::cast_abs_to_unsigned,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::cmp_owned,
+    clippy::collapsible_if,
+    clippy::collapsible_str_replace,
+    clippy::derivable_impls,
+    clippy::doc_overindented_list_items,
+    clippy::enum_variant_names,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::io_other_error,
+    clippy::let_and_return,
+    clippy::manual_async_fn,
+    clippy::manual_clamp,
+    clippy::manual_pattern_char_comparison,
+    clippy::manual_strip,
+    clippy::needless_range_loop,
+    clippy::needless_update,
+    clippy::ptr_arg,
+    clippy::redundant_closure,
+    clippy::too_many_arguments,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_sort_by,
+    clippy::useless_conversion,
+    clippy::useless_format
+)]
+
+mod agent_eval;
+mod agent_markdown;
+mod agent_registry;
+mod arena_ops;
+mod backend_tier;
+mod bootstrap;
+mod builtins;
+mod capability_ops;
+mod capture_gate;
+mod claude_pool;
+mod cli;
+mod cli_client;
+mod complete_ops;
+mod copilot_ops;
+mod credential_profile;
+mod daemon_lock;
+mod daily_pipeline;
+mod dispatch_ops;
+mod dispatch_profile;
+mod dlq_ops;
+pub(crate) mod docs_ops;
+mod doctor;
+mod doctor_ops;
+mod enrichment;
+mod facade_memory_ops;
+mod facade_save_ops;
+mod facade_search_ops;
+mod feedback_rule_ops;
+mod foundry_ops;
+mod foundry_runtime_ops;
+mod foundry_scheduler;
+mod gh_ops;
+mod gh_safe_merge;
+mod graph_state_ops;
+mod handoff_ops;
+mod hub_cli;
+mod hub_helpers;
+mod hub_ops;
+mod kanban;
+mod llm;
+mod manifest;
+mod manifest_audit;
+mod mcp_connection;
+mod mcp_pool;
+mod mcp_proxy;
+mod memory_ops;
+mod memory_search_ops;
+mod network_safety;
+mod notes_ops;
+mod orchestrator_ops;
+mod pack_ops;
+mod path_utils;
+mod pipeline_ops;
+mod profiles;
+mod project_db_ops;
+mod prompt_envelope;
+mod prompts;
+mod provenance;
+mod provider_config;
+mod repair;
+mod rescue;
+mod sandbox_ops;
+mod server_handler;
+mod server_methods;
+mod shared_defs;
+mod shell_ops;
+mod skill_chain_ops;
+mod skill_policy;
+mod status_ops;
+mod task_lifecycle;
+mod tool_params;
+mod tools;
+mod utils;
+mod vault_crypto;
+mod vault_ops;
+mod vector_backfill;
+mod vector_sweep;
+mod verify_ops;
+mod web_search_ops;
+mod wiki_ops;
+mod workflow_closure;
+
+use crate::builtins::seed_builtin_capabilities;
+use crate::foundry_runtime_ops::{
+    enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker, FoundryMaintenanceItem,
+    FoundryWorkerStats,
+};
+use crate::hub_helpers::{
+    build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
+    make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
+    should_expose_skill_tool, CapabilityVisibility,
+};
+use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
+use crate::mcp_proxy::{
+    append_warning, clear_mcp_discovery_metadata, filter_mcp_tools_by_permissions,
+    resolve_mcp_tool_exposure, set_mcp_discovery_failure, set_mcp_discovery_success,
+    McpToolExposureMode,
+};
+use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
+use crate::profiles::ToolProfile;
+use crate::shared_defs::{
+    categorize_error, dlq_mutation_is_unsafe, prune_expired_dead_letters,
+    push_dead_letter_with_limits, should_enqueue_dlq, slim_entry, slim_entry_with_enrichment,
+    slim_search_result, DeadLetter, DLQ_MAX_ENTRIES, DLQ_TTL_SECS,
+};
+use crate::tool_params::*;
+use crate::utils::{
+    find_git_root, find_project_git_root, is_trusted_mcp_command, lock_or_recover, parse_env_bool,
+    parse_env_u64, read_or_recover, render_skill_prompt_template, sanitize_safe_path_name,
+    stable_hash, value_to_template_text, write_or_recover,
+};
+use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
+
+use chrono::Utc;
+use clap::Parser;
+use memory_core::{
+    HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions, VirtualCapabilityBinding,
+};
+use rmcp::{
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    schemars,
+    schemars::JsonSchema,
+    transport::StreamableHttpClientTransport,
+    ServerHandler,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
+use std::time::{Duration, Instant};
+use tokio::io::{stdin, stdout};
+use tokio::sync::mpsc;
+
+use crate::cli::{Cli, Commands, HubAction, ManifestAction, RescueAction};
+use crate::enrichment::EnrichmentItem;
+use crate::mcp_pool::McpClientPool;
+
+pub(crate) mod server_state;
+pub(crate) use server_state::{
+    configured_memory_read_pool_size, AgentProfile, CachedResult, CachedVaultKey, DbScope,
+    HandoffMemo, MemoryServer, ProjectDbState, ReadStorePool, VaultState, CACHEABLE_TOOLS,
+    CACHE_INVALIDATING_TOOLS, RATE_LIMIT_BURST_WINDOW, RATE_LIMIT_MAX_BURST_KEYS,
+    RATE_LIMIT_MAX_SESSIONS, STUCK_SOFT_WARN_THRESHOLD, TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL,
+};
+
+// Enrichment batcher methods are in enrichment.rs
+
+// ─── Tool Parameter Types ───────────────────────────────────────────────────────
+//
+// Note: dead_code warnings are expected here because the #[tool] macro
+// generates code that uses these types through macro expansion.
+
+// Parameter and tool schema definitions moved to `tool_params.rs`.
+
+// MCP pool proxy methods are in mcp_pool.rs
+
+// ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
+
+pub fn run_cli() {
+    let cli = Cli::parse();
+    if let Err(e) = bootstrap::run(cli) {
+        if let Some(exit) = e.downcast_ref::<repair::RepairExit>() {
+            std::process::exit(exit.code());
+        }
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests;
