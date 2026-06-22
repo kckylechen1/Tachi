@@ -115,8 +115,6 @@ mod workflow_closure;
 
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::FoundryWorkerStats;
-use crate::hub_helpers::review_status_allows_call;
-use crate::memory_search_ops::{handle_save_memory, search_memory_rows};
 use crate::profiles::ToolProfile;
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
@@ -124,11 +122,14 @@ use crate::tool_params::*;
 use crate::utils::lock_or_recover;
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
+#[cfg(test)]
 use chrono::Utc;
 use clap::Parser;
+#[cfg(test)]
 use memory_core::{HubCapability, MemoryEntry, MemoryStore};
 #[cfg(test)]
 use rmcp::handler::server::wrapper::Parameters;
+#[cfg(test)]
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::collections::HashMap;
