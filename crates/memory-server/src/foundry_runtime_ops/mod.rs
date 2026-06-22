@@ -1,4 +1,4 @@
-use super::*;
+use crate::server_state::DbScope;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicU64;
 
