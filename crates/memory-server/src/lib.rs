@@ -148,7 +148,7 @@ use crate::mcp_pool::McpClientPool;
 
 pub(crate) mod server_state;
 pub(crate) use server_state::{
-    AgentProfile, CachedVaultKey, DbScope, HandoffMemo, MemoryServer, VaultState, TOOL_CACHE_TTL,
+    AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState, TOOL_CACHE_TTL,
 };
 
 // Enrichment batcher methods are in enrichment.rs
