@@ -1,7 +1,9 @@
 //! Agent benchmark / eval harness schema (#158).
 
-use super::*;
+use crate::server_state::MemoryServer;
+use crate::tool_params::TachiAgentEvalParams;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
