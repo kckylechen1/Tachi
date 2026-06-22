@@ -1,10 +1,8 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::*;
-use crate::vault_ops::{VaultInitParams, VaultSetParams};
 use chrono::Utc;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore};
-use rmcp::handler::server::wrapper::Parameters;
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn ensure_test_env() {
     static INIT: std::sync::Once = std::sync::Once::new();
