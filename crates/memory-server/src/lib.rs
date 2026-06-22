@@ -127,8 +127,8 @@ use crate::shared_defs::{
 };
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, lock_or_recover, parse_env_bool, render_skill_prompt_template,
-    sanitize_safe_path_name, stable_hash, value_to_template_text,
+    find_git_root, lock_or_recover, parse_env_bool, sanitize_safe_path_name, stable_hash,
+    value_to_template_text,
 };
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
