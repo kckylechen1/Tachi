@@ -1,6 +1,4 @@
 use memory_core::MemoryEntry;
-#[cfg(test)]
-use serde_json::json;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, RwLock as StdRwLock};
@@ -654,6 +652,7 @@ pub(crate) fn global_test_lock() -> &'static std::sync::Mutex<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn append_owner_only_jsonl_line_caps_size_and_restricts_file() {

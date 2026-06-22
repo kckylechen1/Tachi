@@ -1,8 +1,6 @@
 use crate::llm;
 use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::{DbScope, MemoryServer};
-#[cfg(test)]
-use crate::tool_params::AgentEvolutionMemoryQueryParams;
 use crate::tool_params::{
     AgentEvolutionDocumentParams, ListAgentEvolutionProposalsParams, ProjectAgentProfileParams,
     ReviewAgentEvolutionProposalParams, SearchMemoryParams, SynthesizeAgentEvolutionParams,
@@ -1305,6 +1303,7 @@ pub(crate) async fn handle_project_agent_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool_params::AgentEvolutionMemoryQueryParams;
 
     #[test]
     fn agent_evolution_job_id_is_deterministic_for_same_inputs() {
