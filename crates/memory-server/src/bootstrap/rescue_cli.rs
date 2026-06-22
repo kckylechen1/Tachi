@@ -1,9 +1,13 @@
-use super::*;
+use super::print_pretty_json;
+use crate::cli::RescueAction;
+use crate::rescue::{apply_rescue, plan_rescue, render_plan};
+use std::error::Error;
+use std::path::{Path, PathBuf};
 
 pub(super) async fn run_rescue_command(
     action: RescueAction,
-    home: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+    home: &Path,
+) -> Result<(), Box<dyn Error>> {
     match action {
         RescueAction::Antigravity {
             source,
@@ -29,14 +33,13 @@ pub(super) async fn run_rescue_command(
                 .into());
             }
 
-            let plan = crate::rescue::plan_rescue(&source_path)
-                .map_err(|e| format!("plan_rescue: {e}"))?;
+            let plan = plan_rescue(&source_path).map_err(|e| format!("plan_rescue: {e}"))?;
 
             if !apply {
                 if json {
                     print_pretty_json(&serde_json::to_value(&plan)?)
                 } else {
-                    println!("{}", crate::rescue::render_plan(&plan));
+                    println!("{}", render_plan(&plan));
                     println!(
                         "\n(dry-run; re-run with --apply to write into target DBs at {})",
                         targets_root_path.display()
@@ -44,12 +47,12 @@ pub(super) async fn run_rescue_command(
                     Ok(())
                 }
             } else {
-                let report = crate::rescue::apply_rescue(&source_path, &targets_root_path, plan)
+                let report = apply_rescue(&source_path, &targets_root_path, plan)
                     .map_err(|e| format!("apply_rescue: {e}"))?;
                 if json {
                     print_pretty_json(&serde_json::to_value(&report)?)
                 } else {
-                    println!("{}", crate::rescue::render_plan(&report.plan));
+                    println!("{}", render_plan(&report.plan));
                     println!("\n=== apply summary ===");
                     let mut total_written = 0usize;
                     for (target, n) in &report.written_per_target {
