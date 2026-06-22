@@ -1,9 +1,30 @@
-use super::capture::*;
-use super::helpers::*;
+use super::capture::{persist_capture_entry, queue_capture_enrichment};
+use super::helpers::{
+    build_entry_path, build_foundry_session_memory_root, build_openclaw_agent_root,
+    build_section_artifact, build_stable_foundry_memory_id, dedup_strings, estimate_token_count,
+    normalize_category, normalize_scope, path_is_within_prefix,
+};
 use super::maintenance::enqueue_capture_maintenance_jobs;
-use super::recall::*;
-use super::*;
+use super::recall::{
+    build_prepend_context, build_wiki_context, parse_session_capture_response,
+    rerank_rows_with_outcome, resolve_recall_scope, run_compaction_model, value_id, value_path,
+    value_relevance, value_topic,
+};
+use super::RerankOutcome;
+use crate::memory_search_ops::search_memory_rows;
+use crate::server_state::{DbScope, MemoryServer};
+use crate::tool_params::{
+    CaptureSessionParams, CompactContextParams, CompactRollupParams, CompactSessionMemoryParams,
+    Message, RecallContextParams, SearchMemoryParams, SectionBuildParams,
+};
+use crate::utils::{sanitize_safe_path_name, stable_hash};
+use chrono::Utc;
+use memory_core::{MemoryEntry, MemoryStore};
+use regex::Regex;
+use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub(super) fn resolve_capture_target(
     server: &MemoryServer,
@@ -31,11 +52,6 @@ pub(super) fn resolve_capture_target(
     let (target_db, warning) = server.resolve_write_scope(requested_scope);
     (target_db, None, None, warning)
 }
-use crate::utils::stable_hash;
-use regex::Regex;
-use std::collections::HashSet;
-use std::sync::OnceLock;
-
 pub(crate) async fn handle_section_build(
     _server: &MemoryServer,
     params: SectionBuildParams,
@@ -753,7 +769,7 @@ pub(crate) async fn handle_recall_context(
 
     let (reranked, rerank_outcome) =
         rerank_rows_with_outcome(server, &params.query, filtered, params.top_k.max(1)).await;
-    if rerank_outcome == super::RerankOutcome::Fallback {
+    if rerank_outcome == RerankOutcome::Fallback {
         tracing::warn!(
             "[recall_context] rerank fail-open: query_hash={} top_k={}",
             stable_hash(&params.query),
@@ -1007,7 +1023,7 @@ pub(crate) async fn handle_capture_session(
     let base_path = params
         .path_prefix
         .clone()
-        .unwrap_or_else(|| super::helpers::build_openclaw_agent_root(&params.agent_id));
+        .unwrap_or_else(|| build_openclaw_agent_root(&params.agent_id));
     let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
