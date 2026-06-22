@@ -129,12 +129,10 @@ use clap::Parser;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore};
 #[cfg(test)]
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::{schemars, schemars::JsonSchema};
-use serde::Deserialize;
 use serde_json::{json, Value};
 #[cfg(test)]
 use std::collections::HashMap;
-use std::sync::Arc;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use crate::cli::Cli;

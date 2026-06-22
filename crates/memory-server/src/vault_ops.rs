@@ -1,6 +1,6 @@
 // vault_ops.rs — MCP tool handlers for Tachi Vault
 
-use super::*;
+use crate::server_state::{CachedVaultKey, MemoryServer};
 use crate::vault_crypto as crypto;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use chrono::Utc;
@@ -8,9 +8,14 @@ use memory_core::vault::{
     normalize_secret_type, VaultCipher, VaultConfig, VaultEntry, VaultKeyHealth, VaultKeyRotation,
     SECRET_TYPE_API_KEY,
 };
+use memory_core::MemoryStore;
+use rmcp::schemars::{self, JsonSchema};
+use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
 const VAULT_UNLOCK_LOCKOUT_SECS: u64 = 300;
