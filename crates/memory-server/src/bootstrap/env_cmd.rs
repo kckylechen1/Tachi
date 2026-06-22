@@ -1,4 +1,4 @@
-use super::*;
+use super::{open_cli_store, open_cli_store_read_only, vault_cli};
 use crate::cli::EnvAction;
 use memory_core::vault::VaultEntry;
 use serde::Serialize;
@@ -201,7 +201,7 @@ fn unlock_cli_vault(
                 .to_string()
         })?;
 
-    let password = super::vault_cli::read_vault_password(
+    let password = vault_cli::read_vault_password(
         stdin_password,
         keychain,
         password_file,
@@ -470,11 +470,8 @@ fn resolve_bound_secret_value(
     if let Some(entry) = entries.get(secret_name).copied() {
         return decrypt_entry_value(entry, unlocked.key.bytes());
     }
-    let (_, value) = super::vault_cli::lease_api_key_from_store(
-        &unlocked.store,
-        unlocked.key.bytes(),
-        secret_name,
-    )?;
+    let (_, value) =
+        vault_cli::lease_api_key_from_store(&unlocked.store, unlocked.key.bytes(), secret_name)?;
     Ok(value)
 }
 
@@ -596,7 +593,7 @@ async fn run_legacy_env_export(
         })?;
 
     // 2. Resolve password from the requested portable source.
-    let password = super::vault_cli::read_vault_password(
+    let password = vault_cli::read_vault_password(
         stdin_password,
         keychain,
         password_file,
