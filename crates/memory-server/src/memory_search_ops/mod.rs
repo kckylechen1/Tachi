@@ -28,6 +28,5 @@ use crate::tool_params::*;
 use crate::utils::{is_active_global_rule, parse_env_bool, stable_hash};
 use crate::DbScope;
 use crate::MemoryServer;
-use chrono::Utc;
-use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{MemoryStore, SearchOptions};
 use serde_json::json;
