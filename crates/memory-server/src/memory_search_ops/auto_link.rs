@@ -1,7 +1,9 @@
-use super::*;
 use crate::memory_search_ops::confidence_reinforce::{
     apply_confidence_reinforcement, confidence_increment, vector_similarity_between,
 };
+use crate::{DbScope, MemoryServer};
+use memory_core::{MemoryEntry, MemoryStore};
+use serde_json::json;
 use std::collections::HashSet;
 
 const REINFORCEMENT_MIN_SIMILARITY: f64 = 0.75;
