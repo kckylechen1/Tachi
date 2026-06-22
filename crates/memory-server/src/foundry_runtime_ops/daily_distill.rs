@@ -26,11 +26,13 @@ use serde_json::{json, Value};
 
 use super::helpers::dedup_strings;
 use super::maintenance::{
-    build_distill_edges, coherence_bucket_key, coherent_distill_buckets,
-    scheduled_distill_path_prefix,
+    build_distill_edges, build_foundry_distill_root, coherence_bucket_key,
+    coherent_distill_buckets, scheduled_distill_path_prefix,
 };
-use super::*;
+use super::FOUNDRY_DISTILL_SOURCE;
 use crate::llm::LlmClient;
+use crate::server_state::{DbScope, MemoryServer};
+use memory_core::{MemoryEntry, MemoryStore};
 
 /// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
 const DEFAULT_GROUPS_PER_BATCH: usize = 6;
@@ -1030,7 +1032,7 @@ fn persist_distill_memory(
         .as_ref()
         .map(|p| p.agent_id.clone())
         .unwrap_or_else(|| "tachi_scheduler".to_string());
-    let distill_root = super::maintenance::build_foundry_distill_root(&agent_id);
+    let distill_root = build_foundry_distill_root(&agent_id);
     let timestamp = Utc::now().to_rfc3339();
     let memory_id = uuid::Uuid::new_v4().to_string();
     let source_ids: Vec<String> = group.entries.iter().map(|e| e.id.clone()).collect();
