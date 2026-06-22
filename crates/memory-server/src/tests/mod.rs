@@ -1,4 +1,4 @@
-use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
+use crate::kanban::{PostCardParams, UpdateCardParams};
 use crate::server_state::{AgentProfile, CachedVaultKey, MemoryServer};
 use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;

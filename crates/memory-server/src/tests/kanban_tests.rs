@@ -1,4 +1,8 @@
-use super::*;
+use super::make_server;
+use crate::kanban::{CheckInboxParams, PostCardParams, UpdateCardParams};
+use crate::tool_params::GetMemoryParams;
+use rmcp::handler::server::wrapper::Parameters;
+use serde_json::{json, Value};
 
 #[tokio::test]
 async fn post_card_check_inbox_and_update_roundtrip() {

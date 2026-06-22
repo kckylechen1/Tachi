@@ -1,4 +1,11 @@
-use super::*;
+use super::{make_mcp_capability, make_server};
+use crate::tool_params::{
+    SandboxSetPolicyParams, VirtualCapabilityBindParams, VirtualCapabilityRegisterParams,
+    VirtualCapabilityResolveParams,
+};
+use memory_core::HubCapability;
+use rmcp::handler::server::wrapper::Parameters;
+use serde_json::{json, Value};
 
 #[tokio::test]
 async fn vc_resolve_prefers_first_callable_binding_and_inherits_policy() {
