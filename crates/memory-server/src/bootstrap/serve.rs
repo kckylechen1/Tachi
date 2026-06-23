@@ -11,13 +11,17 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+mod backfill_commands;
 mod background;
+mod cli_commands;
 mod daemon;
 mod logging;
 mod runtime;
 mod stdio;
 
+use self::backfill_commands::run_if_backfill_command;
 use self::background::*;
+use self::cli_commands::run_pre_serve_command;
 use self::daemon::serve_http_daemon;
 use self::logging::*;
 use self::runtime::*;
@@ -241,65 +245,9 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    // BackfillVectors needs async (LLM client), handle it here before sync dispatch
-    if let Commands::BackfillVectors {
-        db,
-        project,
-        batch_size,
-        dry_run,
-        include_cache,
-    } = &command
-    {
-        let target_path = if let Some(p) = db {
-            expand_user_path(p.to_string_lossy().as_ref())
-        } else if let Some(project) = project {
-            let path = crate::path_utils::plan_c_global_db_path(project);
-            if !path.exists() {
-                return Err(format!(
-                    "named project DB not found for '{project}': {}",
-                    path.display()
-                )
-                .into());
-            }
-            path
-        } else {
-            global_db_path.clone()
-        };
-        return super::backfill::run_backfill_vectors(
-            &target_path,
-            &global_db_path,
-            *batch_size,
-            *dry_run,
-            *include_cache,
-        )
-        .await;
-    }
-
-    if let Commands::BackfillSummaries { db, dry_run } = &command {
-        let target_path = if let Some(p) = db {
-            expand_user_path(p.to_string_lossy().as_ref())
-        } else {
-            global_db_path.clone()
-        };
-        return super::backfill::run_backfill_summaries(&target_path, *dry_run).await;
-    }
-
-    if let Commands::BackfillMetadata { db, dry_run } = &command {
-        let target_path = if let Some(p) = db {
-            expand_user_path(p.to_string_lossy().as_ref())
-        } else {
-            global_db_path.clone()
-        };
-        return super::backfill::run_backfill_metadata(&target_path, *dry_run).await;
-    }
-
-    if let Commands::BackfillFts { db, full, dry_run } = &command {
-        let target_path = if let Some(p) = db {
-            expand_user_path(p.to_string_lossy().as_ref())
-        } else {
-            global_db_path.clone()
-        };
-        return super::backfill::run_backfill_fts(&target_path, *full, *dry_run).await;
+    // Backfill commands need async LLM clients, so handle them before generic CLI dispatch.
+    if run_if_backfill_command(&command, &home, &global_db_path).await? {
+        return Ok(());
     }
 
     let gc_enabled = cli
@@ -407,215 +355,17 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
-    if let Commands::Setup {
-        json,
-        interactive,
-        non_interactive,
-    } = &command
+    if run_pre_serve_command(
+        &command,
+        &home,
+        &app_home,
+        &global_db_path,
+        project_db_path.as_ref(),
+        git_root.as_ref(),
+    )
+    .await?
     {
-        return super::setup::run_setup_command(
-            *json,
-            *interactive,
-            *non_interactive,
-            &home,
-            &app_home,
-            &global_db_path,
-            project_db_path.as_ref(),
-            git_root.as_ref(),
-        )
-        .await;
-    }
-
-    if let Commands::Tidy {
-        json,
-        apply,
-        dry_run,
-        execute,
-        yes,
-        target_db,
-    } = &command
-    {
-        let mut roots = vec![
-            app_home.clone(),
-            home.join(".sigil"),
-            home.join(".gemini"),
-            home.join(".openclaw"),
-        ];
-        if let Some(root) = git_root.as_ref() {
-            roots.push(root.clone());
-        }
-        return super::tidy::run_tidy_command(
-            *json,
-            *apply,
-            *dry_run,
-            *execute,
-            *yes,
-            target_db.clone(),
-            &home,
-            &app_home,
-            roots,
-            git_root.as_ref(),
-        )
-        .await;
-    }
-
-    if let Commands::Clean { action } = &command {
-        return super::clean_cli::run_clean_command(action.clone()).await;
-    }
-
-    if let Commands::Harness { action } = &command {
-        return super::harness_cli::run_harness_command(action.clone()).await;
-    }
-
-    if let Commands::SkillSurface { action } = &command {
-        return super::skill_surface_cli::run_skill_surface_command(action.clone()).await;
-    }
-
-    if let Commands::Doctor {
-        json,
-        fix,
-        scan_only: _,
-        roots,
-        jobs,
-        probe_keys,
-    } = &command
-    {
-        return super::manifest_cli::run_doctor_command(
-            *json,
-            *fix,
-            roots.clone(),
-            *jobs,
-            *probe_keys,
-            &home,
-            &app_home,
-            git_root.as_ref(),
-        )
-        .await;
-    }
-
-    if let Commands::Manifest { action } = &command {
-        return super::manifest_cli::run_manifest_command(
-            action.clone(),
-            &home,
-            &app_home,
-            git_root.as_ref(),
-        )
-        .await;
-    }
-
-    if let Commands::Rescue { action } = &command {
-        return super::rescue_cli::run_rescue_command(action.clone(), &home).await;
-    }
-
-    if let Commands::Status {
-        watch,
-        json,
-        hide_orphans,
-        probe_keys,
-    } = &command
-    {
-        return crate::status_ops::status_cli::run_status(
-            *watch,
-            *json,
-            *hide_orphans,
-            *probe_keys,
-            &app_home,
-            &global_db_path,
-            project_db_path.as_deref(),
-        )
-        .await;
-    }
-
-    if let Commands::Daemon { action } = &command {
-        return crate::status_ops::status_cli::run_daemon(
-            action.clone(),
-            &app_home,
-            &global_db_path,
-        )
-        .await;
-    }
-
-    if let Commands::Watcher { action } = &command {
-        return crate::status_ops::status_cli::run_watcher(
-            action.clone(),
-            &global_db_path,
-            project_db_path.clone(),
-        )
-        .await;
-    }
-
-    if let Commands::Foundry { action } = &command {
-        return crate::status_ops::status_cli::run_foundry(
-            action.clone(),
-            &app_home,
-            &global_db_path,
-        )
-        .await;
-    }
-
-    if let Commands::Repair {
-        action,
-        db,
-        rule,
-        apply,
-        no_backup,
-        json,
-        purge_failed,
-    } = &command
-    {
-        return crate::repair::run_repair(
-            action.clone(),
-            db.clone(),
-            rule.clone(),
-            *apply,
-            *no_backup,
-            *json,
-            *purge_failed,
-            &app_home,
-        )
-        .await;
-    }
-
-    if let Commands::Vault { action } = &command {
-        return super::vault_cli::run_vault_command(&global_db_path, &app_home, action.clone())
-            .await;
-    }
-
-    if let Commands::Env {
-        action,
-        filter,
-        env_only,
-        stdin_password,
-        keychain,
-        password_file,
-        insecure_password_file,
-    } = &command
-    {
-        return super::env_cmd::run_env_command(
-            &global_db_path,
-            action.clone(),
-            filter.as_deref(),
-            *env_only,
-            *stdin_password,
-            *keychain,
-            password_file.as_deref(),
-            *insecure_password_file,
-        )
-        .await;
-    }
-
-    if let Commands::Poke { action } = &command {
-        return super::poke_cli::run_poke_command(&app_home, action.clone()).await;
-    }
-
-    if !matches!(command, Commands::Serve) {
-        return super::cli_tool::run_cli_command(
-            command,
-            &global_db_path,
-            project_db_path.as_ref(),
-            &app_home,
-        )
-        .await;
+        return Ok(());
     }
 
     // Ensure parent dirs exist
