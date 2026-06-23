@@ -12,6 +12,7 @@ fn db_status(label: &str, failed: usize, stuck: usize, coverage: f64) -> DbStatu
         vector_coverage: coverage,
         vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
         namespace: NamespaceHealth::default(),
+        continuity: memory_core::ContinuityMetrics::default(),
         pending_enrichment: 0,
         enrichment_failed_recent: 0,
         enrichment_failures: Vec::new(),

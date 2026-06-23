@@ -85,6 +85,7 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
                 graph_expand_hops: 0,
                 graph_relation_filter: None,
                 weights: None,
+                context_symbols: Vec::new(),
                 agent_role: agent_role.clone(),
                 project: project.clone(),
                 domain: None,

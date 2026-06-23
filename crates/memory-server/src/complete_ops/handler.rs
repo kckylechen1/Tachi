@@ -306,9 +306,43 @@ pub(crate) async fn handle_tachi_complete(
         "kanban_update": "skipped (no dispatch_id)",
         "distill_trajectory": "skipped (no trajectory data)",
         "skill_evolve": "skipped",
+        "continuity_events": "pending",
         "post_complete_hooks": "pending",
     });
     let mut completion_warning: Option<String> = None;
+
+    let task_event_payload = json!({
+        "task_id": task_id.clone(),
+        "task": safe_task.clone(),
+        "agent": safe_agent.clone(),
+        "outcome": outcome_norm.clone(),
+        "task_type": params.task_type.clone(),
+        "profile": params.profile.clone(),
+        "risk": params.risk.clone(),
+        "duration_ms": params.duration_ms,
+        "skills_used": safe_skills_used.clone(),
+        "cost_tokens": params.cost_tokens,
+        "cost_usd": params.cost_usd,
+        "quality_score": params.quality_score,
+        "verification_present": verification_present,
+        "diff_present": diff_present,
+        "evidence_refs": safe_evidence_refs.clone(),
+        "tests_run": safe_tests_run.clone(),
+        "eval_memory_id": eval_memory_id.clone(),
+        "eval_path": path.clone(),
+        "dispatch_id": params.dispatch_id.clone(),
+        "flow_id": params.flow_id.clone(),
+        "issue_ref": params.issue_ref.clone(),
+        "pr_ref": params.pr_ref.clone(),
+        "feedback_rules_applied": safe_feedback_rules.clone(),
+    });
+    let subagent_event_payloads = safe_subagents.as_array().cloned().unwrap_or_default();
+    pipeline_status["continuity_events"] = crate::continuity_ops::emit_task_completion_events(
+        server,
+        task_event_payload,
+        &subagent_event_payloads,
+        params.project.as_deref(),
+    );
 
     if let Some(ref trajectory) = safe_trajectory {
         if let Some(trace_arr) = trajectory.as_array() {

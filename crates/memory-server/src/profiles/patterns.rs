@@ -32,6 +32,8 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     // Unified memory facade (search action is read-only)
     "tachi_memory",
+    // Continuity event facade (query action is read-only)
+    "tachi_event",
     // Zero-param session-start alias for tachi_memory(action='briefing')
     "tachi_briefing",
 ];
@@ -53,6 +55,8 @@ pub(crate) const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_skill",
     // Unified memory facade (save / extract_facts are write ops)
     "tachi_memory",
+    // Continuity event facade (emit action is append-only write)
+    "tachi_event",
 ];
 
 pub(crate) const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -126,6 +130,8 @@ pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_agent_eval",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
+    // Append/query continuity events for typed projectors
+    "tachi_event",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
     "tachi_briefing",
     // Direct notepad/conclusion saver facade (high-frequency)
@@ -149,6 +155,8 @@ pub(crate) const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "runtime_info",
     // Unified memory facade (search + save)
     "tachi_memory",
+    // Continuity events (query + append)
+    "tachi_event",
     "tachi_web_search",
     "tachi_browse",
     // Self-rescue when stuck

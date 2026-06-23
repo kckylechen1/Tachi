@@ -2,7 +2,8 @@ use super::{
     ensure_test_env, make_entry, make_server, make_server_with_temp_home, seed_wiki_project_entries,
 };
 use crate::tool_params::{
-    InitProjectDbParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams, TachiTaskParams,
+    InitProjectDbParams, TachiEventParams, TachiMemoryParams, TachiSearchParams, TachiSkillParams,
+    TachiTaskParams,
 };
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -53,6 +54,7 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
 
 mod briefing;
 mod cli_daemon;
+mod event;
 mod memory_actions;
 mod memory_search;
 mod schema;

@@ -153,6 +153,30 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_processed_events_created_at ON processed_events(created_at DESC);
 
+        -- Tachi continuity event ledger. This is append-only source material for
+        -- typed projectors; it does not directly mutate recall, prompts, routing,
+        -- execution, or domain state.
+        CREATE TABLE IF NOT EXISTS tachi_events (
+            id               TEXT PRIMARY KEY,
+            source_repo      TEXT NOT NULL DEFAULT '',
+            adapter          TEXT NOT NULL DEFAULT '',
+            project          TEXT NOT NULL DEFAULT '',
+            domain           TEXT NOT NULL DEFAULT '',
+            session_id       TEXT NOT NULL DEFAULT '',
+            actor            TEXT NOT NULL DEFAULT '',
+            event_type       TEXT NOT NULL,
+            authority        TEXT NOT NULL DEFAULT 'collect_only',
+            effects          TEXT NOT NULL DEFAULT '[]',
+            projection_hints TEXT NOT NULL DEFAULT '[]',
+            payload_json     TEXT NOT NULL DEFAULT '{}',
+            provenance_json  TEXT NOT NULL DEFAULT '{}',
+            created_at       TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tachi_events_created_at ON tachi_events(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_tachi_events_project_domain ON tachi_events(project, domain, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_tachi_events_type ON tachi_events(event_type, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_tachi_events_session ON tachi_events(session_id, created_at DESC);
+
         -- Hub capability registry (skills, plugins, MCP servers)
         CREATE TABLE IF NOT EXISTS hub_capabilities (
             id          TEXT PRIMARY KEY,

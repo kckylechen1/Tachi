@@ -39,6 +39,7 @@ async fn search_memory_boosts_guide_rows_by_context() {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: None,
@@ -52,4 +53,54 @@ async fn search_memory_boosts_guide_rows_by_context() {
         .expect("search memory with guide context");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("search JSON");
     assert_eq!(rows[0]["id"], json!("guide-context-boosted"));
+}
+
+#[tokio::test]
+async fn search_memory_context_symbols_participate_in_plain_query_recall() {
+    let server = make_server();
+
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("context-symbol-hit");
+            entry.path = "/context-symbols".to_string();
+            entry.summary = "Plain continuity issue".to_string();
+            entry.text =
+                "memory-server regression notes without the user-facing query term".to_string();
+            entry.entities = vec!["memory-server".to_string()];
+            store.upsert(&entry).map_err(|e| format!("seed entry: {e}"))
+        })
+        .expect("seed context symbol memory");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "release blocker".to_string(),
+            query_vec: None,
+            top_k: 3,
+            path_prefix: Some("/context-symbols".to_string()),
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: vec!["memory-server".to_string()],
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("search memory with context symbols");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&response).expect("search JSON");
+
+    assert!(
+        rows.iter()
+            .any(|row| row["id"] == json!("context-symbol-hit")),
+        "context symbol should help recall the seeded row, got {rows:?}"
+    );
 }

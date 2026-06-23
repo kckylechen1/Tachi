@@ -377,6 +377,12 @@ pub struct SearchMemoryParams {
     #[serde(default)]
     pub weights: Option<HybridWeightsParam>,
 
+    /// Optional caller-supplied context tokens used to bias recall without
+    /// overwriting the original query. Kept as `context_symbols` for
+    /// compatibility with HyperMemory adapters, but values are domain-neutral.
+    #[serde(default)]
+    pub context_symbols: Vec<String>,
+
     /// Optional agent role for sandbox filtering (e.g. "finance", "code-review")
     #[serde(default)]
     pub agent_role: Option<String>,
@@ -523,6 +529,7 @@ mod tests {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: None,

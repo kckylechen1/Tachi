@@ -110,6 +110,63 @@ pub const SESSION_CAPTURE_PROMPT: &str = r#"你是 Neural Foundry 的 session ca
 6) summary 要短，text 要完整；两者不要重复堆砌。
 7) 最多输出 5 条。"#;
 
+/// Continuity candidate distillation prompt.
+pub const CONTINUITY_CANDIDATE_PROMPT: &str = r#"You are Tachi's continuity distill lane.
+
+Task: read one session window and extract candidate continuity events. These are
+candidate projections only; do not decide truth, do not update counters, and do
+not write final user profile rules.
+
+Output JSON only:
+{
+  "candidates": [
+    {
+      "projection": "pattern | timeline | bonding | world_book | affect | project_cycle | domain_profile | evidence_gate",
+      "event_type": "optional specific event type",
+      "summary": "short standalone summary",
+      "text": "faithful details, no hidden reasoning",
+      "confidence": 0.0,
+      "evidence_refs": ["message index or compact source ref"],
+      "metadata": {}
+    }
+  ],
+  "open_threads": ["unresolved thread worth carrying forward"]
+}
+
+Rules:
+1) Distill, do not judge. Outcome labels belong to the reasoning lane.
+2) Prefer sparse high-signal candidates over many weak ones.
+3) Use timeline for session/project evolution, pattern for repeated behavior,
+   bonding for shared lexicon/callbacks, world_book for stable entities/places,
+   affect for emotion/state signals, project_cycle for goals/tasks/open loops.
+4) Do not include secrets, raw transcripts, hidden reasoning, or tool noise.
+5) If nothing durable exists, return {"candidates":[],"open_threads":[]}."#;
+
+/// Session outcome label prompt.
+pub const SESSION_OUTCOME_LABEL_PROMPT: &str = r#"You are Tachi's continuity reasoning lane.
+
+Task: label the session outcome for calibration. This is a read-only signal for
+metrics and future label-quality eval, not a routing gate and not a final verdict.
+
+Output JSON only:
+{
+  "outcome": "unknown | user_correct | ai_corrected | ai_error | user_error | partial_reframe | mutual_correction | no_contest | unresolved",
+  "evidence_basis": "external_evidence | interlocutor_argument | testimonial | mixed | unverified",
+  "confidence": 0.0,
+  "rationale": "short explanation grounded in the session",
+  "evidence_refs": ["message index, file:line, test, citation, or other checkable evidence"],
+  "claims": ["specific claim assessed"],
+  "open_questions": ["what would need external resolution"]
+}
+
+Rules:
+1) Prefer unresolved/unknown when the session has no checkable correction signal.
+2) external_evidence means a claim was checked against tests, source code, docs,
+   dates, or other independent evidence. User preference alone is testimonial.
+3) partial_reframe is valid when both sides changed the task frame or were partly right.
+4) Do not reward agreement. The label must describe evidence, not politeness.
+5) Never output markdown or prose outside the JSON object."#;
+
 /// Compaction prompt — compresses a session window into a reinjectable context block.
 pub const COMPACT_CONTEXT_PROMPT: &str = r#"You are the Neural Foundry compaction engine.
 

@@ -50,6 +50,7 @@ async fn search_memory_keeps_exact_token_top_when_rerank_enabled() {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: None,

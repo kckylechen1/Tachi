@@ -117,6 +117,7 @@ pub(super) async fn build_evidence(
                 graph_expand_hops: 1,
                 graph_relation_filter: None,
                 weights: None,
+                context_symbols: Vec::new(),
                 agent_role: None,
                 project: query.project.clone(),
                 domain: None,

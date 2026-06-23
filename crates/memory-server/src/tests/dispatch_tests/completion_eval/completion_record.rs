@@ -159,6 +159,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: None,
@@ -190,6 +191,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: None,
@@ -263,6 +265,53 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     let telemetry: serde_json::Value = serde_json::from_str(&telemetry).expect("telemetry JSON");
     assert_eq!(telemetry["source"], serde_json::json!("live_memory"));
     assert!(telemetry["performance_matrix"].is_array());
+
+    let task_events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memory_core::TachiEventQuery {
+                    event_type: Some("task.outcome".to_string()),
+                    session_id: Some("smoke-test-001".to_string()),
+                    limit: 10,
+                    ..memory_core::TachiEventQuery::default()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .expect("list task outcome events");
+    assert_eq!(task_events.len(), 1);
+    assert_eq!(
+        task_events[0].payload["outcome"],
+        serde_json::json!("success")
+    );
+    assert_eq!(
+        task_events[0].projection_hints,
+        vec![
+            memory_core::ProjectionKind::Outcome,
+            memory_core::ProjectionKind::ProjectCycle
+        ]
+    );
+
+    let subagent_events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memory_core::TachiEventQuery {
+                    event_type: Some("subagent.evaluated".to_string()),
+                    session_id: Some("smoke-test-001".to_string()),
+                    limit: 10,
+                    ..memory_core::TachiEventQuery::default()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .expect("list subagent eval events");
+    assert_eq!(subagent_events.len(), 1);
+    assert_eq!(
+        subagent_events[0].payload["subagent"]["agent"],
+        serde_json::json!("kimi")
+    );
+    assert_eq!(
+        subagent_events[0].payload["subagent"]["verification_impact"],
+        serde_json::json!("changed_plan")
+    );
 }
 
 #[tokio::test]

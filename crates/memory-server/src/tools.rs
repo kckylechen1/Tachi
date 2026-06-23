@@ -22,6 +22,7 @@ use crate::copilot_ops::{
     handle_tachi_wiki_search, handle_tachi_wiki_write,
 };
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
+use crate::event_ops::handle_tachi_event;
 use crate::foundry_ops::{
     handle_list_agent_evolution_proposals, handle_project_agent_profile,
     handle_queue_agent_evolution, handle_review_agent_evolution_proposal,
@@ -1336,6 +1337,31 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiMemoryParams>,
     ) -> Result<String, String> {
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
+    }
+
+    #[tool(
+        description = "Append/query/project domain-neutral continuity events. action='emit' records pattern/outcome/affect/bonding/lorebook/evidence/project-cycle events with authority/effect metadata; action='query' lists recent events; action='metrics' returns read-only continuity metrics such as challenge_rate; action='project' idempotently materializes candidate events into stable memory projections; action='context' returns projected continuity memory for prompt/read-model use; action='label_eval' compares session.outcome labels to session.outcome.review gold labels. Affect/emotion projections are tone/reminder only and must not mutate facts, scores, routing, or execution."
+    )]
+    pub(crate) async fn tachi_event(
+        &self,
+        Parameters(params): Parameters<TachiEventParams>,
+    ) -> Result<String, String> {
+        let action = params.action.to_ascii_lowercase();
+        if matches!(
+            action.as_str(),
+            "query" | "metrics" | "context" | "label_eval"
+        ) {
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_read(self, "tachi_event", &params).await?
+            {
+                return Ok(body);
+            }
+        } else if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "tachi_event", &params).await?
+        {
+            return Ok(body);
+        }
+        handle_tachi_event(self, params).await
     }
 
     /// Zero-param briefing alias. Call at the start of any non-trivial task to

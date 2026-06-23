@@ -48,6 +48,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: None,
             domain: Some("engineering".to_string()),

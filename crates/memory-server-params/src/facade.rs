@@ -51,6 +51,23 @@ fn tachi_memory_action_schema(
     )
 }
 
+fn tachi_event_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "emit",
+            "query",
+            "metrics",
+            "project",
+            "context",
+            "label_eval",
+        ],
+        "Required Tachi event ledger action.",
+        generator,
+    )
+}
+
 fn tachi_wiki_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
@@ -201,6 +218,12 @@ pub struct TachiSearchParams {
 
     #[serde(default)]
     pub error_context: Option<String>,
+
+    /// Optional caller-supplied context tokens used to bias memory/wiki recall
+    /// without overwriting exact ID-like queries. Kept as `context_symbols` for
+    /// compatibility with HyperMemory adapters, but values are domain-neutral.
+    #[serde(default)]
+    pub context_symbols: Vec<String>,
 
     /// Wiki category filter (only used when scope includes wiki)
     #[serde(default)]
@@ -537,6 +560,98 @@ pub struct TachiMemoryParams {
         description = "[action=briefing] When true, emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
     )]
     pub compact: bool,
+}
+
+// ─── Facade: append-only continuity events ───────────────────────────────────
+
+fn default_tachi_event_limit() -> usize {
+    20
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiEventParams {
+    #[schemars(
+        schema_with = "tachi_event_action_schema",
+        description = "Required. emit appends a domain-neutral continuity event; query lists recent events; metrics returns read-only continuity metrics; project materializes candidate events into stable memory projections; context returns projected continuity memory for prompt/read-model use; label_eval compares session.outcome labels to session.outcome.review gold labels."
+    )]
+    pub action: String,
+    #[serde(default, alias = "output_format")]
+    #[schemars(description = "Response shape. Defaults to JSON.")]
+    pub format: Option<String>,
+
+    #[serde(default)]
+    #[schemars(description = "[action=emit] Optional event id. Defaults to a generated UUID.")]
+    pub id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Source repo or product surface that produced the event, e.g. sigil, quant, romanbath."
+    )]
+    pub source_repo: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Adapter/client that submitted the event, e.g. memory-server, codex, openclaw."
+    )]
+    pub adapter: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Named project DB selector and event project label.")]
+    pub project: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional domain label, e.g. trading, bonding, coding, project.")]
+    pub domain: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional session/conversation/run id.")]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional actor label, e.g. user, agent, strategy, runtime.")]
+    pub actor: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=emit|required, action=query|filter] Event type, e.g. pattern.observed, affect.sample, evidence.gate."
+    )]
+    pub event_type: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Authority level: collect_only, review_signal_only, interaction_routing_only, tone_and_reminder_only, advisory, raw_fact, derived_evidence, blocker, execution_gate."
+    )]
+    pub authority: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Effect scopes after projection: recall, prompt, routing, tone, scoring, execution, memory_write, project_cycle, domain_state."
+    )]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Projection hints and filters: pattern, outcome, affect, bonding, world_book, project_cycle, domain_profile, evidence_gate."
+    )]
+    pub projection_hints: Vec<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=emit] Domain payload. Stored as JSON; not interpreted by the kernel."
+    )]
+    pub payload: Option<serde_json::Value>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=emit] Provenance/evidence JSON, e.g. files, source ids, sample_n, timestamps."
+    )]
+    pub provenance: Option<serde_json::Value>,
+    #[serde(default)]
+    #[schemars(description = "[action=emit] Event time. Defaults to now.")]
+    pub created_at: Option<String>,
+    #[serde(default = "default_tachi_event_limit")]
+    #[schemars(
+        description = "[action=query|metrics|project|context] Maximum events or projection rows to inspect/return, default 20, max 500."
+    )]
+    pub limit: usize,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=context] Optional projected memory path prefix. If omitted, inferred from projection_hints."
+    )]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=project] Preview projection writes without upserting memories."
+    )]
+    pub dry_run: bool,
 }
 
 // ─── Facade: unified handoff ─────────────────────────────────────────────────

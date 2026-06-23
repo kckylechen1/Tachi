@@ -116,6 +116,7 @@ pub(crate) struct DbStatus {
     pub(crate) vector_coverage: f64,
     pub(crate) vector_dimension: Option<usize>,
     pub(crate) namespace: NamespaceHealth,
+    pub(crate) continuity: memory_core::ContinuityMetrics,
     pub(crate) pending_enrichment: usize,
     pub(crate) enrichment_failed_recent: usize,
     pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,

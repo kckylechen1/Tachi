@@ -78,6 +78,7 @@ const FACADE_MUTATING_ACTIONS: &[&str] = &[
     "dispatch",
     "complete",
     "extract_facts",
+    "emit",
     "delete",
     "remove",
     "promote_issue",
@@ -101,7 +102,7 @@ pub(super) fn dlq_mutation_is_unsafe(
 
     if matches!(
         tool_name,
-        "tachi_memory" | "tachi_wiki" | "tachi_task" | "tachi_gh" | "tachi_shell"
+        "tachi_memory" | "tachi_event" | "tachi_wiki" | "tachi_task" | "tachi_gh" | "tachi_shell"
     ) {
         let action = arguments
             .and_then(|args| args.get("action"))
@@ -361,6 +362,20 @@ mod dlq_tests {
             Some(&serde_json::Map::from_iter([(
                 "action".to_string(),
                 json!("search")
+            )]))
+        ));
+        assert!(dlq_mutation_is_unsafe(
+            "tachi_event",
+            Some(&serde_json::Map::from_iter([(
+                "action".to_string(),
+                json!("emit")
+            )]))
+        ));
+        assert!(!dlq_mutation_is_unsafe(
+            "tachi_event",
+            Some(&serde_json::Map::from_iter([(
+                "action".to_string(),
+                json!("metrics")
             )]))
         ));
     }

@@ -22,6 +22,22 @@ fn tachi_memory_action_schema_declares_enum_values() {
 }
 
 #[test]
+fn tachi_event_action_schema_declares_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiEventParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    let values = action["enum"].as_array().expect("action enum");
+    assert!(values.contains(&json!("emit")));
+    assert!(values.contains(&json!("query")));
+    assert!(values.contains(&json!("metrics")));
+    assert!(values.contains(&json!("project")));
+    assert!(values.contains(&json!("context")));
+    assert!(values.contains(&json!("label_eval")));
+}
+
+#[test]
 fn tachi_skill_action_schema_declares_bundle_and_loadout() {
     let schema = rmcp::schemars::schema_for!(TachiSkillParams);
     let value = serde_json::to_value(schema).expect("schema serializes");

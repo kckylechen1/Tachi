@@ -239,6 +239,20 @@ async fn render_one(
                 db.namespace.graph_orphan_edges,
             );
         }
+        let outcomes = &db.continuity.session_outcomes;
+        if outcomes.outcome_events > 0 {
+            let rate = outcomes
+                .challenge_rate
+                .map(|value| format!("{:.1}%", value * 100.0))
+                .unwrap_or_else(|| "n/a".to_string());
+            println!(
+                "       [i] continuity outcome_events={} eligible={} ai_corrected={} challenge_rate={} (read-only signal)",
+                outcomes.outcome_events,
+                outcomes.eligible_outcomes,
+                outcomes.ai_corrected,
+                rate
+            );
+        }
         if let Some(job) = &db.latest_active_job {
             println!(
                 "       [i] latest_active kind={} status={} at={}",

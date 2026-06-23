@@ -73,6 +73,7 @@ pub(crate) async fn handle_memory_briefing(
         graph_expand_hops: 1,
         graph_relation_filter: None,
         weights: None,
+        context_symbols: Vec::new(),
         agent_role: None,
         project: named_project.clone(),
         domain: params.domain.clone(),
@@ -101,6 +102,7 @@ pub(crate) async fn handle_memory_briefing(
             graph_expand_hops: 1,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             // If the caller did not explicitly target a project, keep wiki
             // search unscoped so the /wiki retrieval path can merge the

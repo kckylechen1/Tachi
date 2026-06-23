@@ -49,6 +49,7 @@ fn params(query: &str) -> SearchMemoryParams {
         graph_expand_hops: 0,
         graph_relation_filter: None,
         weights: None,
+        context_symbols: Vec::new(),
         agent_role: None,
         project: Some("sigil".into()),
         domain: None,
@@ -58,6 +59,41 @@ fn params(query: &str) -> SearchMemoryParams {
         as_of: None,
         include_metadata: false,
     }
+}
+
+#[test]
+fn context_symbols_prefix_plain_queries_for_recall_bias() {
+    let query = super::rows::query_with_context_symbols(
+        "dispatch smoke failure",
+        &["Tachi".to_string(), "memory-server".to_string()],
+    );
+
+    assert_eq!(query, "Tachi memory-server dispatch smoke failure");
+}
+
+#[test]
+fn context_symbols_do_not_pollute_id_like_exact_queries() {
+    let query = super::rows::query_with_context_symbols(
+        "RECALL_PROBE_ALPHA_20260607",
+        &["Tachi".to_string(), "memory-server".to_string()],
+    );
+
+    assert_eq!(query, "RECALL_PROBE_ALPHA_20260607");
+}
+
+#[test]
+fn context_symbols_are_deduped_and_not_repeated_when_query_already_mentions_them() {
+    let query = super::rows::query_with_context_symbols(
+        "Tachi continuity recall",
+        &[
+            "tachi".to_string(),
+            "memory-server".to_string(),
+            "MEMORY-SERVER".to_string(),
+            " ".to_string(),
+        ],
+    );
+
+    assert_eq!(query, "memory-server Tachi continuity recall");
 }
 
 #[test]

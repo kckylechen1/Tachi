@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::cache::{recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs};
 use super::exact::has_high_confidence_exact_token_top;
-use super::rows::search_memory_rows_with_access;
+use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
 use crate::memory_search_ops::search_helpers::{normalize_json_relevance, search_score};
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::stable_hash;
@@ -18,10 +18,11 @@ pub(crate) async fn handle_search_memory(
 
 pub(crate) async fn handle_search_memory_with_access(
     server: &MemoryServer,
-    params: SearchMemoryParams,
+    mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
 ) -> Result<String, String> {
+    params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let top_k = params.normalized_top_k();
 
     // ── Recall-cache read short-circuit ──────────────────────────────────

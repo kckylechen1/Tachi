@@ -59,6 +59,7 @@ async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
         .expect("tool discovery should work");
 
     assert!(tools.contains("`tachi_memory`"));
+    assert!(tools.contains("`tachi_event`"));
     assert!(tools.contains("`tachi_task`"));
     assert!(tools.contains("`tachi_arena`"));
     assert!(tools.contains("`tachi_agent_eval`"));

@@ -17,6 +17,44 @@ use crate::tool_params::SearchMemoryParams;
 use crate::utils::{is_active_global_rule, parse_env_bool};
 use crate::{DbScope, MemoryServer};
 
+const MAX_CONTEXT_SYMBOLS: usize = 32;
+
+pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]) -> String {
+    if context_symbols.is_empty() || memory_core::scorer::is_id_like_exact_query(query) {
+        return query.to_string();
+    }
+
+    let query_trimmed = query.trim();
+    let query_lower = query_trimmed.to_lowercase();
+    let mut seen = HashSet::new();
+    let mut missing = Vec::new();
+
+    for raw in context_symbols {
+        let symbol = raw.trim();
+        if symbol.is_empty() {
+            continue;
+        }
+        let key = symbol.to_lowercase();
+        if !seen.insert(key.clone()) || query_lower.contains(&key) {
+            continue;
+        }
+        missing.push(symbol.to_string());
+        if missing.len() >= MAX_CONTEXT_SYMBOLS {
+            break;
+        }
+    }
+
+    if missing.is_empty() {
+        return query.to_string();
+    }
+    let prefix = missing.join(" ");
+    if query_trimmed.is_empty() {
+        prefix
+    } else {
+        format!("{prefix} {query_trimmed}")
+    }
+}
+
 pub(crate) async fn search_memory_rows(
     server: &MemoryServer,
     params: SearchMemoryParams,
@@ -31,6 +69,7 @@ pub(crate) async fn search_memory_rows_with_access(
     project_only: bool,
     record_access: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
+    params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let wiki_path_prefix = params
         .path_prefix
         .as_deref()

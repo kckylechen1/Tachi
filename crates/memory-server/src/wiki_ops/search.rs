@@ -128,6 +128,7 @@ pub(crate) async fn collect_wiki_search_value(
                 decay: 0.02,
                 use_rrf: true,
             })),
+            context_symbols: Vec::new(),
             agent_role: params.agent_role,
             project: params.project.clone(),
             domain: params.domain.clone(),

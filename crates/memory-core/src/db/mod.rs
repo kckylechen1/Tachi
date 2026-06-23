@@ -2,6 +2,7 @@ mod agent_state;
 mod audit;
 mod common;
 mod domain;
+mod event_ledger;
 pub mod foundry_config;
 pub mod foundry_jobs;
 mod graph;
@@ -24,6 +25,7 @@ pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
+pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
     get_superseded_ids, graph_expand, remove_edge,

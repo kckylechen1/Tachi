@@ -228,6 +228,32 @@ async fn handle_tachi_status_detail(
     let total_terminal: usize = snapshot.dbs.iter().map(|d| d.terminal_jobs).sum();
     let total_failed: usize = snapshot.dbs.iter().map(|d| d.failed).sum();
     let total_stuck: usize = snapshot.dbs.iter().map(|d| d.stuck_in_progress).sum();
+    let total_outcome_events: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.continuity.session_outcomes.outcome_events)
+        .sum();
+    let total_eligible_outcomes: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.continuity.session_outcomes.eligible_outcomes)
+        .sum();
+    let total_ai_corrected: usize = snapshot
+        .dbs
+        .iter()
+        .map(|d| d.continuity.session_outcomes.ai_corrected)
+        .sum();
+    let aggregate_challenge_rate = (total_eligible_outcomes > 0)
+        .then(|| total_ai_corrected as f64 / total_eligible_outcomes as f64);
+    let continuity_summary = json!({
+        "session_outcomes": {
+            "outcome_events": total_outcome_events,
+            "eligible_outcomes": total_eligible_outcomes,
+            "ai_corrected": total_ai_corrected,
+            "challenge_rate": aggregate_challenge_rate,
+            "note": "read-only signal; not a verdict or routing gate",
+        }
+    });
     let worker_queues: Vec<serde_json::Value> = snapshot
         .dbs
         .iter()
@@ -270,6 +296,7 @@ async fn handle_tachi_status_detail(
                 }
                 ,
                 "namespace": &d.namespace,
+                "continuity": &d.continuity,
             })
         })
         .collect();
@@ -434,6 +461,7 @@ async fn handle_tachi_status_detail(
                 "vector_orphans": vector_orphan_dbs,
                 "enrichment_failures": enrichment_failure_dbs,
                 "namespace_issues": namespace_issues,
+                "continuity": continuity_summary,
                 "plan_c_split_brain": snapshot.plan_c_split_brain,
                 "provider_auth_failures": auth_failures,
                 "latest_failed_jobs": failed_jobs,
@@ -496,6 +524,7 @@ async fn handle_tachi_status_detail(
             "vector_orphans": vector_orphan_dbs.len(),
             "enrichment_failures": enrichment_failure_dbs.len(),
             "namespace_issues": namespace_issues.len(),
+            "continuity": continuity_summary,
             "plan_c_split_brain": snapshot.plan_c_split_brain.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {

@@ -134,6 +134,7 @@ async fn search_feedback_rule_rows(
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project,
             domain: None,

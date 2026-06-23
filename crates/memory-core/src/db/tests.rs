@@ -1,18 +1,21 @@
 use super::{
     add_edge, archive_memory, delete, fetch_by_ids, gc_tables, get_all, get_edges,
-    get_sandbox_policy, graph_expand, init_schema, list_by_path, list_sandbox_policies,
-    list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso, record_access,
-    record_access_with_updates, register_sqlite_vec, release_event_claim, search_fts,
-    search_symbolic_candidates, search_vec, serialize_f32, set_sandbox_policy, stats,
-    supersede_memory, try_claim_event, try_load_sqlite_vec, update_agent_known_state,
-    update_enrichment_fields, update_with_revision, upsert, vault_touch_entry, vault_upsert_entry,
-    AccessUpdate,
+    get_sandbox_policy, graph_expand, init_schema, insert_tachi_event, list_by_path,
+    list_sandbox_policies, list_tachi_events, list_wiki_duplicate_candidates, normalize_for_write,
+    now_utc_iso, record_access, record_access_with_updates, register_sqlite_vec,
+    release_event_claim, search_fts, search_symbolic_candidates, search_vec, serialize_f32,
+    set_sandbox_policy, stats, supersede_memory, try_claim_event, try_load_sqlite_vec,
+    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert,
+    vault_touch_entry, vault_upsert_entry, AccessUpdate,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;
 
-use crate::types::{GcConfig, MemoryEdge, MemoryEntry};
+use crate::types::{
+    AuthorityLevel, EffectScope, GcConfig, MemoryEdge, MemoryEntry, ProjectionKind,
+    TachiEventQuery, TachiEventRecord,
+};
 
 fn make_conn() -> Connection {
     libsimple::enable_auto_extension().unwrap();
@@ -53,6 +56,63 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
         query_diversity: 0,
         tier: "raw".to_string(),
     }
+}
+
+#[test]
+fn tachi_event_ledger_round_trips_typed_projection_metadata() {
+    let conn = make_conn();
+    let event = TachiEventRecord {
+        id: "event-1".to_string(),
+        source_repo: "sigil".to_string(),
+        adapter: "memory-server-test".to_string(),
+        project: "sigil".to_string(),
+        domain: "architecture".to_string(),
+        session_id: "session-1".to_string(),
+        actor: "agent".to_string(),
+        event_type: "pattern.observed".to_string(),
+        authority: AuthorityLevel::DerivedEvidence,
+        effects: vec![EffectScope::Recall, EffectScope::ProjectCycle],
+        projection_hints: vec![ProjectionKind::Pattern, ProjectionKind::ProjectCycle],
+        payload: json!({"summary": "shared continuity event ABI"}),
+        provenance: json!({"files": ["crates/memory-core/src/types.rs"]}),
+        created_at: "2026-06-22T00:00:00.000Z".to_string(),
+    };
+
+    insert_tachi_event(&conn, &event).expect("insert event");
+
+    let rows = list_tachi_events(
+        &conn,
+        &TachiEventQuery {
+            project: Some("sigil".to_string()),
+            domain: Some("architecture".to_string()),
+            event_type: Some("pattern.observed".to_string()),
+            session_id: Some("session-1".to_string()),
+            source_repo: Some("sigil".to_string()),
+            adapter: Some("memory-server-test".to_string()),
+            limit: 10,
+        },
+    )
+    .expect("list events");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "event-1");
+    assert_eq!(rows[0].authority, AuthorityLevel::DerivedEvidence);
+    assert_eq!(
+        rows[0].effects,
+        vec![EffectScope::Recall, EffectScope::ProjectCycle]
+    );
+    assert_eq!(
+        rows[0].projection_hints,
+        vec![ProjectionKind::Pattern, ProjectionKind::ProjectCycle]
+    );
+    assert_eq!(
+        rows[0].payload["summary"],
+        json!("shared continuity event ABI")
+    );
+    assert_eq!(
+        rows[0].provenance["files"][0],
+        json!("crates/memory-core/src/types.rs")
+    );
 }
 
 #[test]

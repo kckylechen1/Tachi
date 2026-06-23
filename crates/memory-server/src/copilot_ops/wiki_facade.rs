@@ -227,6 +227,7 @@ pub(crate) async fn handle_tachi_wiki_search(
                 decay: 0.02,
                 use_rrf: true,
             })),
+            context_symbols: Vec::new(),
             agent_role: params.agent_role,
             project: params.project,
             domain: params.domain,

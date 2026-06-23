@@ -32,6 +32,7 @@ pub(crate) async fn handle_tachi_board(
             graph_expand_hops: 0,
             graph_relation_filter: None,
             weights: None,
+            context_symbols: Vec::new(),
             agent_role: None,
             project: params.project.clone(),
             domain: None,

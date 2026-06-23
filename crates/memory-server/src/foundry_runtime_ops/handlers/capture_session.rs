@@ -323,6 +323,31 @@ pub(crate) async fn handle_capture_session(
         0,
         0,
     )?;
+    let continuity_target = crate::continuity_ops::ContinuityEventTarget::new(
+        target_db,
+        named_project.clone(),
+        db_path.clone(),
+    );
+    let session_event = crate::continuity_ops::emit_session_captured_event(
+        server,
+        &continuity_target,
+        &params.conversation_id,
+        &params.turn_id,
+        &params.agent_id,
+        &base_path,
+        &saved_ids,
+        params.messages.len(),
+        params.project.as_deref(),
+    );
+    let continuity_pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
+        server,
+        continuity_target,
+        params.conversation_id.clone(),
+        params.turn_id.clone(),
+        params.agent_id.clone(),
+        params.project.clone(),
+        params.messages.clone(),
+    );
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));
@@ -334,6 +359,13 @@ pub(crate) async fn handle_capture_session(
     response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
     response.insert("db".into(), json!(target_db.as_str()));
     response.insert("path_prefix".into(), json!(base_path));
+    response.insert(
+        "continuity".into(),
+        json!({
+            "session_event": session_event,
+            "pipeline": continuity_pipeline,
+        }),
+    );
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
     }

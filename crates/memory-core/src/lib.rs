@@ -42,8 +42,11 @@ pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, Pac
 pub use scorer::{generic_precision_multiplier, surprise_score, HybridWeights, PrecisionMatcher};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
-    DomainConfig, GcConfig, GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry,
-    RetentionPolicy, SearchResult, StatsResult,
+    AuthorityLevel, ContinuityCandidate, ContinuityCandidateBatch, ContinuityMetrics,
+    ContinuityOutcomeLabel, DomainConfig, EffectScope, GcConfig, GraphExpandResult, HybridScore,
+    MemoryEdge, MemoryEntry, MetricCount, OutcomeEvidenceBasis, ProjectionKind, RetentionPolicy,
+    SearchResult, SessionOutcomeKind, SessionOutcomeMetrics, StatsResult, TachiEventQuery,
+    TachiEventRecord,
 };
 pub use vault::{
     api_key_pool_member_index, normalize_secret_type, VaultCipher, VaultConfig, VaultEntry,
@@ -778,6 +781,27 @@ impl MemoryStore {
     /// List deterministic key-value state rows in a namespace, newest first.
     pub fn list_state(&self, namespace: &str) -> Result<Vec<db::StateRow>, MemoryError> {
         db::list_state(&self.conn, namespace)
+    }
+
+    /// Append a domain-neutral continuity event for typed projectors.
+    pub fn insert_tachi_event(&self, event: &TachiEventRecord) -> Result<(), MemoryError> {
+        db::insert_tachi_event(&self.conn, event)
+    }
+
+    /// List recent continuity events with optional metadata filters.
+    pub fn list_tachi_events(
+        &self,
+        query: &TachiEventQuery,
+    ) -> Result<Vec<TachiEventRecord>, MemoryError> {
+        db::list_tachi_events(&self.conn, query)
+    }
+
+    /// Compute read-only continuity metrics over recent append-only events.
+    pub fn continuity_metrics(
+        &self,
+        window_event_limit: usize,
+    ) -> Result<ContinuityMetrics, MemoryError> {
+        db::continuity_metrics(&self.conn, window_event_limit)
     }
 
     // Hub, audit, agent state, sandbox, pack, and vault methods live in

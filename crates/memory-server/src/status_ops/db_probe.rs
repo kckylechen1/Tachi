@@ -10,7 +10,7 @@ use super::{
 };
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
-use memory_core::{job_status_histogram, JobStatusHistogram, MemoryStore};
+use memory_core::{job_status_histogram, ContinuityMetrics, JobStatusHistogram, MemoryStore};
 use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::path::Path;
@@ -33,6 +33,7 @@ type ProbeDbResult = (
     usize,
     VectorHealth,
     NamespaceHealth,
+    ContinuityMetrics,
     Option<LatestFoundryJob>,
     Option<LatestFoundryJob>,
     Option<LatestFoundryJob>,
@@ -49,6 +50,7 @@ pub(crate) fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
     let vector = vector_health(conn).unwrap_or_default();
     let namespace = namespace_health(conn).unwrap_or_default();
+    let continuity = store.continuity_metrics(200).unwrap_or_default();
     let latest_active_job =
         latest_foundry_job_with_statuses(conn, &["planned", "queued", "running"]).unwrap_or(None);
     let latest_terminal_job =
@@ -60,6 +62,7 @@ pub(crate) fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
         stuck,
         vector,
         namespace,
+        continuity,
         latest_active_job,
         latest_terminal_job,
         latest_job,
