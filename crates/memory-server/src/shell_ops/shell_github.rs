@@ -4,7 +4,7 @@
 //! to `events.jsonl` for GitHub-related automation (PR gates, merge
 //! state tracking, etc.).
 
-use super::*;
+use super::read_status;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::Path;

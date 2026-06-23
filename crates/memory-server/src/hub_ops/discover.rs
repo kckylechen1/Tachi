@@ -1,6 +1,10 @@
-use super::*;
+use crate::hub_helpers::{capability_callable, capability_visibility_for_cap};
+use crate::tool_params::{HubDiscoverParams, HubFeedbackParams, HubGetParams};
 use crate::utils::redact_sensitive_value;
-use std::collections::HashSet;
+use crate::MemoryServer;
+use memory_core::HubCapability;
+use serde_json::json;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) async fn handle_hub_discover(
     server: &MemoryServer,
@@ -188,7 +192,7 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     };
 
     let total = global_caps.len() + project_caps.len();
-    let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut by_type: HashMap<String, usize> = HashMap::new();
     let all_caps: Vec<&HubCapability> = global_caps.iter().chain(project_caps.iter()).collect();
     for cap in &all_caps {
         *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;

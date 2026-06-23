@@ -1,6 +1,8 @@
 //! Issue → Doc → Memory closure helpers (#150).
 
-use super::*;
+use crate::tool_params::{TachiWorkflowParams, WikiWriteParams};
+use crate::MemoryServer;
+use serde_json::{json, Value};
 
 /// Footer stamped on every closure write-back comment. Also the idempotency
 /// key: if an issue/PR already carries a comment containing this, close_loop

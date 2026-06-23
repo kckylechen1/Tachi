@@ -1,5 +1,6 @@
-use super::*;
 use crate::memory_search_ops::auto_link::{should_reinforce, should_supersede};
+use memory_core::{MemoryEntry, MemoryStore};
+use serde_json::json;
 use std::collections::HashSet;
 
 pub(crate) fn confidence_increment(similarity: f64) -> f64 {

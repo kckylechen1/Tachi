@@ -1,0 +1,343 @@
+use super::super::capture::{persist_capture_entry, queue_capture_enrichment};
+use super::super::helpers::{
+    build_entry_path, build_openclaw_agent_root, dedup_strings, normalize_category, normalize_scope,
+};
+use super::super::maintenance::enqueue_capture_maintenance_jobs;
+use super::super::recall::parse_session_capture_response;
+use super::bracket::{extract_bracket_self_evolution_notes, matches_agent_tag};
+use super::target::resolve_capture_target;
+use crate::server_state::MemoryServer;
+use crate::tool_params::CaptureSessionParams;
+use chrono::Utc;
+use memory_core::MemoryEntry;
+use serde_json::{json, Value};
+
+pub(crate) async fn handle_capture_session(
+    server: &MemoryServer,
+    params: CaptureSessionParams,
+) -> Result<String, String> {
+    let combined_text = params
+        .messages
+        .iter()
+        .map(|message| format!("{}: {}", message.role.trim(), message.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if combined_text.trim().is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_messages",
+            "captured": 0,
+        }))
+        .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+    }
+
+    if !params.force && combined_text.chars().count() < params.min_chars {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "below_min_chars",
+            "captured": 0,
+        }))
+        .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+    }
+
+    let requested_scope = normalize_scope(&params.scope, "project");
+    let (target_db, named_project, db_path, warning) = resolve_capture_target(
+        server,
+        &requested_scope,
+        params.project.as_deref(),
+        &params.agent_id,
+    );
+
+    let base_path = params
+        .path_prefix
+        .clone()
+        .unwrap_or_else(|| build_openclaw_agent_root(&params.agent_id));
+    let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
+    let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
+    // User-preference scoping: agents with "user_memory" in their profile get
+    // preference notes scoped to "user" instead of the requested scope.
+    let is_user_memory_agent = matches_agent_tag(&params.agent_id, "user-memory")
+        || matches_agent_tag(&params.agent_id, "jayne");
+
+    let mut entries = Vec::<MemoryEntry>::new();
+    for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "turn",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "message_count": params.messages.len(),
+                "artifact_kind": "bracket_self_evolution",
+            }),
+            "capture_session",
+            "bracket_self_evolution",
+            Some(requested_scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+        let strategy_keyword = if note.category == "preference" {
+            "user-preference".to_string()
+        } else {
+            "strategy".to_string()
+        };
+        let entry_scope = if is_user_memory_agent && note.category == "preference" {
+            "user".to_string()
+        } else {
+            requested_scope.clone()
+        };
+
+        entries.push(MemoryEntry {
+            id: note.id,
+            path: self_evolution_path.clone(),
+            summary: note.text.chars().take(100).collect(),
+            text: note.text,
+            importance: 0.70,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: note.category,
+            topic: "self_evolution".to_string(),
+            keywords: dedup_strings(vec![
+                "self-evolution".to_string(),
+                "bracket-note".to_string(),
+                strategy_keyword,
+            ]),
+            persons: Vec::new(),
+            entities: if is_user_memory_agent {
+                vec!["user".to_string()]
+            } else {
+                Vec::new()
+            },
+            location: String::new(),
+            source: "bracket_self_evolution".to_string(),
+            scope: entry_scope,
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        });
+    }
+
+    let payload = json!({
+        "conversation_id": params.conversation_id,
+        "turn_id": params.turn_id,
+        "agent_id": params.agent_id,
+        "messages": params.messages,
+    });
+    let request = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize session capture payload: {e}"))?;
+    let drafts = match server
+        .llm
+        .call_extract_llm(
+            crate::prompts::SESSION_CAPTURE_PROMPT,
+            &request,
+            None,
+            0.1,
+            2400,
+        )
+        .await
+    {
+        Ok(raw) => match parse_session_capture_response(&raw) {
+            Ok(drafts) => drafts,
+            Err(err) if entries.is_empty() => {
+                return serde_json::to_string(&json!({
+                    "status": "failed",
+                    "reason": "llm_capture_parse_failed",
+                    "error": err,
+                    "captured": 0,
+                    "conversation_id": params.conversation_id,
+                    "turn_id": params.turn_id,
+                    "agent_id": params.agent_id,
+                }))
+                .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+            }
+            Err(_) => Vec::new(),
+        },
+        Err(err) if entries.is_empty() => {
+            return serde_json::to_string(&json!({
+                "status": "failed",
+                "reason": "llm_capture_failed",
+                "error": err,
+                "captured": 0,
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+            }))
+            .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+        }
+        Err(_) => Vec::new(),
+    };
+
+    if drafts.is_empty() && entries.is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "no_durable_memories",
+            "captured": 0,
+        }))
+        .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
+    }
+
+    for draft in drafts {
+        let topic = if draft.topic.trim().is_empty() {
+            "session_capture".to_string()
+        } else {
+            draft.topic.trim().to_string()
+        };
+        let scope = normalize_scope(&draft.scope, &requested_scope);
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "turn",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "message_count": params.messages.len(),
+            }),
+            "capture_session",
+            "session_capture",
+            Some(scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+
+        let summary = if draft.summary.trim().is_empty() {
+            draft.text.chars().take(100).collect::<String>()
+        } else {
+            draft.summary.trim().to_string()
+        };
+
+        entries.push(MemoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: build_entry_path(&base_path, &topic),
+            summary,
+            text: draft.text.trim().to_string(),
+            importance: draft.importance.clamp(0.0, 1.0),
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: normalize_category(&draft.category),
+            topic,
+            keywords: dedup_strings(draft.keywords),
+            persons: Vec::new(),
+            entities: {
+                let mut entities = dedup_strings(draft.entities);
+                for name in draft.persons {
+                    memory_core::types::push_entity_name(&mut entities, &name);
+                }
+                entities
+            },
+            location: draft.location.trim().to_string(),
+            source: "capture_session".to_string(),
+            scope,
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        });
+    }
+
+    let texts = entries
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect::<Vec<_>>();
+    let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
+        Ok(vectors) => Some(vectors),
+        Err(err) => {
+            tracing::warn!("[capture_session] embedding failed, deferring enrichment: {err}");
+            None
+        }
+    };
+    if let Some(vectors) = embeddings.as_ref() {
+        for (entry, vector) in entries.iter_mut().zip(vectors.iter()) {
+            entry.vector = Some(vector.clone());
+        }
+    }
+
+    let mut saved_ids = Vec::new();
+
+    for entry in &entries {
+        persist_capture_entry(
+            server,
+            target_db,
+            named_project.as_deref(),
+            db_path.as_ref(),
+            entry,
+        )?;
+        if embeddings.is_none() {
+            queue_capture_enrichment(
+                server,
+                target_db,
+                named_project.clone(),
+                db_path.clone(),
+                entry,
+                false,
+                Some(&params.agent_id),
+                Some(&base_path),
+            );
+        }
+        saved_ids.push(entry.id.clone());
+    }
+
+    let saved_ids = dedup_strings(saved_ids);
+    let maintenance_jobs = enqueue_capture_maintenance_jobs(
+        server,
+        target_db,
+        named_project.clone(),
+        db_path.clone(),
+        &params.agent_id,
+        &base_path,
+        &saved_ids,
+        0,
+        0,
+    )?;
+
+    let mut response = serde_json::Map::new();
+    response.insert("status".into(), json!("completed"));
+    response.insert("captured".into(), json!(saved_ids.len()));
+    response.insert("ids".into(), json!(saved_ids));
+    response.insert("merged_ids".into(), json!(Vec::<String>::new()));
+    response.insert("duplicate_ids".into(), json!(Vec::<String>::new()));
+    response.insert("duplicates_skipped".into(), json!(0));
+    response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
+    response.insert("db".into(), json!(target_db.as_str()));
+    response.insert("path_prefix".into(), json!(base_path));
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+
+    serde_json::to_string(&Value::Object(response))
+        .map_err(|e| format!("Failed to serialize capture_session response: {e}"))
+}

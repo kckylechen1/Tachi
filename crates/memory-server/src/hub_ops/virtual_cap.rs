@@ -1,5 +1,11 @@
 use super::discover::hub_discover_inner;
-use super::*;
+use crate::tool_params::{
+    HubDiscoverParams, VirtualCapabilityBindParams, VirtualCapabilityRegisterParams,
+    VirtualCapabilityResolveParams,
+};
+use crate::{DbScope, MemoryServer};
+use memory_core::{HubCapability, VirtualCapabilityBinding};
+use serde_json::json;
 
 pub(crate) async fn handle_vc_register(
     server: &MemoryServer,

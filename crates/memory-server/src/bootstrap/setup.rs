@@ -1,4 +1,10 @@
-use super::*;
+use super::{
+    atty_stdout, count_matching_entries, open_cli_store, print_pretty_json, setup_wizard,
+    SetupItem, SetupReport, SETUP_API_KEYS,
+};
+use std::collections::HashMap;
+use std::error::Error;
+use std::path::{Path, PathBuf};
 
 fn find_path_binary(name: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
@@ -11,7 +17,7 @@ fn find_path_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-fn is_executable_file(path: &std::path::Path) -> bool {
+fn is_executable_file(path: &Path) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -28,7 +34,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     }
 }
 
-fn canonical_or_original(path: &std::path::Path) -> PathBuf {
+fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -94,13 +100,13 @@ fn build_cli_binary_item() -> SetupItem {
 }
 
 pub(crate) fn build_setup_report(
-    home: &std::path::Path,
-    app_home: &std::path::Path,
+    home: &Path,
+    app_home: &Path,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
     env_vars: &HashMap<String, String>,
-) -> Result<SetupReport, Box<dyn std::error::Error>> {
+) -> Result<SetupReport, Box<dyn Error>> {
     let config_env_path = app_home.join("config.env");
 
     let api_key_details = SETUP_API_KEYS
@@ -412,12 +418,12 @@ pub(super) async fn run_setup_command(
     json_output: bool,
     interactive: bool,
     non_interactive: bool,
-    home: &std::path::Path,
-    app_home: &std::path::Path,
+    home: &Path,
+    app_home: &Path,
     global_db_path: &PathBuf,
     project_db_path: Option<&PathBuf>,
     git_root: Option<&PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let env_vars = std::env::vars().collect::<HashMap<_, _>>();
     let report = build_setup_report(
         home,
@@ -444,7 +450,7 @@ pub(super) async fn run_setup_command(
     println!("{}\n", render_setup_report(&report));
 
     let config_env_path = app_home.join("config.env");
-    let outcome = super::setup_wizard::run_interactive_wizard(
+    let outcome = setup_wizard::run_interactive_wizard(
         home,
         app_home,
         &config_env_path,

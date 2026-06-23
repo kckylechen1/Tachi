@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    add_edge, archive_memory, delete, fetch_by_ids, gc_tables, get_all, get_edges,
+    get_sandbox_policy, graph_expand, init_schema, list_by_path, list_sandbox_policies,
+    list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso, record_access,
+    record_access_with_updates, register_sqlite_vec, release_event_claim, search_fts,
+    search_symbolic_candidates, search_vec, serialize_f32, set_sandbox_policy, stats,
+    supersede_memory, try_claim_event, try_load_sqlite_vec, update_agent_known_state,
+    update_enrichment_fields, update_with_revision, upsert, vault_touch_entry, vault_upsert_entry,
+    AccessUpdate,
+};
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;

@@ -1,4 +1,11 @@
-use super::*;
+use crate::llm::LlmClient;
+use crate::provider_config::materialize_standalone;
+use crate::vector_backfill::{embed_and_write_batch, list_missing_vector_entries};
+use memory_core::MemoryStore;
+use std::error::Error;
+use std::io::{Error as IoError, ErrorKind};
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// Backfill missing vector embeddings for a given DB.
 pub(super) async fn run_backfill_vectors(
@@ -7,14 +14,12 @@ pub(super) async fn run_backfill_vectors(
     batch_size: usize,
     dry_run: bool,
     include_cache: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::llm::LlmClient;
-
+) -> Result<(), Box<dyn Error>> {
     const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
     let db_str = db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        IoError::new(
+            ErrorKind::InvalidInput,
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
@@ -60,11 +65,9 @@ pub(super) async fn run_backfill_vectors(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
-    crate::provider_config::materialize_standalone(&llm, vault_db_path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let entries =
-        crate::vector_backfill::list_missing_vector_entries(&store, skip_recall_cache, None)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
+    let entries = list_missing_vector_entries(&store, skip_recall_cache, None)
+        .map_err(|e| IoError::new(ErrorKind::Other, e))?;
 
     let batch_size = batch_size.min(128).max(1);
     let total_missing = entries.len();
@@ -76,7 +79,7 @@ pub(super) async fn run_backfill_vectors(
     let mut store = MemoryStore::open(db_str)?;
 
     for chunk in entries.chunks(batch_size) {
-        match crate::vector_backfill::embed_and_write_batch(&mut store, &llm, chunk).await {
+        match embed_and_write_batch(&mut store, &llm, chunk).await {
             Ok(n) => {
                 processed += n;
                 println!("  [{processed}/{total_missing}] ✓ batch of {}", chunk.len());
@@ -102,12 +105,10 @@ pub(super) async fn run_backfill_vectors(
 pub(super) async fn run_backfill_summaries(
     db_path: &PathBuf,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::llm::LlmClient;
-
+) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        IoError::new(
+            ErrorKind::InvalidInput,
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
@@ -165,12 +166,10 @@ pub(super) async fn run_backfill_summaries(
 pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::llm::LlmClient;
-
+) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        IoError::new(
+            ErrorKind::InvalidInput,
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;
@@ -244,10 +243,10 @@ pub(super) async fn run_backfill_fts(
     db_path: &PathBuf,
     full: bool,
     dry_run: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        IoError::new(
+            ErrorKind::InvalidInput,
             format!("DB path contains invalid UTF-8: {}", db_path.display()),
         )
     })?;

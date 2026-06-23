@@ -12,7 +12,7 @@
 //! The tests deliberately do NOT enable async_dispatch — we never want the
 //! integration suite to spawn real clanker subprocesses.
 
-use super::*;
+use super::{make_server, shell_params};
 use crate::shell_ops::{handle_tachi_shell, shell_runs_root};
 use serde_json::Value;
 

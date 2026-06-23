@@ -1,6 +1,12 @@
-use super::helpers::*;
-use super::maintenance::*;
-use super::*;
+use super::helpers::{
+    build_foundry_agent_root, build_openclaw_agent_root, dedup_strings,
+    normalize_path_prefix_value, path_is_within_prefix, round3,
+};
+use super::maintenance::build_foundry_distill_root;
+use super::{CompactContextDraft, RecallScope, RerankOutcome, SessionCaptureDraft};
+use crate::llm;
+use crate::server_state::MemoryServer;
+use serde_json::{json, Value};
 
 fn value_text(row: &Value) -> String {
     row.get("text")
@@ -244,11 +250,11 @@ pub(crate) async fn rerank_rows_with_outcome(
     query: &str,
     rows: Vec<Value>,
     top_k: usize,
-) -> (Vec<Value>, super::RerankOutcome) {
+) -> (Vec<Value>, RerankOutcome) {
     if rows.len() <= 1 {
         return (
             rows.into_iter().take(top_k).collect(),
-            super::RerankOutcome::NotNeeded,
+            RerankOutcome::NotNeeded,
         );
     }
 
@@ -270,9 +276,9 @@ pub(crate) async fn rerank_rows_with_outcome(
                 out.push(row);
             }
             let outcome = if out.is_empty() {
-                super::RerankOutcome::Fallback
+                RerankOutcome::Fallback
             } else {
-                super::RerankOutcome::Applied
+                RerankOutcome::Applied
             };
             let rows = if out.is_empty() {
                 rows.into_iter().take(top_k).collect()
@@ -285,7 +291,7 @@ pub(crate) async fn rerank_rows_with_outcome(
             tracing::warn!("[recall_context] rerank failed, falling back to hybrid ranking: {err}");
             (
                 rows.into_iter().take(top_k).collect(),
-                super::RerankOutcome::Fallback,
+                RerankOutcome::Fallback,
             )
         }
     }

@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
+memory-server-params = { path = "../memory-server-params" }
 tachi-clean = { path = "../../tools/cleaner" }
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
 serde = { workspace = true }
@@ -40,6 +41,10 @@ libsimple = "~0.7"
 [dev-dependencies]
 tempfile = "3"
 libsimple = "~0.7"
+
+[lib]
+name = "memory_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "memory-server"

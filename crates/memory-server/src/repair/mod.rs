@@ -181,16 +181,41 @@ pub async fn run_repair(
                 run_fts_cli(&db, apply, app_home, json_out, no_backup).await
             }
             RepairAction::Report { json } => {
-                eprintln!("`tachi repair report` is a stub — re-run `tachi repair --json` for the latest scan.");
-                if json {
-                    println!("{{\"summary\":{{\"hint\":\"re-run with --json\"}}}}");
-                }
-                Ok(())
+                run_repair_sweep(
+                    db_filter,
+                    rule_filter,
+                    false,
+                    no_backup,
+                    json,
+                    purge_failed,
+                    app_home,
+                )
+                .await
             }
         };
     }
 
-    // No subcommand → multi-DB sweep over all rules (or filtered).
+    run_repair_sweep(
+        db_filter,
+        rule_filter,
+        apply,
+        no_backup,
+        json_out,
+        purge_failed,
+        app_home,
+    )
+    .await
+}
+
+async fn run_repair_sweep(
+    db_filter: Option<String>,
+    rule_filter: Vec<String>,
+    apply: bool,
+    no_backup: bool,
+    json_out: bool,
+    purge_failed: Option<u64>,
+    app_home: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let manifest_path =
         Manifest::default_path(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
     // app_home is canonical; manifest lives at <app_home>/manifest.json.

@@ -1,0 +1,450 @@
+use super::super::acp_native::{
+    is_native_acp_transport, run_native_acp_dispatch, NativeAcpRunSpec,
+};
+use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
+use super::super::dispatch_v2::{append_trajectory_event, write_status_json};
+use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
+use super::super::subprocess::{run_agent_subprocess, tail_chars};
+use super::dedupe::release_flow_dispatch_slot;
+use super::response_helpers::McpCleanup;
+use crate::credential_profile::cleanup_ephemeral_credential_materializations;
+use crate::{MemoryServer, SaveMemoryParams};
+use chrono::Utc;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::process::Command;
+
+pub(super) enum DispatchExecution {
+    Subprocess(Command),
+    NativeAcp(NativeAcpRunSpec),
+}
+
+pub(super) struct BackgroundDispatchContext {
+    pub(super) server: MemoryServer,
+    pub(super) dispatch_id: String,
+    pub(super) agent: String,
+    pub(super) stage: Option<String>,
+    pub(super) trajectory_path: PathBuf,
+    pub(super) workspace_dir: PathBuf,
+    pub(super) v2: bool,
+    pub(super) plan_generated_at: Option<String>,
+    pub(super) plan_duration_ms: Option<u64>,
+    pub(super) timeout_secs: u64,
+    pub(super) timeout: Duration,
+    pub(super) capability_bundle_card: Value,
+    pub(super) feedback_rules_trace: Value,
+    pub(super) harness_transport: String,
+    pub(super) harness_server_url: Option<String>,
+    pub(super) execution_backend_metadata: Option<Value>,
+    pub(super) execution: DispatchExecution,
+    pub(super) flow_dispatch_slot: Option<PathBuf>,
+    pub(super) mcp_config_path: Option<PathBuf>,
+}
+
+pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
+    let server_clone = ctx.server;
+    let d_id = ctx.dispatch_id;
+    let agent_for_watchdog = ctx.agent;
+    let stage_for_traj = ctx.stage;
+    let traj_path_for_spawn = ctx.trajectory_path;
+    let workspace_dir = ctx.workspace_dir.clone();
+    let workspace_dir_for_spawn = ctx.workspace_dir;
+    let v2_for_spawn = ctx.v2;
+    let plan_generated_at_for_spawn = ctx.plan_generated_at;
+    let plan_duration_ms_for_spawn = ctx.plan_duration_ms;
+    let timeout_secs_for_spawn = ctx.timeout_secs;
+    let timeout = ctx.timeout;
+    let capability_bundle_card_for_spawn = ctx.capability_bundle_card;
+    let feedback_rules_trace_for_spawn = ctx.feedback_rules_trace;
+    let harness_transport_for_spawn = ctx.harness_transport;
+    let harness_server_url_for_spawn = ctx.harness_server_url;
+    let execution_backend_metadata_for_spawn = ctx.execution_backend_metadata;
+    let execution_for_spawn = ctx.execution;
+    let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
+    let mcp_config_path = ctx.mcp_config_path;
+
+    tokio::task::spawn(async move {
+        let _mcp_cleanup = McpCleanup(mcp_config_path);
+
+        // execute_started — Stage 2 (or, in V1, the only stage).
+        let execute_started_at = Utc::now();
+        let execute_started_instant = std::time::Instant::now();
+        append_trajectory_event(
+            &traj_path_for_spawn,
+            json!({
+                "event": "execute_started",
+                "dispatch_id": d_id,
+                "agent": agent_for_watchdog,
+                "stage": stage_for_traj,
+                "v2": v2_for_spawn,
+                "harness_transport": harness_transport_for_spawn.clone(),
+                "harness_server_url": harness_server_url_for_spawn.clone(),
+                "timestamp": execute_started_at.to_rfc3339(),
+            }),
+        );
+
+        let result = match execution_for_spawn {
+            DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
+            DispatchExecution::NativeAcp(spec) => {
+                run_native_acp_dispatch(
+                    spec,
+                    &workspace_dir_for_spawn,
+                    &traj_path_for_spawn,
+                    &d_id,
+                    &agent_for_watchdog,
+                    timeout,
+                )
+                .await
+            }
+        };
+        let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
+
+        // Append subprocess_finished event to trajectory.jsonl
+        let mut full_output = match &result {
+            Ok(r) => r.output.clone(),
+            Err(e) => e.clone(),
+        };
+        let mut acpx_event_summary_json: Option<serde_json::Value> = None;
+        if is_acpx_transport(&harness_transport_for_spawn) {
+            match persist_acpx_events_and_map(
+                &workspace_dir_for_spawn,
+                &traj_path_for_spawn,
+                &d_id,
+                &agent_for_watchdog,
+                &full_output,
+            ) {
+                Ok(summary) => {
+                    if let Some(final_response) = summary.final_response.clone() {
+                        full_output = final_response;
+                    }
+                    acpx_event_summary_json = Some(json!({
+                        "events_file": summary.events_file.to_string_lossy(),
+                        "mapped_events": summary.mapped_events,
+                        "final_response_extracted": summary.final_response.is_some(),
+                    }));
+                }
+                Err(err) => {
+                    append_trajectory_event(
+                        &traj_path_for_spawn,
+                        json!({
+                            "event": "acpx_events_persist_failed",
+                            "dispatch_id": d_id,
+                            "agent": agent_for_watchdog.clone(),
+                            "timestamp": Utc::now().to_rfc3339(),
+                            "error": err,
+                        }),
+                    );
+                }
+            }
+        }
+        {
+            let (exit_code, output_tail) = match &result {
+                Err(e) => (None, e.chars().take(200).collect::<String>()),
+                Ok(r) => (r.exit_code, tail_chars(&r.output, 500)),
+            };
+            let finished_event = json!({
+                "event": "subprocess_finished",
+                "dispatch_id": d_id,
+                "agent": agent_for_watchdog,
+                "stage": stage_for_traj,
+                "exit_code": exit_code,
+                "timestamp": Utc::now().to_rfc3339(),
+                "output_tail": output_tail,
+            });
+            if let Ok(line) = serde_json::to_string(&finished_event) {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&traj_path_for_spawn)
+                {
+                    let _ = writeln!(f, "{}", line);
+                }
+                let progress_path = workspace_dir_for_spawn.join("progress.jsonl");
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(progress_path)
+                {
+                    let _ = writeln!(f, "{}", line);
+                }
+            }
+        }
+
+        // Save full output to result.md for orchestrator eval
+        {
+            let result_path = workspace_dir.join("result.md");
+            if let Err(err) =
+                crate::utils::write_owner_only_file_atomic(&result_path, full_output.as_bytes())
+            {
+                tracing::warn!(
+                    dispatch_id = %d_id,
+                    path = %result_path.display(),
+                    error = %err,
+                    "failed to persist dispatch result artifact"
+                );
+                append_trajectory_event(
+                    &traj_path_for_spawn,
+                    json!({
+                        "event": "result_persist_failed",
+                        "dispatch_id": d_id,
+                        "timestamp": Utc::now().to_rfc3339(),
+                        "path": result_path.to_string_lossy(),
+                        "error": err,
+                    }),
+                );
+            }
+        }
+
+        // --- WATCHDOG: check if sub-agent properly closed the loop ---
+        // Poll for kanban state instead of a fixed sleep to avoid race conditions
+        let mut kanban_state = None;
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let state = get_kanban_state(&server_clone, &d_id).await;
+            if let Some(ref s) = state {
+                if matches!(
+                    s.as_str(),
+                    "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
+                ) {
+                    kanban_state = state;
+                    break;
+                }
+            }
+        }
+        let kanban_state = match kanban_state {
+            Some(s) => Some(s),
+            None => get_kanban_state(&server_clone, &d_id).await,
+        };
+        let is_closed = matches!(
+            kanban_state.as_deref(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        );
+        if !is_closed {
+            let exited_ok = matches!(&result, Ok(r) if r.exit_code == Some(0));
+
+            if exited_ok {
+                // exit_code=0 but no tachi_complete: sub-agent forgot to
+                // close the loop, but we have no real evaluation. Do NOT
+                // synthesize a `success` eval — that would poison the nightly
+                // routing analysis with records whose agent is "watchdog/*"
+                // and whose quality/trajectory/diff are empty. Instead just
+                // close the kanban row as COMPLETED but leave `reviewed=false`
+                // so the status dashboard surfaces it as "unreviewed" and
+                // operators can decide whether to write a real eval.
+                let tail = tail_chars(&full_output, 500);
+                eprintln!(
+                    "[watchdog] dispatch {} exited 0 without tachi_complete; marking kanban COMPLETED as unreviewed. tail={}",
+                    d_id, tail
+                );
+                if let Err(error) = update_kanban_state(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_COMPLETED",
+                    None,
+                    Some(false),
+                )
+                .await
+                {
+                    eprintln!(
+                        "[watchdog] failed to mark dispatch {} COMPLETED in kanban: {}",
+                        d_id, error
+                    );
+                }
+            } else {
+                // Crash / timeout / error: record a failure eval so the
+                // failure is still visible in the ledger, but tag it as
+                // `auto_synthesized=true` so the daily routing analysis can
+                // exclude synthesized records from agent success-rate stats.
+                let note = match &result {
+                    Err(e) => format!("Watchdog: {}", e),
+                    Ok(r) => {
+                        let tail = tail_chars(&r.output, 500);
+                        format!(
+                            "Watchdog: Agent crashed (exit {:?}). Stderr tail: {}",
+                            r.exit_code, tail
+                        )
+                    }
+                };
+
+                let ts = Utc::now();
+                let eval_id = format!(
+                    "eval_ws_{}_{}",
+                    ts.format("%Y%m%dT%H%M%SZ"),
+                    d_id.chars().take(16).collect::<String>()
+                );
+                let metadata = json!({
+                    "task_id": eval_id,
+                    "agent": format!("watchdog/{}", agent_for_watchdog),
+                    "outcome": "failure",
+                    "dispatch_id": d_id,
+                    // Nightly routing analysis must exclude these so "fake"
+                    // failures attributed to the watchdog agent don't pollute
+                    // the real backend's success-rate.
+                    "auto_synthesized": true,
+                });
+                let save_params = SaveMemoryParams {
+                    text: note.clone(),
+                    summary: format!("Watchdog auto-close FAILURE: {}", d_id),
+                    path: format!("/eval/{}/{}", ts.format("%Y%m%d"), eval_id),
+                    importance: 0.4,
+                    category: "experience".to_string(),
+                    topic: "eval".to_string(),
+                    keywords: vec![
+                        "eval".to_string(),
+                        "watchdog".to_string(),
+                        "failure".to_string(),
+                        "auto_synthesized".to_string(),
+                    ],
+                    persons: Vec::new(),
+                    entities: Vec::new(),
+                    location: String::new(),
+                    scope: "project".to_string(),
+                    vector: None,
+                    id: Some(eval_id.clone()),
+                    force: true,
+                    auto_link: false,
+                    project: None,
+                    retention_policy: Some("durable".to_string()),
+                    domain: Some("system".to_string()),
+                    timestamp: None,
+                    valid_from: None,
+                    valid_until: None,
+                    metadata: Some(metadata),
+                };
+                if let Err(error) =
+                    crate::memory_search_ops::handle_save_memory(&server_clone, save_params).await
+                {
+                    eprintln!(
+                        "[watchdog] failed to persist synthesized failure eval for dispatch {}: {}",
+                        d_id, error
+                    );
+                }
+
+                if let Err(error) = update_kanban_state(
+                    &server_clone,
+                    &d_id,
+                    "TASK_STATE_FAILED",
+                    Some(&eval_id),
+                    Some(false),
+                )
+                .await
+                {
+                    eprintln!(
+                        "[watchdog] failed to mark dispatch {} FAILED in kanban: {}",
+                        d_id, error
+                    );
+                }
+            }
+        }
+
+        let should_cleanup = match &result {
+            Ok(r) => should_cleanup_run(r.exit_code, kanban_state.as_deref()),
+            Err(_) => false,
+        };
+
+        // Final audit: dispatch_finished + status.json refresh.
+        let final_exit_code = match &result {
+            Ok(r) => r.exit_code,
+            Err(_) => None,
+        };
+        let total_duration_ms = plan_duration_ms_for_spawn.unwrap_or(0) + execute_duration_ms;
+
+        append_trajectory_event(
+            &traj_path_for_spawn,
+            json!({
+                "event": "dispatch_finished",
+                "dispatch_id": d_id,
+                "agent": agent_for_watchdog,
+                "stage": stage_for_traj,
+                "v2": v2_for_spawn,
+                "exit_code": final_exit_code,
+                "duration_ms_execute": execute_duration_ms,
+                "duration_ms_plan": plan_duration_ms_for_spawn,
+                "total_duration_ms": total_duration_ms,
+                "timestamp": Utc::now().to_rfc3339(),
+            }),
+        );
+
+        write_status_json(
+            &workspace_dir_for_spawn,
+            &d_id,
+            v2_for_spawn,
+            plan_generated_at_for_spawn.as_deref(),
+            Some(&execute_started_at.to_rfc3339()),
+            if v2_for_spawn { "approved" } else { "n/a" },
+            final_exit_code,
+            plan_duration_ms_for_spawn,
+            Some(execute_duration_ms),
+            Some(total_duration_ms),
+            Some(json!({
+                "agent": agent_for_watchdog.clone(),
+                "state": match final_exit_code {
+                    Some(0) => "TASK_STATE_COMPLETED",
+                    Some(_) => "TASK_STATE_FAILED",
+                    None => "TASK_STATE_FAILED",
+                },
+                "updated_at": Utc::now().to_rfc3339(),
+                "run_dir": workspace_dir_for_spawn.to_string_lossy(),
+                "result_written": true,
+                "harness_transport": harness_transport_for_spawn.clone(),
+                "harness_server_url": harness_server_url_for_spawn.clone(),
+                "execution_backend": if is_acpx_transport(&harness_transport_for_spawn) {
+                    Some("acpx")
+                } else if is_native_acp_transport(&harness_transport_for_spawn) {
+                    Some("acp_native")
+                } else {
+                    None
+                },
+                "acpx": if is_acpx_transport(&harness_transport_for_spawn) {
+                    execution_backend_metadata_for_spawn.clone()
+                } else {
+                    None
+                },
+                "acp_native": if is_native_acp_transport(&harness_transport_for_spawn) {
+                    execution_backend_metadata_for_spawn.clone()
+                } else {
+                    None
+                },
+                "acpx_events": acpx_event_summary_json,
+                "capability_bundle": capability_bundle_card_for_spawn,
+                "feedback_rules": feedback_rules_trace_for_spawn,
+                "timeout_secs": timeout_secs_for_spawn,
+            })),
+        );
+
+        if should_cleanup {
+            let credential_cleanup = server_clone.with_global_store(|store| {
+                cleanup_ephemeral_credential_materializations(
+                    store,
+                    &workspace_dir_for_spawn,
+                    false,
+                )
+            });
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "credentials_cleanup",
+                    "dispatch_id": d_id,
+                    "agent": agent_for_watchdog,
+                    "report": credential_cleanup
+                        .as_ref()
+                        .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
+                        .unwrap_or_else(|err| json!({"errors": [err]})),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "workspace_retained",
+                    "dispatch_id": d_id,
+                    "reason": "run_dir is retained so board/status links remain valid",
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+        }
+        release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
+    });
+}

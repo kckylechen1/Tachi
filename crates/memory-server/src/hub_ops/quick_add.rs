@@ -21,10 +21,12 @@
 //! For skills (always `auto_approval_eligible=true`), `auto_approve` is a no-op
 //! because `hub_register` already marks them `approved`+`enabled`.
 
-use super::*;
 use crate::hub_ops::register::handle_hub_register;
 use crate::hub_ops::review::handle_hub_review;
+use crate::mcp_proxy::append_warning;
 use crate::tool_params::{HubQuickAddParams, HubRegisterParams, HubReviewParams};
+use crate::MemoryServer;
+use serde_json::json;
 
 pub(crate) async fn handle_hub_quick_add(
     server: &MemoryServer,

@@ -1,14 +1,13 @@
-use super::*;
+use super::print_pretty_json;
+use crate::cli::ManifestAction;
+use std::error::Error;
+use std::path::{Path, PathBuf};
 
-fn manifest_path(app_home: &std::path::Path) -> PathBuf {
+fn manifest_path(app_home: &Path) -> PathBuf {
     app_home.join("manifest.json")
 }
 
-fn default_scan_roots(
-    home: &std::path::Path,
-    app_home: &std::path::Path,
-    git_root: Option<&PathBuf>,
-) -> Vec<PathBuf> {
+fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) -> Vec<PathBuf> {
     let mut roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
     if app_home.exists() && !roots.iter().any(|root| root == app_home) {
         roots.push(app_home.to_path_buf());
@@ -22,10 +21,10 @@ pub(super) async fn run_doctor_command(
     roots_override: Vec<PathBuf>,
     jobs_report: bool,
     probe_keys: bool,
-    home: &std::path::Path,
-    app_home: &std::path::Path,
+    home: &Path,
+    app_home: &Path,
     git_root: Option<&PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let roots: Vec<PathBuf> = if !roots_override.is_empty() {
         roots_override
     } else {
@@ -209,10 +208,7 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
     }
 }
 
-async fn collect_provider_key_report(
-    global_db_path: &std::path::Path,
-    probe_keys: bool,
-) -> ProviderKeyReport {
+async fn collect_provider_key_report(global_db_path: &Path, probe_keys: bool) -> ProviderKeyReport {
     let keys = if probe_keys {
         collect_provider_key_status_with_value_compare(global_db_path)
     } else {
@@ -226,16 +222,14 @@ async fn collect_provider_key_report(
     ProviderKeyReport { keys, probes }
 }
 
-fn collect_provider_key_status(global_db_path: &std::path::Path) -> Vec<ProviderKeyStatus> {
+fn collect_provider_key_status(global_db_path: &Path) -> Vec<ProviderKeyStatus> {
     crate::status_ops::status_health::collect_api_key_status(global_db_path)
         .into_iter()
         .map(ProviderKeyStatus::from)
         .collect()
 }
 
-fn collect_provider_key_status_with_value_compare(
-    global_db_path: &std::path::Path,
-) -> Vec<ProviderKeyStatus> {
+fn collect_provider_key_status_with_value_compare(global_db_path: &Path) -> Vec<ProviderKeyStatus> {
     crate::status_ops::status_health::collect_api_key_status_with_value_compare(global_db_path)
         .into_iter()
         .map(ProviderKeyStatus::from)
@@ -293,10 +287,10 @@ fn collect_job_histograms(manifest: &crate::manifest::Manifest) -> Vec<DbJobRepo
 
 pub(super) async fn run_manifest_command(
     action: ManifestAction,
-    home: &std::path::Path,
-    app_home: &std::path::Path,
+    home: &Path,
+    app_home: &Path,
     git_root: Option<&PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn Error>> {
     let manifest_path = manifest_path(app_home);
 
     match action {
@@ -449,10 +443,10 @@ pub(super) async fn run_manifest_command(
 fn run_audit_projects(
     apply: bool,
     json: bool,
-    app_home: &std::path::Path,
+    app_home: &Path,
     git_root: Option<&PathBuf>,
-    manifest_path: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+    manifest_path: &Path,
+) -> Result<(), Box<dyn Error>> {
     use crate::manifest_audit::{build_plan, gather_project_inputs, render_plan};
 
     let projects_dir = app_home.join("projects");

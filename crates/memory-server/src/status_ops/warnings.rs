@@ -3,7 +3,11 @@
 //! warning lines, plus the small DbStatus predicates they key off. Extracted
 //! from `status_ops::mod` (no behavior change); shared types come via the parent.
 
-use super::*;
+use super::{
+    collect_snapshot, resolve_app_home, truncate, DaemonStatus, DbStatus, StatusSnapshot,
+    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+};
+use serde_json::json;
 
 /// Lightweight warning lines for `tachi_memory action=alerts` — no provider keys, models, or skill matrices.
 pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) -> Vec<String> {

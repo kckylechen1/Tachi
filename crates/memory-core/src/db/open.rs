@@ -8,6 +8,13 @@ const BUSY_TIMEOUT_MS: u64 = 5_000;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 
+/// Serialize in-process SQLite open+schema initialization.
+///
+/// SQLite handles cross-process coordination through file locks/WAL, but a
+/// single process can still stampede several stores through schema init during
+/// startup. Keeping that phase single-file inside this process removes one
+/// avoidable source of `database is locked` errors while preserving concurrent
+/// read pools after startup.
 pub(crate) fn acquire_startup_lock() -> MutexGuard<'static, ()> {
     SQLITE_STARTUP_LOCK
         .lock()

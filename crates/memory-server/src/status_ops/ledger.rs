@@ -1,9 +1,18 @@
 //! Dispatch / foundry / eval ledger reads for `tachi status`: latest foundry
 //! jobs (active/terminal/failed), recent dispatch outcomes, recent eval rows,
 //! and the daily-report / distill markers. Extracted from `status_ops::mod`
-//! (no behavior change). All shared imports + status types come via the parent.
+//! (no behavior change).
 
-use super::*;
+use super::{
+    status_health, DispatchStatus, DistillMarkerStatus, LatestFailedJob, LatestFoundryJob,
+    RecentEval, DISPATCH_STALE_THRESHOLD_SECS, DISTILL_STALE_THRESHOLD_SECS,
+    FOUNDRY_RECALL_CACHE_SOURCE,
+};
+use chrono::{DateTime, Utc};
+use memory_core::MemoryStore;
+use rusqlite::OptionalExtension;
+use serde_json::json;
+use std::path::Path;
 
 pub(crate) fn latest_failed_job(
     conn: &rusqlite::Connection,

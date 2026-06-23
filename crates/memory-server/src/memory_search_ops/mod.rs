@@ -21,15 +21,3 @@ pub(crate) use search_memory::handle_search_memory_with_access;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use text_scrub::scrub_secrets;
-
-// Shared imports that sub-modules pull in via `use super::*`.
-use crate::shared_defs::{slim_entry, slim_l0_rule, slim_search_result};
-use crate::tool_params::*;
-use crate::utils::{is_active_global_rule, parse_env_bool, stable_hash};
-use crate::DbScope;
-use crate::MemoryServer;
-use chrono::Utc;
-use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
-use serde_json::{json, Value};
-use std::collections::HashMap;
-use std::path::PathBuf;

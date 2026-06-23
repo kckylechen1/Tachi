@@ -1,0 +1,363 @@
+use std::collections::HashSet;
+
+use super::cache::recall_cache_recall_opted_in;
+use super::exact::{annotate_exact_token_matches, mark_exact_token_match};
+use super::filters::{
+    eval_recall_opted_in, is_eval_entry, project_filter_name, project_scope_allows_memory,
+    training_recall_opted_in,
+};
+use super::store::{with_global_search, with_named_project_search, with_project_search};
+use crate::memory_search_ops::auto_link::is_training_seed;
+use crate::memory_search_ops::search_helpers::{
+    apply_guide_context_boosts, dedup_search_results, infer_search_project,
+    named_project_db_exists, normalize_search_relevance,
+};
+use crate::shared_defs::{slim_l0_rule, slim_search_result};
+use crate::tool_params::SearchMemoryParams;
+use crate::utils::{is_active_global_rule, parse_env_bool};
+use crate::{DbScope, MemoryServer};
+
+pub(crate) async fn search_memory_rows(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_with_access(server, params, project_only, false).await
+}
+
+pub(crate) async fn search_memory_rows_with_access(
+    server: &MemoryServer,
+    mut params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    let wiki_path_prefix = params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    if !wiki_path_prefix && memory_core::should_skip_query(&params.query) {
+        return Ok(vec![]);
+    }
+    let top_k = params.normalized_top_k();
+    params.top_k = top_k;
+    params.candidates_per_channel = params.normalized_candidates_per_channel();
+
+    let named_project_vec_available = if let Some(ref project_name) = params.project {
+        server
+            .with_named_project_store_read(project_name, |store| Ok(store.vec_available))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let default_wiki_vec_available =
+        if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+            server
+                .with_named_project_store_read("wiki", |store| Ok(store.vec_available))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+    let mut searched_default_wiki = false;
+
+    if params.query_vec.is_none()
+        && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+        && (server.global_vec_available
+            || server.project_vec_available
+            || named_project_vec_available
+            || default_wiki_vec_available)
+    {
+        server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
+        match server.llm.embed_voyage(&params.query, "query").await {
+            Ok(query_vec) => {
+                params.query_vec = Some(query_vec);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
+                );
+            }
+        }
+    }
+
+    let pipeline_enabled = server.pipeline_enabled;
+
+    let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+
+    let mut searched_named = false;
+    if let Some(ref project_name) = params.project {
+        if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name) {
+            let project_results = with_named_project_search(
+                server,
+                project_name,
+                &params,
+                record_access,
+                format!("Search failed in project DB '{project_name}'"),
+            )?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            searched_named = true;
+        } else if !project_only {
+            return Err(format!(
+                "Project '{project_name}' not found (expected DB at {})",
+                crate::MemoryServer::resolve_named_project_db_path(project_name)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|e| e)
+            ));
+        }
+    }
+
+    if params.project.is_none() && wiki_path_prefix && named_project_db_exists("wiki") {
+        match with_named_project_search(
+            server,
+            "wiki",
+            &params,
+            record_access,
+            "Search failed in default wiki project DB",
+        ) {
+            Ok(wiki_results) => {
+                combined_results.extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
+                searched_default_wiki = true;
+            }
+            Err(e) => {
+                tracing::warn!("Search failed in default wiki project DB: {e}");
+            }
+        }
+    }
+
+    if !searched_named {
+        if project_only {
+            let named_project =
+                crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
+            if let Some(ref project_name) = named_project {
+                if crate::memory_search_ops::search_helpers::named_project_db_exists(project_name)
+                    && (project_name != "wiki" || !searched_default_wiki)
+                {
+                    let workspace_path = server.project_db_path_buf();
+                    let named_path =
+                        crate::MemoryServer::resolve_named_project_db_path(project_name).ok();
+                    let skip_workspace = workspace_path
+                        .as_deref()
+                        .zip(named_path.as_deref())
+                        .map(|(w, n)| w == n)
+                        .unwrap_or(false);
+
+                    if !skip_workspace && server.has_project_db() {
+                        let project_results = with_project_search(
+                            server,
+                            &params,
+                            record_access,
+                            "Search failed in workspace project DB",
+                        )?;
+                        combined_results
+                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    }
+
+                    if named_path.is_some() {
+                        let project_results = with_named_project_search(
+                            server,
+                            project_name,
+                            &params,
+                            record_access,
+                            format!("Search failed in named project DB '{project_name}'"),
+                        )?;
+                        combined_results
+                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                    }
+                } else if server.has_project_db() {
+                    let project_results = with_project_search(
+                        server,
+                        &params,
+                        record_access,
+                        "Search failed in workspace project DB",
+                    )?;
+                    combined_results
+                        .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                }
+            } else if server.has_project_db() {
+                let project_results = with_project_search(
+                    server,
+                    &params,
+                    record_access,
+                    "Search failed in workspace project DB",
+                )?;
+                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            }
+        } else {
+            let inferred_project = infer_search_project(&params.query, params.domain.as_deref());
+            let inferred_db_path = inferred_project
+                .as_deref()
+                .and_then(|name| crate::MemoryServer::resolve_named_project_db_path(name).ok());
+            let workspace_db_path = server.project_db_path_buf();
+            let skip_workspace = inferred_db_path.is_some()
+                && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+
+            let global_results =
+                with_global_search(server, &params, record_access, "Search failed in global DB")?;
+            combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+            if let Some(ref project_name) = inferred_project {
+                if project_name == "wiki" && searched_default_wiki {
+                    // Already searched the canonical wiki store above for
+                    // unscoped /wiki queries.
+                } else {
+                    match with_named_project_search(
+                        server,
+                        project_name,
+                        &params,
+                        record_access,
+                        format!("Search failed in inferred project DB '{project_name}'"),
+                    ) {
+                        Ok(project_results) => {
+                            combined_results
+                                .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Search failed in inferred project DB '{project_name}': {e}"
+                            );
+                        }
+                    }
+                }
+            } else if server.has_project_db() && !skip_workspace {
+                let project_results = with_project_search(
+                    server,
+                    &params,
+                    record_access,
+                    "Search failed in project DB",
+                )?;
+                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+            }
+        }
+    }
+
+    if !training_recall_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_training_seed(&result.entry));
+    }
+    if !recall_cache_recall_opted_in(params.path_prefix.as_deref()) {
+        combined_results.retain(|(result, _)| !memory_core::is_recall_cache_entry(&result.entry));
+    }
+    if !eval_recall_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_eval_entry(&result.entry));
+    }
+    if let Some(project_name) = project_filter_name(&params, project_only) {
+        combined_results.retain(|(result, db_scope)| match db_scope {
+            DbScope::Project => project_scope_allows_memory(&project_name, &params, &result.entry),
+            DbScope::Global => true,
+        });
+    }
+
+    apply_guide_context_boosts(
+        &mut combined_results,
+        params.file_context.as_deref(),
+        params.error_context.as_deref(),
+    );
+
+    combined_results.sort_by(|a, b| {
+        b.0.score
+            .final_score
+            .partial_cmp(&a.0.score.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    combined_results = dedup_search_results(combined_results, top_k);
+
+    let mut seen_ids = HashSet::new();
+    let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+    for (result, db_scope) in combined_results {
+        if seen_ids.insert(result.entry.id.clone()) {
+            deduped_results.push((result, db_scope));
+        }
+        if deduped_results.len() >= top_k {
+            break;
+        }
+    }
+
+    normalize_search_relevance(&mut deduped_results);
+
+    // Sandbox filtering: if agent_role is specified, filter out denied entries
+    if let Some(ref role) = params.agent_role {
+        deduped_results.retain(|(result, db_scope)| {
+            let allowed = match db_scope {
+                DbScope::Global => server.with_global_store_read(|store| {
+                    store
+                        .check_sandbox_access(role, &result.entry.path, "read")
+                        .map(|(allowed, _)| allowed)
+                        .map_err(|e| format!("{e}"))
+                }),
+                DbScope::Project => {
+                    if let Some(ref p) = params.project {
+                        server.with_named_project_store_read(p, |store| {
+                            store
+                                .check_sandbox_access(role, &result.entry.path, "read")
+                                .map(|(allowed, _)| allowed)
+                                .map_err(|e| format!("{e}"))
+                        })
+                    } else {
+                        server.with_project_store_read(|store| {
+                            store
+                                .check_sandbox_access(role, &result.entry.path, "read")
+                                .map(|(allowed, _)| allowed)
+                                .map_err(|e| format!("{e}"))
+                        })
+                    }
+                }
+            };
+            allowed.unwrap_or(true)
+        });
+    }
+
+    let mut output: Vec<serde_json::Value> = deduped_results
+        .iter()
+        .map(|(r, db_scope)| {
+            let mut row = slim_search_result(r, *db_scope, params.include_metadata);
+            if memory_core::scorer::is_id_like_exact_query(&params.query)
+                && memory_core::scorer::entry_has_exact_query_token(&r.entry, &params.query)
+            {
+                mark_exact_token_match(&mut row);
+            }
+            row
+        })
+        .collect();
+    annotate_exact_token_matches(&mut output, &params.query);
+
+    if pipeline_enabled {
+        let mut existing_ids: HashSet<String> = deduped_results
+            .iter()
+            .map(|(r, _)| r.entry.id.clone())
+            .collect();
+
+        if server.has_project_db() {
+            let project_rules = server.with_project_store_read(|store| {
+                Ok(store
+                    .list_by_path("/behavior/global_rules", 50, false)
+                    .unwrap_or_default())
+            })?;
+            for rule in project_rules {
+                if !is_active_global_rule(&rule) {
+                    continue;
+                }
+                if !existing_ids.insert(rule.id.clone()) {
+                    continue;
+                }
+                output.push(slim_l0_rule(&rule, DbScope::Project));
+            }
+        }
+
+        let global_rules = server.with_global_store_read(|store| {
+            Ok(store
+                .list_by_path("/behavior/global_rules", 50, false)
+                .unwrap_or_default())
+        })?;
+        for rule in global_rules {
+            if !is_active_global_rule(&rule) {
+                continue;
+            }
+            if !existing_ids.insert(rule.id.clone()) {
+                continue;
+            }
+            output.push(slim_l0_rule(&rule, DbScope::Global));
+        }
+    }
+
+    Ok(output)
+}

@@ -2,7 +2,7 @@
 //! peer, and decide whether a running daemon matches this binary and global DB.
 //! Extracted from `status_ops::mod` (no behavior change).
 
-use super::*;
+use super::{DaemonPidInfo, DaemonStatus};
 use crate::daemon_lock::{process_alive, read_pid_file};
 use std::path::Path;
 
