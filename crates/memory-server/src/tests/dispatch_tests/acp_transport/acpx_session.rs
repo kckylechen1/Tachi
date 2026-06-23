@@ -1,0 +1,59 @@
+use super::*;
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn dispatch_acpx_session_mode_derives_raven_for_review_profile() {
+    let _lock = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp_home = tempfile::tempdir().expect("temp tachi home");
+    let temp_python = tempfile::tempdir().expect("temp python module");
+    std::fs::write(
+        temp_python.path().join("fake_acpx_session.py"),
+        r#"import json
+print(json.dumps({"type": "message", "message": "reviewing"}))
+print(json.dumps({"event": "end_turn", "final_response": "raven done"}))
+"#,
+    )
+    .expect("fake acpx session module");
+
+    let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
+    let _pythonpath = EnvVarGuard::set_path("PYTHONPATH", temp_python.path());
+    let _acpx_command = EnvVarGuard::set_value("TACHI_ACPX_COMMAND", "python3");
+    let _acpx_args = EnvVarGuard::set_value("TACHI_ACPX_ARGS", "-m fake_acpx_session");
+    let _acpx_agent = EnvVarGuard::set_value("TACHI_ACPX_AGENT", "codex");
+    let _acpx_mode = EnvVarGuard::set_value("TACHI_ACPX_RUN_MODE", "session");
+    let _acpx_session = EnvVarGuard::set_value("TACHI_ACPX_SESSION", "");
+
+    let server = make_server();
+    let mut params = dispatch_params(Some("codex"), "Review through fake acpx session");
+    params.harness_transport = Some("acpx".to_string());
+    params.cwd = Some(temp_home.path().to_string_lossy().to_string());
+    params.profile = Some("codex_55_review".to_string());
+    params.timeout_secs = 5;
+
+    let response = server
+        .tachi_dispatch(Parameters(params))
+        .await
+        .expect("acpx session dispatch should start");
+    let parsed: Value = serde_json::from_str(&response).expect("dispatch JSON");
+    assert_eq!(parsed["execution_backend"], json!("acpx"));
+    assert_eq!(parsed["acpx"]["mode"], json!("session"));
+    assert_eq!(parsed["acpx"]["session"], json!("raven"));
+    assert_eq!(
+        parsed["acpx"]["controls"]["status"]["supported"],
+        json!(true)
+    );
+
+    let dispatch_id = parsed["dispatch_id"].as_str().expect("dispatch id");
+    let run_dir = temp_home.path().join("runs").join(dispatch_id);
+    let result = wait_for_dispatch_result(&run_dir).await;
+    assert_eq!(result, "raven done");
+    let status = wait_for_dispatch_status(&run_dir).await;
+    assert_eq!(status["acpx"]["mode"], json!("session"));
+    assert_eq!(status["acpx"]["session"], json!("raven"));
+    assert_eq!(
+        status["acpx"]["controls"]["cancel"]["supported"],
+        json!(true)
+    );
+}
