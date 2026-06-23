@@ -1,12 +1,12 @@
 #!/bin/bash
-# Build release memory-server and install to ./bin/memory-server (symlinked as ~/bin/tachi).
+# Build release binaries and install them to stable user-level paths.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-INSTALL_BIN="${INSTALL_BIN:-$SCRIPT_DIR/bin/memory-server}"
-INSTALL_CLEAN_BIN="${INSTALL_CLEAN_BIN:-$SCRIPT_DIR/bin/tachi-clean}"
+INSTALL_BIN="${INSTALL_BIN:-${HOME}/.cargo/bin/memory-server}"
+INSTALL_CLEAN_BIN="${INSTALL_CLEAN_BIN:-${HOME}/.cargo/bin/tachi-clean}"
 TACHI_LINK="${TACHI_LINK:-${HOME}/bin/tachi}"
 CLEAN_LINK="${CLEAN_LINK:-${HOME}/bin/tachi-clean}"
 SKIP_LINK="${SKIP_LINK:-0}"
