@@ -1,0 +1,331 @@
+use super::*;
+
+fn api_key_row<'a>(rows: &'a [ApiKeyStatus], name: &str) -> &'a ApiKeyStatus {
+    rows.iter()
+        .find(|row| row.name == name)
+        .expect("api key row should exist")
+}
+
+fn restore_env(name: &str, original: Option<std::ffi::OsString>) {
+    if let Some(value) = original {
+        std::env::set_var(name, value);
+    } else {
+        std::env::remove_var(name);
+    }
+}
+
+#[test]
+fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("VOYAGE_API_KEY");
+    std::env::set_var("VOYAGE_API_KEY", "same-secret");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        HashMap::from([("VOYAGE_API_KEY".to_string(), "same-secret".to_string())]),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+    assert_eq!(voyage.status, "configured");
+    assert_eq!(voyage.source, "vault+env(same)");
+    assert!(voyage
+        .drift_warning
+        .as_deref()
+        .is_some_and(|warning| warning.starts_with("redundant:")));
+
+    restore_env("VOYAGE_API_KEY", original);
+}
+
+#[test]
+fn vault_plaintext_duplicate_with_different_value_is_drift() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("VOYAGE_API_KEY");
+    std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        HashMap::from([("VOYAGE_API_KEY".to_string(), "vault-secret".to_string())]),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+    assert_eq!(voyage.status, "drift");
+    assert_eq!(voyage.source, "vault+env");
+    assert!(voyage
+        .drift_warning
+        .as_deref()
+        .is_some_and(|warning| warning.starts_with("drift:")));
+
+    restore_env("VOYAGE_API_KEY", original);
+}
+
+#[test]
+fn vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("VOYAGE_API_KEY");
+    std::env::set_var("VOYAGE_API_KEY", "env-secret");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::from(["VOYAGE_API_KEY".to_string()]),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+    assert_eq!(voyage.status, "configured");
+    assert_eq!(voyage.source, "vault+env(unverified)");
+    assert!(voyage
+        .drift_warning
+        .as_deref()
+        .is_some_and(|warning| warning.starts_with("duplicate-unverified:")));
+
+    restore_env("VOYAGE_API_KEY", original);
+}
+
+#[test]
+fn deprecated_configured_key_reports_canonical_cleanup_hint() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("REASONING_API_KEY");
+    std::env::set_var("REASONING_API_KEY", "legacy-secret");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+
+    assert!(reasoning.deprecated);
+    assert_eq!(reasoning.canonical_name, "SILICONFLOW_API_KEY");
+    assert_eq!(reasoning.status, "configured");
+    assert!(reasoning
+        .cleanup_hint
+        .as_deref()
+        .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
+
+    restore_env("REASONING_API_KEY", original);
+}
+
+#[test]
+fn deprecated_unset_key_has_no_cleanup_hint() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("REASONING_API_KEY");
+    std::env::remove_var("REASONING_API_KEY");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::new(),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let reasoning = api_key_row(&rows, "REASONING_API_KEY");
+
+    assert!(reasoning.deprecated);
+    assert_eq!(reasoning.status, "deprecated-unset");
+    assert!(reasoning.cleanup_hint.is_none());
+
+    restore_env("REASONING_API_KEY", original);
+}
+
+#[test]
+fn rotation_members_configure_their_logical_provider_key() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("VOYAGE_API_KEY");
+    std::env::remove_var("VOYAGE_API_KEY");
+
+    let rows = collect_api_key_status_from_sources(
+        HashSet::from([
+            "VOYAGE_API_KEY_1".to_string(),
+            "VOYAGE_API_KEY_2".to_string(),
+        ]),
+        HashMap::new(),
+        HashMap::new(),
+        HashMap::from([(
+            "VOYAGE_API_KEY".to_string(),
+            RotationSourceStatus {
+                total_keys: 2,
+                current_index: 1,
+                strategy: "round_robin".to_string(),
+                members: vec![
+                    "VOYAGE_API_KEY_1".to_string(),
+                    "VOYAGE_API_KEY_2".to_string(),
+                ],
+            },
+        )]),
+        &HashMap::new(),
+        &HashMap::new(),
+    );
+    let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
+
+    assert_eq!(voyage.status, "configured");
+    assert_eq!(voyage.source, "vault");
+    assert_eq!(
+        voyage.rotation.as_ref().map(|rotation| rotation.total_keys),
+        Some(2)
+    );
+    assert_eq!(
+        voyage
+            .rotation
+            .as_ref()
+            .map(|rotation| rotation.configured_keys),
+        Some(2)
+    );
+    assert_eq!(
+        voyage
+            .rotation
+            .as_ref()
+            .and_then(|rotation| rotation.healthy_keys),
+        None
+    );
+    assert_eq!(
+        voyage
+            .rotation
+            .as_ref()
+            .map(|rotation| {
+                rotation
+                    .members
+                    .iter()
+                    .map(|member| member.name.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        vec!["VOYAGE_API_KEY_1", "VOYAGE_API_KEY_2"]
+    );
+
+    let rotation_sources = HashMap::from([(
+        "VOYAGE_API_KEY".to_string(),
+        RotationSourceStatus {
+            total_keys: 2,
+            current_index: 1,
+            strategy: "round_robin".to_string(),
+            members: vec![
+                "VOYAGE_API_KEY_1".to_string(),
+                "VOYAGE_API_KEY_2".to_string(),
+            ],
+        },
+    )]);
+    let probed = ProviderRotationGroupProbe {
+        logical_name: "VOYAGE_API_KEY".to_string(),
+        total_keys: 2,
+        configured_keys: 2,
+        healthy_keys: 1,
+        rate_limited_keys: 1,
+        auth_failed_keys: 0,
+        current_index: 1,
+        strategy: "round_robin".to_string(),
+        next_retry_at: None,
+        keys: vec![
+            ApiKeyRotationMemberStatus {
+                name: "VOYAGE_API_KEY_1".to_string(),
+                status: "ok".to_string(),
+                message: Some("1024 dims".to_string()),
+                last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+            },
+            ApiKeyRotationMemberStatus {
+                name: "VOYAGE_API_KEY_2".to_string(),
+                status: "rate_limited".to_string(),
+                message: Some("429".to_string()),
+                last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+            },
+        ],
+    };
+    let rotation_probes = HashMap::from([("VOYAGE_API_KEY".to_string(), &probed)]);
+    let probed_rows = collect_api_key_status_from_sources(
+        HashSet::from([
+            "VOYAGE_API_KEY_1".to_string(),
+            "VOYAGE_API_KEY_2".to_string(),
+        ]),
+        HashMap::new(),
+        HashMap::new(),
+        rotation_sources,
+        &HashMap::new(),
+        &rotation_probes,
+    );
+    let probed_voyage = api_key_row(&probed_rows, "VOYAGE_API_KEY");
+    let rotation = probed_voyage.rotation.as_ref().expect("rotation");
+    assert_eq!(rotation.healthy_keys, Some(1));
+    assert_eq!(rotation.rate_limited_keys, 1);
+    assert_eq!(rotation.members[1].status, "rate_limited");
+
+    restore_env("VOYAGE_API_KEY", original);
+}
+
+#[test]
+fn provider_probe_cache_round_trips() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cache = write_provider_probe_cache_report(
+        dir.path(),
+        ProviderProbeReport {
+            probes: vec![ProviderProbeResult {
+                name: "voyage_embed".to_string(),
+                status: "ok".to_string(),
+                message: Some("1024 dims".to_string()),
+            }],
+            rotation_groups: vec![ProviderRotationGroupProbe {
+                logical_name: "VOYAGE_API_KEY".to_string(),
+                total_keys: 2,
+                configured_keys: 2,
+                healthy_keys: 1,
+                rate_limited_keys: 1,
+                auth_failed_keys: 0,
+                current_index: 1,
+                strategy: "round_robin".to_string(),
+                next_retry_at: None,
+                keys: vec![
+                    ApiKeyRotationMemberStatus {
+                        name: "VOYAGE_API_KEY_1".to_string(),
+                        status: "ok".to_string(),
+                        message: Some("1024 dims".to_string()),
+                        last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                    },
+                    ApiKeyRotationMemberStatus {
+                        name: "VOYAGE_API_KEY_2".to_string(),
+                        status: "rate_limited".to_string(),
+                        message: Some("429".to_string()),
+                        last_probe_at: Some("2026-06-08T00:00:00Z".to_string()),
+                    },
+                ],
+            }],
+        },
+    )
+    .expect("write cache");
+
+    let loaded = read_provider_probe_cache(dir.path()).expect("read cache");
+    assert_eq!(loaded.last_probe_at, cache.last_probe_at);
+    assert_eq!(loaded.ttl_seconds, 24 * 60 * 60);
+    assert!(!loaded.is_stale());
+    assert_eq!(loaded.probes.len(), 1);
+    assert_eq!(loaded.probes[0].status, "ok");
+    assert_eq!(loaded.rotation_groups.len(), 1);
+    assert_eq!(loaded.rotation_groups[0].logical_name, "VOYAGE_API_KEY");
+    assert_eq!(loaded.rotation_groups[0].healthy_keys, 1);
+    assert_eq!(loaded.rotation_groups[0].rate_limited_keys, 1);
+    assert_eq!(loaded.rotation_groups[0].keys[1].status, "rate_limited");
+}
