@@ -1,0 +1,219 @@
+use super::*;
+
+#[test]
+fn r11_plan_c_split_brain_merges_alias_and_relinks_symlink() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let saved = std::env::var_os("TACHI_HOME");
+    let dir = TempDir::new().unwrap();
+    let tachi_home = dir.path().join("home");
+    std::env::set_var("TACHI_HOME", &tachi_home);
+
+    let repo = dir.path().join("Split Brain Repo");
+    let local_db = repo.join(".tachi/memory.db");
+    let local_conn = fresh_db_at(&local_db, "project:Split_Brain_Repo");
+    insert_memory(
+        &local_conn,
+        "canonical-only",
+        "/project/canonical",
+        "canonical row stays authoritative",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    drop(local_conn);
+
+    let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
+    let alias_conn = fresh_db_at(&alias_db, "alias:Split_Brain_Repo");
+    insert_memory(
+        &alias_conn,
+        "alias-only",
+        "/project/alias",
+        "alias row should be merged by id",
+        "{}",
+        Some("durable"),
+        None,
+    );
+    drop(alias_conn);
+
+    let mut ctx = open_ctx(&local_db, "project:Split_Brain_Repo");
+    let dry = PlanCRepair { backup_alias: true }
+        .dry_run(&mut ctx)
+        .unwrap();
+    assert!(
+        dry.findings
+            .iter()
+            .any(|finding| finding.kind == "plan_c_split_brain"),
+        "dry-run should surface split-brain: {dry:?}"
+    );
+
+    let applied = PlanCRepair { backup_alias: true }.apply(&mut ctx).unwrap();
+    assert!(
+        applied
+            .findings
+            .iter()
+            .any(|finding| finding.kind == "plan_c_alias_relinked"),
+        "apply should report relink: {applied:?}"
+    );
+    assert!(applied.applied > 0, "apply should mutate: {applied:?}");
+    assert!(alias_db.is_symlink(), "alias should become a symlink");
+    assert!(
+        std::fs::read_link(&alias_db).is_ok_and(|target| target == local_db),
+        "alias symlink should point at canonical local db"
+    );
+
+    let merged_count: i64 = ctx
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE id IN ('canonical-only', 'alias-only')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(merged_count, 2, "canonical DB should contain both rows");
+    assert!(
+        std::fs::read_dir(alias_db.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".bak.")),
+        "alias backup should be written before relink"
+    );
+    assert!(
+        crate::path_utils::plan_c_split_brain_for_local_db(&local_db).is_none(),
+        "post-repair split-brain detector should be clean"
+    );
+
+    if let Some(value) = saved {
+        std::env::set_var("TACHI_HOME", value);
+    } else {
+        std::env::remove_var("TACHI_HOME");
+    }
+}
+
+#[test]
+fn r3_cross_db_restore_all_moves_row() {
+    use crate::manifest::{DbEntry, DbRole, Manifest};
+    let dir = TempDir::new().unwrap();
+    let (src_path, src_conn) = fresh_db(&dir, "src.db");
+    let (dst_path, _dst_conn) = fresh_db(&dir, "dst.db");
+
+    let dst_canon = std::fs::canonicalize(&dst_path).unwrap();
+    let meta = serde_json::json!({
+        "quarantine": {
+            "reason": "cross_db_pollution",
+            "original_path": "/restored/a",
+            "expected_db": dst_canon.display().to_string(),
+            "actual_db": src_path.display().to_string(),
+            "detected_at": "2026-01-01T00:00:00Z",
+        }
+    });
+    insert_memory(
+        &src_conn,
+        "qx",
+        "/_quarantine/cross-db/restored/a",
+        "blob",
+        &meta.to_string(),
+        None,
+        None,
+    );
+    drop(src_conn);
+
+    let manifest = Manifest {
+        schema_version: 1,
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        comment: String::new(),
+        dbs: vec![
+            DbEntry {
+                path: src_path.display().to_string(),
+                role: DbRole::Project,
+                owner: "test".into(),
+                schema_kind: "tachi".into(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "tachi".into(),
+                scope_hint: "project:src".into(),
+                notes: String::new(),
+            },
+            DbEntry {
+                path: dst_path.display().to_string(),
+                role: DbRole::Project,
+                owner: "test".into(),
+                schema_kind: "tachi".into(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_classification: "tachi".into(),
+                scope_hint: "project:dst".into(),
+                notes: String::new(),
+            },
+        ],
+    };
+
+    crate::repair::quarantine::cmd_restore_all(&manifest, "project:dst", true, true).unwrap();
+
+    // src should no longer have the row; dst should.
+    let n_src: i64 = Connection::open(&src_path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let n_dst: i64 = Connection::open(&dst_path)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM memories WHERE id='qx'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(n_src, 0, "source should no longer have the row");
+    assert_eq!(n_dst, 1, "destination should have the row");
+
+    // Verify path rewritten + quarantine block stripped.
+    let (dst_path_col, dst_meta): (String, String) = Connection::open(&dst_path)
+        .unwrap()
+        .query_row(
+            "SELECT path, metadata FROM memories WHERE id='qx'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(dst_path_col, "/restored/a");
+    let v: serde_json::Value = serde_json::from_str(&dst_meta).unwrap();
+    assert!(
+        v.get("quarantine").is_none(),
+        "destination metadata should not contain quarantine block: {dst_meta}"
+    );
+}
+
+/// B5: pin the historical legacy→current rewrite for stale `expected_db`
+/// values so future refactors of `rewrite_legacy_expected_db` cannot
+/// silently drop the only mapping that matters in the wild — the
+/// `memory-hybrid-bridge` → `extensions/tachi` move.
+///
+/// The actual filter behavior is exercised end-to-end by
+/// `r3_cross_db_restore_all_moves_row`; this test is a focused unit
+/// guard on the string-substitution helper itself.
+#[test]
+fn r3_legacy_expected_db_is_rewritten_to_modern_path() {
+    use crate::repair::quarantine::rewrite_legacy_expected_db;
+
+    // The exact stale path observed in the field (380 quarantined rows
+    // pointed here on `kckylechen`'s box).
+    let stale = "/Users/kckylechen/.openclaw/local-plugins/extensions/memory-hybrid-bridge/data/agents/jayne/memory.db";
+    let modern = "/Users/kckylechen/.openclaw/extensions/tachi/data/agents/jayne/memory.db";
+    assert_eq!(rewrite_legacy_expected_db(stale), modern);
+
+    // Different agent — same prefix substitution must apply.
+    let stale_main = "/Users/kckylechen/.openclaw/local-plugins/extensions/memory-hybrid-bridge/data/agents/main/memory.db";
+    let modern_main = "/Users/kckylechen/.openclaw/extensions/tachi/data/agents/main/memory.db";
+    assert_eq!(rewrite_legacy_expected_db(stale_main), modern_main);
+
+    // Modern paths and unrelated paths must pass through unchanged so we
+    // never collapse two different DBs onto one canonical home.
+    let already_modern = "/Users/kckylechen/.openclaw/extensions/tachi/data/agents/jayne/memory.db";
+    assert_eq!(rewrite_legacy_expected_db(already_modern), already_modern);
+    let unrelated = "/Users/kckylechen/.tachi/projects/quant/memory.db";
+    assert_eq!(rewrite_legacy_expected_db(unrelated), unrelated);
+    assert_eq!(rewrite_legacy_expected_db(""), "");
+}
