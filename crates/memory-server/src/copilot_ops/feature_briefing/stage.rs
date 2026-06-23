@@ -1,0 +1,68 @@
+use super::super::*;
+
+pub(super) fn infer_feature_stage(run_artifacts: &[Value], board: &Value) -> String {
+    if let Some(task) = board
+        .get("tasks")
+        .and_then(Value::as_array)
+        .and_then(|tasks| tasks.first())
+    {
+        if let Some(state) = task.get("state").and_then(Value::as_str) {
+            return state.to_string();
+        }
+    }
+    let has_result = run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("result.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    });
+    if has_result {
+        "result_available".to_string()
+    } else if !run_artifacts.is_empty() {
+        "flow_started".to_string()
+    } else {
+        "intake".to_string()
+    }
+}
+
+pub(super) fn feature_next_action(
+    canonical_docs: &[Value],
+    run_artifacts: &[Value],
+    board: &Value,
+    memory_rows: &[Value],
+) -> String {
+    if canonical_docs.is_empty() {
+        return "Attach or create a canonical docs/spec reference before treating memory as feature truth.".to_string();
+    }
+    if board
+        .get("tasks")
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks
+                .iter()
+                .any(|task| task.get("state").and_then(Value::as_str) == Some("TASK_STATE_WORKING"))
+        })
+    {
+        return "Poll tachi_task(action='board') and collect the active worker result before dispatching more work.".to_string();
+    }
+    if run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("instruction.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    }) && !run_artifacts.iter().any(|artifact| {
+        artifact
+            .get("path")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("result.md"))
+            && artifact.get("exists").and_then(Value::as_bool) == Some(true)
+    }) {
+        return "Use the flow instruction packet as the worker handoff source and dispatch a bounded slice.".to_string();
+    }
+    if memory_rows.is_empty() {
+        return "Start with tachi_task(action='plan') or save a checkpoint after the next concrete decision.".to_string();
+    }
+    "Run tachi_task(action='recommend') for the next worker profile, then dispatch or review with explicit verification.".to_string()
+}
