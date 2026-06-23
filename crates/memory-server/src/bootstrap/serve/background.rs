@@ -275,7 +275,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
-    if daily_distill_scheduler_enabled(&server) {
+    if daily_distill_scheduler_enabled(server) {
         // Phase 1 daily batch distill. Default cadence is 24h; the legacy
         // per-capture `MemoryDistill` enqueue is gone, so this scheduler must
         // remain active even when external pipeline workers are disabled.
@@ -285,7 +285,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
             .unwrap_or(86_400);
 
         let distill_server = server.clone();
-        let marker_path = daily_distill_marker_path(&app_home);
+        let marker_path = daily_distill_marker_path(app_home);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(60)).await;
             eprintln!(
