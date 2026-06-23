@@ -113,17 +113,11 @@ mod web_search_ops;
 mod wiki_ops;
 mod workflow_closure;
 
-use crate::builtins::seed_builtin_capabilities;
-use crate::foundry_runtime_ops::FoundryWorkerStats;
-use crate::profiles::ToolProfile;
-use crate::shared_defs::DeadLetter;
 use crate::tool_params::*;
-use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 
 use clap::Parser;
 
 use crate::cli::Cli;
-use crate::mcp_pool::McpClientPool;
 
 pub(crate) mod server_state;
 pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
