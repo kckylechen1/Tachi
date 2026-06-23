@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use tokio::process::Command;
 
 #[cfg(test)]
 pub(crate) fn apply_unlocked_vault_env(
