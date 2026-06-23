@@ -1,10 +1,13 @@
 use super::*;
+use std::ffi::OsString;
+use std::path::Path;
 use tokio::io::{stdin, stdout};
 
 pub(super) async fn serve_stdio(
     server: MemoryServer,
     app_home: PathBuf,
     global_db_path: PathBuf,
+    project_db_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // stdio mode (default) — auto-spawn daemon if not running
     {
@@ -66,8 +69,13 @@ pub(super) async fn serve_stdio(
             match std::env::current_exe() {
                 Ok(exe) => {
                     let port_str = "0".to_string();
+                    let daemon_args = auto_daemon_command_args(
+                        &global_db_path,
+                        project_db_path.as_deref(),
+                        &port_str,
+                    );
                     match std::process::Command::new(&exe)
-                        .args(["--daemon", "--port", &port_str])
+                        .args(daemon_args)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
@@ -142,4 +150,78 @@ pub(super) async fn serve_stdio(
         }
     }
     Ok(())
+}
+
+fn auto_daemon_command_args(
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+    port: &str,
+) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("--daemon"),
+        OsString::from("--port"),
+        OsString::from(port),
+        OsString::from("--global-db"),
+        global_db_path.as_os_str().to_owned(),
+    ];
+    match project_db_path {
+        Some(project_db_path) => {
+            args.push(OsString::from("--project-db"));
+            args.push(project_db_path.as_os_str().to_owned());
+        }
+        None => args.push(OsString::from("--no-project-db")),
+    }
+    args
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_daemon_args_preserve_global_only_scope() {
+        let args = auto_daemon_command_args(Path::new("/tmp/agent.db"), None, "0");
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "--daemon",
+                "--port",
+                "0",
+                "--global-db",
+                "/tmp/agent.db",
+                "--no-project-db"
+            ]
+        );
+    }
+
+    #[test]
+    fn auto_daemon_args_preserve_project_scope() {
+        let args = auto_daemon_command_args(
+            Path::new("/tmp/global.db"),
+            Some(Path::new("/tmp/project.db")),
+            "1234",
+        );
+        let rendered: Vec<String> = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "--daemon",
+                "--port",
+                "1234",
+                "--global-db",
+                "/tmp/global.db",
+                "--project-db",
+                "/tmp/project.db"
+            ]
+        );
+    }
 }

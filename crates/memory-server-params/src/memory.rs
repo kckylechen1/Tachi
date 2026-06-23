@@ -462,7 +462,7 @@ impl SearchMemoryParams {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct FindSimilarMemoryParams {
     /// Query embedding vector (same dimension as stored embeddings)
     pub query_vec: Vec<f32>,
@@ -596,7 +596,7 @@ pub struct GetMemoryParams {
     pub project: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct ListMemoriesParams {
     /// Path prefix to filter
     #[serde(default = "default_path")]
@@ -611,7 +611,7 @@ pub struct ListMemoriesParams {
     pub include_archived: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub struct DeleteMemoryParams {
     /// Memory entry ID to delete
     pub id: String,

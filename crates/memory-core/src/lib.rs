@@ -51,8 +51,7 @@ pub use vault::{
     SECRET_TYPE_OAUTH_TOKEN, SECRET_TYPE_OTHER,
 };
 
-use rusqlite::{Connection, OpenFlags};
-use std::time::Duration;
+use rusqlite::Connection;
 
 /// Test/operator escape hatch: when set to a truthy value, the path-routing
 /// validation in `MemoryStore::upsert` is bypassed entirely. Useful for test
@@ -106,8 +105,8 @@ impl MemoryStore {
         libsimple::enable_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
-        let mut conn = Connection::open(db_path)?;
-        conn.busy_timeout(Duration::from_millis(5_000))?;
+        let _startup_guard = db::acquire_startup_lock();
+        let mut conn = db::open_read_write(db_path)?;
         if path_validation {
             let p = std::path::PathBuf::from(db_path);
             let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p)?;
@@ -132,8 +131,7 @@ impl MemoryStore {
         libsimple::enable_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
-        let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        conn.busy_timeout(Duration::from_millis(5_000))?;
+        let conn = db::open_read_only(db_path)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -149,7 +147,7 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = Connection::open_in_memory()?;
-        conn.busy_timeout(Duration::from_millis(5_000))?;
+        db::configure_connection(&conn)?;
         db::init_schema(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {

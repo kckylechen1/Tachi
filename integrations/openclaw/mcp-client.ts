@@ -379,6 +379,7 @@ export class MemoryMcpClient {
       MEMORY_DB_PATH: this.dbPath,
       TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
       TACHI_DERIVATIVE_IDENTITY: process.env.TACHI_DERIVATIVE_IDENTITY || "openclaw-tachi",
+      TACHI_EMBEDDED_MCP: process.env.TACHI_EMBEDDED_MCP || "1",
     } as Record<string, string>;
     const candidates: LaunchConfig[] = [
       // First candidate: explicit global-db, no project db (clean isolation)

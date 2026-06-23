@@ -32,6 +32,20 @@ pub(super) fn db_path_held_by_other_process(db_path: &str) -> bool {
     }
 }
 
+/// True when this process is an embedded stdio MCP facade for a host runtime
+/// (OpenClaw, editor plugins, etc.) rather than the canonical owner daemon.
+/// In this mode request handling remains available, but owner duties such as
+/// background workers and periodic GC/checkpoints stay with the daemon.
+pub(super) fn embedded_mcp_facade() -> bool {
+    let embedded = std::env::var("TACHI_EMBEDDED_MCP")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false);
+    embedded && !crate::cli_client::is_daemon_process()
+}
+
 pub(super) fn daily_distill_scheduler_enabled(server: &crate::MemoryServer) -> bool {
     server.has_project_db()
 }

@@ -378,6 +378,10 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
+    if cli.daemon {
+        std::env::set_var("TACHI_DAEMON", "1");
+    }
+
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
     let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs();
     if !recovered.is_empty() {
@@ -411,12 +415,16 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         n => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
     }
 
-    spawn_idle_connection_cleanup(&server);
-    spawn_wal_checkpoint(&server);
-    spawn_background_gc(&server, gc_enabled, gc_initial_delay_secs, gc_interval_secs);
-    run_startup_integrity_checks(&server, project_db_path.is_some())?;
-    load_cached_hub_tools(&server);
-    report_pipeline_and_spawn_daily_distill(&server, &app_home);
+    if embedded_mcp_facade() {
+        eprintln!("[embedded-mcp] owner background tasks disabled; forwarding to scoped daemon");
+    } else {
+        spawn_idle_connection_cleanup(&server);
+        spawn_wal_checkpoint(&server);
+        spawn_background_gc(&server, gc_enabled, gc_initial_delay_secs, gc_interval_secs);
+        run_startup_integrity_checks(&server, project_db_path.is_some())?;
+        load_cached_hub_tools(&server);
+        report_pipeline_and_spawn_daily_distill(&server, &app_home);
+    }
 
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
     eprintln!(
@@ -455,7 +463,13 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         )
         .await?;
     } else {
-        serve_stdio(server, app_home.clone(), global_db_path.clone()).await?;
+        serve_stdio(
+            server,
+            app_home.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+        )
+        .await?;
     }
 
     Ok(())
