@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use serde::Serialize;
 use serde_json::json;
 
 use memory_core::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
@@ -615,6 +617,32 @@ fn process_alive(pid: i64) -> bool {
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ReapProcessFinding {
+    pid: i64,
+    ppid: i64,
+    kind: &'static str,
+    reap: bool,
+    reason: String,
+    global_db: Option<String>,
+    project_db: Option<String>,
+    no_project_db: bool,
+    profile: Option<String>,
+    command: String,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct StaleDaemonFileFinding {
+    file: String,
+    path: String,
+    pid: Option<i64>,
+    reap: bool,
+    reason: String,
+    lock_file: String,
+}
+
 /// Extract the token following `flag` from a ps command line.
 fn flag_value(command: &str, flag: &str) -> Option<String> {
     let mut it = command.split_whitespace();
@@ -624,6 +652,103 @@ fn flag_value(command: &str, flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(unix)]
+fn flag_present(command: &str, flag: &str) -> bool {
+    command.split_whitespace().any(|tok| tok == flag)
+}
+
+#[cfg(unix)]
+fn parse_ps_line(line: &str) -> Option<(i64, i64, String)> {
+    let mut rest = line.trim_start();
+    let pid_end = rest.find(char::is_whitespace)?;
+    let pid = rest[..pid_end].parse::<i64>().ok()?;
+    rest = rest[pid_end..].trim_start();
+
+    let ppid_end = rest.find(char::is_whitespace)?;
+    let ppid = rest[..ppid_end].parse::<i64>().ok()?;
+    rest = rest[ppid_end..].trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+
+    Some((pid, ppid, rest.to_string()))
+}
+
+#[cfg(unix)]
+fn classify_reap_process_line(line: &str, self_pid: i64) -> Option<ReapProcessFinding> {
+    let (pid, ppid, command) = parse_ps_line(line)?;
+    if pid == self_pid {
+        return None;
+    }
+
+    let argv0 = command.split_whitespace().next()?;
+    let base = argv0.rsplit('/').next().unwrap_or(argv0);
+    if base != "tachi" && base != "memory-server" {
+        return None;
+    }
+
+    let global_db = flag_value(&command, "--global-db");
+    let project_db = flag_value(&command, "--project-db");
+    let no_project_db = flag_present(&command, "--no-project-db");
+    let profile = flag_value(&command, "--profile");
+    let is_daemon = flag_present(&command, "--daemon");
+
+    let (kind, reap, reason) = if ppid == 1 && !is_daemon {
+        (
+            "orphan-stdio",
+            true,
+            "stdio adapter is reparented to pid 1; launching host likely exited".to_string(),
+        )
+    } else if is_daemon {
+        match global_db.as_deref() {
+            Some(db) if !Path::new(db).exists() => (
+                "dead-db-daemon",
+                true,
+                format!("daemon global DB does not exist: {db}"),
+            ),
+            Some(db) => ("daemon", false, format!("daemon global DB exists: {db}")),
+            None => (
+                "daemon",
+                false,
+                "daemon has no --global-db flag; cannot prove DB is dead".to_string(),
+            ),
+        }
+    } else {
+        (
+            "stdio",
+            false,
+            format!("stdio adapter still has live parent pid {ppid}"),
+        )
+    };
+
+    Some(ReapProcessFinding {
+        pid,
+        ppid,
+        kind,
+        reap,
+        reason,
+        global_db,
+        project_db,
+        no_project_db,
+        profile,
+        command,
+    })
+}
+
+#[cfg(unix)]
+fn read_daemon_discovery_pid(path: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(pid) = value.get("pid").and_then(|p| p.as_i64()) {
+            return Some(pid);
+        }
+        if let Some(pid) = value.as_i64() {
+            return Some(pid);
+        }
+    }
+    text.trim().parse::<i64>().ok()
 }
 
 /// Machine-wide sweep for stale tachi processes. Only ever reaps the
@@ -642,60 +767,29 @@ fn reap_stale_processes(
         .output()?;
     let text = String::from_utf8_lossy(&out.stdout);
 
-    let mut findings: Vec<serde_json::Value> = Vec::new();
+    let mut findings: Vec<ReapProcessFinding> = Vec::new();
     let mut reaped = 0usize;
     let mut kept = 0usize;
 
     for line in text.lines() {
-        let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() < 3 {
-            continue;
-        }
-        let (Ok(pid), Ok(ppid)) = (tokens[0].parse::<i64>(), tokens[1].parse::<i64>()) else {
+        let Some(finding) = classify_reap_process_line(line, self_pid) else {
             continue;
         };
-        if pid == self_pid {
-            continue;
-        }
-        let command = tokens[2..].join(" ");
-        // Only consider processes whose argv[0] basename is a tachi binary.
-        let argv0 = tokens[2];
-        let base = argv0.rsplit('/').next().unwrap_or(argv0);
-        if base != "tachi" && base != "memory-server" {
-            continue;
-        }
 
-        let is_daemon = command.contains("--daemon");
-        let (kind, reap) = if ppid == 1 && !is_daemon {
-            ("orphan-stdio", true)
-        } else if is_daemon {
-            match flag_value(&command, "--global-db") {
-                Some(db) if !Path::new(&db).exists() => ("dead-db-daemon", true),
-                _ => ("daemon", false),
-            }
-        } else {
-            ("stdio", false)
-        };
-
-        if reap {
+        if finding.reap {
             reaped += 1;
             if apply {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+                unsafe { libc::kill(finding.pid as libc::pid_t, libc::SIGTERM) };
             }
         } else {
             kept += 1;
         }
-        findings.push(serde_json::json!({
-            "pid": pid,
-            "ppid": ppid,
-            "kind": kind,
-            "reap": reap,
-            "command": command.chars().take(120).collect::<String>(),
-        }));
+        findings.push(finding);
     }
 
     // Stale daemon discovery files (pid recorded but no longer alive).
     let mut stale_files: Vec<String> = Vec::new();
+    let mut stale_daemon_files: Vec<StaleDaemonFileFinding> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(app_home) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().to_string();
@@ -703,17 +797,25 @@ fn reap_stale_processes(
                 continue;
             }
             let path = ent.path();
-            let alive = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get("pid").and_then(|p| p.as_i64()))
-                .map(process_alive)
-                .unwrap_or(false);
+            let pid = read_daemon_discovery_pid(&path);
+            let alive = pid.map(process_alive).unwrap_or(false);
             if !alive {
+                let lock_file = path.with_extension("lock");
+                let reason = pid
+                    .map(|pid| format!("recorded daemon pid {pid} is not alive"))
+                    .unwrap_or_else(|| "daemon pid file does not contain a valid pid".to_string());
                 stale_files.push(name);
+                stale_daemon_files.push(StaleDaemonFileFinding {
+                    file: ent.file_name().to_string_lossy().to_string(),
+                    path: path.display().to_string(),
+                    pid,
+                    reap: true,
+                    reason,
+                    lock_file: lock_file.display().to_string(),
+                });
                 if apply {
                     let _ = std::fs::remove_file(&path);
-                    let _ = std::fs::remove_file(path.with_extension("lock"));
+                    let _ = std::fs::remove_file(lock_file);
                 }
             }
         }
@@ -727,6 +829,7 @@ fn reap_stale_processes(
                 "reaped": reaped,
                 "kept": kept,
                 "stale_files": stale_files,
+                "stale_daemon_files": stale_daemon_files,
                 "processes": findings,
             }))?
         );
@@ -735,7 +838,7 @@ fn reap_stale_processes(
 
     let verb = if apply { "reaped" } else { "would reap" };
     println!(
-        "tachi process sweep: {verb} {reaped}, kept {kept} healthy{}",
+        "tachi process sweep: {verb} {reaped}, kept {kept}{}",
         if apply {
             ""
         } else {
@@ -743,22 +846,45 @@ fn reap_stale_processes(
         }
     );
     for f in &findings {
-        let mark = if f["reap"].as_bool().unwrap_or(false) {
-            "KILL"
+        let mark = if f.reap { "KILL" } else { "keep" };
+        let mut scope = Vec::new();
+        if let Some(global_db) = &f.global_db {
+            scope.push(format!("global_db={global_db}"));
+        }
+        if let Some(project_db) = &f.project_db {
+            scope.push(format!("project_db={project_db}"));
+        } else if f.no_project_db {
+            scope.push("project_db=<disabled>".to_string());
+        }
+        if let Some(profile) = &f.profile {
+            scope.push(format!("profile={profile}"));
+        }
+        let scope = if scope.is_empty() {
+            String::new()
         } else {
-            "keep"
+            format!(" ({})", scope.join(" "))
         };
         println!(
-            "  [{mark}] pid={} ppid={} {} :: {}",
-            f["pid"],
-            f["ppid"],
-            f["kind"].as_str().unwrap_or(""),
-            f["command"].as_str().unwrap_or("")
+            "  [{mark}] pid={} ppid={} {}{}",
+            f.pid, f.ppid, f.kind, scope
         );
+        println!("       reason: {}", f.reason);
+        println!("      command: {}", f.command);
     }
-    if !stale_files.is_empty() {
+    if !stale_daemon_files.is_empty() {
         let fverb = if apply { "removed" } else { "stale" };
-        println!("  {fverb} lock/pid files: {}", stale_files.join(", "));
+        println!("  {fverb} lock/pid files:");
+        for f in &stale_daemon_files {
+            println!(
+                "    - file={} pid={} reason={} lock={}",
+                f.file,
+                f.pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                f.reason,
+                f.lock_file
+            );
+        }
     }
     Ok(())
 }
@@ -770,6 +896,76 @@ fn reap_stale_processes(
     _json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err("daemon reap is only implemented on unix".into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_reap_process_line_keeps_scoped_daemon_with_scope() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let global = dir.path().join("global.db");
+        let project = dir.path().join("project.db");
+        std::fs::write(&global, "").expect("global db");
+
+        let line = format!(
+            "  123  45 /opt/bin/memory-server --daemon --global-db {} --project-db {} --profile openclaw",
+            global.display(),
+            project.display()
+        );
+        let finding = classify_reap_process_line(&line, 999).expect("tachi process");
+
+        assert_eq!(finding.kind, "daemon");
+        assert!(!finding.reap);
+        assert_eq!(finding.global_db.as_deref(), Some(global.to_str().unwrap()));
+        assert_eq!(
+            finding.project_db.as_deref(),
+            Some(project.to_str().unwrap())
+        );
+        assert_eq!(finding.profile.as_deref(), Some("openclaw"));
+        assert!(finding.reason.contains("exists"));
+    }
+
+    #[test]
+    fn classify_reap_process_line_reaps_orphan_stdio() {
+        let line = "321 1 /usr/local/bin/tachi --global-db /tmp/tachi.db --no-project-db";
+        let finding = classify_reap_process_line(line, 999).expect("tachi process");
+
+        assert_eq!(finding.kind, "orphan-stdio");
+        assert!(finding.reap);
+        assert!(finding.no_project_db);
+        assert!(finding.reason.contains("pid 1"));
+    }
+
+    #[test]
+    fn classify_reap_process_line_reaps_daemon_with_missing_global_db() {
+        let line =
+            "456 12 /usr/local/bin/memory-server --daemon --global-db /tmp/tachi-missing-global.db";
+        let finding = classify_reap_process_line(line, 999).expect("tachi process");
+
+        assert_eq!(finding.kind, "dead-db-daemon");
+        assert!(finding.reap);
+        assert!(finding.reason.contains("does not exist"));
+    }
+
+    #[test]
+    fn classify_reap_process_line_ignores_current_and_non_tachi_processes() {
+        assert!(classify_reap_process_line("777 1 /usr/local/bin/memory-server", 777).is_none());
+        assert!(classify_reap_process_line("778 1 /usr/local/bin/node server.js", 777).is_none());
+    }
+
+    #[test]
+    fn read_daemon_discovery_pid_accepts_json_and_plain_pid() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let json_path = dir.path().join("daemon-a.pid");
+        let plain_path = dir.path().join("daemon-b.pid");
+        std::fs::write(&json_path, serde_json::json!({ "pid": 42 }).to_string()).expect("json pid");
+        std::fs::write(&plain_path, "43\n").expect("plain pid");
+
+        assert_eq!(read_daemon_discovery_pid(&json_path), Some(42));
+        assert_eq!(read_daemon_discovery_pid(&plain_path), Some(43));
+    }
 }
 
 pub(crate) async fn run_watcher(

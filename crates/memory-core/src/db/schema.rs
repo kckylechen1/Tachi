@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::error::MemoryError;
 
@@ -43,7 +44,9 @@ pub fn init_schema_with_label_mut(
 }
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
-    conn.execute_batch(r#"
+    execute_batch_retry(
+        conn,
+        r#"
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
         PRAGMA busy_timeout = 5000;
@@ -444,7 +447,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
             last_hit_at   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_recall_cache_updated ON recall_cache(updated_at);
-    "#)?;
+    "#,
+    )?;
 
     // Forward-compatible migrations for existing DB files created before
     // archived/created_at/updated_at columns existed.
@@ -538,7 +542,8 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
-    conn.execute_batch(
+    execute_batch_retry(
+        conn,
         r#"
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
@@ -583,6 +588,52 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+fn execute_batch_retry(conn: &Connection, sql: &str) -> Result<(), MemoryError> {
+    retry_locked(|| conn.execute_batch(sql).map(|_| ()))
+}
+
+fn execute_retry(conn: &Connection, sql: &str) -> Result<usize, MemoryError> {
+    retry_locked(|| conn.execute(sql, []))
+}
+
+fn retry_locked<T>(
+    mut operation: impl FnMut() -> Result<T, rusqlite::Error>,
+) -> Result<T, MemoryError> {
+    let mut backoff = Duration::from_millis(10);
+    let max_backoff = Duration::from_millis(250);
+    let attempts = 24;
+
+    for attempt in 1..=attempts {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_locked_error(&error) && attempt < attempts => {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    unreachable!("retry loop returns on every final attempt")
+}
+
+fn is_locked_error(error: &rusqlite::Error) -> bool {
+    use rusqlite::ffi::ErrorCode;
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
+}
+
+fn is_duplicate_column_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(_, Some(message))
+            if message.contains("duplicate column name")
+    )
 }
 
 /// Align HyperTachi-shaped legacy DBs (`indexed_tags`, `domain_key`) with Sigil's
@@ -1068,10 +1119,18 @@ fn ensure_column(
         return Ok(());
     }
 
+    let table_name = table.to_string();
+    let column_name = column.to_string();
     let table = quote_sql_identifier(table)?;
     let column = quote_sql_identifier(column)?;
     let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
-    conn.execute(&sql, [])?;
+    match execute_retry(conn, &sql) {
+        Ok(_) => {}
+        Err(MemoryError::Sqlite(error))
+            if is_duplicate_column_error(&error)
+                && has_column(conn, &table_name, &column_name)? => {}
+        Err(error) => return Err(error),
+    }
     Ok(())
 }
 

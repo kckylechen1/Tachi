@@ -174,6 +174,12 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<FindSimilarMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "find_similar_memory", &params)
+                .await?
+        {
+            return Ok(body);
+        }
         handle_find_similar_memory(self, params).await
     }
 
@@ -195,11 +201,22 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<ListMemoriesParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "list_memories", &params).await?
+        {
+            return Ok(body);
+        }
         handle_list_memories(self, params).await
     }
 
     #[tool(description = "Get aggregate statistics about the memory store.")]
     pub(crate) async fn memory_stats(&self) -> Result<String, String> {
+        let params = json!({});
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "memory_stats", &params).await?
+        {
+            return Ok(body);
+        }
         handle_memory_stats(self).await
     }
 
@@ -254,6 +271,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<DeleteMemoryParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "delete_memory", &params).await?
+        {
+            return Ok(body);
+        }
         handle_delete_memory(self, params).await
     }
 
@@ -383,6 +405,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<MemoryGraphParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "memory_graph", &params).await?
+        {
+            return Ok(body);
+        }
         handle_memory_graph(self, params).await
     }
 
@@ -705,6 +732,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<RecallContextParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "recall_context", &params).await?
+        {
+            return Ok(body);
+        }
         handle_recall_context(self, params).await
     }
 
@@ -715,6 +747,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CaptureSessionParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "capture_session", &params).await?
+        {
+            return Ok(body);
+        }
         handle_capture_session(self, params).await
     }
 
@@ -725,6 +762,11 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CompactContextParams>,
     ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "compact_context", &params).await?
+        {
+            return Ok(body);
+        }
         handle_compact_context(self, params).await
     }
 

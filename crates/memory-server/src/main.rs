@@ -519,19 +519,27 @@ struct MemoryServer {
 
 // MCP client pool types are in mcp_pool.rs
 
-fn test_background_workers_enabled() -> bool {
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+        })
+        .unwrap_or(false)
+}
+
+fn embedded_mcp_facade() -> bool {
+    env_truthy("TACHI_EMBEDDED_MCP") && !crate::cli_client::is_daemon_process()
+}
+
+fn background_workers_enabled() -> bool {
     #[cfg(test)]
     {
-        matches!(
-            std::env::var("TACHI_TEST_ENABLE_BACKGROUND_WORKERS")
-                .ok()
-                .as_deref(),
-            Some("1") | Some("true") | Some("TRUE") | Some("yes")
-        )
+        env_truthy("TACHI_TEST_ENABLE_BACKGROUND_WORKERS")
     }
     #[cfg(not(test))]
     {
-        true
+        !embedded_mcp_facade()
     }
 }
 
@@ -710,7 +718,7 @@ impl MemoryServer {
             })),
         };
 
-        if test_background_workers_enabled() {
+        if background_workers_enabled() {
             // Spawn the enrichment batcher worker
             {
                 let batcher_server = server.clone();
@@ -784,6 +792,10 @@ impl MemoryServer {
                     }
                 });
             }
+        } else if embedded_mcp_facade() {
+            eprintln!(
+                "[embedded-mcp] background enrichment/foundry workers disabled; scoped daemon owns queues"
+            );
         }
 
         seed_builtin_capabilities(&server)

@@ -8,6 +8,7 @@ mod graph;
 mod hub_db;
 mod memory_crud;
 pub mod migrations;
+mod open;
 mod pack_db;
 mod recall_cache;
 mod sandbox;
@@ -42,6 +43,9 @@ pub use memory_crud::{
     record_enrichment_failure, release_event_claim, search_fts, search_symbolic_candidates,
     search_vec, supersede_memory, try_claim_event, update_enrichment_fields, update_with_revision,
     upsert,
+};
+pub(crate) use open::{
+    acquire_startup_lock, configure_connection, open_read_only, open_read_write,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,

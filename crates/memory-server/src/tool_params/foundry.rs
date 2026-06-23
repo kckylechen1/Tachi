@@ -74,7 +74,7 @@ fn default_wiki_project_name() -> String {
 
 // ─── Recall ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct RecallContextParams {
     /// User or agent query that should be used to recall prior context
     pub query: String,
@@ -130,7 +130,7 @@ pub(crate) struct RecallContextParams {
 
 // ─── Capture ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct CaptureSessionParams {
     /// Conversation identifier
     pub conversation_id: String,
@@ -167,7 +167,7 @@ pub(crate) struct CaptureSessionParams {
 
 // ─── Compact ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct CompactContextParams {
     /// Canonical agent id for pathing / provenance
     pub agent_id: String,
@@ -496,7 +496,7 @@ pub(crate) struct PrepareCapabilityBundleParams {
 
 // ─── Memory Graph ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(crate) struct MemoryGraphParams {
     /// Optional seed memory id
     #[serde(default)]
