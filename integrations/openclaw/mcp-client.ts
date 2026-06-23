@@ -224,7 +224,7 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
   }
   return {
     id,
-    text: asString(raw.text),
+    text: asString(raw.text) || asString(raw.excerpt),
     summary: asString(raw.summary),
     keywords: asStringArray(raw.keywords),
     timestamp: asString(raw.timestamp),
@@ -245,6 +245,33 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
       : undefined,
     metadata: ensureMetadata(raw.metadata),
   };
+}
+
+function extractMemoryRows(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (!isRecord(payload)) {
+    return [];
+  }
+
+  if (Array.isArray(payload.results)) {
+    return payload.results;
+  }
+  if (Array.isArray(payload.docs)) {
+    return payload.docs;
+  }
+
+  if (!Array.isArray(payload.sections)) {
+    return [];
+  }
+  const rows: unknown[] = [];
+  for (const section of payload.sections) {
+    if (isRecord(section) && Array.isArray(section.rows)) {
+      rows.push(...section.rows);
+    }
+  }
+  return rows;
 }
 
 function extractErrorMessage(result: RawToolResult, toolName: string): string {
@@ -624,11 +651,7 @@ export class MemoryMcpClient {
     const scores: Record<string, number> = {};
     const scoreBreakdowns: Record<string, HybridScore> = {};
 
-    if (!Array.isArray(payload)) {
-      return { docs, scores, scoreBreakdowns };
-    }
-
-    for (const row of payload) {
+    for (const row of extractMemoryRows(payload)) {
       const entry = coerceMemoryEntry(row);
       if (!entry) {
         continue;
