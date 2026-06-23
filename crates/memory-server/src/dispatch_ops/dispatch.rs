@@ -35,163 +35,28 @@ use std::time::Duration;
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 
-struct DispatchStart {
-    dispatch_id: String,
-    agent_norm: String,
-    resolved_profile: ResolvedDispatchProfile,
-    profile_payload: Value,
-    timeout_secs_for_status: u64,
-    timeout: Duration,
-    inject_tachi: bool,
-    inject_hub: bool,
-    workspace_dir: PathBuf,
-}
-
-// ─── Dispatch result ─────────────────────────────────────────────────────────
-
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
 }
 
-struct ExecutionBackendPrepareFailure<'a> {
-    trajectory_path: &'a Path,
-    workspace_dir: &'a Path,
-    dispatch_id: &'a str,
-    agent_norm: &'a str,
-    params: &'a TachiDispatchParams,
-    backend: &'a str,
-    error: &'a str,
-    v2: bool,
-    plan_generated_at: Option<&'a str>,
-    plan_duration_ms: Option<u64>,
-    harness_transport: &'a str,
-    harness_server_url: &'a Option<String>,
-    capability_bundle_card: &'a Value,
-    timeout_secs_for_status: u64,
-}
-
-fn record_execution_backend_prepare_failure(ctx: ExecutionBackendPrepareFailure<'_>) {
-    append_trajectory_event(
-        ctx.trajectory_path,
-        json!({
-            "event": "execution_backend_prepare_failed",
-            "dispatch_id": ctx.dispatch_id,
-            "agent": ctx.agent_norm,
-            "execution_backend": ctx.backend,
-            "error": ctx.error,
-            "timestamp": Utc::now().to_rfc3339(),
-        }),
-    );
-    write_status_json(
-        ctx.workspace_dir,
-        ctx.dispatch_id,
-        ctx.v2,
-        ctx.plan_generated_at,
-        None,
-        if ctx.v2 { "approved" } else { "n/a" },
-        Some(1),
-        ctx.plan_duration_ms,
-        None,
-        ctx.plan_duration_ms,
-        Some(json!({
-            "agent": ctx.agent_norm,
-            "task": ctx.params.task.clone(),
-            "state": "TASK_STATE_FAILED",
-            "updated_at": Utc::now().to_rfc3339(),
-            "run_dir": ctx.workspace_dir.to_string_lossy(),
-            "result_written": false,
-            "harness_transport": ctx.harness_transport,
-            "harness_server_url": ctx.harness_server_url,
-            "execution_backend": ctx.backend,
-            "capability_bundle": ctx.capability_bundle_card,
-            "timeout_secs": ctx.timeout_secs_for_status,
-            "error": ctx.error,
-        })),
-    );
-}
-
-fn resolve_dispatch_start(
-    server: &MemoryServer,
-    params: &mut TachiDispatchParams,
-    now: chrono::DateTime<Utc>,
-) -> Result<DispatchStart, String> {
-    let resolved_profile = resolve_and_apply_dispatch_profile_for_server(server, params)?;
-    let mut agent_norm = resolved_profile.agent.clone();
-    let dispatch_id = new_dispatch_id(now, &agent_norm);
-
-    agent_norm = if agent_norm.eq_ignore_ascii_case("custom") {
-        "custom".to_string()
-    } else if let Some(def) = resolve_dispatch_agent(&agent_norm) {
-        def.name.to_string()
-    } else {
-        let agent = params.agent.as_deref().unwrap_or("");
-        return Err(format!(
-            "Unknown agent '{}'. Supported: {}",
-            agent.trim(),
-            dispatch_agent_help_list()
-        ));
-    };
-    params.agent = Some(agent_norm.clone());
-
-    let profile_payload =
-        serde_json::to_value(&resolved_profile).unwrap_or_else(|_| json!({"agent": agent_norm}));
-    let timeout_secs_for_status = params.timeout_secs;
-    let timeout = Duration::from_secs(timeout_secs_for_status);
-    let inject_tachi = params.inject_tachi_mcp.unwrap_or(false);
-    let inject_hub = params.inject_hub_mcps.unwrap_or(false);
-
-    // Validate backend/MCP compatibility before creating the run ledger. A
-    // rejected dispatch should not leave an empty run directory with no status.
-    if inject_tachi || inject_hub {
-        if agent_norm == "custom" {
-            return Err(
-                "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend."
-                    .to_string(),
-            );
-        }
-        let def = resolve_dispatch_agent(&agent_norm).expect("resolved agent");
-        if !mcp_inject_supported(def) {
-            let hint = match def.name {
-                "codex" => "Configure MCP servers in ~/.codex/config.toml instead, or dispatch with agent='claude' or 'grok'.",
-                "kimi" => "Dispatch with agent='claude' or 'grok' for Tachi MCP injection.",
-                _ => "Use an agent that supports --mcp-config.",
-            };
-            return Err(format!(
-                "inject_tachi_mcp / inject_hub_mcps are not supported for the {} backend. {}",
-                def.name, hint
-            ));
-        }
-    }
-
-    let workspace_dir = dispatch_runs_root().join(&dispatch_id);
-
-    Ok(DispatchStart {
-        dispatch_id,
-        agent_norm,
-        resolved_profile,
-        profile_payload,
-        timeout_secs_for_status,
-        timeout,
-        inject_tachi,
-        inject_hub,
-        workspace_dir,
-    })
-}
-
+mod backend_failure;
 mod credentials;
 mod dedupe;
 mod execution;
 mod recovery;
 mod response_helpers;
+mod start;
 
 #[cfg(test)]
 mod tests;
 
+use self::backend_failure::*;
 use self::credentials::*;
 use self::dedupe::*;
 use self::execution::{spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution};
 use self::response_helpers::*;
+use self::start::*;
 
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
