@@ -31,6 +31,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");
@@ -86,6 +87,7 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
                 valid_from: None,
                 valid_until: None,
                 metadata: None,
+                emit_continuity: false,
             }))
             .await
             .expect("save_memory should succeed");

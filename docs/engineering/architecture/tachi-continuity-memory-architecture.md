@@ -1,6 +1,6 @@
 # Tachi Continuity Memory Architecture
 
-**Status:** architecture design
+**Status:** architecture design + first implementation slice
 **Date:** 2026-06-23
 **Related docs:**
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md) — original design + cold review
@@ -201,19 +201,27 @@ tachi_event action=project                          [implemented, explicit]
     ↓
 Next session start / explicit context request
     → tachi_event action=context
-    → returns projected memories + lorebook + affect + metrics
+    → returns projected memories + patterns + lorebook + affect + metrics
     → dispatch can assemble prompt context from projections
+```
+
+Implemented integration slice:
+
+```
+save_memory emit_continuity=true → memory.saved event
+tachi_search scope=patterns      → explicit /user/patterns recall
+tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
+tachi_skill action=from_pattern  → pending/disabled Hub skill candidate
 ```
 
 Target integration still to add:
 
 ```
-tachi_memory save → memory.saved event
-tachi_wiki_write  → wiki.saved event with optional pattern_ref
+wiki.saved event with optional pattern_ref
 pattern hit/miss callback → pattern.hit / pattern.miss event
 projection loop → background tachi_event action=project
 pattern maturity → /wiki/drafts/patterns/<name>.md → reviewed wiki/runbook
-pattern maturity → generated skill candidate with pattern_ref
+pattern maturity → reviewed promotion of generated skill candidate
 ```
 
 The target runtime path is:
@@ -243,10 +251,14 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
 - `tachi_complete` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
 - `tachi_event action=project` idempotently materializes events into stable projections.
-- `tachi_event action=context` returns projected memories + `lorebook` + `affect` read-model sections.
+- `tachi_event action=context` returns projected memories + `patterns` + `lorebook` + `affect` read-model sections.
 - Pattern/bonding projections maintain `seen / hit / miss / confidence / last_seen` counters.
 - Affect projections carry explicit guardrails.
 - `tachi_event action=label_eval` provides a label-quality harness.
+- `save_memory` supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
+- `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
+- `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
+- `tachi_skill(action="from_pattern")` registers a disabled, pending-review, discoverable skill candidate with a `pattern_ref`.
 - Complete skill system: `hub_register`, `run_skill`, `recommend_skill`, `skill_evolve`, builtin skills.
 
 ### Missing / gaps
@@ -255,11 +267,10 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. **No Agent MD crystallization**: the ledger is not yet read when generating agent system prompts.
 3. **No cross-process A2A transport**: only a local read model exists.
 4. **Label-quality calibration incomplete**: harness exists, needs reviewed held-out data.
-5. **Memory save does not emit continuity events**: `handle_save_memory` writes the DB row but does not append to `tachi_events`.
-6. **Wiki write does not recall patterns**: `handle_tachi_wiki_write` builds `SaveMemoryParams` directly without consulting `/user/patterns`.
-7. **`tachi_search` has no `scope="patterns"`**: pattern memories can only be reached via `path_prefix`.
-8. **`tachi_event action=context` does not return a `patterns` section**: active patterns are mixed into `memories`.
-9. **No pattern → skill generator**: the hub can register and evolve skills, but no code consumes `/user/patterns` to emit a `HubCapability`.
+5. **Wiki writes do not emit `wiki.saved` events**: wiki entries can carry `pattern_refs`, but the write itself is not yet a ledger event.
+6. **Maturity gates are not implemented**: `from_pattern` can register candidates, but hit-rate / validation thresholds do not auto-promote to wiki or approved skills.
+7. **Pattern hit/miss feedback is not wired**: counters update from event types if supplied, but runtime recall does not emit hit/miss callbacks.
+8. **Pattern recommendation signal for skills is not wired**: `recommend_skill` does not yet use active patterns as context.
 
 ---
 
@@ -279,10 +290,11 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 **Goal:** pattern memory becomes a first-class search and recall citizen.
 
-1. Add `scope="patterns"` to `tachi_search`.
-2. Return a dedicated `patterns` section from `tachi_event action=context`.
-3. Emit `memory.saved` continuity event from `handle_save_memory`.
-4. Let `handle_tachi_wiki_write` optionally recall and reference active patterns.
+1. Done: `scope="patterns"` exists on `tachi_search`.
+2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
+3. Done: `save_memory` can emit `memory.saved` when `emit_continuity=true`.
+4. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
+5. Remaining: emit `wiki.saved` events for reviewed wiki writes.
 
 ### Phase 3 — Background projection loop
 
@@ -297,9 +309,9 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 **Goal:** mature patterns become executable skills.
 
 1. Add `recommend_skill` pattern signal (Phase 4a).
-2. Add `tachi_skill action=from_pattern` to generate skill definitions from mature patterns (Phase 4b).
-3. Register generated skills as `discoverable` with `pattern_ref` metadata.
-4. Human review before promoting to `listed`.
+2. Done: `tachi_skill action=from_pattern` generates skill candidates from active patterns.
+3. Done: generated skills are `discoverable`, disabled, pending review, and carry `pattern_ref` metadata.
+4. Remaining: human/maturity review before promoting to `listed`.
 
 ### Phase 5 — A2A and cold seat transport
 
@@ -313,78 +325,75 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ## 8. Concrete file-level integration points
 
-### 8.1 Add `patterns` section to `tachi_event action=context`
+### 8.1 `patterns` section in `tachi_event action=context`
 
 - **File:** `crates/memory-server/src/continuity_ops.rs`
 - **Function:** `build_continuity_context`
-- **Change:** after building `memories`, filter entries where `path.starts_with("/user/patterns")` or `metadata.projection_kind == "pattern"`, and include `"patterns": patterns` in the returned JSON.
+- **Current behavior:** after building `memories`, active `/user/patterns` and bonding projections are returned under `"patterns"`.
 
-### 8.2 Add `scope="patterns"` to `tachi_search`
+### 8.2 `scope="patterns"` in `tachi_search`
 
 - **File:** `crates/memory-server/src/facade_search_ops.rs`
 - **Function:** `collect_tachi_search_sections`
-- **Change:** extend scope match to include `"patterns"`; run `search_memory_rows_with_access` with `path_prefix = "/user/patterns"`.
+- **Current behavior:** scope match includes `"patterns"`; pattern recall runs with `path_prefix = "/user/patterns"`, while ordinary `memory` recall filters projection rows.
 - **File:** `crates/memory-server/src/agent_markdown/search.rs`
 - **Function:** `format_search_sections`
-- **Change:** add markdown rendering for the `Patterns` section.
+- **Current behavior:** the generic section renderer handles the `Patterns` section.
 
-### 8.3 Memory save emits continuity event
+### 8.3 Memory save emits continuity event when requested
 
 - **File:** `crates/memory-server/src/memory_search_ops/save_memory/handler.rs`
 - **Function:** `handle_save_memory`
-- **Change:** after `upsert_save_entry`, call a new helper `emit_memory_saved_event`.
+- **Current behavior:** after `upsert_save_entry`, `emit_continuity=true` calls `emit_memory_saved_event`.
 - **File:** `crates/memory-server/src/continuity_ops.rs`
-- **Change:** add `pub(crate) fn emit_memory_saved_event` that writes a `memory.saved` event with projection hints inferred from category/path metadata.
+- **Current behavior:** `emit_memory_saved_event` writes a `memory.saved` event with projection hints inferred from category/path metadata.
 - **File:** `crates/memory-server-params/src/memory.rs`
-- **Change:** add optional `#[serde(default)] emit_continuity: bool` to `SaveMemoryParams`.
+- **Current behavior:** `SaveMemoryParams` has `#[serde(default)] emit_continuity: bool`.
 
 ### 8.4 Wiki write recalls patterns
 
 - **File:** `crates/memory-server/src/copilot_ops/wiki_facade.rs`
 - **Function:** `handle_tachi_wiki_write`
-- **Change:** before building `SaveMemoryParams`, call a new helper that queries active patterns and merges them into wiki metadata or entry text.
+- **Current behavior:** when `include_patterns=true`, active patterns are queried and merged into `metadata.pattern_refs`.
 - **File:** `crates/memory-server/src/continuity_ops.rs`
-- **Change:** expose `pub(crate) fn list_active_patterns`.
+- **Current behavior:** `pub(crate) fn list_active_patterns` is available for wiki/skill integration.
 - **File:** `crates/memory-server-params/src/memory.rs`
-- **Change:** add `include_patterns`, `pattern_query`, `pattern_top_k` to `WikiWriteParams`.
+- **Current behavior:** `WikiWriteParams` has `include_patterns`, `pattern_query`, and `pattern_top_k`.
 
 ### 8.5 Pattern → skill generator
 
 - **New file:** `crates/memory-server/src/hub_ops/pattern_to_skill.rs`
 - **Function:** `handle_skill_from_pattern`
-- **Responsibilities:**
+- **Current behavior:**
   1. Fetch active patterns.
   2. Build skill definition JSON (system, prompt, content, inputSchema, policy, tags, `pattern_ref`).
   3. Persist via `store.hub_register`.
-  4. Optionally expose via `register_skill_tool`.
+  4. Keep generated skills disabled and pending review; do not auto-expose as listed tools.
 - **File:** `crates/memory-server/src/hub_ops/mod.rs`
-- **Change:** re-export the new handler.
+- **Current behavior:** re-exports the new handler.
 - **File:** `crates/memory-server/src/tools/skill_facade.rs`
-- **Change:** route `tachi_skill(action="from_pattern")` to the new handler.
+- **Current behavior:** routes `tachi_skill(action="from_pattern")` to the new handler.
 - **File:** `crates/memory-server-params/src/facade.rs`
-- **Change:** add `from_pattern` action to `TachiSkillParams` schema.
-- **File:** `crates/memory-server/src/prompts.rs`
-- **Change:** add `PATTERN_TO_SKILL_PROMPT`.
+- **Current behavior:** `from_pattern` is in the `TachiSkillParams` action schema.
 
 ---
 
 ## 9. Open questions
 
-1. **Which memory categories should auto-emit `memory.saved` events?** All saves, or only `preference`, `experience`, `decision`?
-2. **Should pattern-derived skills be auto-approved or pending review?** Auto-approval risks spam; pending review adds friction.
-3. **What is the promotion threshold from pattern to wiki/skill?** Pure hit-rate, or hit-rate + external validation + timeline depth?
-4. **How does the cold seat participate in cross-process A2A?** Does it subscribe to events but ignore timeline conclusions, or does it maintain a separate evidence stream?
-5. **Should pattern memory be per-project or global?** User judgment structures are likely global, but pattern instances may be project-specific.
+1. **Should any memory categories auto-emit `memory.saved` events?** Current behavior is explicit only (`emit_continuity=true`).
+2. **What is the promotion threshold from pattern to wiki/skill?** Pure hit-rate, or hit-rate + external validation + timeline depth?
+3. **How does the cold seat participate in cross-process A2A?** Does it subscribe to events but ignore timeline conclusions, or does it maintain a separate evidence stream?
+4. **Should pattern memory be per-project or global?** User judgment structures are likely global, but pattern instances may be project-specific.
 
 ---
 
 ## 10. Summary
 
-Tachi already has the substrate for continuity memory: the `tachi_events` ledger, projection machinery, counters, and guardrails. The remaining work is integration, not invention:
+Tachi already has the substrate for continuity memory: the `tachi_events` ledger, projection machinery, counters, and guardrails. The first integration slice is now in place: explicit memory-save events, pattern search/context, wiki pattern references, and pending pattern-derived skill candidates. Remaining work is loop closure, calibration, and promotion:
 
-- Connect **memory save** to the event ledger so patterns can grow from ordinary saves.
-- Connect **wiki** to pattern memory so mature patterns can be reviewed and crystallized.
-- Connect **skill** to pattern memory so verified patterns become executable capabilities.
+- Add **pattern hit/miss feedback** so counters reflect runtime recall outcomes.
+- Add **wiki.saved** events so reviewed wiki writes return to the ledger.
+- Add **maturity gates** so only validated patterns promote to wiki/skills.
 - Add a **background projection loop** so the system closes the loop automatically.
 - Keep the **over-fit brake and cold seat** as un-revocable safeguards.
 

@@ -68,6 +68,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");

@@ -292,16 +292,43 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         .await
         .expect("emit affect");
 
+    let mut pattern = tachi_event_params("emit");
+    pattern.id = Some("pattern-context-1".to_string());
+    pattern.source_repo = Some("sigil".to_string());
+    pattern.adapter = Some("facade-test".to_string());
+    pattern.domain = Some("agent_os".to_string());
+    pattern.session_id = Some("session-lore".to_string());
+    pattern.actor = Some("codex".to_string());
+    pattern.event_type = Some("pattern.observed".to_string());
+    pattern.authority = Some("collect_only".to_string());
+    pattern.projection_hints = vec!["pattern".to_string()];
+    pattern.payload = Some(json!({
+        "pattern_key": "agent-os-continuity",
+        "summary": "Agent OS continuity pattern",
+        "text": "Continuity patterns should be returned as first-class context.",
+    }));
+    crate::event_ops::handle_tachi_event(&server, pattern)
+        .await
+        .expect("emit pattern");
+
     let mut project = tachi_event_params("project");
-    project.projection_hints = vec!["world_book".to_string(), "affect".to_string()];
+    project.projection_hints = vec![
+        "world_book".to_string(),
+        "affect".to_string(),
+        "pattern".to_string(),
+    ];
     let projected = crate::event_ops::handle_tachi_event(&server, project)
         .await
-        .expect("project lorebook and affect");
+        .expect("project lorebook, affect, and pattern");
     let projected_json: Value = serde_json::from_str(&projected).expect("projected JSON");
-    assert_eq!(projected_json["projected_count"], json!(2));
+    assert_eq!(projected_json["projected_count"], json!(3));
 
     let mut context = tachi_event_params("context");
-    context.projection_hints = vec!["world_book".to_string(), "affect".to_string()];
+    context.projection_hints = vec![
+        "world_book".to_string(),
+        "affect".to_string(),
+        "pattern".to_string(),
+    ];
     let body = crate::event_ops::handle_tachi_event(&server, context)
         .await
         .expect("context");
@@ -314,6 +341,10 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
     assert_eq!(
         parsed["affect"][0]["guardrails"]["execution_effect"],
         json!("none")
+    );
+    assert_eq!(
+        parsed["patterns"][0]["projection_key"],
+        json!("agent-os-continuity")
     );
     assert_eq!(
         parsed["guardrails"]["a2a"],

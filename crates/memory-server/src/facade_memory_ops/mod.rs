@@ -163,6 +163,7 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata,
+                emit_continuity: params.emit_continuity,
                 files: params.files.clone(),
             };
             let body = handle_tachi_save(server, save_params).await?;
@@ -205,6 +206,7 @@ pub(crate) async fn handle_tachi_memory(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata: params.metadata.clone(),
+                emit_continuity: false,
                 files: params.files.clone(),
             };
             let body = handle_tachi_save(server, save_params).await?;

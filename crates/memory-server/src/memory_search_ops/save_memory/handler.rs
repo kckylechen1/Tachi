@@ -56,6 +56,7 @@ pub(crate) async fn handle_save_memory(
     let needs_summary = params.summary.is_empty();
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
+    let emit_continuity = params.emit_continuity;
     let entry = build_save_entry(
         server,
         params,
@@ -67,6 +68,17 @@ pub(crate) async fn handle_save_memory(
     );
 
     upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;
+
+    let continuity_event = if emit_continuity {
+        Some(crate::continuity_ops::emit_memory_saved_event(
+            server,
+            &entry,
+            target_db,
+            named_project.as_deref(),
+        ))
+    } else {
+        None
+    };
 
     if !needs_embedding && entry.vector.is_some() {
         spawn_save_contradiction_detection(server, id, target_db, named_project.clone());
@@ -92,6 +104,9 @@ pub(crate) async fn handle_save_memory(
         gate_warnings,
         secret_redactions,
     );
+    if let Some(event) = continuity_event {
+        response.insert("continuity_event".into(), event);
+    }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {
         spawn_auto_linking(server, &entry, target_db, named_project);

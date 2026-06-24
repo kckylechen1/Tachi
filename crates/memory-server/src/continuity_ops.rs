@@ -282,6 +282,78 @@ fn list_projection_memories(
     }
 }
 
+fn projection_kind_metadata(entry: &MemoryEntry) -> Option<&str> {
+    entry
+        .metadata
+        .get("projection_kind")
+        .and_then(Value::as_str)
+}
+
+fn is_active_pattern_projection(entry: &MemoryEntry) -> bool {
+    if !entry.path.starts_with("/user/patterns") {
+        return false;
+    }
+    matches!(
+        projection_kind_metadata(entry),
+        Some("pattern") | Some("bonding") | None
+    )
+}
+
+fn pattern_matches_query(entry: &MemoryEntry, query: Option<&str>) -> bool {
+    let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let query = query.to_ascii_lowercase();
+    let projection_key = entry
+        .metadata
+        .get("projection_key")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    [
+        entry.id.as_str(),
+        entry.path.as_str(),
+        entry.summary.as_str(),
+        entry.text.as_str(),
+        entry.topic.as_str(),
+        projection_key,
+    ]
+    .iter()
+    .any(|value| value.to_ascii_lowercase().contains(&query))
+}
+
+fn pattern_context_json(entry: &MemoryEntry) -> Value {
+    json!({
+        "id": entry.id,
+        "path": entry.path,
+        "summary": entry.summary,
+        "content": entry.text,
+        "projection_kind": projection_kind_metadata(entry).unwrap_or("pattern"),
+        "projection_key": entry.metadata.get("projection_key").cloned().unwrap_or(Value::Null),
+        "authority": entry.metadata.get("authority").cloned().unwrap_or(Value::Null),
+        "counters": entry.metadata.get("counters").cloned().unwrap_or_else(|| json!({})),
+        "source_event_id": entry.metadata.get("source_event_id").cloned().unwrap_or(Value::Null),
+        "projected_event_ids": entry.metadata.get("projected_event_ids").cloned().unwrap_or_else(|| json!([])),
+    })
+}
+
+pub(crate) fn list_active_patterns(
+    server: &MemoryServer,
+    project: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<MemoryEntry>, String> {
+    let target = ContinuityEventTarget::from_default_write(server, project);
+    let limit = query_limit(limit);
+    let scan_limit = limit.saturating_mul(4).max(50).min(500);
+    let mut patterns = list_projection_memories(server, &target, "/user/patterns", scan_limit)?
+        .into_iter()
+        .filter(is_active_pattern_projection)
+        .filter(|entry| pattern_matches_query(entry, query))
+        .collect::<Vec<_>>();
+    patterns.truncate(limit);
+    Ok(patterns)
+}
+
 fn projection_filters(values: &[String]) -> Result<Vec<ProjectionKind>, String> {
     let mut filters = Vec::new();
     for value in values {
@@ -392,7 +464,7 @@ fn slug_segment(value: &str) -> String {
     }
 }
 
-fn nested_payload<'a>(event: &'a TachiEventRecord) -> &'a Value {
+fn nested_payload(event: &TachiEventRecord) -> &Value {
     event.payload.get("candidate").unwrap_or(&event.payload)
 }
 
@@ -992,6 +1064,11 @@ pub(crate) fn build_continuity_context(
             })
         })
         .collect::<Vec<_>>();
+    let patterns = memories
+        .iter()
+        .filter(|entry| is_active_pattern_projection(entry))
+        .map(pattern_context_json)
+        .collect::<Vec<_>>();
     let affect = memories
         .iter()
         .filter(|entry| {
@@ -1020,6 +1097,7 @@ pub(crate) fn build_continuity_context(
         "event_count": events.len(),
         "memories": memories,
         "events": events,
+        "patterns": patterns,
         "lorebook": lorebook,
         "affect": affect,
         "metrics": metrics,
@@ -1038,7 +1116,7 @@ fn payload_string<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-fn review_target<'a>(review: &'a TachiEventRecord) -> Option<&'a str> {
+fn review_target(review: &TachiEventRecord) -> Option<&str> {
     payload_string(
         &review.payload,
         &["target_event_id", "event_id", "label_event_id"],
@@ -1299,6 +1377,112 @@ pub(crate) fn emit_session_captured_event(
 
     match write_event(server, target, &event) {
         Ok(()) => json!({"status": "saved", "event_id": event.id, "event_type": event.event_type}),
+        Err(error) => json!({"status": "failed", "error": error, "event_type": event.event_type}),
+    }
+}
+
+fn infer_saved_memory_projection_hints(entry: &MemoryEntry) -> Vec<ProjectionKind> {
+    let path = entry.path.trim().to_ascii_lowercase();
+    if path.starts_with("/user/patterns/bonding") {
+        return vec![ProjectionKind::Bonding];
+    }
+    if path.starts_with("/user/patterns") {
+        return vec![ProjectionKind::Pattern];
+    }
+    if path.starts_with("/user/affect") {
+        return vec![ProjectionKind::Affect];
+    }
+    if path.starts_with("/lorebook") {
+        return vec![ProjectionKind::WorldBook];
+    }
+    if path.starts_with("/timeline") {
+        return vec![ProjectionKind::Timeline];
+    }
+    if path.starts_with("/outcomes") {
+        return vec![ProjectionKind::Outcome];
+    }
+    if path.starts_with("/project-cycle") {
+        return vec![ProjectionKind::ProjectCycle];
+    }
+    if path.starts_with("/domain-profile") {
+        return vec![ProjectionKind::DomainProfile];
+    }
+    if path.starts_with("/evidence-gates") {
+        return vec![ProjectionKind::EvidenceGate];
+    }
+
+    match entry.category.trim().to_ascii_lowercase().as_str() {
+        "preference" => vec![ProjectionKind::Pattern],
+        "decision" => vec![ProjectionKind::Outcome],
+        "experience" => vec![ProjectionKind::Timeline],
+        "entity" => vec![ProjectionKind::DomainProfile],
+        _ => Vec::new(),
+    }
+}
+
+pub(crate) fn emit_memory_saved_event(
+    server: &MemoryServer,
+    entry: &MemoryEntry,
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Value {
+    let target = if let Some(project) = named_project
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        ContinuityEventTarget::new(DbScope::Project, Some(project.to_string()), None)
+    } else {
+        ContinuityEventTarget::new(target_db, None, None)
+    };
+    let projections = infer_saved_memory_projection_hints(entry);
+    let event = TachiEventRecord {
+        id: stable_event_payload_id(&[
+            "memory.saved",
+            entry.id.as_str(),
+            entry.path.as_str(),
+            entry.timestamp.as_str(),
+        ]),
+        source_repo: "tachi".to_string(),
+        adapter: "save_memory".to_string(),
+        project: target.project_label(named_project),
+        domain: entry
+            .domain
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| entry.category.clone()),
+        session_id: entry.id.clone(),
+        actor: "tachi_memory".to_string(),
+        event_type: "memory.saved".to_string(),
+        authority: AuthorityLevel::RawFact,
+        effects: vec![EffectScope::MemoryWrite],
+        projection_hints: projections,
+        payload: json!({
+            "memory_id": entry.id,
+            "path": entry.path,
+            "summary": entry.summary,
+            "text": entry.text,
+            "category": entry.category,
+            "topic": entry.topic,
+            "keywords": entry.keywords,
+            "entities": entry.entities,
+            "scope": entry.scope,
+            "tier": entry.tier,
+            "metadata": entry.metadata,
+        }),
+        provenance: json!({
+            "source": "save_memory",
+            "note": "raw memory save marker; projection hints are path/category-derived and candidate hits are not implied",
+        }),
+        created_at: now_rfc3339(),
+    };
+
+    match write_event(server, &target, &event) {
+        Ok(()) => json!({
+            "status": "saved",
+            "event_id": event.id,
+            "event_type": event.event_type,
+            "projection_hints": event.projection_hints.iter().map(|projection| projection.as_str()).collect::<Vec<_>>(),
+        }),
         Err(error) => json!({"status": "failed", "error": error, "event_type": event.event_type}),
     }
 }

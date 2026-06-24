@@ -48,6 +48,7 @@ fn tachi_skill_action_schema_declares_bundle_and_loadout() {
     assert!(values.contains(&json!("discover")));
     assert!(values.contains(&json!("run")));
     assert!(values.contains(&json!("bundle")));
+    assert!(values.contains(&json!("from_pattern")));
     assert!(values.contains(&json!("loadout")));
 }
 

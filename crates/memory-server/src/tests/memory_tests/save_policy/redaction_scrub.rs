@@ -28,6 +28,7 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");
@@ -79,6 +80,7 @@ async fn save_memory_scrubs_think_tags_from_text_and_summary() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");

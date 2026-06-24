@@ -25,11 +25,58 @@ fn is_wiki_row(row: &Value) -> bool {
             .is_some_and(|domain| domain.eq_ignore_ascii_case("wiki"))
 }
 
+fn metadata_projection_kind(row: &Value) -> Option<&str> {
+    row.get("metadata")
+        .and_then(|metadata| metadata.get("projection_kind"))
+        .and_then(Value::as_str)
+}
+
+fn is_continuity_projection_row(row: &Value) -> bool {
+    if metadata_projection_kind(row).is_some() {
+        return true;
+    }
+
+    row.get("path").and_then(Value::as_str).is_some_and(|path| {
+        path == "/lorebook"
+            || path.starts_with("/lorebook/")
+            || path == "/user/patterns"
+            || path.starts_with("/user/patterns/")
+            || path == "/user/affect"
+            || path.starts_with("/user/affect/")
+            || path == "/timeline"
+            || path.starts_with("/timeline/")
+            || path == "/outcomes"
+            || path.starts_with("/outcomes/")
+            || path == "/project-cycle"
+            || path.starts_with("/project-cycle/")
+            || path == "/domain-profile"
+            || path.starts_with("/domain-profile/")
+            || path == "/evidence-gates"
+            || path.starts_with("/evidence-gates/")
+    })
+}
+
+fn is_pattern_row(row: &Value) -> bool {
+    matches!(
+        metadata_projection_kind(row),
+        Some("pattern") | Some("bonding")
+    ) || row
+        .get("path")
+        .and_then(Value::as_str)
+        .is_some_and(|path| path == "/user/patterns" || path.starts_with("/user/patterns/"))
+}
+
 fn parse_memory_rows(raw: String, top_k: usize) -> Value {
     let Ok(mut rows) = serde_json::from_str::<Vec<Value>>(&raw) else {
         return Value::Array(vec![]);
     };
-    rows.retain(|row| !is_wiki_row(row));
+    rows.retain(|row| !is_wiki_row(row) && !is_continuity_projection_row(row));
+    rows.truncate(top_k);
+    Value::Array(rows)
+}
+
+fn parse_pattern_rows(mut rows: Vec<Value>, top_k: usize) -> Value {
+    rows.retain(is_pattern_row);
     rows.truncate(top_k);
     Value::Array(rows)
 }
@@ -63,7 +110,7 @@ pub(crate) async fn collect_tachi_search_sections(
     let top_k = crate::clamp_facade_top_k(params.top_k);
     let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
-        "wiki" | "memory" | "all" | "sft" => scope.as_str(),
+        "wiki" | "memory" | "patterns" | "all" | "sft" => scope.as_str(),
         _ => "all",
     };
     let scope_remapped = effective_scope != scope.as_str();
@@ -99,6 +146,40 @@ pub(crate) async fn collect_tachi_search_sections(
         match handle_search_memory_with_access(server, mem_params, false, true).await {
             Ok(raw) => sections.push(("Memory".to_string(), parse_memory_rows(raw, top_k))),
             Err(e) => sections.push(("Memory".to_string(), Value::String(format!("Error: {e}")))),
+        }
+    }
+
+    if effective_scope == "patterns" {
+        let pattern_params = SearchMemoryParams {
+            query: params.query.clone(),
+            query_vec: None,
+            top_k: top_k.saturating_mul(3).max(top_k),
+            path_prefix: Some(
+                params
+                    .path_prefix
+                    .clone()
+                    .unwrap_or_else(|| "/user/patterns".to_string()),
+            ),
+            include_training: params.include_training,
+            include_archived: params.include_archived,
+            candidates_per_channel: top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: params.context_symbols.clone(),
+            agent_role: None,
+            project: params.project.clone(),
+            domain: params.domain.clone(),
+            file_context: params.file_context.clone(),
+            error_context: params.error_context.clone(),
+            enable_rerank: params.enable_rerank,
+            as_of: params.as_of.clone(),
+            include_metadata: false,
+        };
+        match search_memory_rows_with_access(server, pattern_params, false, true).await {
+            Ok(rows) => sections.push(("Patterns".to_string(), parse_pattern_rows(rows, top_k))),
+            Err(e) => sections.push(("Patterns".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
 

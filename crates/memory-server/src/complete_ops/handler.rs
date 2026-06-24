@@ -289,6 +289,7 @@ pub(crate) async fn handle_tachi_complete(
         valid_from: None,
         valid_until: None,
         metadata: Some(serde_json::Value::Object(metadata_map)),
+        emit_continuity: false,
     };
 
     let save_result = handle_save_memory(server, mem_params).await?;

@@ -82,7 +82,7 @@ fn tachi_skill_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
     string_enum_schema(
-        &["discover", "run", "bundle", "loadout"],
+        &["discover", "run", "bundle", "loadout", "from_pattern"],
         "Required Tachi skill facade action.",
         generator,
     )
@@ -371,6 +371,10 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
 
+    /// Also append a typed continuity ledger event for this memory save.
+    #[serde(default)]
+    pub emit_continuity: bool,
+
     /// Source files this memory references (stored as `metadata.files`). Surfaced
     /// inline on search results so agents can jump to the referenced file without
     /// a follow-up `get_memory`. Merged with paths auto-parsed from `spec:` pointers.
@@ -525,6 +529,11 @@ pub struct TachiMemoryParams {
         description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
     )]
     pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=save] Also append a typed continuity ledger event for this memory save."
+    )]
+    pub emit_continuity: bool,
     #[serde(default)]
     #[schemars(
         description = "[action=save] Referenced source files, e.g. docs/SPEC.md, src/lib.rs."
@@ -1193,6 +1202,18 @@ pub struct TachiWikiParams {
     /// External references (URLs, absolute paths, GitHub shorthands). Validated on write.
     #[serde(default)]
     pub references: Vec<String>,
+
+    /// Recall projected continuity patterns and persist references in wiki metadata.
+    #[serde(default)]
+    pub include_patterns: bool,
+
+    /// Optional pattern search/filter text. Defaults to title + summary when include_patterns=true.
+    #[serde(default)]
+    pub pattern_query: Option<String>,
+
+    /// Maximum pattern references to attach.
+    #[serde(default)]
+    pub pattern_top_k: Option<usize>,
 }
 
 // ─── Facade: workflow closure (Issue → Doc → Memory) ─────────────────────────
@@ -1259,7 +1280,7 @@ pub struct TachiWorkflowParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSkillParams {
-    /// Action: "discover", "run", "bundle", or "loadout"
+    /// Action: "discover", "run", "bundle", "loadout", or "from_pattern"
     #[schemars(schema_with = "tachi_skill_action_schema")]
     pub action: String,
     #[serde(default)]

@@ -394,6 +394,9 @@ pub(crate) async fn handle_workflow(
                     metadata: Some(metadata),
                     force: params.force,
                     references,
+                    include_patterns: false,
+                    pattern_query: None,
+                    pattern_top_k: None,
                 },
             )
             .await?;

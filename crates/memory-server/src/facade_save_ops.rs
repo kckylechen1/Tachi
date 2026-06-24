@@ -88,6 +88,9 @@ pub(crate) async fn handle_tachi_save(
                 metadata: params.metadata.clone(),
                 force: params.force,
                 references: params.references.clone(),
+                include_patterns: false,
+                pattern_query: None,
+                pattern_top_k: None,
             };
             handle_tachi_wiki_write(server, wiki_params).await
         }
@@ -182,6 +185,7 @@ pub(crate) async fn handle_tachi_save(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 metadata,
+                emit_continuity: params.emit_continuity,
             };
             handle_save_memory(server, mem_params).await
         }

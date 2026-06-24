@@ -95,6 +95,9 @@ pub(super) async fn handle_tachi_wiki_facade(
                     metadata: params.metadata.clone(),
                     force: params.force,
                     references: params.references.clone(),
+                    include_patterns: params.include_patterns,
+                    pattern_query: params.pattern_query.clone(),
+                    pattern_top_k: params.pattern_top_k,
                 };
                 handle_tachi_wiki_write(server, wiki_params).await?
             };

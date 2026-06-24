@@ -420,6 +420,7 @@ async fn save_wiki_draft(
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
             files: Vec::new(),
         }))
         .await;

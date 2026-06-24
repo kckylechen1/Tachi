@@ -40,6 +40,7 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");

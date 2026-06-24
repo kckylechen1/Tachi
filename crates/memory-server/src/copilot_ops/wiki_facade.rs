@@ -48,6 +48,11 @@ pub(crate) async fn handle_tachi_wiki_write(
     // Audit B11: this metadata flag is the explicit opt-in required by
     // path_router::validate_path_for_db.
     let references = params.references.clone();
+    let pattern_refs = if params.include_patterns {
+        wiki_pattern_refs(server, &params, requested_project.as_deref())?
+    } else {
+        Vec::new()
+    };
     let layer_metadata =
         wiki_layer_metadata(&path, &params.scope, target_project.as_deref(), &references);
     let mut wiki_metadata = params.metadata.clone().unwrap_or_else(|| json!({}));
@@ -60,6 +65,9 @@ pub(crate) async fn handle_tachi_wiki_write(
         obj.insert("user_force".to_string(), json!(params.force));
         obj.insert("allow_cross_project".to_string(), json!(true));
         obj.insert("source_refs".to_string(), json!(references));
+        if params.include_patterns {
+            obj.insert("pattern_refs".to_string(), json!(pattern_refs));
+        }
     }
     if let (Some(target), Some(layer)) = (wiki_metadata.as_object_mut(), layer_metadata.as_object())
     {
@@ -108,6 +116,7 @@ pub(crate) async fn handle_tachi_wiki_write(
             valid_from: None,
             valid_until: None,
             metadata: Some(wiki_metadata),
+            emit_continuity: false,
         },
     )
     .await?;
@@ -172,6 +181,45 @@ pub(crate) async fn handle_tachi_wiki_write(
         ),
     );
     serde_json::to_string(&response).map_err(|e| format!("serialize wiki_write: {e}"))
+}
+
+fn wiki_pattern_refs(
+    server: &MemoryServer,
+    params: &WikiWriteParams,
+    project: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let query = params
+        .pattern_query
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{} {}",
+                params.title,
+                params.summary.as_deref().unwrap_or_default()
+            )
+        });
+    let limit = params.pattern_top_k.unwrap_or(5).clamp(1, 20);
+    let entries =
+        crate::continuity_ops::list_active_patterns(server, project, Some(&query), limit)?;
+    Ok(entries
+        .into_iter()
+        .map(pattern_ref_json)
+        .collect::<Vec<_>>())
+}
+
+fn pattern_ref_json(entry: MemoryEntry) -> Value {
+    json!({
+        "id": entry.id,
+        "path": entry.path,
+        "summary": entry.summary,
+        "projection_kind": entry.metadata.get("projection_kind").cloned().unwrap_or(Value::Null),
+        "projection_key": entry.metadata.get("projection_key").cloned().unwrap_or(Value::Null),
+        "source_event_id": entry.metadata.get("source_event_id").cloned().unwrap_or(Value::Null),
+        "counters": entry.metadata.get("counters").cloned().unwrap_or_else(|| json!({})),
+    })
 }
 
 pub(super) fn wiki_slug(input: &str) -> String {

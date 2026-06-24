@@ -27,6 +27,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
             files: Vec::new(),
         }))
         .await
@@ -84,6 +85,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 valid_from: None,
                 valid_until: None,
                 metadata: None,
+                emit_continuity: false,
                 files: Vec::new(),
             }))
             .await
@@ -137,6 +139,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             project: None,
             domain: None,
             metadata: None,
+            emit_continuity: false,
             compact: false,
             files: Vec::new(),
         }))
@@ -222,6 +225,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
             files: Vec::new(),
         }))
         .await

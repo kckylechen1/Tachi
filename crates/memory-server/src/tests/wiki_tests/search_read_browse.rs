@@ -116,6 +116,9 @@ async fn tachi_wiki_search_defaults_to_named_wiki_project() {
             domain: None,
             metadata: None,
             force: false,
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
         }))
         .await
         .expect("tachi_wiki search should succeed");
@@ -161,6 +164,9 @@ async fn tachi_wiki_search_supports_explicit_markdown_format() {
             domain: None,
             metadata: None,
             force: false,
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
         }))
         .await
         .expect("tachi_wiki markdown search should succeed");
@@ -204,6 +210,9 @@ async fn tachi_wiki_read_and_browse_default_to_json() {
             domain: None,
             metadata: None,
             force: false,
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
         }))
         .await
         .expect("tachi_wiki read should succeed");
@@ -236,6 +245,9 @@ async fn tachi_wiki_read_and_browse_default_to_json() {
             domain: None,
             metadata: None,
             force: false,
+            include_patterns: false,
+            pattern_query: None,
+            pattern_top_k: None,
         }))
         .await
         .expect("tachi_wiki browse should succeed");

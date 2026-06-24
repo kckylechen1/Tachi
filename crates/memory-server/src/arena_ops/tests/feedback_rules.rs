@@ -42,6 +42,7 @@ async fn save_arena_feedback_rule(server: &MemoryServer) -> String {
                     "prompt_patch": "Search both identifier and call forms before making dead-code claims.",
                     "evidence_contract": ["grep_commands", "paths_searched", "uncertainty_notes"]
                 })),
+                emit_continuity: false,
             },
         )
         .await

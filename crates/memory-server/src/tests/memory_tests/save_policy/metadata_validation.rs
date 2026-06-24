@@ -29,6 +29,7 @@ async fn save_memory_allows_curated_tier_metadata() {
             valid_from: None,
             valid_until: None,
             metadata: Some(json!({"tier": "consolidated"})),
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");
@@ -76,6 +77,7 @@ async fn save_memory_clamps_importance_into_valid_range() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("save_memory should succeed");
@@ -124,6 +126,7 @@ async fn save_memory_noise_rejection_returns_structured_json() {
             valid_from: None,
             valid_until: None,
             metadata: None,
+            emit_continuity: false,
         }))
         .await
         .expect("noise rejection should be a normal JSON response");

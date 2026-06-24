@@ -235,6 +235,12 @@ pub struct SaveMemoryParams {
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+
+    /// Also append a typed continuity ledger event for this save.
+    /// Default is false so ordinary memory writes do not unexpectedly become
+    /// pattern/outcome projections.
+    #[serde(default)]
+    pub emit_continuity: bool,
 }
 
 // ─── Remember shortcut ──────────────────────────────────────────────────────
@@ -1085,6 +1091,18 @@ pub struct WikiWriteParams {
     /// External references: URLs, absolute paths, or GitHub shorthands (#N, repo#N, owner/repo#N).
     #[serde(default)]
     pub references: Vec<String>,
+
+    /// Recall projected continuity patterns and persist references in wiki metadata.
+    #[serde(default)]
+    pub include_patterns: bool,
+
+    /// Optional pattern search/filter text. Defaults to title + summary when include_patterns=true.
+    #[serde(default)]
+    pub pattern_query: Option<String>,
+
+    /// Maximum pattern references to attach.
+    #[serde(default)]
+    pub pattern_top_k: Option<usize>,
 }
 
 // ─── Wiki Search / Browse ───────────────────────────────────────────────────

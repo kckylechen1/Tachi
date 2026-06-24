@@ -43,8 +43,8 @@ use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
     handle_hub_register, handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled,
-    handle_hub_stats, handle_run_skill, handle_skill_evolve, handle_tachi_audit_log,
-    handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
+    handle_hub_stats, handle_run_skill, handle_skill_evolve, handle_skill_from_pattern,
+    handle_tachi_audit_log, handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
     handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
@@ -1411,6 +1411,7 @@ impl MemoryServer {
             project: named,
             domain: None,
             metadata: None,
+            emit_continuity: false,
             files: Vec::new(),
             compact: true,
         };
@@ -1629,10 +1630,10 @@ impl MemoryServer {
         handle_tachi_wiki_facade(self, params).await
     }
 
-    // ─── Facade: skill (discover / run / bundle / loadout) ──────────────────
+    // ─── Facade: skill (discover / run / bundle / loadout / from_pattern) ───
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='bundle': prepare a host-aware capability bundle for a task query; action='loadout': resolve a DispatchProfile's sparse skill loadout plus capability bundle; action='run': execute a named skill by ID. Always discover/bundle before writing custom multi-step logic."
+        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='bundle': prepare a host-aware capability bundle for a task query; action='loadout': resolve a DispatchProfile's sparse skill loadout plus capability bundle; action='from_pattern': create a disabled/pending skill candidate from a projected continuity pattern; action='run': execute a named skill by ID. Always discover/bundle before writing custom multi-step logic."
     )]
     pub(crate) async fn tachi_skill(
         &self,

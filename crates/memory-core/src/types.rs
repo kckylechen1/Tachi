@@ -454,8 +454,7 @@ impl SessionOutcomeKind {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase()
-            .replace('-', "_")
-            .replace(' ', "_");
+            .replace(['-', ' '], "_");
         match normalized.as_str() {
             "user_correct" | "user_was_correct" | "ai_revised" | "assistant_revised" => {
                 Self::UserCorrect
@@ -518,8 +517,7 @@ impl OutcomeEvidenceBasis {
             .unwrap_or("")
             .trim()
             .to_ascii_lowercase()
-            .replace('-', "_")
-            .replace(' ', "_");
+            .replace(['-', ' '], "_");
         match normalized.as_str() {
             "external_evidence" | "externally_anchored" | "verified" => Self::ExternalEvidence,
             "interlocutor_argument" | "argument" | "conversation_argument" => {

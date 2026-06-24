@@ -43,6 +43,7 @@ pub(crate) async fn handle_remember(
         valid_from: params.valid_from,
         valid_until: params.valid_until,
         metadata: Some(json!({ "shortcut": "remember" })),
+        emit_continuity: false,
     };
 
     handle_save_memory(server, save_params).await

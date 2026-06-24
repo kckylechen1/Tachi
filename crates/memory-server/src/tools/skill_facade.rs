@@ -151,8 +151,9 @@ pub(super) async fn handle_tachi_skill_facade(
             }))
             .map_err(|e| format!("serialize skill loadout: {e}"))
         }
+        "from_pattern" => handle_skill_from_pattern(server, &params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'discover', 'bundle', 'loadout', or 'run'.",
+            "Invalid action '{}'. Use 'discover', 'bundle', 'from_pattern', 'loadout', or 'run'.",
             params.action
         )),
     }

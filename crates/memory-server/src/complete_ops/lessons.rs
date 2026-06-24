@@ -176,6 +176,7 @@ pub(super) async fn run_lesson_post_complete_hook(
             "last_seen": Utc::now().to_rfc3339(),
             "skills_used": safe_skills_used,
         })),
+        emit_continuity: false,
     };
     match handle_save_memory(server, lesson_params).await {
         Ok(_) => json!("lesson_saved"),

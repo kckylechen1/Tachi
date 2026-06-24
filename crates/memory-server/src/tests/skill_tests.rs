@@ -19,5 +19,6 @@ mod agent_evolution;
 mod builtin_ingest;
 mod bundle;
 mod discover;
+mod from_pattern;
 mod loadout;
 mod run_recommend;
