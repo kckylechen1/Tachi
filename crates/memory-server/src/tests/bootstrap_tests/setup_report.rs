@@ -19,7 +19,7 @@ fn setup_report_detects_readiness_from_local_state() {
     )
     .expect("write tachi skill");
     std::fs::create_dir_all(home.join(".claude")).expect("create claude dir");
-    std::fs::write(home.join(".claude").join("mcp.json"), "{}").expect("write claude mcp");
+    std::fs::write(home.join(".claude").join(".mcp.json"), "{}").expect("write claude mcp");
     std::fs::create_dir_all(global_db.parent().unwrap()).expect("create global db dir");
 
     let env = HashMap::from([

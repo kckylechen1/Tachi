@@ -61,13 +61,14 @@ export type BridgeConfig = {
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginDataDir = path.resolve(moduleDir, "data");
 const workspaceRoot = process.env.OPENCLAW_WORKSPACE || "";
+const configuredProjectDbPath = process.env.TACHI_PROJECT_DB_PATH || process.env.MEMORY_DB_PATH;
 
 export const defaultConfig: BridgeConfig = {
   globalDbPath: process.env.TACHI_GLOBAL_DB_PATH
     ? resolveUserPath(process.env.TACHI_GLOBAL_DB_PATH)
     : defaultGlobalDbPath,
-  dbPath: process.env.MEMORY_DB_PATH
-    ? resolveUserPath(process.env.MEMORY_DB_PATH)
+  dbPath: configuredProjectDbPath
+    ? resolveUserPath(configuredProjectDbPath)
     : defaultDbPath,
   shadowStorePath: path.resolve(
     pluginDataDir,

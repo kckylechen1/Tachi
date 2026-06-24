@@ -38,6 +38,46 @@ fn canonical_or_original(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn agent_config_paths(home: &Path) -> Vec<(&'static str, PathBuf)> {
+    vec![
+        ("amp", home.join(".config/amp/settings.json")),
+        (
+            "amp-macos",
+            home.join("Library/Application Support/Amp/settings.json"),
+        ),
+        ("claude-code", home.join(".claude").join(".mcp.json")),
+        (
+            "claude-desktop",
+            home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        ),
+        ("cursor", home.join(".cursor").join("mcp.json")),
+        ("gemini", home.join(".gemini").join("mcp.json")),
+        (
+            "gemini-settings",
+            home.join(".gemini").join("settings.json"),
+        ),
+        (
+            "gemini-config",
+            home.join(".gemini").join("config").join("mcp_config.json"),
+        ),
+        (
+            "antigravity",
+            home.join(".gemini")
+                .join("antigravity")
+                .join("mcp_config.json"),
+        ),
+        (
+            "antigravity-ide",
+            home.join(".gemini")
+                .join("antigravity-ide")
+                .join("mcp_config.json"),
+        ),
+        ("codex", home.join(".codex").join("config.toml")),
+        ("opencode", home.join(".config/opencode/opencode.json")),
+        ("openclaw", home.join(".openclaw").join("openclaw.json")),
+    ]
+}
+
 fn build_cli_binary_item() -> SetupItem {
     let current_exe = std::env::current_exe().ok();
     let path_tachi = find_path_binary("tachi");
@@ -171,17 +211,7 @@ pub(crate) fn build_setup_report(
         })
         .collect::<Vec<_>>();
 
-    let agent_configs = [
-        (
-            "amp",
-            home.join("Library/Application Support/Amp/settings.json"),
-        ),
-        ("claude", home.join(".claude").join("mcp.json")),
-        ("cursor", home.join(".cursor").join("mcp.json")),
-        ("gemini", home.join(".gemini").join("mcp.json")),
-        ("codex", home.join(".codex")),
-        ("openclaw", home.join(".openclaw").join("openclaw.json")),
-    ];
+    let agent_configs = agent_config_paths(home);
     let detected_agents = agent_configs
         .iter()
         .filter(|(_, path)| path.exists())

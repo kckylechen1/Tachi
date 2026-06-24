@@ -2,6 +2,45 @@ use serde_json::json;
 
 use crate::status_ops::DbStatus;
 
+fn agent_mcp_config_paths(home: &std::path::Path) -> Vec<(&'static str, std::path::PathBuf)> {
+    vec![
+        ("claude-code", home.join(".claude").join(".mcp.json")),
+        (
+            "claude-desktop",
+            home.join("Library/Application Support/Claude/claude_desktop_config.json"),
+        ),
+        ("cursor", home.join(".cursor").join("mcp.json")),
+        ("gemini", home.join(".gemini").join("mcp.json")),
+        (
+            "gemini-settings",
+            home.join(".gemini").join("settings.json"),
+        ),
+        (
+            "gemini-config",
+            home.join(".gemini").join("config").join("mcp_config.json"),
+        ),
+        (
+            "antigravity",
+            home.join(".gemini")
+                .join("antigravity")
+                .join("mcp_config.json"),
+        ),
+        (
+            "antigravity-ide",
+            home.join(".gemini")
+                .join("antigravity-ide")
+                .join("mcp_config.json"),
+        ),
+        ("codex", home.join(".codex").join("config.toml")),
+        ("opencode", home.join(".config/opencode/opencode.json")),
+        ("amp", home.join(".config/amp/settings.json")),
+        (
+            "amp-macos",
+            home.join("Library/Application Support/Amp/settings.json"),
+        ),
+    ]
+}
+
 pub(crate) fn agent_readiness_json(
     app_home: &std::path::Path,
     snapshot: &crate::status_ops::StatusSnapshot,
@@ -26,15 +65,7 @@ pub(crate) fn agent_readiness_json(
             })
         })
         .collect();
-    let mcp_configs = vec![
-        ("claude", home.join(".claude").join("mcp.json")),
-        ("cursor", home.join(".cursor").join("mcp.json")),
-        ("gemini", home.join(".gemini").join("mcp.json")),
-        (
-            "amp",
-            home.join("Library/Application Support/Amp/settings.json"),
-        ),
-    ];
+    let mcp_configs = agent_mcp_config_paths(&home);
     let mcp: Vec<_> = mcp_configs
         .into_iter()
         .map(|(agent, path)| {
@@ -44,6 +75,9 @@ pub(crate) fn agent_readiness_json(
                 "path": path.display().to_string(),
                 "exists": path.exists(),
                 "mentions_tachi": raw.to_ascii_lowercase().contains("tachi") || raw.contains("memory-server"),
+                "uses_no_project_db": raw.contains("--no-project-db"),
+                "pins_memory_db_path": raw.contains("MEMORY_DB_PATH"),
+                "uses_local_http_daemon": raw.contains("127.0.0.1:6919/mcp"),
             })
         })
         .collect();

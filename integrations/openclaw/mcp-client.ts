@@ -404,6 +404,8 @@ export class MemoryMcpClient {
     const command = this.resolveServerCommand();
     const env = {
       ...process.env,
+      TACHI_GLOBAL_DB_PATH: this.globalDbPath,
+      // Rust still treats MEMORY_DB_PATH as the legacy global DB env alias.
       MEMORY_DB_PATH: this.globalDbPath,
       TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
       TACHI_DERIVATIVE_IDENTITY: process.env.TACHI_DERIVATIVE_IDENTITY || "openclaw-tachi",

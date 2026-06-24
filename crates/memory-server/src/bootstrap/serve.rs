@@ -35,6 +35,14 @@ fn should_load_project_local_env(no_project_db: bool) -> bool {
     !no_project_db
 }
 
+fn should_refresh_plan_c_symlink(
+    project_db_path: Option<&Path>,
+    git_root: Option<&Path>,
+    explicit_project_db: bool,
+) -> bool {
+    !explicit_project_db && project_db_path.is_some() && git_root.is_some()
+}
+
 fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Error> {
     let runtime = app_home.join("runtime");
     std::fs::create_dir_all(&runtime)?;
@@ -333,8 +341,14 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     };
 
     // Plan C: link <tachi_home>/projects/<sanitized-dir>/memory.db -> repo-local DB.
-    if let Some(ref db_path) = project_db_path {
-        if let Some(root) = git_root.as_ref() {
+    // Explicit project DBs are caller-owned (for example embedded agent workspaces)
+    // and must not rewrite the repo's global named-project alias.
+    if should_refresh_plan_c_symlink(
+        project_db_path.as_deref(),
+        git_root.as_deref(),
+        explicit_project_db,
+    ) {
+        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), git_root.as_ref()) {
             if let crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) =
                 crate::path_utils::ensure_plan_c_symlink(db_path, root)
             {
@@ -551,6 +565,29 @@ mod tests {
     fn project_local_env_loading_is_disabled_for_no_project_db() {
         assert!(!should_load_project_local_env(true));
         assert!(should_load_project_local_env(false));
+    }
+
+    #[test]
+    fn plan_c_symlink_refresh_skips_explicit_project_db() {
+        let project_db = std::path::Path::new("/tmp/agent-workspace/memory.db");
+        let git_root = std::path::Path::new("/tmp/repo");
+
+        assert!(!should_refresh_plan_c_symlink(
+            Some(project_db),
+            Some(git_root),
+            true
+        ));
+        assert!(should_refresh_plan_c_symlink(
+            Some(project_db),
+            Some(git_root),
+            false
+        ));
+        assert!(!should_refresh_plan_c_symlink(None, Some(git_root), false));
+        assert!(!should_refresh_plan_c_symlink(
+            Some(project_db),
+            None,
+            false
+        ));
     }
 
     #[cfg(unix)]

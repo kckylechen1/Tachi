@@ -54,16 +54,53 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
 | Cursor | `~/.cursor/mcp.json` |
 | Gemini CLI | `~/.gemini/mcp.json` |
 | Antigravity | `~/.gemini/antigravity/mcp_config.json` |
+| OpenCode | `~/.config/opencode/opencode.json` |
+| AMP | `~/.config/amp/settings.json` |
 
 ### Minimal MCP Entry (JSON)
+
+Most hosts use an `mcpServers` map:
 
 ```json
 {
   "mcpServers": {
     "tachi": {
       "command": "tachi",
+      "args": ["serve"],
       "env": {
-        "VOYAGE_API_KEY": "<your-voyage-api-key>",
+        "TACHI_PROFILE": "standard"
+      }
+    }
+  }
+}
+```
+
+OpenCode uses a top-level `mcp` map:
+
+```json
+{
+  "mcp": {
+    "tachi": {
+      "enabled": true,
+      "type": "local",
+      "command": ["tachi", "serve"],
+      "environment": {
+        "TACHI_PROFILE": "standard"
+      }
+    }
+  }
+}
+```
+
+AMP uses `amp.mcpServers`:
+
+```json
+{
+  "amp.mcpServers": {
+    "tachi": {
+      "command": "tachi",
+      "args": ["serve"],
+      "env": {
         "TACHI_PROFILE": "standard"
       }
     }
@@ -78,8 +115,8 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
   "mcpServers": {
     "tachi": {
       "command": "tachi",
+      "args": ["serve"],
       "env": {
-        "VOYAGE_API_KEY": "<your-voyage-api-key>",
         "SILICONFLOW_API_KEY": "<your-siliconflow-key>",
         "SILICONFLOW_BASE_URL": "https://api.siliconflow.cn/v1/chat/completions",
         "SILICONFLOW_MODEL": "Qwen/Qwen3.5-27B",
@@ -90,7 +127,7 @@ Add Tachi to your agent's MCP configuration file. The exact file depends on your
 }
 ```
 
-> **Note**: The server also reads `.env` from the current project root at startup. You can place API keys there instead of in the MCP config. See `.env.example` in the repository for all available environment variables.
+> **Note**: Normal coding agents should use `args: ["serve"]` without `--no-project-db` or `MEMORY_DB_PATH`. The server reads repo-local `.env` from the current project root at startup, so you can place API keys there instead of in the MCP config. See `.env.example` in the repository for all available environment variables.
 
 ---
 
