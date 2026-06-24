@@ -20,6 +20,7 @@ fn cli_tool_allows_read_fallback(tool_name: &str) -> bool {
     matches!(
         tool_name,
         "search_memory"
+            | "list_memories"
             | "get_memory"
             | "tachi_search"
             | "wiki_search"
@@ -101,4 +102,30 @@ where
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cli_tool_allows_read_fallback;
+
+    #[test]
+    fn read_only_cli_wrappers_allow_daemon_fallback() {
+        for tool_name in [
+            "search_memory",
+            "list_memories",
+            "get_memory",
+            "tachi_search",
+            "wiki_search",
+            "tachi_wiki_search",
+            "vault_status",
+            "vault_list",
+        ] {
+            assert!(
+                cli_tool_allows_read_fallback(tool_name),
+                "{tool_name} should be safe to run in-process when daemon forwarding misses"
+            );
+        }
+        assert!(!cli_tool_allows_read_fallback("save_memory"));
+        assert!(!cli_tool_allows_read_fallback("tachi_wiki_write"));
+    }
 }
