@@ -1,7 +1,7 @@
 # Tachi Continuity Memory Architecture
 
-**Status:** architecture design  
-**Date:** 2026-06-23  
+**Status:** architecture design
+**Date:** 2026-06-23
 **Related docs:**
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md) — original design + cold review
 - [`../../wiki/agent/tachi/Tachi-图书馆架构设计.md`](../../wiki/agent/tachi/Tachi-图书馆架构设计.md) — Karpathy LLM Wiki mapping
@@ -31,8 +31,8 @@ Pattern memory stores the user's **cognitive and judgment structures**: how they
 
 It is a model of the user's thinking, not merely a catalog of world facts. A pattern such as `religious_leader_political_proxy` is valuable not because the world contains religious leaders, but because the user has learned to recognize a structural shape across multiple domains and can use it to predict and analyze new instances.
 
-Storage: `/user/patterns/*` in the memory DB.  
-Metadata counters: `seen / hit / miss / confidence / last_seen`.  
+Storage: `/user/patterns/*` in the memory DB.
+Metadata counters: `seen / hit / miss / confidence / last_seen`.
 Authority: usually `CollectOnly` until promoted.
 
 ### 2.2 Timeline memory — why a conclusion is trustworthy
@@ -41,7 +41,7 @@ Timeline memory stores the **credibility history** of a judgment or pattern. It 
 
 The timeline is an evolution chain: discovered → defended → revised → externally validated. Each transition is a causal edge with temporal validity. The depth of adversarial testing and external verification is itself evidence for the conclusion's reliability.
 
-Storage: causal graph edges + `TimelineEntry` projections.  
+Storage: causal graph edges + `TimelineEntry` projections.
 Surface: `open_threads` at next session start; `tachi_event action=context` returns evolution metadata.
 
 ### 2.3 Bonding layer — shared communication protocol
@@ -55,7 +55,7 @@ That said, **affect and warmth are legitimate carriers for bonding**. A warm del
 - **Warmth/affect** = one delivery carrier that can make bonding feel natural and trustworthy.
 - A cold-carrier agent with strong bonding can still be effective; a warm-carrier agent without bonding is only performing generic RLHF politeness.
 
-Storage: `/user/patterns/bonding/*` and `SharedLexicon` entries.  
+Storage: `/user/patterns/bonding/*` and `SharedLexicon` entries.
 Guardrails: `tone_and_reminder_only`; no execution, scoring, portfolio, or fact-mutation effects.
 
 ### 2.4 Affect — delivery tone only

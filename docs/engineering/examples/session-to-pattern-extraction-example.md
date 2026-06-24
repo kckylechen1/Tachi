@@ -1,8 +1,8 @@
 # Session Capture → Pattern Extraction: A Real Example
 
-**Session date:** 2026-06-23  
-**Participants:** user + Kimi Code CLI  
-**Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)  
+**Session date:** 2026-06-23
+**Participants:** user + Kimi Code CLI
+**Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)
 **Purpose:** demonstrate how a real design conversation maps into the continuity memory pipeline.
 
 ---
