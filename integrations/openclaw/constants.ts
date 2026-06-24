@@ -44,4 +44,8 @@ export const appHome = resolveUserPath(
 // Second pass: TACHI_HOME/config.env can override secrets (same as Rust server)
 loadEnvFile(path.join(appHome, "config.env"), true);
 
+export const defaultGlobalDbPath = path.resolve(appHome, "global", "memory.db");
+
+// OpenClaw's plugin-local DB remains the project/workspace store. Tachi's
+// process-wide global store lives at defaultGlobalDbPath.
 export const defaultDbPath = path.resolve(appHome, "memory.db");

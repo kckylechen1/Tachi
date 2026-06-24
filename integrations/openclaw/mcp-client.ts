@@ -354,7 +354,8 @@ export class MemoryMcpClient {
   private static readonly CLIENT_VERSION = "1.2.0";
 
   constructor(
-    private readonly dbPath: string,
+    private readonly globalDbPath: string,
+    private readonly projectDbPath: string,
     private readonly logger?: LoggerLike,
   ) {}
 
@@ -403,23 +404,24 @@ export class MemoryMcpClient {
     const command = this.resolveServerCommand();
     const env = {
       ...process.env,
-      MEMORY_DB_PATH: this.dbPath,
+      MEMORY_DB_PATH: this.globalDbPath,
       TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
       TACHI_DERIVATIVE_IDENTITY: process.env.TACHI_DERIVATIVE_IDENTITY || "openclaw-tachi",
       TACHI_EMBEDDED_MCP: process.env.TACHI_EMBEDDED_MCP || "1",
     } as Record<string, string>;
     const candidates: LaunchConfig[] = [
-      // First candidate: explicit global-db, no project db (clean isolation)
+      // First candidate: explicit global + OpenClaw agent/workspace project DB.
       {
         command,
-        args: ["--global-db", this.dbPath, "--no-project-db"],
+        args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
         env,
         cwd: os.tmpdir(),
       },
-      // Second candidate: plain launch — use actual CWD so git root detection works
+      // Second candidate: compatibility launch. Runtime self-check below
+      // rejects accidental cwd/project mismatches.
       {
         command,
-        args: [],
+        args: ["--project-db", this.projectDbPath],
         env,
         cwd: process.cwd(),
       },
@@ -428,7 +430,7 @@ export class MemoryMcpClient {
     if (command === "tachi") {
       candidates.push({
         command: "memory-server",
-        args: ["--global-db", this.dbPath, "--no-project-db"],
+        args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
         env,
         cwd: os.tmpdir(),
       });
@@ -489,7 +491,7 @@ export class MemoryMcpClient {
           try {
             const client = await this.connectWith(launch);
             if (i > 0) {
-              this.logWarn("connected via compatibility launch (without --global-db)");
+              this.logWarn("connected via compatibility launch");
             } else {
               this.logInfo(`connected to ${launch.command}`);
             }
@@ -559,11 +561,11 @@ export class MemoryMcpClient {
     const requestedProfile = info.runtime?.requested_profile;
     const identity = info.runtime?.derivative_identity;
     const errors: string[] = [];
-    if (!pathsEqualForRouting(globalPath, this.dbPath)) {
-      errors.push(`global DB mismatch: expected ${this.dbPath}, got ${globalPath || "<missing>"}`);
+    if (!pathsEqualForRouting(globalPath, this.globalDbPath)) {
+      errors.push(`global DB mismatch: expected ${this.globalDbPath}, got ${globalPath || "<missing>"}`);
     }
-    if (projectPath) {
-      errors.push(`project DB must be disabled for OpenClaw per-agent stores, got ${projectPath}`);
+    if (!pathsEqualForRouting(projectPath, this.projectDbPath)) {
+      errors.push(`project DB mismatch: expected ${this.projectDbPath}, got ${projectPath || "<missing>"}`);
     }
     if (requestedProfile !== "openclaw") {
       errors.push(`requested profile mismatch: expected openclaw, got ${requestedProfile || "<missing>"}`);
@@ -575,7 +577,7 @@ export class MemoryMcpClient {
       throw new Error(`Tachi runtime routing self-check failed: ${errors.join("; ")}; info=${runtimeInfoSummary(info)}`);
     }
     this.logInfo(
-      `runtime verified profile=${profile || "<missing>"} requested=${requestedProfile} identity=${identity} db=${normalizePathForCompare(this.dbPath)}`,
+      `runtime verified profile=${profile || "<missing>"} requested=${requestedProfile} identity=${identity} global=${normalizePathForCompare(this.globalDbPath)} project=${normalizePathForCompare(this.projectDbPath)}`,
     );
     return info;
   }

@@ -533,6 +533,7 @@ export const memoryHybridBridgePlugin = {
   register(api: OpenClawPluginApi) {
     const runtimeApi = api;
     const config = bridgeConfigSchema.parse(api.pluginConfig);
+    const configuredGlobalDbPath = resolveConfigPath(api, config.globalDbPath);
     const configuredDbPath = resolveConfigPath(api, config.dbPath);
     const pluginDataDir = path.dirname(configuredDbPath);
     const clientCache = new Map<string, Promise<MemoryMcpClient>>();
@@ -620,7 +621,7 @@ export const memoryHybridBridgePlugin = {
       const dbPath = resolveAgentDbPath(agentId);
       let initClient = clientCache.get(dbPath);
       if (!initClient) {
-        initClient = Promise.resolve(new MemoryMcpClient(dbPath, api.logger));
+        initClient = Promise.resolve(new MemoryMcpClient(configuredGlobalDbPath, dbPath, api.logger));
         clientCache.set(dbPath, initClient);
       }
       return initClient;

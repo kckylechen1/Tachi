@@ -191,9 +191,25 @@ This will:
 - Download and install the OpenClaw `tachi` plugin to `~/.openclaw/extensions/tachi`
 - Update `~/.openclaw/openclaw.json` with plugin allow-list and memory slot
 
-### No-project MCP serve isolation
+### MCP serve DB scope
 
-For host-spawned MCP processes that should use only the global Tachi runtime, launch:
+For repo-aware coding hosts (Codex, Claude Code, Cursor, Windsurf, etc.), use the
+normal `serve` entrypoint from the repository/workspace. Tachi will bind the
+current repo project DB plus the global DB:
+
+```bash
+tachi --profile codex serve
+```
+
+For embedded runtimes with their own workspace/agent memory store, pass that
+store as an explicit project DB while keeping Tachi's global DB separate:
+
+```bash
+tachi --global-db ~/.tachi/global/memory.db --project-db /path/to/openclaw/agent/memory.db --profile openclaw serve
+```
+
+For host-spawned MCP processes that intentionally need only the global Tachi
+runtime, launch:
 
 ```bash
 tachi --no-project-db --profile openclaw serve
@@ -206,7 +222,9 @@ In this mode Tachi treats `serve` as a global runtime entrypoint:
 - No project DB is opened or inferred from the launch directory.
 - Global config remains allowed through `~/.tachi/config.env`, `~/.sigil/config.env`, `~/.secrets/master.env`, explicit CLI flags, and inherited environment variables.
 
-This keeps OpenClaw, Claude Code, and other MCP clients from inheriting Desktop or repository paths simply because the host process was launched from that directory. Use an explicit `--project-db PATH` without `--no-project-db` when a host intentionally needs a project-scoped Tachi instance.
+Use `--no-project-db` only for deliberately global-only maintenance or
+diagnostic clients. Do not use it as the default coding-agent configuration:
+normal agents should see their current repo project DB plus global memory.
 
 ---
 
