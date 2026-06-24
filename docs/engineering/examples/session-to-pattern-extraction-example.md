@@ -83,6 +83,8 @@ This is the credibility history of the conclusions reached. Each node is a judgm
 
 ## 2. Core patterns extracted
 
+The per-pattern counters in this section are human-facing evidence notes for the example. Current projector counters are shown later: candidate projection starts with `seen=1`, `hit=0`, and only later hit/miss callback events move confidence.
+
 ### Pattern 1: `alignment_bridge`
 
 **Statement:** The memory system is a dynamic bridge between vendor alignment and user alignment, not a "remember more" cache.
@@ -226,40 +228,29 @@ skill:<name> (Hub)
 
 ### `session.captured` event
 
+Current implementation emits `session.captured` as a raw capture marker. It is timeline/project-cycle evidence, not an outcome label and not a pattern hit.
+
 ```json
 {
   "event_type": "session.captured",
   "session_id": "2026-06-23-tachi-continuity-design",
   "actor": "kimi-code-cli",
-  "authority": "CollectOnly",
-  "projection_hints": ["Outcome", "EvidenceGate"],
+  "authority": "RawFact",
+  "projection_hints": ["Timeline", "ProjectCycle"],
   "payload": {
-    "summary": "Design conversation about Tachi continuity memory: pattern, timeline, bonding, and crystallization into wiki/skill.",
-    "discoveries": [
-      "alignment_bridge between vendor and user alignment",
-      "bonding is protocol; warmth is carrier",
-      "labeler-first constraint for conversation domain",
-      "pattern memory is cognitive structure, not content memory",
-      "crystallization pipeline: session → pattern → wiki → skill"
-    ],
-    "decisions": [
-      "Write tachi-continuity-memory-architecture.md",
-      "Use DeepSeek V4 Pro for reasoning/distill; Flash/Qwen 27B for extract/summary",
-      "Integrate memory save, wiki write, and skill generation with pattern memory"
-    ],
-    "open_threads": [
-      "Implement tachi_search scope=patterns",
-      "Add patterns section to tachi_event action=context",
-      "Emit memory.saved continuity event",
-      "Build pattern → skill generator"
-    ]
+    "conversation_id": "2026-06-23-tachi-continuity-design",
+    "turn_id": "continuity-architecture",
+    "agent_id": "kimi-code-cli",
+    "path_prefix": "/sessions/2026-06-23",
+    "captured_memory_ids": ["..."],
+    "message_count": 42
   }
 }
 ```
 
 ### `pattern.candidate` events
 
-Five candidate events, one per pattern above, with `projection_hints = ["Pattern"]` and `authority = "CollectOnly"`.
+With `TACHI_CONTINUITY_PIPELINE=1`, the distill lane can emit five candidate events, one per pattern above, with `projection_hints = ["Pattern"]`, `authority = "CollectOnly"`, and `effects = ["None"]`.
 
 ### `session.outcome` event
 
@@ -291,24 +282,28 @@ Five candidate events, one per pattern above, with `projection_hints = ["Pattern
 The five pattern candidates would be materialized into stable memory projections:
 
 ```
-/user/patterns/alignment_bridge
-/user/patterns/bonding_protocol_warmth_carrier
-/user/patterns/labeler_first
-/user/patterns/pattern_not_content_memory
-/user/patterns/crystallization_pipeline
+/user/patterns/session/<hash12>
+/user/patterns/session/<hash12>
+/user/patterns/session/<hash12>
+/user/patterns/session/<hash12>
+/user/patterns/session/<hash12>
 ```
+
+The stable human-readable key remains in `metadata.projection_key`; the current path shape is domain plus a stable hash.
 
 Each with metadata counters:
 
 ```json
 {
   "seen": 1,
-  "hit": 1,
+  "hit": 0,
   "miss": 0,
-  "confidence": 0.85,
+  "confidence": 0.0,
   "last_seen": "2026-06-23T05:15:00Z"
 }
 ```
+
+Later `pattern.hit`, `pattern.miss`, or `callback_hit` events update hit/miss counters and make `confidence = hit / seen`. Candidate extraction alone is not treated as validation.
 
 ---
 
@@ -318,7 +313,8 @@ From this session, the bonding layer would capture:
 
 ```json
 {
-  "/user/patterns/bonding/alignment_bridge": {
+  "/user/patterns/bonding/session/<hash12-a>": {
+    "projection_key": "alignment_bridge",
     "origin": "user correction during 2026-06-23 continuity memory design",
     "meaning": "When discussing memory systems, first check whether the design bridges vendor alignment and user alignment.",
     "callback_hits": 1,
@@ -326,7 +322,8 @@ From this session, the bonding layer would capture:
     "appropriate_contexts": ["memory design", "model alignment discussions", "Tachi architecture"],
     "inappropriate_contexts": ["unrelated coding tasks"]
   },
-  "/user/patterns/bonding/bonding_carrier": {
+  "/user/patterns/bonding/session/<hash12-b>": {
+    "projection_key": "bonding_carrier",
     "origin": "user refinement of bonding definition",
     "meaning": "Bonding is the shared protocol; warmth is one carrier. Do not conflate them, but do not dismiss warmth either.",
     "callback_hits": 1,

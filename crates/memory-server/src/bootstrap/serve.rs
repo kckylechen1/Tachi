@@ -8,7 +8,7 @@ use crate::utils::{find_project_git_root, lock_or_recover, parse_env_bool, parse
 use chrono::Utc;
 use memory_core::MemoryStore;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod backfill_commands;
@@ -26,6 +26,21 @@ use self::daemon::serve_http_daemon;
 use self::logging::*;
 use self::runtime::*;
 use self::stdio::serve_stdio;
+
+fn no_project_serve_detaches_launch_cwd(command: &Commands, no_project_db: bool) -> bool {
+    no_project_db && matches!(command, Commands::Serve)
+}
+
+fn should_load_project_local_env(no_project_db: bool) -> bool {
+    !no_project_db
+}
+
+fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Error> {
+    let runtime = app_home.join("runtime");
+    std::fs::create_dir_all(&runtime)?;
+    std::env::set_current_dir(&runtime)?;
+    Ok(runtime)
+}
 
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -51,30 +66,50 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         app_home = %app_home.display(),
         "tachi memory-server starting"
     );
-    let git_root = find_project_git_root();
+    let command = cli.command.clone().unwrap_or(Commands::Serve);
+    if no_project_serve_detaches_launch_cwd(&command, cli.no_project_db) {
+        let runtime_cwd = detach_launch_cwd_to_runtime(&app_home).map_err(|error| {
+            format!(
+                "failed to detach --no-project-db serve cwd to {}: {error}",
+                app_home.join("runtime").display()
+            )
+        })?;
+        tracing::info!(
+            runtime_cwd = %runtime_cwd.display(),
+            "--no-project-db serve detached launch cwd to runtime"
+        );
+    }
+    let load_project_local_env = should_load_project_local_env(cli.no_project_db);
+    let git_root = if load_project_local_env {
+        find_project_git_root()
+    } else {
+        None
+    };
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
 
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
     let _ = dotenvy::from_path_override(app_home.join("config.env"));
-    let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
     // Backward compatibility with old Sigil paths
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
-    let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
 
     // Project-local dotenv support (non-overriding):
     // - current working directory .env
     // - git root .env (if different from cwd)
-    if let Ok(cwd) = std::env::current_dir() {
-        let _ = dotenvy::from_path(cwd.join(".env"));
-        if let Some(root) = git_root.as_ref() {
-            if root != &cwd {
-                let _ = dotenvy::from_path(root.join(".env"));
+    if load_project_local_env {
+        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
+        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+    }
+    if load_project_local_env {
+        if let Ok(cwd) = std::env::current_dir() {
+            let _ = dotenvy::from_path(cwd.join(".env"));
+            if let Some(root) = git_root.as_ref() {
+                if root != &cwd {
+                    let _ = dotenvy::from_path(root.join(".env"));
+                }
             }
         }
     }
-
-    let command = cli.command.clone().unwrap_or(Commands::Serve);
 
     // Resolve global DB path
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
@@ -380,6 +415,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     if cli.daemon {
         std::env::set_var("TACHI_DAEMON", "1");
+    } else {
+        std::env::remove_var("TACHI_DAEMON");
     }
 
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
@@ -495,6 +532,25 @@ mod tests {
             daily_distill_marker_path(app_home),
             app_home.join("foundry-runs").join(".last_distill_run")
         );
+    }
+
+    #[test]
+    fn no_project_serve_detaches_launch_cwd_only_for_mcp_serve() {
+        assert!(no_project_serve_detaches_launch_cwd(&Commands::Serve, true));
+        assert!(!no_project_serve_detaches_launch_cwd(
+            &Commands::Serve,
+            false
+        ));
+        assert!(!no_project_serve_detaches_launch_cwd(
+            &Commands::Stats,
+            true
+        ));
+    }
+
+    #[test]
+    fn project_local_env_loading_is_disabled_for_no_project_db() {
+        assert!(!should_load_project_local_env(true));
+        assert!(should_load_project_local_env(false));
     }
 
     #[cfg(unix)]

@@ -191,6 +191,23 @@ This will:
 - Download and install the OpenClaw `tachi` plugin to `~/.openclaw/extensions/tachi`
 - Update `~/.openclaw/openclaw.json` with plugin allow-list and memory slot
 
+### No-project MCP serve isolation
+
+For host-spawned MCP processes that should use only the global Tachi runtime, launch:
+
+```bash
+tachi --no-project-db --profile openclaw serve
+```
+
+In this mode Tachi treats `serve` as a global runtime entrypoint:
+
+- The process cwd is moved to `~/.tachi/runtime` before project discovery.
+- Project-local `.env`, `.tachi/config.env`, and `.sigil/config.env` files are skipped.
+- No project DB is opened or inferred from the launch directory.
+- Global config remains allowed through `~/.tachi/config.env`, `~/.sigil/config.env`, `~/.secrets/master.env`, explicit CLI flags, and inherited environment variables.
+
+This keeps OpenClaw, Claude Code, and other MCP clients from inheriting Desktop or repository paths simply because the host process was launched from that directory. Use an explicit `--project-db PATH` without `--no-project-db` when a host intentionally needs a project-scoped Tachi instance.
+
 ---
 
 ## Available MCP Tools

@@ -21,6 +21,18 @@ The continuity memory system is therefore **not** a "remember more" cache. It is
 
 Because this bridge can drift toward the user's short-term feedback at the expense of their long-term interests, the system keeps an **over-fit brake** and an **un-revocable cold seat** as structural safeguards.
 
+### 1.1 Core invariant: one ledger, many read models
+
+Continuity memory is an **append-only evidence substrate** plus projected read models. Pattern, timeline, bonding, affect, lorebook/world-book, eval, wiki, and skill crystallization should all be derived from the same evidence ledger, not built as isolated caches.
+
+This means:
+
+- The source of truth is `tachi_events`.
+- Projections are read models used for search, prompt context, wiki drafts, skills, or evaluation.
+- Affect/emotion projections can influence tone/reminder style only; they must not mutate facts, scores, routing, trading decisions, or execution.
+- Pattern and bonding memory are not obedience knobs. They can compress communication and surface learned judgment structures, but cold-seat review and label calibration remain mandatory.
+- A2A transport should share evidence, open questions, and provenance across agents; it should not force agents to inherit conclusions.
+
 ---
 
 ## 2. Core abstractions
@@ -31,7 +43,7 @@ Pattern memory stores the user's **cognitive and judgment structures**: how they
 
 It is a model of the user's thinking, not merely a catalog of world facts. A pattern such as `religious_leader_political_proxy` is valuable not because the world contains religious leaders, but because the user has learned to recognize a structural shape across multiple domains and can use it to predict and analyze new instances.
 
-Storage: `/user/patterns/*` in the memory DB.
+Current storage: `ProjectionKind::Pattern` materializes into `/user/patterns/<domain>/<hash>` in the memory DB. Human-readable slugs and wiki drafts are later crystallization targets, not the current projector path shape.
 Metadata counters: `seen / hit / miss / confidence / last_seen`.
 Authority: usually `CollectOnly` until promoted.
 
@@ -41,8 +53,8 @@ Timeline memory stores the **credibility history** of a judgment or pattern. It 
 
 The timeline is an evolution chain: discovered → defended → revised → externally validated. Each transition is a causal edge with temporal validity. The depth of adversarial testing and external verification is itself evidence for the conclusion's reliability.
 
-Storage: causal graph edges + `TimelineEntry` projections.
-Surface: `open_threads` at next session start; `tachi_event action=context` returns evolution metadata.
+Current storage: append-only `tachi_events` plus `ProjectionKind::Timeline` projections under `/timeline/<domain>/<hash>`. Causal graph edges and typed `TimelineEntry` records are design targets, not a committed runtime type yet.
+Surface target: `open_threads` at next session start; `tachi_event action=context` already returns timeline projections when projected.
 
 ### 2.3 Bonding layer — shared communication protocol
 
@@ -55,7 +67,7 @@ That said, **affect and warmth are legitimate carriers for bonding**. A warm del
 - **Warmth/affect** = one delivery carrier that can make bonding feel natural and trustworthy.
 - A cold-carrier agent with strong bonding can still be effective; a warm-carrier agent without bonding is only performing generic RLHF politeness.
 
-Storage: `/user/patterns/bonding/*` and `SharedLexicon` entries.
+Current storage: `ProjectionKind::Bonding` materializes into `/user/patterns/bonding/<domain>/<hash>`. `SharedLexicon` is a design target for a richer read model.
 Guardrails: `tone_and_reminder_only`; no execution, scoring, portfolio, or fact-mutation effects.
 
 ### 2.4 Affect — delivery tone only
@@ -171,35 +183,48 @@ export TACHI_BACKEND_DISTILL_TIER=balanced
 ```
 User session
     ↓
-capture_session emits session.captured
+capture_session emits session.captured              [implemented]
     ↓
-(TACHI_CONTINUITY_PIPELINE=1)
+TACHI_CONTINUITY_PIPELINE=1                         [implemented, opt-in]
 distill lane    → pattern.candidate / bonding.candidate / timeline.candidate
 reasoning lane  → session.outcome
     ↓
-tachi_memory save → memory.saved event
-tachi_wiki_write  → wiki.saved event (optionally referencing patterns)
+tachi_event action=project                          [implemented, explicit]
+    → idempotently materialize eligible candidates into:
+       /user/patterns/<domain>/<hash>
+       /user/patterns/bonding/<domain>/<hash>
+       /lorebook/<domain>/<hash>
+       /user/affect/<domain>/<hash>
+       /timeline/<domain>/<hash>
+       /project-cycle/<domain>/<hash>
+    → update counters (seen / hit / miss / confidence / last_seen)
     ↓
-tachi_event action=project
-    → idempotently materialize candidates into:
-       /user/patterns/*
-       /user/patterns/bonding/*
-       /lorebook/*
-       /user/affect/*
-    → update counters (seen / hit / miss / last_seen)
-    → concrete instances written to /memory/instances/<pattern_id>/
-    ↓
-Next session start
+Next session start / explicit context request
     → tachi_event action=context
-    → returns active patterns + lorebook + affect + memories
-    → dispatch assembles prompt with patterns
-    ↓
+    → returns projected memories + lorebook + affect + metrics
+    → dispatch can assemble prompt context from projections
+```
+
+Target integration still to add:
+
+```
+tachi_memory save → memory.saved event
+tachi_wiki_write  → wiki.saved event with optional pattern_ref
+pattern hit/miss callback → pattern.hit / pattern.miss event
+projection loop → background tachi_event action=project
+pattern maturity → /wiki/drafts/patterns/<name>.md → reviewed wiki/runbook
+pattern maturity → generated skill candidate with pattern_ref
+```
+
+The target runtime path is:
+
+```
 Runtime event
-    → vector search recalls top-k patterns
-    → extract/flash LLM confirms match
-    → emit pattern.matched event
+    → search recalls top-k projected patterns
+    → extract/flash LLM or deterministic matcher confirms match
+    → emit pattern.hit / pattern.miss event
     ↓
-Pattern matures (hit_rate / confidence threshold + external validation)
+Pattern matures (hit_rate / confidence threshold + external validation + cold-seat check)
     → generate /wiki/drafts/patterns/<name>.md
     → generate skill:<name> candidate
     → human review
@@ -291,36 +316,36 @@ Pattern matures (hit_rate / confidence threshold + external validation)
 ### 8.1 Add `patterns` section to `tachi_event action=context`
 
 - **File:** `crates/memory-server/src/continuity_ops.rs`
-- **Function:** `build_continuity_context` (≈918)
+- **Function:** `build_continuity_context`
 - **Change:** after building `memories`, filter entries where `path.starts_with("/user/patterns")` or `metadata.projection_kind == "pattern"`, and include `"patterns": patterns` in the returned JSON.
 
 ### 8.2 Add `scope="patterns"` to `tachi_search`
 
 - **File:** `crates/memory-server/src/facade_search_ops.rs`
-- **Function:** `collect_tachi_search_sections` (≈59)
+- **Function:** `collect_tachi_search_sections`
 - **Change:** extend scope match to include `"patterns"`; run `search_memory_rows_with_access` with `path_prefix = "/user/patterns"`.
-- **File:** `crates/memory-server/src/agent_markdown.rs`
-- **Function:** `format_search_sections` (≈311)
+- **File:** `crates/memory-server/src/agent_markdown/search.rs`
+- **Function:** `format_search_sections`
 - **Change:** add markdown rendering for the `Patterns` section.
 
 ### 8.3 Memory save emits continuity event
 
-- **File:** `crates/memory-server/src/memory_search_ops/save_memory.rs`
-- **Function:** `handle_save_memory` (≈288)
+- **File:** `crates/memory-server/src/memory_search_ops/save_memory/handler.rs`
+- **Function:** `handle_save_memory`
 - **Change:** after `upsert_save_entry`, call a new helper `emit_memory_saved_event`.
 - **File:** `crates/memory-server/src/continuity_ops.rs`
-- **Change:** add `pub(crate) fn emit_memory_saved_event` that writes a `memory.saved` event with `projection_hints = [ProjectionKind::Pattern]`.
-- **File:** `crates/memory-server/src/tool_params/memory.rs`
+- **Change:** add `pub(crate) fn emit_memory_saved_event` that writes a `memory.saved` event with projection hints inferred from category/path metadata.
+- **File:** `crates/memory-server-params/src/memory.rs`
 - **Change:** add optional `#[serde(default)] emit_continuity: bool` to `SaveMemoryParams`.
 
 ### 8.4 Wiki write recalls patterns
 
-- **File:** `crates/memory-server/src/copilot_ops.rs`
-- **Function:** `handle_tachi_wiki_write` (≈690)
+- **File:** `crates/memory-server/src/copilot_ops/wiki_facade.rs`
+- **Function:** `handle_tachi_wiki_write`
 - **Change:** before building `SaveMemoryParams`, call a new helper that queries active patterns and merges them into wiki metadata or entry text.
 - **File:** `crates/memory-server/src/continuity_ops.rs`
 - **Change:** expose `pub(crate) fn list_active_patterns`.
-- **File:** `crates/memory-server/src/tool_params/memory.rs`
+- **File:** `crates/memory-server-params/src/memory.rs`
 - **Change:** add `include_patterns`, `pattern_query`, `pattern_top_k` to `WikiWriteParams`.
 
 ### 8.5 Pattern → skill generator
@@ -334,10 +359,10 @@ Pattern matures (hit_rate / confidence threshold + external validation)
   4. Optionally expose via `register_skill_tool`.
 - **File:** `crates/memory-server/src/hub_ops/mod.rs`
 - **Change:** re-export the new handler.
-- **File:** `crates/memory-server/src/tool_params/facade.rs`
-- **Change:** add `from_pattern` action to `TachiSkillParams` schema.
-- **File:** `crates/memory-server/src/tools.rs`
+- **File:** `crates/memory-server/src/tools/skill_facade.rs`
 - **Change:** route `tachi_skill(action="from_pattern")` to the new handler.
+- **File:** `crates/memory-server-params/src/facade.rs`
+- **Change:** add `from_pattern` action to `TachiSkillParams` schema.
 - **File:** `crates/memory-server/src/prompts.rs`
 - **Change:** add `PATTERN_TO_SKILL_PROMPT`.
 
