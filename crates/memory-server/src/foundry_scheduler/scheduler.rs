@@ -25,6 +25,30 @@ impl FoundryScheduler {
         own_global: PathBuf,
         own_project: Option<PathBuf>,
     ) -> Self {
+        Self::start_inner(manifest_path, foundry_tx, own_global, own_project, true)
+    }
+
+    /// Spawn a scheduler that only watches the daemon's own DB scope.
+    ///
+    /// Agent-global/no-project daemons are intentionally isolated from the
+    /// machine-wide manifest so an embedded host such as OpenClaw does not try
+    /// to open project DBs under Desktop/Volumes that belong to other agents.
+    pub fn start_own_dbs(
+        manifest_path: PathBuf,
+        foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
+        own_global: PathBuf,
+        own_project: Option<PathBuf>,
+    ) -> Self {
+        Self::start_inner(manifest_path, foundry_tx, own_global, own_project, false)
+    }
+
+    fn start_inner(
+        manifest_path: PathBuf,
+        foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
+        own_global: PathBuf,
+        own_project: Option<PathBuf>,
+        include_manifest: bool,
+    ) -> Self {
         let workers: Arc<Mutex<BTreeMap<PathBuf, WorkerHandle>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
         let cancel_root = tokio_util::sync::CancellationToken::new();
@@ -40,8 +64,9 @@ impl FoundryScheduler {
         let manifest_task = tokio::spawn(async move {
             // Run an immediate reconcile before the first tick so workers
             // come up at startup, not 60 s later.
-            reconcile_workers(
+            reconcile_workers_with_scope(
                 &manifest_path_owned,
+                include_manifest,
                 &manifest_workers,
                 &manifest_tx,
                 &manifest_global,
@@ -57,8 +82,9 @@ impl FoundryScheduler {
                 tokio::select! {
                     _ = manifest_cancel.cancelled() => break,
                     _ = tick.tick() => {
-                        reconcile_workers(
+                        reconcile_workers_with_scope(
                             &manifest_path_owned,
+                            include_manifest,
                             &manifest_workers,
                             &manifest_tx,
                             &manifest_global,
@@ -93,15 +119,29 @@ impl Drop for FoundryScheduler {
     }
 }
 
-/// Reconcile in-memory worker set against the manifest on disk.
-fn reconcile_workers(
+fn reconcile_workers_with_scope(
     manifest_path: &Path,
+    include_manifest: bool,
     workers: &Arc<Mutex<BTreeMap<PathBuf, WorkerHandle>>>,
     foundry_tx: &mpsc::Sender<FoundryMaintenanceItem>,
     own_global: &Path,
     own_project: Option<&Path>,
     cancel_root: &tokio_util::sync::CancellationToken,
 ) {
+    let by_path = if include_manifest {
+        manifest_worker_targets(manifest_path, own_global, own_project)
+    } else {
+        own_worker_targets(own_global, own_project)
+    };
+
+    reconcile_worker_targets(workers, foundry_tx, by_path, cancel_root);
+}
+
+fn manifest_worker_targets(
+    manifest_path: &Path,
+    own_global: &Path,
+    own_project: Option<&Path>,
+) -> BTreeMap<PathBuf, (String, Route)> {
     let manifest = match Manifest::load(manifest_path) {
         Ok(m) => m,
         Err(e) => {
@@ -111,11 +151,10 @@ fn reconcile_workers(
                 "[foundry-scheduler] manifest load failed ({}): {e}",
                 manifest_path.display()
             );
-            return;
+            return BTreeMap::new();
         }
     };
 
-    let mut desired: HashSet<PathBuf> = HashSet::new();
     let mut by_path: BTreeMap<PathBuf, (String, Route)> = BTreeMap::new();
     for entry in &manifest.dbs {
         let path = PathBuf::from(&entry.path);
@@ -126,9 +165,40 @@ fn reconcile_workers(
         }
         let label = manifest_label_for(&path, &entry.scope_hint);
         let route = classify_route(entry, &path, own_global, own_project);
-        desired.insert(path.clone());
         by_path.insert(path, (label, route));
     }
+    by_path
+}
+
+fn own_worker_targets(
+    own_global: &Path,
+    own_project: Option<&Path>,
+) -> BTreeMap<PathBuf, (String, Route)> {
+    let mut by_path = BTreeMap::new();
+    if own_global.exists() {
+        by_path.insert(
+            own_global.to_path_buf(),
+            ("global".to_string(), Route::Global),
+        );
+    }
+    if let Some(project) = own_project {
+        if project.exists() {
+            by_path.insert(
+                project.to_path_buf(),
+                ("project".to_string(), Route::Project),
+            );
+        }
+    }
+    by_path
+}
+
+fn reconcile_worker_targets(
+    workers: &Arc<Mutex<BTreeMap<PathBuf, WorkerHandle>>>,
+    foundry_tx: &mpsc::Sender<FoundryMaintenanceItem>,
+    by_path: BTreeMap<PathBuf, (String, Route)>,
+    cancel_root: &tokio_util::sync::CancellationToken,
+) {
+    let desired: HashSet<PathBuf> = by_path.keys().cloned().collect();
 
     let mut map = workers.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -173,5 +243,37 @@ fn reconcile_workers(
             .await;
         });
         map.insert(path.clone(), WorkerHandle { cancel, join });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_worker_targets_only_include_daemon_dbs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let global = tmp.path().join("agent").join("memory.db");
+        let project = tmp.path().join("project").join("memory.db");
+        let unrelated = tmp.path().join("unrelated").join("memory.db");
+        std::fs::create_dir_all(global.parent().unwrap()).expect("global parent");
+        std::fs::create_dir_all(project.parent().unwrap()).expect("project parent");
+        std::fs::create_dir_all(unrelated.parent().unwrap()).expect("unrelated parent");
+        std::fs::write(&global, b"").expect("global db");
+        std::fs::write(&project, b"").expect("project db");
+        std::fs::write(&unrelated, b"").expect("unrelated db");
+
+        let targets = own_worker_targets(&global, Some(&project));
+
+        assert_eq!(targets.len(), 2);
+        assert!(matches!(
+            targets.get(&global).map(|(_, route)| route),
+            Some(Route::Global)
+        ));
+        assert!(matches!(
+            targets.get(&project).map(|(_, route)| route),
+            Some(Route::Project)
+        ));
+        assert!(!targets.contains_key(&unrelated));
     }
 }

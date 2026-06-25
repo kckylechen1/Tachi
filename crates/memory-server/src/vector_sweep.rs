@@ -48,6 +48,20 @@ pub(crate) fn collect_sweep_paths(
     global_db: &Path,
     project_db: Option<&Path>,
 ) -> Vec<PathBuf> {
+    collect_sweep_paths_inner(manifest_path, global_db, project_db, true)
+}
+
+#[cfg(test)]
+pub(crate) fn collect_own_sweep_paths(global_db: &Path, project_db: Option<&Path>) -> Vec<PathBuf> {
+    collect_sweep_paths_inner(Path::new(""), global_db, project_db, false)
+}
+
+fn collect_sweep_paths_inner(
+    manifest_path: &Path,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    include_manifest: bool,
+) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -68,12 +82,14 @@ pub(crate) fn collect_sweep_paths(
         push(p.to_path_buf());
     }
 
-    if let Ok(manifest) = Manifest::load(manifest_path) {
-        for entry in manifest.dbs {
-            if !entry.allow_write || entry.schema_kind != "tachi" {
-                continue;
+    if include_manifest {
+        if let Ok(manifest) = Manifest::load(manifest_path) {
+            for entry in manifest.dbs {
+                if !entry.allow_write || entry.schema_kind != "tachi" {
+                    continue;
+                }
+                push(PathBuf::from(entry.path));
             }
-            push(PathBuf::from(entry.path));
         }
     }
 
@@ -91,6 +107,135 @@ pub(crate) async fn run_vector_sweep_once(
     skip_cache: bool,
 ) -> usize {
     let paths = collect_sweep_paths(manifest_path, global_db, project_db);
+    run_vector_sweep_paths(paths, llm, batch_per_db, skip_cache).await
+}
+
+/// Background task: periodically embed missing vectors across manifest DBs.
+pub struct VectorSweepScheduler {
+    _cancel: tokio::sync::watch::Sender<()>,
+}
+
+impl VectorSweepScheduler {
+    /// Uses the daemon's shared `LlmClient` (same provider secrets as MCP/enrichment).
+    pub fn start(
+        manifest_path: PathBuf,
+        global_db: PathBuf,
+        project_db: Option<PathBuf>,
+        llm: Arc<LlmClient>,
+    ) -> Self {
+        Self::start_inner(manifest_path, global_db, project_db, llm, true)
+    }
+
+    /// Start a sweep that only touches the daemon's own DBs.
+    pub fn start_own_dbs(
+        manifest_path: PathBuf,
+        global_db: PathBuf,
+        project_db: Option<PathBuf>,
+        llm: Arc<LlmClient>,
+    ) -> Self {
+        Self::start_inner(manifest_path, global_db, project_db, llm, false)
+    }
+
+    fn start_inner(
+        manifest_path: PathBuf,
+        global_db: PathBuf,
+        project_db: Option<PathBuf>,
+        llm: Arc<LlmClient>,
+        include_manifest: bool,
+    ) -> Self {
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
+
+        tokio::spawn(async move {
+            if sweep_disabled() {
+                tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
+                return;
+            }
+
+            let batch = sweep_batch_per_db();
+            let skip_cache = skip_recall_cache();
+            let manifest_ref = manifest_path.as_path();
+            let global_ref = global_db.as_path();
+            let project_ref = project_db.as_deref();
+
+            // Run once immediately so startup does not wait a full interval.
+            if include_manifest {
+                run_vector_sweep_once(
+                    manifest_ref,
+                    global_ref,
+                    project_ref,
+                    llm.as_ref(),
+                    batch,
+                    skip_cache,
+                )
+                .await;
+            } else {
+                run_vector_sweep_once_with_scope(
+                    manifest_ref,
+                    global_ref,
+                    project_ref,
+                    llm.as_ref(),
+                    batch,
+                    skip_cache,
+                    false,
+                )
+                .await;
+            }
+
+            let mut tick = interval(Duration::from_secs(sweep_interval_secs()));
+            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => break,
+                    _ = tick.tick() => {
+                        if include_manifest {
+                            run_vector_sweep_once(
+                                manifest_ref,
+                                global_ref,
+                                project_ref,
+                                llm.as_ref(),
+                                batch,
+                                skip_cache,
+                            ).await;
+                        } else {
+                            run_vector_sweep_once_with_scope(
+                                manifest_ref,
+                                global_ref,
+                                project_ref,
+                                llm.as_ref(),
+                                batch,
+                                skip_cache,
+                                false,
+                            ).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        Self { _cancel: cancel_tx }
+    }
+}
+
+async fn run_vector_sweep_once_with_scope(
+    manifest_path: &Path,
+    global_db: &Path,
+    project_db: Option<&Path>,
+    llm: &LlmClient,
+    batch_per_db: usize,
+    skip_cache: bool,
+    include_manifest: bool,
+) -> usize {
+    let paths = collect_sweep_paths_inner(manifest_path, global_db, project_db, include_manifest);
+    run_vector_sweep_paths(paths, llm, batch_per_db, skip_cache).await
+}
+
+async fn run_vector_sweep_paths(
+    paths: Vec<PathBuf>,
+    llm: &LlmClient,
+    batch_per_db: usize,
+    skip_cache: bool,
+) -> usize {
     let mut total_done = 0usize;
     for path in paths {
         match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
@@ -108,68 +253,6 @@ pub(crate) async fn run_vector_sweep_once(
         tracing::info!("[vector-sweep] run complete, embedded {total_done} row(s)");
     }
     total_done
-}
-
-/// Background task: periodically embed missing vectors across manifest DBs.
-pub struct VectorSweepScheduler {
-    _cancel: tokio::sync::watch::Sender<()>,
-}
-
-impl VectorSweepScheduler {
-    /// Uses the daemon's shared `LlmClient` (same provider secrets as MCP/enrichment).
-    pub fn start(
-        manifest_path: PathBuf,
-        global_db: PathBuf,
-        project_db: Option<PathBuf>,
-        llm: Arc<LlmClient>,
-    ) -> Self {
-        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
-
-        tokio::spawn(async move {
-            if sweep_disabled() {
-                tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
-                return;
-            }
-
-            let batch = sweep_batch_per_db();
-            let skip_cache = skip_recall_cache();
-            let manifest_ref = manifest_path.as_path();
-            let global_ref = global_db.as_path();
-            let project_ref = project_db.as_deref();
-
-            // Run once immediately so startup does not wait a full interval.
-            run_vector_sweep_once(
-                manifest_ref,
-                global_ref,
-                project_ref,
-                llm.as_ref(),
-                batch,
-                skip_cache,
-            )
-            .await;
-
-            let mut tick = interval(Duration::from_secs(sweep_interval_secs()));
-            tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    _ = cancel_rx.changed() => break,
-                    _ = tick.tick() => {
-                        run_vector_sweep_once(
-                            manifest_ref,
-                            global_ref,
-                            project_ref,
-                            llm.as_ref(),
-                            batch,
-                            skip_cache,
-                        ).await;
-                    }
-                }
-            }
-        });
-
-        Self { _cancel: cancel_tx }
-    }
 }
 
 #[cfg(test)]
@@ -229,5 +312,51 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.iter().any(|p| p.ends_with("global.db")));
         assert!(paths.iter().any(|p| p.ends_with("project.db")));
+    }
+
+    #[test]
+    fn collect_own_sweep_paths_excludes_manifest_entries() {
+        let tmp = TempDir::new().unwrap();
+        let global = tmp.path().join("agent-global.db");
+        fs::write(&global, b"").unwrap();
+        let project = tmp.path().join("project.db");
+        fs::write(&project, b"").unwrap();
+        let unrelated = tmp.path().join("unrelated.db");
+        fs::write(&unrelated, b"").unwrap();
+        let manifest_path = tmp.path().join("manifest.json");
+        fs::write(
+            &manifest_path,
+            format!(
+                r#"{{
+  "schema_version": 1,
+  "generated_at": "2026-01-01T00:00:00Z",
+  "dbs": [
+    {{
+      "path": "{}",
+      "role": "project",
+      "owner": "test",
+      "schema_kind": "tachi",
+      "vec_enabled": true,
+      "allow_write": true,
+      "last_doctor_at": "",
+      "last_classification": "healthy",
+      "scope_hint": "project:test",
+      "notes": ""
+    }}
+  ]
+}}"#,
+                unrelated.display()
+            ),
+        )
+        .unwrap();
+
+        let manifest_paths = collect_sweep_paths(&manifest_path, &global, Some(&project));
+        assert_eq!(manifest_paths.len(), 3);
+
+        let own_paths = collect_own_sweep_paths(&global, Some(&project));
+        assert_eq!(own_paths.len(), 2);
+        assert!(own_paths.iter().any(|p| p.ends_with("agent-global.db")));
+        assert!(own_paths.iter().any(|p| p.ends_with("project.db")));
+        assert!(!own_paths.iter().any(|p| p.ends_with("unrelated.db")));
     }
 }

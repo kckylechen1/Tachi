@@ -148,6 +148,7 @@ fn explicit_agent_can_override_profile_backend() {
 fn custom_profile_populates_opencode_command() {
     let mut params = params();
     params.profile = Some("deepseek_explore".to_string());
+    params.harness_transport = Some("opencode_cli".to_string());
     let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
 
     assert_eq!(resolved.agent, "custom");

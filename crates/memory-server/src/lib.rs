@@ -33,6 +33,7 @@
 
 mod agent_eval;
 mod agent_markdown;
+mod agent_profile_ops;
 mod agent_registry;
 mod arena_ops;
 mod backend_tier;
@@ -45,6 +46,7 @@ mod cli;
 mod cli_client;
 mod complete_ops;
 mod continuity_ops;
+mod continuity_projector;
 mod copilot_ops;
 mod credential_profile;
 mod daemon_lock;
@@ -55,6 +57,7 @@ mod dlq_ops;
 pub(crate) mod docs_ops;
 mod doctor;
 mod doctor_ops;
+mod domain_adapter_ops;
 mod enrichment;
 mod event_ops;
 mod facade_memory_ops;

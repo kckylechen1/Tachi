@@ -73,6 +73,28 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
         .as_array()
         .expect("source_refs array");
     assert_eq!(refs.len(), 2);
+    assert_eq!(json["continuity_event"]["event_type"], json!("wiki.saved"));
+    let events = server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memory_core::TachiEventQuery {
+                    event_type: Some("wiki.saved".to_string()),
+                    limit: 10,
+                    ..memory_core::TachiEventQuery::default()
+                })
+                .map_err(|e| e.to_string())
+        })
+        .expect("read wiki events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].payload["wiki_id"], json!(id));
+    assert_eq!(
+        events[0]
+            .projection_hints
+            .iter()
+            .map(|projection| projection.as_str())
+            .collect::<Vec<_>>(),
+        vec!["timeline", "project_cycle"]
+    );
 }
 
 #[tokio::test]

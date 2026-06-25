@@ -38,6 +38,19 @@ fn tachi_event_action_schema_declares_enum_values() {
 }
 
 #[test]
+fn tachi_profile_action_schema_declares_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiProfileParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+
+    assert_eq!(action["type"], json!("string"));
+    let values = action["enum"].as_array().expect("action enum");
+    assert!(values.contains(&json!("import")));
+    assert!(values.contains(&json!("render")));
+    assert!(values.contains(&json!("context")));
+}
+
+#[test]
 fn tachi_skill_action_schema_declares_bundle_and_loadout() {
     let schema = rmcp::schemars::schema_for!(TachiSkillParams);
     let value = serde_json::to_value(schema).expect("schema serializes");

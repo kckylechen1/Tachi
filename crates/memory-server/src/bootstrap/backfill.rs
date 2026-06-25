@@ -1,11 +1,16 @@
 use crate::llm::LlmClient;
 use crate::provider_config::materialize_standalone;
 use crate::vector_backfill::{embed_and_write_batch, list_missing_vector_entries};
+use futures::{stream, StreamExt};
 use memory_core::MemoryStore;
 use std::error::Error;
+use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
 use std::path::PathBuf;
 use std::time::Duration;
+
+const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
+const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;
 
 /// Backfill missing vector embeddings for a given DB.
 pub(super) async fn run_backfill_vectors(
@@ -135,34 +140,66 @@ pub(super) async fn run_backfill_summaries(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    let concurrency = backfill_llm_concurrency();
 
-    println!("\nBackfilling {missing} entries...\n");
+    println!("\nBackfilling {missing} entries (concurrency={concurrency})...\n");
 
     drop(store);
     let mut store = MemoryStore::open(db_str)?;
-    let mut processed = 0usize;
-
-    for (id, text, revision) in &entries {
+    let tasks = stream::iter(entries.into_iter().map(|(id, text, revision)| {
+        let llm = llm.clone();
         let input: String = text.chars().take(8000).collect();
-        let summary = llm.generate_summary(&input).await?;
+        async move {
+            let result = generate_summary_with_retry(&llm, &input).await;
+            (id, revision, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    tokio::pin!(tasks);
 
-        match store.update_enrichment_fields(id, Some(&summary), None, None, None, *revision) {
+    let mut attempted = 0usize;
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+
+    while let Some((id, revision, result)) = tasks.next().await {
+        attempted += 1;
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: summary failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "summary", &error);
+                continue;
+            }
+        };
+
+        match store.update_enrichment_fields(&id, Some(&summary), None, None, None, revision) {
             Ok(true) => {
                 processed += 1;
-                println!("  [{processed}/{missing}] ✓ {id}");
+                println!("  [{attempted}/{missing}] ✓ {id}");
             }
             Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
-            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: DB write failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "db_update", &error);
+            }
         }
     }
 
     let final_missing = store.entries_missing_summaries()?.len();
     let final_with_summary = total.saturating_sub(final_missing as u64);
-    println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    if failed == 0 {
+        println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    } else {
+        println!(
+            "\n⚠ Done with {failed} failure(s). Summaries: {with_summary} → {final_with_summary} / {total}; updated {processed}/{missing}"
+        );
+    }
     Ok(())
 }
 
-/// Backfill missing keywords/entities using the configured extract LLM.
+/// Backfill missing recall keywords using the configured extract LLM.
 pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
     dry_run: bool,
@@ -185,7 +222,7 @@ pub(super) async fn run_backfill_metadata(
     println!("Missing:  {missing}");
 
     if missing == 0 {
-        println!("\n✅ All entries have keywords and entities!");
+        println!("\n✅ All entries have recall keywords!");
         return Ok(());
     }
 
@@ -195,21 +232,43 @@ pub(super) async fn run_backfill_metadata(
     }
 
     let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    let concurrency = backfill_llm_concurrency();
 
-    println!("\nBackfilling metadata for {missing} entries...\n");
+    println!("\nBackfilling metadata for {missing} entries (concurrency={concurrency})...\n");
 
     drop(store);
     let mut store = MemoryStore::open(db_str)?;
-    let mut processed = 0usize;
-
-    for (id, text, _summary, revision) in &entries {
+    let tasks = stream::iter(entries.into_iter().map(|(id, text, _summary, revision)| {
+        let llm = llm.clone();
         let input: String = text.chars().take(8000).collect();
-        let (keywords, entities) = llm.extract_metadata(&input).await?;
+        async move {
+            let result = extract_metadata_with_retry(&llm, &input).await;
+            (id, revision, result)
+        }
+    }))
+    .buffer_unordered(concurrency);
+    tokio::pin!(tasks);
+
+    let mut attempted = 0usize;
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+
+    while let Some((id, revision, result)) = tasks.next().await {
+        attempted += 1;
+        let (keywords, entities) = match result {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: metadata failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "metadata", &error);
+                continue;
+            }
+        };
         // Domain-specific deterministic tagging was removed from the generic
         // engine; use the LLM-extracted keywords/entities directly.
 
         match store.update_enrichment_fields(
-            id,
+            &id,
             None,
             None,
             if keywords.is_empty() {
@@ -222,20 +281,109 @@ pub(super) async fn run_backfill_metadata(
             } else {
                 Some(&entities)
             },
-            *revision,
+            revision,
         ) {
             Ok(true) => {
                 processed += 1;
-                println!("  [{processed}/{missing}] ✓ {id}");
+                println!("  [{attempted}/{missing}] ✓ {id}");
             }
             Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
-            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+            Err(error) => {
+                failed += 1;
+                eprintln!("  WARN: DB write failed for {id}: {error}");
+                record_backfill_failure(&store, &id, "db_update", &error);
+            }
         }
     }
 
     let (_, final_with_metadata) = store.metadata_stats()?;
-    println!("\n✅ Done! Metadata coverage: {with_metadata} → {final_with_metadata} / {total}");
+    if failed == 0 {
+        println!("\n✅ Done! Metadata coverage: {with_metadata} → {final_with_metadata} / {total}");
+    } else {
+        println!(
+            "\n⚠ Done with {failed} failure(s). Metadata coverage: {with_metadata} → {final_with_metadata} / {total}; updated {processed}/{missing}"
+        );
+    }
     Ok(())
+}
+
+fn backfill_llm_concurrency() -> usize {
+    std::env::var("TACHI_BACKFILL_LLM_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_BACKFILL_LLM_CONCURRENCY)
+        .clamp(1, MAX_BACKFILL_LLM_CONCURRENCY)
+}
+
+async fn generate_summary_with_retry(llm: &LlmClient, input: &str) -> Result<String, String> {
+    retry_llm_call("summary", || llm.generate_summary(input)).await
+}
+
+async fn extract_metadata_with_retry(
+    llm: &LlmClient,
+    input: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    retry_llm_call("metadata", || llm.extract_metadata(input)).await
+}
+
+async fn retry_llm_call<F, Fut, T>(stage: &str, mut call: F) -> Result<T, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    const MAX_ATTEMPTS: usize = 5;
+    let mut last_error = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let delay = retry_delay_for_error(&error, attempt);
+                last_error = Some(error);
+                if attempt < MAX_ATTEMPTS {
+                    eprintln!(
+                        "  WARN: {stage} attempt {attempt}/{MAX_ATTEMPTS} failed; retrying in {}s",
+                        delay.as_secs_f32()
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| format!("{stage} failed without an error")))
+}
+
+fn retry_delay_for_error(error: &str, attempt: usize) -> Duration {
+    provider_cooldown_delay(error).unwrap_or_else(|| Duration::from_millis(500 * attempt as u64))
+}
+
+fn provider_cooldown_delay(error: &str) -> Option<Duration> {
+    let marker = "retry after about ";
+    let tail = error.split(marker).nth(1)?;
+    let seconds: u64 = tail
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds.saturating_add(1).min(300)))
+}
+
+fn record_backfill_failure(store: &MemoryStore, id: &str, stage: &str, error: impl Display) {
+    let error = bounded_error(error);
+    if let Err(record_error) = store.record_enrichment_failure(id, stage, &error) {
+        eprintln!("  WARN: failed to record enrichment failure for {id}: {record_error}");
+    }
+}
+
+fn bounded_error(error: impl Display) -> String {
+    let error = error.to_string();
+    const MAX_ERROR_CHARS: usize = 1_000;
+    if error.chars().count() <= MAX_ERROR_CHARS {
+        return error;
+    }
+    let mut truncated: String = error.chars().take(MAX_ERROR_CHARS).collect();
+    truncated.push_str("...");
+    truncated
 }
 
 /// Rebuild or backfill FTS5 full-text search index for a given DB.

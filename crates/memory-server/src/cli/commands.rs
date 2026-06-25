@@ -154,7 +154,7 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Backfill missing keywords/entities using the configured extract LLM
+    /// Backfill missing recall keywords using the configured extract LLM
     BackfillMetadata {
         /// Target DB path (defaults to global DB)
         #[arg(long, value_name = "PATH")]

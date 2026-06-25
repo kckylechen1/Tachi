@@ -34,6 +34,7 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
     // Continuity event facade (query action is read-only)
     "tachi_event",
+    "tachi_profile",
     // Zero-param session-start alias for tachi_memory(action='briefing')
     "tachi_briefing",
 ];
@@ -57,6 +58,8 @@ pub(crate) const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
     // Continuity event facade (emit action is append-only write)
     "tachi_event",
+    // Repo-shape adapter facade (imports into continuity events/projections)
+    "tachi_domain_adapter",
 ];
 
 pub(crate) const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -132,6 +135,10 @@ pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
     // Append/query continuity events for typed projectors
     "tachi_event",
+    // Import repo-specific continuity shapes into neutral projections
+    "tachi_domain_adapter",
+    // Render/import canonical agent profile projections (read-only dry-run)
+    "tachi_profile",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
     "tachi_briefing",
     // Direct notepad/conclusion saver facade (high-frequency)

@@ -212,6 +212,7 @@ save_memory emit_continuity=true → memory.saved event
 tachi_search scope=patterns      → explicit /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
 tachi_skill action=from_pattern  → pending/disabled Hub skill candidate
+tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 ```
 
 Target integration still to add:
@@ -223,6 +224,16 @@ projection loop → background tachi_event action=project
 pattern maturity → /wiki/drafts/patterns/<name>.md → reviewed wiki/runbook
 pattern maturity → reviewed promotion of generated skill candidate
 ```
+
+Adapter boundary:
+
+`tachi_domain_adapter` belongs to the generic core only when it converts an external
+repo shape into the neutral continuity ledger. The first implemented action,
+`lorebook_import`, maps RomanBath/SillyTavern lorebook entries into `tachi_event`
+`world_book` candidates and optional projection. Domain business logic such as
+finance tickers, trading lesson paths, or Quant-specific defaults should live in a
+Quant adapter pack/fork that emits the same neutral events or normal memory writes;
+it should not be exposed by the generic agent surface.
 
 The target runtime path is:
 

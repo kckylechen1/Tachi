@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration as StdDuration, Instant};
 
+use crate::agent_profile_ops::handle_tachi_profile;
 use crate::arena_ops::handle_tachi_arena;
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
@@ -874,6 +875,21 @@ impl MemoryServer {
         handle_project_agent_profile(self, params).await
     }
 
+    #[tool(
+        description = "Import and render canonical AgentProfilePack projections for user-agent alignment. Read-only: returns dry-run AGENTS.md / CLAUDE.md / GEMINI.md / Cursor/OpenClaw projections or a bounded runtime context block; it never writes files."
+    )]
+    pub(crate) async fn tachi_profile(
+        &self,
+        Parameters(params): Parameters<TachiProfileParams>,
+    ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(self, "tachi_profile", &params).await?
+        {
+            return Ok(body);
+        }
+        handle_tachi_profile(self, params).await
+    }
+
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
     pub(crate) async fn tachi_audit_log(
         &self,
@@ -1362,6 +1378,22 @@ impl MemoryServer {
             return Ok(body);
         }
         handle_tachi_event(self, params).await
+    }
+
+    #[tool(
+        description = "Domain adapter facade for repo-derived continuity shapes. Actions: lorebook_import (import RomanBath/SillyTavern lorebook entries into tachi_event world_book projections). Keeps repo conventions out of generic memory core."
+    )]
+    pub(crate) async fn tachi_domain_adapter(
+        &self,
+        Parameters(params): Parameters<TachiDomainAdapterParams>,
+    ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "tachi_domain_adapter", &params)
+                .await?
+        {
+            return Ok(body);
+        }
+        crate::domain_adapter_ops::handle_tachi_domain_adapter(self, params).await
     }
 
     /// Zero-param briefing alias. Call at the start of any non-trivial task to

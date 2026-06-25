@@ -97,6 +97,7 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // Facade tools (write / mixed)
     "tachi_save",
     "tachi_memory",
+    "tachi_domain_adapter",
     "tachi_handoff",
     "tachi_complete",
     "tachi_orchestrator",

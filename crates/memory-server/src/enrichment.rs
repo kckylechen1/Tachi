@@ -26,8 +26,8 @@ pub(super) struct EnrichmentItem {
     pub(super) revision: i64,
 }
 
-pub(super) fn needs_metadata_enrichment(keywords: &[String], entities: &[String]) -> bool {
-    keywords.is_empty() || entities.is_empty()
+pub(super) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
+    keywords.is_empty()
 }
 
 pub(super) fn build_enrichment_item(

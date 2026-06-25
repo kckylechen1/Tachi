@@ -35,6 +35,7 @@ pub(crate) async fn handle_tachi_wiki_write(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| params.title.chars().take(100).collect());
+    let domain = params.domain.clone().or_else(|| Some("wiki".to_string()));
 
     let mut keywords = params.keywords.clone();
     keywords.push("wiki".to_string());
@@ -111,7 +112,7 @@ pub(crate) async fn handle_tachi_wiki_write(
             auto_link: true,
             project: target_project.clone(),
             retention_policy: Some(params.retention_policy),
-            domain: params.domain.or_else(|| Some("wiki".to_string())),
+            domain: domain.clone(),
             timestamp: None,
             valid_from: None,
             valid_until: None,
@@ -167,6 +168,30 @@ pub(crate) async fn handle_tachi_wiki_write(
             );
         }
     }
+    let wiki_write_mode = if update_id.is_some() {
+        "updated"
+    } else {
+        "created"
+    };
+    let continuity_event = crate::continuity_ops::emit_wiki_saved_event(
+        server,
+        crate::continuity_ops::WikiSavedEventInput {
+            project: target_project.as_deref(),
+            wiki_id: &canonical_id,
+            path: &path,
+            title: &params.title,
+            topic: &topic,
+            summary: response
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            text: &entry_text,
+            domain: domain.as_deref(),
+            mode: wiki_write_mode,
+            references: &references,
+            pattern_refs: &pattern_refs,
+        },
+    );
     crate::wiki_ops::append_wiki_log(
         server,
         "write",
@@ -180,6 +205,9 @@ pub(crate) async fn handle_tachi_wiki_write(
             duplicates_superseded
         ),
     );
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("continuity_event".to_string(), continuity_event);
+    }
     serde_json::to_string(&response).map_err(|e| format!("serialize wiki_write: {e}"))
 }
 

@@ -82,6 +82,7 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "sync_memories",
     "synthesize_agent_evolution",
     "tachi_complete",
+    "tachi_domain_adapter",
     "tachi_handoff",
     "tachi_memory",
     "tachi_orchestrator",

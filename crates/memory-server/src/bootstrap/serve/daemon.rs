@@ -48,32 +48,81 @@ pub(super) async fn serve_http_daemon(
     // routable scopes (own global/project + named projects), counts
     // orphans for unroutable manifest entries (dark DBs).
     let manifest_path = app_home.join("manifest.json");
-    let scheduler = crate::foundry_scheduler::FoundryScheduler::start(
-        manifest_path.clone(),
-        server.foundry_tx_clone(),
-        server.global_db_path_buf(),
-        server.project_db_path_buf(),
-    );
-    eprintln!(
-        "[daemon] foundry scheduler started (manifest={})",
-        manifest_path.display()
-    );
+    let manifest_background = daemon_uses_manifest_background(&app_home, &global_db_path);
+    let scheduler = if manifest_background {
+        crate::foundry_scheduler::FoundryScheduler::start(
+            manifest_path.clone(),
+            server.foundry_tx_clone(),
+            server.global_db_path_buf(),
+            server.project_db_path_buf(),
+        )
+    } else {
+        crate::foundry_scheduler::FoundryScheduler::start_own_dbs(
+            manifest_path.clone(),
+            server.foundry_tx_clone(),
+            server.global_db_path_buf(),
+            server.project_db_path_buf(),
+        )
+    };
+    if manifest_background {
+        eprintln!(
+            "[daemon] foundry scheduler started (manifest={})",
+            manifest_path.display()
+        );
+    } else {
+        eprintln!("[daemon] foundry scheduler scoped to daemon DBs only");
+    }
     // Hold scheduler for the whole daemon lifetime; Drop cancels
     // the manifest watcher + per-DB workers.
     let _scheduler = scheduler;
 
-    let _vector_sweep = crate::vector_sweep::VectorSweepScheduler::start(
-        manifest_path.clone(),
-        global_db_path.clone(),
-        project_db_path.clone(),
-        server.llm.clone(),
-    );
-    eprintln!(
-        "[daemon] vector sweep scheduled (manifest={})",
-        manifest_path.display()
-    );
+    let _vector_sweep = if manifest_background {
+        let scheduler = crate::vector_sweep::VectorSweepScheduler::start(
+            manifest_path.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+            server.llm.clone(),
+        );
+        eprintln!(
+            "[daemon] vector sweep scheduled (manifest={})",
+            manifest_path.display()
+        );
+        scheduler
+    } else {
+        let scheduler = crate::vector_sweep::VectorSweepScheduler::start_own_dbs(
+            manifest_path.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+            server.llm.clone(),
+        );
+        eprintln!("[daemon] vector sweep scoped to daemon DBs only");
+        scheduler
+    };
 
-    {
+    let _continuity_projection = if manifest_background {
+        let scheduler = crate::continuity_projector::ContinuityProjectionScheduler::start(
+            manifest_path.clone(),
+            server.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+        );
+        eprintln!(
+            "[daemon] continuity projection scheduled (manifest={})",
+            manifest_path.display()
+        );
+        scheduler
+    } else {
+        let scheduler = crate::continuity_projector::ContinuityProjectionScheduler::start_own_dbs(
+            manifest_path.clone(),
+            server.clone(),
+            global_db_path.clone(),
+            project_db_path.clone(),
+        );
+        eprintln!("[daemon] continuity projection scoped to daemon DBs only");
+        scheduler
+    };
+
+    if manifest_background {
         let daily_server = server.clone();
         tokio::spawn(async move {
             loop {
@@ -88,9 +137,7 @@ pub(super) async fn serve_http_daemon(
             }
         });
         eprintln!("[daemon] daily pipeline scheduled for 04:00 Asia/Shanghai");
-    }
 
-    {
         let rem_server = server.clone();
         tokio::spawn(async move {
             loop {
@@ -110,6 +157,8 @@ pub(super) async fn serve_http_daemon(
             }
         });
         eprintln!("[daemon] REM wiki evolver scheduled for Sunday 05:00 Asia/Shanghai");
+    } else {
+        eprintln!("[daemon] daily pipeline and REM wiki evolver disabled for scoped daemon");
     }
 
     use rmcp::transport::streamable_http_server::{
@@ -244,4 +293,39 @@ pub(super) async fn serve_http_daemon(
     // Best-effort cleanup of daemon discovery file
     let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
     Ok(())
+}
+
+fn daemon_uses_manifest_background(app_home: &Path, global_db_path: &Path) -> bool {
+    paths_match(global_db_path, &app_home.join("global").join("memory.db"))
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_background_only_runs_for_default_global_db() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let app_home = tmp.path().join(".tachi");
+        let default_global = app_home.join("global").join("memory.db");
+        let agent_global = app_home.join("agents").join("main").join("memory.db");
+        std::fs::create_dir_all(default_global.parent().unwrap()).expect("default parent");
+        std::fs::create_dir_all(agent_global.parent().unwrap()).expect("agent parent");
+        std::fs::write(&default_global, b"").expect("default db");
+        std::fs::write(&agent_global, b"").expect("agent db");
+
+        assert!(daemon_uses_manifest_background(&app_home, &default_global));
+        assert!(!daemon_uses_manifest_background(&app_home, &agent_global));
+    }
 }

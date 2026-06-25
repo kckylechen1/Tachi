@@ -3,6 +3,7 @@
 // Re-exports all primary types and provides a MemoryStore handle that
 // bundles a rusqlite::Connection with convenience methods.
 
+pub mod agent_profile;
 pub mod db;
 pub mod error;
 pub mod foundry;
@@ -17,6 +18,10 @@ pub mod store;
 pub mod types;
 pub mod vault;
 
+pub use agent_profile::{
+    AgentProfileIdentity, AgentProfilePack, AgentProfileRule, AgentProfileSource,
+    RenderedAgentProfile, AGENT_PROFILE_PACK_SCHEMA_VERSION,
+};
 pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig};
 pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
@@ -386,7 +391,11 @@ impl MemoryStore {
         Ok(rows)
     }
 
-    /// List entries missing keywords and/or entities metadata.
+    /// List entries missing recall keywords.
+    ///
+    /// Entities are optional: some short notes and diagnostic rows have no
+    /// meaningful named entity, and repeatedly retrying them only creates false
+    /// enrichment gaps.
     /// Returns (id, text, summary, revision) tuples.
     pub fn entries_missing_metadata(
         &self,
@@ -394,7 +403,6 @@ impl MemoryStore {
         let mut stmt = self.conn.prepare(
             "SELECT id, text, summary, revision FROM memories
              WHERE trim(keywords) IN ('', '[]')
-                OR trim(entities) IN ('', '[]')
              ORDER BY rowid",
         )?;
         let rows = stmt
@@ -410,13 +418,15 @@ impl MemoryStore {
         Ok(rows)
     }
 
-    /// Count entries with empty keywords or entities.
+    /// Count entries with recall keywords.
+    ///
+    /// Entities are optional for generic memory rows; keyword coverage is the
+    /// hard completeness signal used by backfill and runtime enrichment.
     pub fn metadata_stats(&self) -> Result<(i64, i64), MemoryError> {
         let (total, missing): (i64, i64) = self.conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE
                         WHEN trim(keywords) IN ('', '[]')
-                          OR trim(entities) IN ('', '[]')
                         THEN 1 ELSE 0 END), 0)
              FROM memories",
             [],
@@ -954,11 +964,23 @@ mod tests {
         complete.entities = vec!["ZAI".to_string()];
         store.upsert(&complete).expect("seed complete metadata");
 
+        let mut keywords_only = test_entry("metadata-keywords-only");
+        keywords_only.keywords = vec!["routing".to_string()];
+        keywords_only.entities = vec![];
+        store
+            .upsert(&keywords_only)
+            .expect("seed keywords-only metadata");
+
         let mut missing = test_entry("metadata-missing");
-        missing.keywords = vec!["routing".to_string()];
-        missing.entities = vec![];
+        missing.keywords = vec![];
+        missing.entities = vec!["Tachi".to_string()];
         store.upsert(&missing).expect("seed missing metadata");
 
-        assert_eq!(store.metadata_stats().expect("metadata stats"), (2, 1));
+        assert_eq!(store.metadata_stats().expect("metadata stats"), (3, 2));
+        let missing_entries = store
+            .entries_missing_metadata()
+            .expect("missing metadata entries");
+        assert_eq!(missing_entries.len(), 1);
+        assert_eq!(missing_entries[0].0, "metadata-missing");
     }
 }

@@ -11,6 +11,14 @@ fn default_facade_top_k() -> usize {
     6
 }
 
+fn default_profile_max_chars() -> usize {
+    4_000
+}
+
+fn default_profile_dry_run() -> bool {
+    true
+}
+
 pub const MAX_FACADE_TOP_K: usize = 100;
 
 pub fn clamp_facade_top_k(top_k: usize) -> usize {
@@ -64,6 +72,16 @@ fn tachi_event_action_schema(
             "label_eval",
         ],
         "Required Tachi event ledger action.",
+        generator,
+    )
+}
+
+fn tachi_profile_action_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["import", "render", "context"],
+        "Required Tachi profile action. import builds a canonical AgentProfilePack from supplied docs; render returns dry-run target files; context returns a bounded runtime alignment block.",
         generator,
     )
 }
@@ -660,6 +678,139 @@ pub struct TachiEventParams {
     #[schemars(
         description = "[action=project] Preview projection writes without upserting memories."
     )]
+    pub dry_run: bool,
+}
+
+/// Domain-specific adapter facade for repo-derived memory shapes.
+///
+/// This surface keeps fork/domain conventions out of the generic save/search
+/// structs while still letting Tachi own the canonical event/projection behavior.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiDomainAdapterParams {
+    #[schemars(description = "Action: lorebook_import.")]
+    pub action: String,
+
+    #[serde(default)]
+    #[schemars(description = "Named project DB for imported events/projections.")]
+    pub project: Option<String>,
+
+    #[serde(default)]
+    #[schemars(description = "Domain label for imported events/projections.")]
+    pub domain: Option<String>,
+
+    #[serde(default)]
+    #[schemars(description = "Actor/agent label for event imports.")]
+    pub actor: Option<String>,
+
+    #[serde(default)]
+    pub session_id: Option<String>,
+
+    #[serde(default)]
+    #[schemars(description = "Character/card name for lorebook imports.")]
+    pub character: Option<String>,
+
+    #[serde(default)]
+    #[schemars(description = "Lorebook entries, using RomanBath/SillyTavern field names.")]
+    pub entries: Vec<serde_json::Value>,
+
+    #[serde(default)]
+    #[schemars(description = "Project lorebook events after import. Defaults false.")]
+    pub project_events: bool,
+
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiProfileDocumentParams {
+    #[schemars(
+        description = "Document kind: agents|claude|gemini|cursor|soul|identity|user|tools|memory_policy|tool_policy|other."
+    )]
+    pub kind: String,
+
+    #[serde(default)]
+    pub path: Option<String>,
+
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiProfileDocumentPathParams {
+    #[schemars(
+        description = "Document kind: agents|claude|gemini|cursor|soul|identity|user|tools|memory_policy|tool_policy|other."
+    )]
+    pub kind: String,
+
+    pub path: String,
+}
+
+/// Canonical user-agent alignment/profile facade.
+///
+/// This first slice is read-only: it imports and renders profile projections,
+/// but never writes AGENTS.md / CLAUDE.md / GEMINI.md / OpenClaw files.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct TachiProfileParams {
+    #[schemars(schema_with = "tachi_profile_action_schema")]
+    pub action: String,
+
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    #[serde(default)]
+    pub display_name: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Single render target, e.g. codex_agents, claude_md, gemini_md, cursor_mdc, openclaw_agents, openclaw_soul, openclaw_identity, openclaw_user, openclaw_tools."
+    )]
+    pub target: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Multiple render targets. If empty, render uses target or codex_agents."
+    )]
+    pub targets: Vec<String>,
+
+    #[serde(default)]
+    pub documents: Vec<TachiProfileDocumentParams>,
+
+    #[serde(default)]
+    pub document_paths: Vec<TachiProfileDocumentPathParams>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Existing AgentProfilePack JSON. When omitted, Tachi imports from documents/document_paths."
+    )]
+    pub pack: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub project: Option<String>,
+
+    #[serde(default)]
+    pub role: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Session kind: main|subagent|cron|group|external. subagent/group/external suppress private user context."
+    )]
+    pub session_kind: Option<String>,
+
+    #[serde(default)]
+    #[schemars(
+        description = "Include user_model/private user profile in context render. Defaults false."
+    )]
+    pub include_private_user: bool,
+
+    #[serde(default = "default_true")]
+    #[schemars(
+        description = "Include projected continuity read-model context (patterns, lorebook, affect, metrics) in action=context."
+    )]
+    pub include_continuity: bool,
+
+    #[serde(default = "default_profile_max_chars")]
+    pub max_chars: usize,
+
+    #[serde(default = "default_profile_dry_run")]
     pub dry_run: bool,
 }
 

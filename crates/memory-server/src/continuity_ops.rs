@@ -374,7 +374,10 @@ fn inferred_projection_from_event_type(event_type: &str) -> Option<ProjectionKin
     let normalized = event_type.trim().to_ascii_lowercase();
     if normalized.starts_with("pattern.") {
         Some(ProjectionKind::Pattern)
-    } else if normalized.starts_with("timeline.") || normalized == "session.captured" {
+    } else if normalized.starts_with("timeline.")
+        || normalized == "session.captured"
+        || normalized == "wiki.saved"
+    {
         Some(ProjectionKind::Timeline)
     } else if normalized.starts_with("bonding.") {
         Some(ProjectionKind::Bonding)
@@ -910,12 +913,73 @@ pub(crate) fn project_continuity_events(
     let target = target_from_event_params(server, params);
     let query = event_query_from_params(params);
     let filters = projection_filters(&params.projection_hints)?;
+    project_continuity_events_inner(server, &target, query, filters, params.dry_run, false)
+}
+
+pub(crate) fn project_auto_continuity_events_for_target(
+    server: &MemoryServer,
+    target: ContinuityEventTarget,
+    limit: usize,
+) -> Result<Value, String> {
+    let query = TachiEventQuery {
+        limit: query_limit(limit),
+        ..TachiEventQuery::default()
+    };
+    project_continuity_events_inner(server, &target, query, Vec::new(), false, true)
+}
+
+fn auto_projectable_event(event: &TachiEventRecord) -> bool {
+    if event_projections(event).is_empty() {
+        return false;
+    }
+    if matches!(
+        event.authority,
+        AuthorityLevel::Blocker | AuthorityLevel::ExecutionGate
+    ) {
+        return false;
+    }
+
+    let event_type = event.event_type.trim().to_ascii_lowercase();
+    matches!(
+        event.authority,
+        AuthorityLevel::CollectOnly
+            | AuthorityLevel::RawFact
+            | AuthorityLevel::ReviewSignalOnly
+            | AuthorityLevel::ToneAndReminderOnly
+            | AuthorityLevel::Advisory
+    ) || matches!(
+        event_type.as_str(),
+        "memory.saved"
+            | "wiki.saved"
+            | "session.captured"
+            | "task.outcome"
+            | "subagent.evaluated"
+            | "session.outcome"
+    )
+}
+
+fn project_continuity_events_inner(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    query: TachiEventQuery,
+    filters: Vec<ProjectionKind>,
+    dry_run: bool,
+    auto_only: bool,
+) -> Result<Value, String> {
     let events = read_events(server, &target, &query)?;
     let mut projected = Vec::new();
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
 
     for event in events {
+        if auto_only && !auto_projectable_event(&event) {
+            skipped.push(json!({
+                "event_id": event.id,
+                "event_type": event.event_type,
+                "reason": "not auto-projectable",
+            }));
+            continue;
+        }
         let projections = event_projections(&event);
         if projections.is_empty() {
             skipped.push(json!({
@@ -932,7 +996,7 @@ pub(crate) fn project_continuity_events(
             let memory_id = projection_memory_id(projection, &key);
             let existing = get_projection_memory(server, &target, &memory_id)?;
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
-            if !params.dry_run {
+            if !dry_run {
                 if let Err(error) = upsert_projection_memory(server, &target, &entry) {
                     errors.push(json!({
                         "event_id": event.id,
@@ -952,14 +1016,15 @@ pub(crate) fn project_continuity_events(
                 "summary": entry.summary,
                 "tier": entry.tier,
                 "already_projected": already_projected,
-                "dry_run": params.dry_run,
+                "dry_run": dry_run,
             }));
         }
     }
 
     Ok(json!({
         "status": if errors.is_empty() { "completed" } else { "partial" },
-        "dry_run": params.dry_run,
+        "dry_run": dry_run,
+        "auto_only": auto_only,
         "projected_count": projected.len(),
         "skipped_count": skipped.len(),
         "error_count": errors.len(),
@@ -1487,6 +1552,76 @@ pub(crate) fn emit_memory_saved_event(
     }
 }
 
+pub(crate) struct WikiSavedEventInput<'a> {
+    pub project: Option<&'a str>,
+    pub wiki_id: &'a str,
+    pub path: &'a str,
+    pub title: &'a str,
+    pub topic: &'a str,
+    pub summary: &'a str,
+    pub text: &'a str,
+    pub domain: Option<&'a str>,
+    pub mode: &'a str,
+    pub references: &'a [String],
+    pub pattern_refs: &'a [Value],
+}
+
+pub(crate) fn emit_wiki_saved_event(
+    server: &MemoryServer,
+    input: WikiSavedEventInput<'_>,
+) -> Value {
+    let target = ContinuityEventTarget::from_default_write(server, input.project);
+    let event = TachiEventRecord {
+        id: stable_event_payload_id(&[
+            "wiki.saved",
+            input.wiki_id,
+            input.path,
+            input.mode,
+            &uuid::Uuid::new_v4().to_string(),
+        ]),
+        source_repo: "tachi".to_string(),
+        adapter: "tachi_wiki_write".to_string(),
+        project: target.project_label(input.project),
+        domain: input.domain.unwrap_or("wiki").to_string(),
+        session_id: input.wiki_id.to_string(),
+        actor: "tachi_wiki".to_string(),
+        event_type: "wiki.saved".to_string(),
+        authority: AuthorityLevel::RawFact,
+        effects: vec![
+            EffectScope::MemoryWrite,
+            EffectScope::Recall,
+            EffectScope::Prompt,
+        ],
+        projection_hints: vec![ProjectionKind::Timeline, ProjectionKind::ProjectCycle],
+        payload: json!({
+            "wiki_id": input.wiki_id,
+            "path": input.path,
+            "title": input.title,
+            "topic": input.topic,
+            "summary": input.summary,
+            "text": input.text,
+            "mode": input.mode,
+            "references": input.references,
+            "pattern_refs": input.pattern_refs,
+        }),
+        provenance: json!({
+            "source": "tachi_wiki_write",
+            "note": "reviewed wiki write returned to the continuity ledger; projection is a read-model marker, not a replacement for the wiki row",
+        }),
+        created_at: now_rfc3339(),
+    };
+
+    match write_event(server, &target, &event) {
+        Ok(()) => json!({
+            "status": "saved",
+            "event_id": event.id,
+            "event_type": event.event_type,
+            "projection_hints": event.projection_hints.iter().map(|projection| projection.as_str()).collect::<Vec<_>>(),
+        }),
+        Err(error) => json!({"status": "failed", "error": error, "event_type": event.event_type}),
+    }
+}
+
 pub(crate) fn emit_task_completion_events(
     server: &MemoryServer,
     task_payload: Value,
@@ -1867,5 +2002,84 @@ mod tests {
             events[0].payload["captured_memory_ids"][0],
             json!("memory-1")
         );
+    }
+
+    #[test]
+    fn auto_projection_skips_execution_gate_events() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let db = dir.path().join("memory.db");
+        let server = MemoryServer::new(db, None).expect("test server");
+        server
+            .with_global_store(|store| {
+                let allowed = TachiEventRecord {
+                    id: "pattern-candidate-1".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "pattern.candidate".to_string(),
+                    authority: AuthorityLevel::CollectOnly,
+                    effects: vec![EffectScope::None],
+                    projection_hints: vec![ProjectionKind::Pattern],
+                    payload: json!({
+                        "summary": "Continuity-first planning",
+                        "text": "Use continuity evidence before picking the next project-management action.",
+                        "projection_key": "continuity-first"
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                let blocked = TachiEventRecord {
+                    id: "execution-gate-1".to_string(),
+                    source_repo: "tachi".to_string(),
+                    adapter: "test".to_string(),
+                    project: "sigil".to_string(),
+                    domain: "agent_os".to_string(),
+                    session_id: "s1".to_string(),
+                    actor: "codex".to_string(),
+                    event_type: "evidence_gate.required".to_string(),
+                    authority: AuthorityLevel::ExecutionGate,
+                    effects: vec![EffectScope::Execution],
+                    projection_hints: vec![ProjectionKind::EvidenceGate],
+                    payload: json!({
+                        "summary": "Do not ship without tests",
+                        "projection_key": "must-test"
+                    }),
+                    provenance: json!({"source": "test"}),
+                    created_at: now_rfc3339(),
+                };
+                store.insert_tachi_event(&allowed).map_err(|e| e.to_string())?;
+                store.insert_tachi_event(&blocked).map_err(|e| e.to_string())
+            })
+            .expect("seed events");
+
+        let report = project_auto_continuity_events_for_target(
+            &server,
+            ContinuityEventTarget::new(DbScope::Global, None, None),
+            20,
+        )
+        .expect("project events");
+        assert_eq!(report["projected_count"], json!(1));
+        assert_eq!(report["skipped_count"], json!(1));
+
+        let patterns = list_projection_memories(
+            &server,
+            &ContinuityEventTarget::new(DbScope::Global, None, None),
+            "/user/patterns",
+            10,
+        )
+        .expect("list patterns");
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].summary, "Continuity-first planning");
+        let gates = list_projection_memories(
+            &server,
+            &ContinuityEventTarget::new(DbScope::Global, None, None),
+            "/evidence-gates",
+            10,
+        )
+        .expect("list gates");
+        assert!(gates.is_empty());
     }
 }
