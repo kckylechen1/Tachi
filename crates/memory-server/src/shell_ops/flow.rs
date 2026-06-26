@@ -122,12 +122,19 @@ pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
         let close_loop_path = dir.join("close_loop.json");
         let has_close_loop = close_loop_path.exists();
         if dir.join("result.md").exists() && !has_close_loop {
+            let status = read_status(&dir);
+            let Some(issue_ref) = status_string(&status, "issue_ref") else {
+                continue;
+            };
+            let pr_ref = status_string(&status, "pr_ref");
             debts.push(json!({
                 "kind": "unclosed_loop",
                 "flow_id": flow_id,
                 "detail": "Flow produced a result but close_loop has not run: issue/PR not written back, lesson not sunk to wiki, spec drift not flagged.",
-                "action": format!("tachi_task(action='close_loop', flow_id='{flow_id}')"),
+                "action": close_loop_action_hint(&flow_id, &issue_ref, pr_ref.as_deref()),
                 "authority": "closure_debt",
+                "issue_ref": issue_ref,
+                "pr_ref": pr_ref,
             }));
         } else if has_close_loop {
             let spec_unresolved = std::fs::read_to_string(&close_loop_path)
@@ -166,6 +173,32 @@ pub(crate) fn scan_open_loops(limit: usize) -> Vec<Value> {
         }));
     }
     debts
+}
+
+fn status_string(status: &Value, key: &str) -> Option<String> {
+    status
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn close_loop_action_hint(flow_id: &str, issue_ref: &str, pr_ref: Option<&str>) -> String {
+    let mut hint = format!(
+        "tachi_task(action='close_loop', flow_id='{}', issue_ref='{}'",
+        pseudo_call_quote(flow_id),
+        pseudo_call_quote(issue_ref)
+    );
+    if let Some(pr_ref) = pr_ref {
+        hint.push_str(&format!(", pr_ref='{}'", pseudo_call_quote(pr_ref)));
+    }
+    hint.push(')');
+    hint
+}
+
+fn pseudo_call_quote(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 pub(super) fn validate_slice_id(id: &str) -> Result<(), String> {

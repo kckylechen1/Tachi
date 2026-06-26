@@ -15,6 +15,20 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
     let unclosed = runs_root.join("flow_20260101T000000Z_unclosed_aaaa1111");
     std::fs::create_dir_all(&unclosed).unwrap();
     std::fs::write(unclosed.join("result.md"), "# Fixed the leak\nbody").unwrap();
+    std::fs::write(
+        unclosed.join("status.json"),
+        r#"{"issue_ref":"owner/repo#123","pr_ref":"owner/repo#124"}"#,
+    )
+    .unwrap();
+
+    let issue_less = runs_root.join("flow_20260101T000000Z_issue_less_eeee5555");
+    std::fs::create_dir_all(&issue_less).unwrap();
+    std::fs::write(issue_less.join("result.md"), "# Local maintenance\nbody").unwrap();
+    std::fs::write(
+        issue_less.join("status.json"),
+        r#"{"issue_ref":null,"pr_ref":null}"#,
+    )
+    .unwrap();
 
     let clean = runs_root.join("flow_20260101T000000Z_clean_bbbb2222");
     std::fs::create_dir_all(&clean).unwrap();
@@ -42,10 +56,29 @@ async fn scan_open_loops_flags_unclosed_and_spec_drift() {
             .and_then(|d| d.get("kind").and_then(|k| k.as_str()).map(String::from))
     };
     assert_eq!(kind_for("unclosed").as_deref(), Some("unclosed_loop"));
+    let unclosed_debt = debts
+        .iter()
+        .find(|debt| {
+            debt.get("flow_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.contains("unclosed"))
+        })
+        .expect("unclosed issue-backed flow should be flagged");
+    assert_eq!(unclosed_debt["issue_ref"], json!("owner/repo#123"));
+    assert!(
+        unclosed_debt["action"]
+            .as_str()
+            .is_some_and(|action| action.contains("issue_ref='owner/repo#123'")),
+        "suggested action should include the issue_ref required by close_loop: {unclosed_debt}"
+    );
     assert_eq!(kind_for("drift").as_deref(), Some("spec_drift"));
     assert!(
         kind_for("clean").is_none(),
         "cleanly-closed flow must not be flagged"
+    );
+    assert!(
+        kind_for("issue_less").is_none(),
+        "issue-less transient flow must not be flagged with a close_loop action that cannot run"
     );
 }
 
