@@ -24,15 +24,16 @@ pub(crate) async fn handle_tachi_memory(
     params: TachiMemoryParams,
 ) -> Result<String, String> {
     let action = params.action.to_ascii_lowercase();
+    if should_forward_facade_read(&action) {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params).await?
+        {
+            return Ok(body);
+        }
+    }
+
     match action.as_str() {
         "search" => {
-            if let Some(body) =
-                crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params)
-                    .await?
-            {
-                return Ok(body);
-            }
-
             let query = params
                 .query
                 .clone()
@@ -73,13 +74,6 @@ pub(crate) async fn handle_tachi_memory(
             crate::facade_search_ops::handle_tachi_search(server, search_params).await
         }
         "get" => {
-            if let Some(body) =
-                crate::cli_client::maybe_forward_server_read(server, "tachi_memory", &params)
-                    .await?
-            {
-                return Ok(body);
-            }
-
             let id = params
                 .id
                 .clone()
@@ -218,7 +212,47 @@ pub(crate) async fn handle_tachi_memory(
     }
 }
 
+fn should_forward_facade_read(action: &str) -> bool {
+    matches!(
+        action,
+        "search" | "get" | "briefing" | "alerts" | "ask" | "consolidate" | "readiness"
+    )
+}
+
 // Re-export pub(crate) items that external modules reference.
 pub(crate) use checkpoint_ops::{
     capture_latest_claude_jsonl_checkpoint, claude_jsonl_passive_watcher_status,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::should_forward_facade_read;
+
+    #[test]
+    fn facade_read_actions_include_briefing_forwarding() {
+        for action in [
+            "search",
+            "get",
+            "briefing",
+            "alerts",
+            "ask",
+            "consolidate",
+            "readiness",
+        ] {
+            assert!(
+                should_forward_facade_read(action),
+                "{action} should use daemon read forwarding"
+            );
+        }
+    }
+
+    #[test]
+    fn facade_write_actions_do_not_use_read_forwarding() {
+        for action in ["save", "extract_facts", "checkpoint", "progress"] {
+            assert!(
+                !should_forward_facade_read(action),
+                "{action} should keep its write/state-specific forwarding path"
+            );
+        }
+    }
+}
