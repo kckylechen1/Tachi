@@ -970,6 +970,7 @@ fn project_continuity_events_inner(
     let mut projected = Vec::new();
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
+    let mut promotion_candidates = Vec::new();
 
     for event in events {
         if auto_only && !auto_projectable_event(&event) {
@@ -1007,6 +1008,21 @@ fn project_continuity_events_inner(
                     continue;
                 }
             }
+            if let Some(reason) = projection_promotion_reason(&entry) {
+                if !promotion_candidates.iter().any(|candidate: &Value| {
+                    candidate.get("memory_id").and_then(Value::as_str) == Some(entry.id.as_str())
+                }) {
+                    promotion_candidates.push(json!({
+                        "memory_id": entry.id,
+                        "projection": projection.as_str(),
+                        "path": entry.path,
+                        "summary": entry.summary,
+                        "tier": entry.tier,
+                        "reason": reason,
+                        "counters": entry.metadata.get("counters").cloned().unwrap_or_else(|| json!({})),
+                    }));
+                }
+            }
             projected.push(json!({
                 "event_id": event.id,
                 "event_type": event.event_type,
@@ -1027,11 +1043,29 @@ fn project_continuity_events_inner(
         "auto_only": auto_only,
         "projected_count": projected.len(),
         "skipped_count": skipped.len(),
+        "promotion_candidate_count": promotion_candidates.len(),
+        "promotion_candidates": promotion_candidates,
         "error_count": errors.len(),
         "projections": projected,
         "skipped": skipped,
         "errors": errors,
     }))
+}
+
+fn projection_promotion_reason(entry: &MemoryEntry) -> Option<&'static str> {
+    let projection = projection_kind_metadata(entry)?;
+    if !matches!(projection, "pattern" | "bonding" | "world_book") {
+        return None;
+    }
+    let seen = counter_i64(&entry.metadata, "seen");
+    let hit = counter_i64(&entry.metadata, "hit");
+    if seen >= 3 && hit > 0 {
+        return Some("hit_threshold");
+    }
+    if entry.tier == "pattern" {
+        return Some("reviewed_pattern_tier");
+    }
+    None
 }
 
 fn default_context_projections(filters: Vec<ProjectionKind>) -> Vec<ProjectionKind> {

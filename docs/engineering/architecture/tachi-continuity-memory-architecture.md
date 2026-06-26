@@ -266,22 +266,23 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - Pattern/bonding projections maintain `seen / hit / miss / confidence / last_seen` counters.
 - Affect projections carry explicit guardrails.
 - `tachi_event action=label_eval` provides a label-quality harness.
+- A held-out label-eval smoke fixture covers `session.outcome` vs `session.outcome.review` matching before `challenge_rate` is used as an over-fit signal.
 - `save_memory` supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
+- `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
 - `tachi_skill(action="from_pattern")` registers a disabled, pending-review, discoverable skill candidate with a `pattern_ref`.
+- The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters.
 - Complete skill system: `hub_register`, `run_skill`, `recommend_skill`, `skill_evolve`, builtin skills.
 
 ### Missing / gaps
 
-1. **No background auto-apply loop**: projection is explicit via `tachi_event action=project`.
-2. **No Agent MD crystallization**: the ledger is not yet read when generating agent system prompts.
-3. **No cross-process A2A transport**: only a local read model exists.
-4. **Label-quality calibration incomplete**: harness exists, needs reviewed held-out data.
-5. **Wiki writes do not emit `wiki.saved` events**: wiki entries can carry `pattern_refs`, but the write itself is not yet a ledger event.
-6. **Maturity gates are not implemented**: `from_pattern` can register candidates, but hit-rate / validation thresholds do not auto-promote to wiki or approved skills.
-7. **Pattern hit/miss feedback is not wired**: counters update from event types if supplied, but runtime recall does not emit hit/miss callbacks.
-8. **Pattern recommendation signal for skills is not wired**: `recommend_skill` does not yet use active patterns as context.
+1. **No Agent MD crystallization**: the ledger is not yet read when generating agent system prompts.
+2. **No cross-process A2A transport**: only a local read model exists.
+3. **Label-quality calibration incomplete**: harness and smoke fixture exist, but calibration still needs a larger reviewed held-out corpus.
+4. **Maturity gates are not implemented**: `from_pattern` can register candidates, but hit-rate / validation thresholds do not auto-promote to wiki or approved skills.
+5. **Pattern hit/miss feedback is not wired to recall runtime**: counters update from event types if supplied, but runtime recall does not emit hit/miss callbacks.
+6. **Pattern recommendation signal for skills is not wired**: `recommend_skill` does not yet use active patterns as context.
 
 ---
 
@@ -294,7 +295,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 1. Configure backend lanes:
    - `extract/summary` → fast model (Qwen 27B / DeepSeek V4 Flash)
    - `distill/reasoning` → strong model (Qwen 72B / DeepSeek V4 Pro)
-2. Run `tachi_event action=label_eval` on held-out transcripts.
+2. Expand held-out transcript fixtures and run `tachi_event action=label_eval`.
 3. Establish label-quality acceptance criteria before trusting `challenge_rate`.
 
 ### Phase 2 — Memory / Wiki / Pattern integration
@@ -305,15 +306,15 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
 3. Done: `save_memory` can emit `memory.saved` when `emit_continuity=true`.
 4. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
-5. Remaining: emit `wiki.saved` events for reviewed wiki writes.
+5. Done: `tachi_wiki_write` emits `wiki.saved` continuity events with reviewed `pattern_refs`.
 
 ### Phase 3 — Background projection loop
 
 **Goal:** close the loop without requiring manual `tachi_event action=project`.
 
-1. Add a scheduler/cron that calls `project_continuity_events` for eligible candidates.
-2. Respect authority levels: only `CollectOnly` candidates are auto-projected; higher authority remains explicit.
-3. Add observability: projected count, skipped count, promotion candidates.
+1. Done: daemon scheduler calls `project_auto_continuity_events_for_target` for scoped/manifest DBs.
+2. Done: auto projection skips `Blocker` and `ExecutionGate` authority events.
+3. Done: reports and scheduler logs include projected count, skipped count, and promotion candidates.
 
 ### Phase 4 — Skill crystallization
 

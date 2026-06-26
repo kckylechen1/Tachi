@@ -178,6 +178,82 @@ async fn tachi_event_label_eval_compares_outcomes_to_gold_reviews() {
 }
 
 #[tokio::test]
+async fn tachi_event_label_eval_runs_heldout_fixture() {
+    let server = make_server();
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../fixtures/continuity_label_eval_heldout.json"
+    ))
+    .expect("heldout fixture JSON");
+    for event in fixture["events"].as_array().expect("fixture events") {
+        let mut emit = tachi_event_params("emit");
+        emit.id = event.get("id").and_then(Value::as_str).map(str::to_string);
+        emit.source_repo = event
+            .get("source_repo")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.adapter = event
+            .get("adapter")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.domain = event
+            .get("domain")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.session_id = event
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.actor = event
+            .get("actor")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.event_type = event
+            .get("event_type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.authority = event
+            .get("authority")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        emit.effects = event
+            .get("effects")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        emit.projection_hints = event
+            .get("projection_hints")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        emit.payload = event.get("payload").cloned();
+        crate::event_ops::handle_tachi_event(&server, emit)
+            .await
+            .expect("emit heldout event");
+    }
+
+    let eval = crate::event_ops::handle_tachi_event(&server, tachi_event_params("label_eval"))
+        .await
+        .expect("label eval");
+    let parsed: Value = serde_json::from_str(&eval).expect("label eval JSON");
+    assert_eq!(parsed["status"], json!("completed"));
+    assert_eq!(parsed["reviewed"], json!(1));
+    assert_eq!(parsed["outcome_accuracy"], json!(1.0));
+    assert_eq!(parsed["evidence_basis_accuracy"], json!(1.0));
+}
+
+#[tokio::test]
 async fn tachi_event_project_materializes_pattern_idempotently() {
     let server = make_server();
 
@@ -237,6 +313,86 @@ async fn tachi_event_project_materializes_pattern_idempotently() {
         entry.metadata["projected_event_ids"],
         json!(["pattern-observed-1"])
     );
+}
+
+#[tokio::test]
+async fn tachi_event_project_updates_pattern_hit_miss_counters() {
+    let server = make_server();
+
+    for (id, event_type, created_at) in [
+        (
+            "pattern-counter-candidate",
+            "pattern.candidate",
+            "2026-06-24T00:00:00Z",
+        ),
+        ("pattern-counter-hit", "pattern.hit", "2026-06-24T00:01:00Z"),
+        (
+            "pattern-counter-miss",
+            "pattern.miss",
+            "2026-06-24T00:02:00Z",
+        ),
+    ] {
+        let mut emit = tachi_event_params("emit");
+        emit.id = Some(id.to_string());
+        emit.source_repo = Some("sigil".to_string());
+        emit.adapter = Some("facade-test".to_string());
+        emit.domain = Some("agent_os".to_string());
+        emit.session_id = Some("session-pattern-counters".to_string());
+        emit.actor = Some("codex".to_string());
+        emit.event_type = Some(event_type.to_string());
+        emit.authority = Some("collect_only".to_string());
+        emit.projection_hints = vec!["pattern".to_string()];
+        emit.created_at = Some(created_at.to_string());
+        emit.payload = Some(json!({
+            "pattern_key": "counter-continuity",
+            "summary": "Counter continuity pattern",
+            "text": "Candidate projection starts as evidence; hit and miss callbacks update confidence.",
+        }));
+        crate::event_ops::handle_tachi_event(&server, emit)
+            .await
+            .expect("emit counter event");
+    }
+
+    let mut project = tachi_event_params("project");
+    project.projection_hints = vec!["pattern".to_string()];
+    project.limit = 10;
+    let projected = crate::event_ops::handle_tachi_event(&server, project.clone())
+        .await
+        .expect("project counter events");
+    let projected_json: Value = serde_json::from_str(&projected).expect("project JSON");
+    assert_eq!(projected_json["projected_count"], json!(3));
+    assert_eq!(projected_json["promotion_candidate_count"], json!(1));
+    assert_eq!(
+        projected_json["promotion_candidates"][0]["reason"],
+        json!("hit_threshold")
+    );
+    let memory_id = projected_json["promotion_candidates"][0]["memory_id"]
+        .as_str()
+        .expect("promotion candidate memory id")
+        .to_string();
+
+    let entry = server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
+        .expect("read projected counter entry")
+        .expect("projection entry exists");
+    assert_eq!(entry.metadata["counters"]["seen"], json!(3));
+    assert_eq!(entry.metadata["counters"]["hit"], json!(1));
+    assert_eq!(entry.metadata["counters"]["miss"], json!(1));
+    assert_eq!(entry.metadata["counters"]["confidence"], json!(1.0 / 3.0));
+    assert_eq!(entry.tier, "consolidated");
+
+    let second = crate::event_ops::handle_tachi_event(&server, project)
+        .await
+        .expect("project counter events again");
+    let second_json: Value = serde_json::from_str(&second).expect("second project JSON");
+    assert_eq!(second_json["promotion_candidate_count"], json!(1));
+    let entry_after = server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
+        .expect("read projected counter entry again")
+        .expect("projection entry exists after second pass");
+    assert_eq!(entry_after.metadata["counters"]["seen"], json!(3));
+    assert_eq!(entry_after.metadata["counters"]["hit"], json!(1));
+    assert_eq!(entry_after.metadata["counters"]["miss"], json!(1));
 }
 
 #[tokio::test]

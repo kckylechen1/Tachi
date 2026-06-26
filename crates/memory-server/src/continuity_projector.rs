@@ -117,10 +117,15 @@ fn run_projection_pass(
                     .get("error_count")
                     .and_then(|value| value.as_u64())
                     .unwrap_or(0);
-                if projected > 0 || errors > 0 {
+                let promotion_candidates = report
+                    .get("promotion_candidate_count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0);
+                if projected > 0 || promotion_candidates > 0 || errors > 0 {
                     tracing::info!(
                         target: "tachi::continuity_projector",
                         projected,
+                        promotion_candidates,
                         errors,
                         "continuity projection pass completed"
                     );

@@ -214,7 +214,8 @@ Implemented substrate:
   stable memory projections. Pattern/bonding/worldbook keys map to stable memory ids;
   rerunning projection does not double-count the same event.
 - `tachi_event action="context"` now returns projected continuity memories plus typed
-  `lorebook` and `affect` read-model sections for prompt/runtime consumers.
+  `patterns`, `lorebook`, and `affect` read-model sections for prompt/runtime
+  consumers.
 - Pattern/bonding projections maintain basic `seen / hit / miss / last_seen` counters
   in metadata. Promotion remains conservative: `CollectOnly` does not become an
   execution/scoring authority.
@@ -223,16 +224,27 @@ Implemented substrate:
 - `tachi_event action="label_eval"` provides a read-only label-quality harness:
   compare `session.outcome` events against `session.outcome.review` gold labels by
   `target_event_id` or `session_id`.
+- A held-out label-eval smoke fixture exercises that harness before `challenge_rate`
+  is treated as an over-fit signal.
+- `save_memory` can opt into `memory.saved` events with `emit_continuity=true`.
+- `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
+  mixing them into ordinary memory recall.
+- `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
+  `wiki.saved` events.
+- `tachi_skill action="from_pattern"` registers disabled, pending-review,
+  discoverable skill candidates carrying `pattern_ref` metadata.
+- The daemon runs a background continuity projection loop. Projection reports expose
+  `projected_count`, `skipped_count`, and `promotion_candidate_count`.
 
 Still missing:
 
-- No background auto-apply loop runs projection by itself; projection is explicit via
-  `tachi_event action="project"`.
 - No `Agent MD` crystallization reads this ledger yet.
 - No cross-process A2A subscription transport has been wired on top of these events;
   the local read model exists through `tachi_event action="context"`.
-- Label-quality calibration is not complete; the harness exists, but it still needs
-  reviewed held-out data.
+- Label-quality calibration is not complete; the harness and smoke fixture exist, but
+  it still needs a larger reviewed held-out corpus.
+- Runtime recall does not yet emit `pattern.hit` / `pattern.miss` feedback events;
+  supplied callback events update counters, but search itself is not feeding them yet.
 
 ## Lorebook and emotion mapping
 
