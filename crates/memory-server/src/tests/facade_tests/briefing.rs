@@ -46,6 +46,11 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            proposal_id: None,
+            review_status: None,
+            notes: None,
+            confirm: false,
+            state_filter: None,
         },
     )
     .await
@@ -163,6 +168,11 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             emit_continuity: false,
             compact: false,
             files: Vec::new(),
+            proposal_id: None,
+            review_status: None,
+            notes: None,
+            confirm: false,
+            state_filter: None,
         },
     )
     .await

@@ -52,6 +52,9 @@ fn tachi_memory_action_schema(
             "ask",
             "consolidate",
             "recall_simulate",
+            "recall_proposals",
+            "review_recall_proposal",
+            "apply_recall_proposals",
             "progress",
             "readiness",
         ],
@@ -412,7 +415,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), progress (long-running flow status), readiness (health + tool visibility)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), progress (long-running flow status), readiness (health + tool visibility)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -545,7 +548,7 @@ pub struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}] and optional variants: [{name, recall_config:{or_fallback_fts_score_factor?, default_fts?, ...}}]."
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate|recall_proposals] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}] and optional variants: [{name, recall_config:{or_fallback_fts_score_factor?, default_fts?, ...}}]."
     )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
@@ -588,6 +591,29 @@ pub struct TachiMemoryParams {
         description = "[action=briefing] When true, emit a tight 6-row summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no health snapshot. Default false (full briefing)."
     )]
     pub compact: bool,
+
+    // --- recall config proposals ---
+    #[serde(default)]
+    #[schemars(
+        description = "[action=review_recall_proposal|apply_recall_proposals] Recall proposal id."
+    )]
+    pub proposal_id: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=review_recall_proposal] Review status: approved or rejected."
+    )]
+    pub review_status: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "[action=review_recall_proposal] Optional review note.")]
+    pub notes: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=apply_recall_proposals] Required true to write approved TACHI_RECALL_* values to config.env."
+    )]
+    pub confirm: bool,
+    #[serde(default)]
+    #[schemars(description = "[action=recall_proposals] Optional proposal status filter.")]
+    pub state_filter: Option<String>,
 }
 
 // ─── Facade: append-only continuity events ───────────────────────────────────

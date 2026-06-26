@@ -23,6 +23,18 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .as_array()
         .expect("action enum")
         .contains(&json!("recall_simulate")));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("recall_proposals")));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("review_recall_proposal")));
+    assert!(action["enum"]
+        .as_array()
+        .expect("action enum")
+        .contains(&json!("apply_recall_proposals")));
 }
 
 #[test]

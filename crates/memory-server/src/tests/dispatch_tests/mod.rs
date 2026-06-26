@@ -168,6 +168,11 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         project: None,
         domain: None,
         compact: false,
+        proposal_id: None,
+        review_status: None,
+        notes: None,
+        confirm: false,
+        state_filter: None,
     }
 }
 

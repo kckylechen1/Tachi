@@ -1446,6 +1446,11 @@ impl MemoryServer {
             emit_continuity: false,
             files: Vec::new(),
             compact: true,
+            proposal_id: None,
+            review_status: None,
+            notes: None,
+            confirm: false,
+            state_filter: None,
         };
         crate::facade_memory_ops::handle_tachi_memory(self, params).await
     }

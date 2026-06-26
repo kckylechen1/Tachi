@@ -167,6 +167,11 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         emit_continuity: false,
         files: Vec::new(),
         compact: false,
+        proposal_id: None,
+        review_status: None,
+        notes: None,
+        confirm: false,
+        state_filter: None,
     };
     let (saved, display_path, already_formatted, echo) =
         save_memory_checkpoint(server, params).await?;

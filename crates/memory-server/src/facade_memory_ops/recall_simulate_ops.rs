@@ -64,6 +64,36 @@ struct RecallConfigOverrides {
     #[serde(default)]
     default_use_rrf: Option<bool>,
     #[serde(default)]
+    guide_semantic: Option<f64>,
+    #[serde(default)]
+    guide_fts: Option<f64>,
+    #[serde(default)]
+    guide_symbolic: Option<f64>,
+    #[serde(default)]
+    guide_decay: Option<f64>,
+    #[serde(default)]
+    guide_use_rrf: Option<bool>,
+    #[serde(default)]
+    wiki_semantic: Option<f64>,
+    #[serde(default)]
+    wiki_fts: Option<f64>,
+    #[serde(default)]
+    wiki_symbolic: Option<f64>,
+    #[serde(default)]
+    wiki_decay: Option<f64>,
+    #[serde(default)]
+    wiki_use_rrf: Option<bool>,
+    #[serde(default)]
+    events_notes_semantic: Option<f64>,
+    #[serde(default)]
+    events_notes_fts: Option<f64>,
+    #[serde(default)]
+    events_notes_symbolic: Option<f64>,
+    #[serde(default)]
+    events_notes_decay: Option<f64>,
+    #[serde(default)]
+    events_notes_use_rrf: Option<bool>,
+    #[serde(default)]
     expanded_fts_score_factor: Option<f64>,
     #[serde(default)]
     max_expanded_fts_queries: Option<usize>,
@@ -119,6 +149,30 @@ impl RecallConfigOverrides {
             self.default_decay,
             self.default_use_rrf,
         );
+        apply_weight_overrides(
+            &mut config.guide_weights,
+            self.guide_semantic,
+            self.guide_fts,
+            self.guide_symbolic,
+            self.guide_decay,
+            self.guide_use_rrf,
+        );
+        apply_weight_overrides(
+            &mut config.wiki_weights,
+            self.wiki_semantic,
+            self.wiki_fts,
+            self.wiki_symbolic,
+            self.wiki_decay,
+            self.wiki_use_rrf,
+        );
+        apply_weight_overrides(
+            &mut config.events_notes_weights,
+            self.events_notes_semantic,
+            self.events_notes_fts,
+            self.events_notes_symbolic,
+            self.events_notes_decay,
+            self.events_notes_use_rrf,
+        );
         if let Some(value) = self.expanded_fts_score_factor {
             config.expanded_fts_score_factor = value;
         }
@@ -150,6 +204,17 @@ pub(crate) async fn handle_memory_recall_simulate(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
+    let report = build_recall_simulation_report(server, params).await?;
+    if wants_json(params.format.as_deref()) {
+        return json_string(&report);
+    }
+    Ok(format_recall_simulate_markdown(&report))
+}
+
+pub(crate) async fn build_recall_simulation_report(
+    server: &MemoryServer,
+    params: &TachiMemoryParams,
+) -> Result<Value, String> {
     let cases = parse_cases(params)?;
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
     let candidate_variants = parse_variants(params)?;
@@ -159,20 +224,20 @@ pub(crate) async fn handle_memory_recall_simulate(
     let mut variants = vec![current_report.clone()];
     for (idx, variant) in candidate_variants.iter().enumerate() {
         let config = variant.to_recall_config(&base_config);
-        variants.push(
-            run_variant(
-                server,
-                params,
-                &cases,
-                default_top_k,
-                &variant.configured_name(idx + 1),
-                Some(&config),
-            )
-            .await?,
-        );
+        let mut report = run_variant(
+            server,
+            params,
+            &cases,
+            default_top_k,
+            &variant.configured_name(idx + 1),
+            Some(&config),
+        )
+        .await?;
+        report["config_env"] = json!(recall_config_env_diff(&base_config, &config));
+        variants.push(report);
     }
 
-    let report = json!({
+    Ok(json!({
         "status": "completed",
         "action": "recall_simulate",
         "case_count": cases.len(),
@@ -190,12 +255,7 @@ pub(crate) async fn handle_memory_recall_simulate(
             "Does not mutate memory access_count or recall counters.",
             "Variant recall_config overrides apply only inside this simulation call."
         ],
-    });
-
-    if wants_json(params.format.as_deref()) {
-        return json_string(&report);
-    }
-    Ok(format_recall_simulate_markdown(&report))
+    }))
 }
 
 async fn run_variant(
@@ -443,6 +503,139 @@ fn apply_weight_overrides(
     }
 }
 
+pub(crate) fn recall_config_env_diff(
+    base: &RecallConfig,
+    candidate: &RecallConfig,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    insert_weight_env_diff(
+        &mut out,
+        "TACHI_RECALL_DEFAULT",
+        &base.default_weights,
+        &candidate.default_weights,
+    );
+    insert_weight_env_diff(
+        &mut out,
+        "TACHI_RECALL_GUIDE",
+        &base.guide_weights,
+        &candidate.guide_weights,
+    );
+    insert_weight_env_diff(
+        &mut out,
+        "TACHI_RECALL_WIKI",
+        &base.wiki_weights,
+        &candidate.wiki_weights,
+    );
+    insert_weight_env_diff(
+        &mut out,
+        "TACHI_RECALL_EVENTS_NOTES",
+        &base.events_notes_weights,
+        &candidate.events_notes_weights,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR",
+        base.expanded_fts_score_factor,
+        candidate.expanded_fts_score_factor,
+    );
+    insert_usize_env_diff(
+        &mut out,
+        "TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES",
+        base.max_expanded_fts_queries,
+        candidate.max_expanded_fts_queries,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
+        base.or_fallback_fts_score_factor,
+        candidate.or_fallback_fts_score_factor,
+    );
+    insert_usize_env_diff(
+        &mut out,
+        "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
+        base.or_fallback_fts_max_terms,
+        candidate.or_fallback_fts_max_terms,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_RAW_HALF_LIFE_DAYS",
+        base.raw_half_life_days,
+        candidate.raw_half_life_days,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_CONSOLIDATED_HALF_LIFE_DAYS",
+        base.consolidated_half_life_days,
+        candidate.consolidated_half_life_days,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_PATTERN_HALF_LIFE_DAYS",
+        base.pattern_half_life_days,
+        candidate.pattern_half_life_days,
+    );
+    insert_f64_env_diff(
+        &mut out,
+        "TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST",
+        base.id_like_exact_match_boost,
+        candidate.id_like_exact_match_boost,
+    );
+    out
+}
+
+fn insert_weight_env_diff(
+    out: &mut BTreeMap<String, String>,
+    prefix: &str,
+    base: &HybridWeights,
+    candidate: &HybridWeights,
+) {
+    insert_f64_env_diff(
+        out,
+        &format!("{prefix}_SEMANTIC"),
+        base.semantic,
+        candidate.semantic,
+    );
+    insert_f64_env_diff(out, &format!("{prefix}_FTS"), base.fts, candidate.fts);
+    insert_f64_env_diff(
+        out,
+        &format!("{prefix}_SYMBOLIC"),
+        base.symbolic,
+        candidate.symbolic,
+    );
+    insert_f64_env_diff(out, &format!("{prefix}_DECAY"), base.decay, candidate.decay);
+    if base.use_rrf != candidate.use_rrf {
+        out.insert(format!("{prefix}_USE_RRF"), candidate.use_rrf.to_string());
+    }
+}
+
+fn insert_f64_env_diff(out: &mut BTreeMap<String, String>, key: &str, base: f64, candidate: f64) {
+    if (base - candidate).abs() > f64::EPSILON {
+        out.insert(key.to_string(), format_env_f64(candidate));
+    }
+}
+
+fn insert_usize_env_diff(
+    out: &mut BTreeMap<String, String>,
+    key: &str,
+    base: usize,
+    candidate: usize,
+) {
+    if base != candidate {
+        out.insert(key.to_string(), candidate.to_string());
+    }
+}
+
+fn format_env_f64(value: f64) -> String {
+    let mut out = format!("{value:.6}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
+}
+
 fn recall_config_summary(config: &RecallConfig) -> Value {
     json!({
         "default_weights": {
@@ -451,6 +644,27 @@ fn recall_config_summary(config: &RecallConfig) -> Value {
             "symbolic": config.default_weights.symbolic,
             "decay": config.default_weights.decay,
             "use_rrf": config.default_weights.use_rrf,
+        },
+        "guide_weights": {
+            "semantic": config.guide_weights.semantic,
+            "fts": config.guide_weights.fts,
+            "symbolic": config.guide_weights.symbolic,
+            "decay": config.guide_weights.decay,
+            "use_rrf": config.guide_weights.use_rrf,
+        },
+        "wiki_weights": {
+            "semantic": config.wiki_weights.semantic,
+            "fts": config.wiki_weights.fts,
+            "symbolic": config.wiki_weights.symbolic,
+            "decay": config.wiki_weights.decay,
+            "use_rrf": config.wiki_weights.use_rrf,
+        },
+        "events_notes_weights": {
+            "semantic": config.events_notes_weights.semantic,
+            "fts": config.events_notes_weights.fts,
+            "symbolic": config.events_notes_weights.symbolic,
+            "decay": config.events_notes_weights.decay,
+            "use_rrf": config.events_notes_weights.use_rrf,
         },
         "expanded_fts_score_factor": config.expanded_fts_score_factor,
         "max_expanded_fts_queries": config.max_expanded_fts_queries,

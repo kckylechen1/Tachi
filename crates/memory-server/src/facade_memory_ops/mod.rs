@@ -9,6 +9,7 @@ mod checkpoint_ops;
 mod evidence_format;
 mod progress_ops;
 mod readiness_ops;
+mod recall_proposal_ops;
 mod recall_simulate_ops;
 
 use crate::facade_save_ops::handle_tachi_save;
@@ -207,10 +208,17 @@ pub(crate) async fn handle_tachi_memory(
         "recall_simulate" => {
             recall_simulate_ops::handle_memory_recall_simulate(server, &params).await
         }
+        "recall_proposals" => {
+            recall_proposal_ops::handle_recall_config_proposals(server, &params).await
+        }
+        "review_recall_proposal" => {
+            recall_proposal_ops::handle_recall_config_review(server, &params)
+        }
+        "apply_recall_proposals" => recall_proposal_ops::handle_recall_config_apply(server, &params),
         "progress" => progress_ops::handle_memory_progress(server, &params).await,
         "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'progress', or 'readiness'.",
+            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'progress', or 'readiness'.",
             params.action
         )),
     }

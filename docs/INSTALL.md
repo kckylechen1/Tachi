@@ -218,6 +218,46 @@ uses the same adaptive Voyage rerank gate as normal search, including the
 exact-token skip policy. It bypasses the recall-cache short circuit and does not
 mutate memory access counters.
 
+To turn an improved variant into a reviewed config change, run the same labeled
+set through the proposal loop:
+
+```json
+{
+  "action": "recall_proposals",
+  "metadata": {
+    "cases": [
+      {
+        "query": "RECALL_PROBE_ALPHA_20260607",
+        "expected_ids": ["recall-probe-alpha-20260607"],
+        "top_k": 5
+      }
+    ],
+    "variants": [
+      {
+        "name": "or-fallback-0.3",
+        "recall_config": {
+          "or_fallback_fts_score_factor": 0.3,
+          "or_fallback_fts_max_terms": 8
+        }
+      }
+    ]
+  }
+}
+```
+
+`recall_proposals` persists only variants that improve recall@k, or keep
+recall@k flat while improving MRR, and includes the exact `TACHI_RECALL_*`
+`config_env` patch. Apply is two-step:
+
+```json
+{ "action": "review_recall_proposal", "proposal_id": "...", "review_status": "approved" }
+{ "action": "apply_recall_proposals", "proposal_id": "...", "confirm": true }
+```
+
+Apply only upserts `TACHI_RECALL_*` keys in `~/.tachi/config.env` (or
+`$TACHI_HOME/config.env`) and preserves provider/vault lines. Restart the daemon
+or MCP server after apply; `RecallConfig` is loaded at process startup.
+
 ---
 
 ## Step 4: Verify
