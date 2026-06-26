@@ -268,7 +268,7 @@ async fn wait_for_dispatch_status(run_dir: &std::path::Path) -> Value {
     for _ in 0..40 {
         if let Ok(raw) = std::fs::read_to_string(&status_path) {
             let status: Value = serde_json::from_str(&raw).expect("status JSON");
-            if !status["exit_code"].is_null() {
+            if dispatch_status_is_terminal(&status) {
                 return status;
             }
         }
@@ -276,6 +276,19 @@ async fn wait_for_dispatch_status(run_dir: &std::path::Path) -> Value {
     }
     serde_json::from_str(&std::fs::read_to_string(&status_path).expect("status.json"))
         .expect("status JSON")
+}
+
+fn dispatch_status_is_terminal(status: &Value) -> bool {
+    if !status["exit_code"].is_null() {
+        return true;
+    }
+    if matches!(
+        status.get("state").and_then(Value::as_str),
+        Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+    ) {
+        return true;
+    }
+    status.get("result_written").and_then(Value::as_bool) == Some(true)
 }
 
 fn write_acpx_control_fixture(run_dir: &std::path::Path, dispatch_id: &str) {

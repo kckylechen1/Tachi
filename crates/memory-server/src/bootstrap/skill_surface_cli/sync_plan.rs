@@ -34,6 +34,8 @@ pub(super) struct SkillSourceSyncPlan {
     boundary: String,
     summary: SkillSourceSyncSummary,
     corpora: Vec<SkillSourceCorpusSyncPlan>,
+    review_batches: Vec<SkillSourceReviewBatch>,
+    next_actions: Vec<String>,
     review_workflow: Vec<String>,
 }
 
@@ -81,6 +83,28 @@ pub(super) struct SkillSourceAffectedCard {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(super) struct SkillSourceReviewBatch {
+    name: String,
+    reason: String,
+    risk_level: String,
+    skills: Vec<SkillSourceReviewBatchSkill>,
+    affected_cards: Vec<SkillSourceAffectedCard>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillSourceReviewBatchSkill {
+    corpus: String,
+    id: String,
+    name: String,
+    local_path: String,
+    upstream_path: String,
+    risk_level: String,
+    change_classes: Vec<String>,
+    local_overlay_review_required: bool,
+    recommended_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(super) struct GitChangedFile {
     path: String,
     status: String,
@@ -109,6 +133,8 @@ pub(super) fn build_skill_source_sync_plan() -> Result<SkillSourceSyncPlan, Stri
         corpora.push(corpus);
     }
     summary.cards_to_review = affected_cards.len();
+    let review_batches = build_review_batches(&corpora);
+    let next_actions = build_next_actions(&summary, &corpora, &review_batches);
 
     Ok(SkillSourceSyncPlan {
         schema_version: "tachi.skill_surface.sync_plan.v1".to_string(),
@@ -117,6 +143,8 @@ pub(super) fn build_skill_source_sync_plan() -> Result<SkillSourceSyncPlan, Stri
         boundary: SYNC_PLAN_BOUNDARY.to_string(),
         summary,
         corpora,
+        review_batches,
+        next_actions,
         review_workflow: vec![
             "Inspect upstream diff for changed skill files.".to_string(),
             "Classify changes by lifecycle guidance, evidence contract, shell/script, permissions, and examples.".to_string(),
@@ -125,6 +153,147 @@ pub(super) fn build_skill_source_sync_plan() -> Result<SkillSourceSyncPlan, Stri
             "Land vendored snapshot and manifest SHA updates only through a reviewed PR.".to_string(),
         ],
     })
+}
+
+pub(super) fn build_review_batches(
+    corpora: &[SkillSourceCorpusSyncPlan],
+) -> Vec<SkillSourceReviewBatch> {
+    let mut batches = Vec::new();
+    if let Some(batch) = review_batch_for(
+        corpora,
+        "local_overlay_review",
+        "Changed skill has a Tachi local overlay; compare the overlay with upstream before syncing.",
+        "high",
+        |skill| skill.local_overlay_review_required,
+    ) {
+        batches.push(batch);
+    }
+    if let Some(batch) = review_batch_for(
+        corpora,
+        "high_risk_upstream",
+        "Changed upstream skill may alter permissions, shell/script guidance, or destructive-safety boundaries.",
+        "high",
+        |skill| skill.risk_level == "high" && !skill.local_overlay_review_required,
+    ) {
+        batches.push(batch);
+    }
+    if let Some(batch) = review_batch_for(
+        corpora,
+        "medium_risk_upstream",
+        "Changed upstream skill may alter evidence, lifecycle, routing, or native-contract behavior.",
+        "medium",
+        |skill| skill.risk_level == "medium" && !skill.local_overlay_review_required,
+    ) {
+        batches.push(batch);
+    }
+    if let Some(batch) = review_batch_for(
+        corpora,
+        "low_risk_upstream",
+        "Changed upstream skill is currently classified as documentation-only or low-risk guidance.",
+        "low",
+        |skill| skill.risk_level == "low" && !skill.local_overlay_review_required,
+    ) {
+        batches.push(batch);
+    }
+    batches
+}
+
+fn review_batch_for(
+    corpora: &[SkillSourceCorpusSyncPlan],
+    name: &str,
+    reason: &str,
+    risk_level: &str,
+    predicate: impl Fn(&SkillSourceChangedSkill) -> bool,
+) -> Option<SkillSourceReviewBatch> {
+    let mut skills = Vec::new();
+    let mut cards = BTreeMap::<String, SkillSourceAffectedCard>::new();
+
+    for corpus in corpora {
+        for skill in &corpus.changed_skills {
+            if !predicate(skill) {
+                continue;
+            }
+            for card in &skill.affected_cards {
+                cards
+                    .entry(card.profile.clone())
+                    .or_insert_with(|| card.clone());
+            }
+            skills.push(SkillSourceReviewBatchSkill {
+                corpus: corpus.corpus.clone(),
+                id: skill.id.clone(),
+                name: skill.name.clone(),
+                local_path: skill.local_path.clone(),
+                upstream_path: skill.upstream_path.clone(),
+                risk_level: skill.risk_level.clone(),
+                change_classes: skill.change_classes.clone(),
+                local_overlay_review_required: skill.local_overlay_review_required,
+                recommended_action: skill.recommended_action.clone(),
+            });
+        }
+    }
+
+    if skills.is_empty() {
+        return None;
+    }
+
+    Some(SkillSourceReviewBatch {
+        name: name.to_string(),
+        reason: reason.to_string(),
+        risk_level: risk_level.to_string(),
+        skills,
+        affected_cards: cards.into_values().collect(),
+    })
+}
+
+fn build_next_actions(
+    summary: &SkillSourceSyncSummary,
+    corpora: &[SkillSourceCorpusSyncPlan],
+    review_batches: &[SkillSourceReviewBatch],
+) -> Vec<String> {
+    let mut actions = Vec::new();
+
+    if summary.unavailable > 0 {
+        let unavailable = corpora
+            .iter()
+            .filter(|corpus| corpus.status == "unavailable")
+            .map(|corpus| corpus.corpus.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        actions.push(format!(
+            "Retry unavailable corpora before vendoring updates: {unavailable}."
+        ));
+    }
+    if !review_batches.is_empty() {
+        let batches = review_batches
+            .iter()
+            .map(|batch| batch.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        actions.push(format!(
+            "Review batches in order before changing vendored skills: {batches}."
+        ));
+    }
+    if summary.cards_to_review > 0 {
+        actions.push(
+            "Run affected Card loadout review and `tachi poke run --suite smoke` after any accepted skill sync."
+                .to_string(),
+        );
+    }
+    if summary.changed_skills > 0 {
+        actions.push(
+            "Land vendored skill text and manifest SHA updates only through a reviewed PR."
+                .to_string(),
+        );
+    }
+    if actions.is_empty() {
+        actions
+            .push("No upstream skill sync action is required from the current pins.".to_string());
+    }
+    actions.push(
+        "Keep this command read-only; it must not mutate vendored skills or write GitHub state."
+            .to_string(),
+    );
+    actions
 }
 
 fn inspect_corpus_sync(
@@ -684,6 +853,35 @@ pub(super) fn print_skill_source_sync_plan(report: &SkillSourceSyncPlan) {
         }
     }
 
+    if !report.review_batches.is_empty() {
+        println!();
+        println!("Review batches:");
+        for batch in &report.review_batches {
+            let cards = batch
+                .affected_cards
+                .iter()
+                .map(|card| card.profile.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "  {:<22} risk={:<6} skills={} cards={}",
+                batch.name,
+                batch.risk_level,
+                batch.skills.len(),
+                if cards.is_empty() { "none" } else { &cards }
+            );
+            println!("    {}", batch.reason);
+        }
+    }
+
+    if !report.next_actions.is_empty() {
+        println!();
+        println!("Next actions:");
+        for (index, action) in report.next_actions.iter().enumerate() {
+            println!("  {}. {}", index + 1, action);
+        }
+    }
+
     println!();
     println!("Reviewed sync workflow:");
     for (index, step) in report.review_workflow.iter().enumerate() {
@@ -695,4 +893,77 @@ fn short_sha(value: Option<&str>) -> String {
     value
         .map(|sha| sha.chars().take(7).collect())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn changed_skill(
+        id: &str,
+        risk_level: &str,
+        local_overlay_review_required: bool,
+        affected_cards: Vec<SkillSourceAffectedCard>,
+    ) -> SkillSourceChangedSkill {
+        SkillSourceChangedSkill {
+            id: id.to_string(),
+            name: id.trim_start_matches("skill:").to_string(),
+            local_path: format!("skills/{id}/SKILL.md"),
+            upstream_path: format!("skills/{id}/SKILL.md"),
+            source_kind: Some("upstream_skill_repo".to_string()),
+            local_overlay: local_overlay_review_required.then(|| "tachi-routing-only".to_string()),
+            metadata_status: "pinned_upstream".to_string(),
+            file_status: "M".to_string(),
+            change_classes: vec!["tool_permissions".to_string()],
+            risk_level: risk_level.to_string(),
+            risk_reasons: vec!["permissions changed".to_string()],
+            local_overlay_review_required,
+            affected_cards,
+            recommended_action: "reviewed_sync_pr".to_string(),
+        }
+    }
+
+    fn corpus(changed_skills: Vec<SkillSourceChangedSkill>) -> SkillSourceCorpusSyncPlan {
+        SkillSourceCorpusSyncPlan {
+            corpus: "waza".to_string(),
+            repo: Some("tw93/Waza".to_string()),
+            manifest_path: "crates/memory-server/builtin_skills/waza/manifest.yaml".to_string(),
+            pinned_ref: Some("main".to_string()),
+            pinned_sha: Some("abc".to_string()),
+            latest_ref: Some("main".to_string()),
+            latest_sha: Some("def".to_string()),
+            status: "behind_with_tracked_changes".to_string(),
+            error: None,
+            changed_files: vec![GitChangedFile {
+                path: "skills/check/SKILL.md".to_string(),
+                status: "M".to_string(),
+            }],
+            changed_skills,
+            review_required: true,
+        }
+    }
+
+    #[test]
+    fn review_batches_prioritize_local_overlays_and_collect_cards() {
+        let raven = SkillSourceAffectedCard {
+            profile: "codex_55_review".to_string(),
+            display_name: "Codex 5.5 Review".to_string(),
+            role: "reviewer".to_string(),
+            stage: Some("review".to_string()),
+            archetype: "raven".to_string(),
+        };
+        let corpora = vec![corpus(vec![
+            changed_skill("skill:waza-check", "high", true, vec![raven.clone()]),
+            changed_skill("skill:waza-hunt", "high", false, Vec::new()),
+        ])];
+
+        let batches = build_review_batches(&corpora);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].name, "local_overlay_review");
+        assert_eq!(batches[0].skills[0].id, "skill:waza-check");
+        assert_eq!(batches[0].affected_cards, vec![raven]);
+        assert_eq!(batches[1].name, "high_risk_upstream");
+        assert_eq!(batches[1].skills[0].id, "skill:waza-hunt");
+    }
 }
