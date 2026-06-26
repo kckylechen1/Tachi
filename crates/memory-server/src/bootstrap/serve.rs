@@ -427,6 +427,51 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
+    let client_project_name = project_db_path
+        .as_deref()
+        .and_then(crate::memory_search_ops::named_project_from_db_path)
+        .or_else(|| {
+            project_db_path
+                .is_some()
+                .then(crate::memory_search_ops::resolve_workspace_named_project)
+                .flatten()
+        });
+
+    if !cli.daemon {
+        if let Some(info) =
+            stdio::ensure_stdio_proxy_daemon(&app_home, &global_db_path, project_db_path.as_deref())
+                .await
+        {
+            if stdio::proxy_can_preserve_project_context(
+                &info,
+                &global_db_path,
+                project_db_path.as_deref(),
+                client_project_name.as_deref(),
+            ) {
+                eprintln!(
+                    "[stdio-proxy] forwarding stdio MCP to daemon {} (project={})",
+                    info.url,
+                    client_project_name.as_deref().unwrap_or("<none>")
+                );
+                stdio::serve_stdio_proxy(
+                    info,
+                    global_db_path.clone(),
+                    project_db_path.clone(),
+                    client_project_name,
+                )
+                .await?;
+                return Ok(());
+            }
+            eprintln!(
+                "[stdio-proxy] local fallback: project DB {} has no named-project route and daemon project scope differs",
+                project_db_path
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            );
+        }
+    }
+
     if cli.daemon {
         std::env::set_var("TACHI_DAEMON", "1");
     } else {
@@ -514,13 +559,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         )
         .await?;
     } else {
-        serve_stdio(
-            server,
-            app_home.clone(),
-            global_db_path.clone(),
-            project_db_path.clone(),
-        )
-        .await?;
+        serve_stdio(server).await?;
     }
 
     Ok(())

@@ -644,12 +644,7 @@ fn retry_locked<T>(
 }
 
 fn is_locked_error(error: &rusqlite::Error) -> bool {
-    use rusqlite::ffi::ErrorCode;
-    matches!(
-        error,
-        rusqlite::Error::SqliteFailure(err, _)
-            if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
-    )
+    super::sqlite_error_is_locked(error)
 }
 
 fn is_duplicate_column_error(error: &rusqlite::Error) -> bool {

@@ -784,6 +784,7 @@ pub(crate) fn search_fts_raw_match(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_fts_match(
     conn: &Connection,
     match_query: &str,

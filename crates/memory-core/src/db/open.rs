@@ -5,6 +5,10 @@ use std::time::Duration;
 use crate::error::MemoryError;
 
 const BUSY_TIMEOUT_MS: u64 = 5_000;
+const LOCK_RETRY_ATTEMPTS: usize = 6;
+const LOCK_RETRY_INITIAL_BACKOFF_MS: u64 = 10;
+const LOCK_RETRY_MAX_BACKOFF_MS: u64 = 250;
+const LOCK_RETRY_MAX_ELAPSED_MS: u64 = 30_000;
 
 static SQLITE_STARTUP_LOCK: Mutex<()> = Mutex::new(());
 
@@ -36,4 +40,46 @@ pub(crate) fn open_read_only(db_path: &str) -> Result<Connection, MemoryError> {
 pub(crate) fn configure_connection(conn: &Connection) -> Result<(), MemoryError> {
     conn.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
     Ok(())
+}
+
+pub(crate) fn retry_memory_locked<T>(
+    mut operation: impl FnMut() -> Result<T, MemoryError>,
+) -> Result<T, MemoryError> {
+    let started_at = std::time::Instant::now();
+    let mut backoff = Duration::from_millis(LOCK_RETRY_INITIAL_BACKOFF_MS);
+    let max_backoff = Duration::from_millis(LOCK_RETRY_MAX_BACKOFF_MS);
+    let max_elapsed = Duration::from_millis(LOCK_RETRY_MAX_ELAPSED_MS);
+
+    for attempt in 1..=LOCK_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if memory_error_is_locked(&error)
+                    && attempt < LOCK_RETRY_ATTEMPTS
+                    && started_at.elapsed().saturating_add(backoff) < max_elapsed =>
+            {
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(max_backoff);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("retry loop returns on every final attempt")
+}
+
+fn memory_error_is_locked(error: &MemoryError) -> bool {
+    let MemoryError::Sqlite(error) = error else {
+        return false;
+    };
+    sqlite_error_is_locked(error)
+}
+
+pub(crate) fn sqlite_error_is_locked(error: &rusqlite::Error) -> bool {
+    use rusqlite::ffi::ErrorCode;
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(err, _)
+            if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+    )
 }

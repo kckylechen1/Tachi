@@ -173,7 +173,7 @@ impl RecallConfig {
             DEFAULT_EXPANDED_FTS_SCORE_FACTOR,
         )
         .clamp(0.0, 1.0);
-        self.max_expanded_fts_queries = self.max_expanded_fts_queries.max(1).min(64);
+        self.max_expanded_fts_queries = self.max_expanded_fts_queries.clamp(1, 64);
         self.raw_half_life_days =
             positive_or_default(self.raw_half_life_days, DEFAULT_RAW_HALF_LIFE_DAYS);
         self.consolidated_half_life_days = positive_or_default(
@@ -191,7 +191,7 @@ impl RecallConfig {
             DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
         )
         .clamp(0.0, 1.0);
-        self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.max(1).min(32);
+        self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.clamp(1, 32);
         self
     }
 }

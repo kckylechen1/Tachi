@@ -337,6 +337,7 @@ fn symbolic_query_with_expansion(query: &str) -> String {
     terms.join(" ")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_fts_with_expansion_config(
     conn: &Connection,
     query: &str,

@@ -16,6 +16,40 @@ organize: true
 - **Tachi / Hub** 适合作为 **高权限操作的收敛点**：记忆、检索、Hub 代理的外围 MCP、（规划中的）GitHub 操作等，由**少数受控路径**完成，而不是让每个 Agent 各自带 `GH_TOKEN`、各自 `gh`。
 - **`AGENTS.md` / 项目规则** 负责**叙述与约定**；**真正「强制」**依赖 **不配敏感 env、网关/沙箱、可选的环境隔离**（见 §6）。
 
+### 1.1 Transport boundary: Streamable HTTP kernel, stdio adapter
+
+Tachi 的长期运行时边界是 Streamable HTTP daemon，不是每个 MCP
+宿主各自启动的 stdio 子进程。stdio 仍然是必要入口，因为 Claude
+Code、Cursor、Codex、OpenClaw 等宿主最稳定的本地接入面通常是
+stdio；但 stdio 进程只应是 `stdio -> daemon Streamable HTTP` 的
+thin proxy。
+
+目标形态：
+
+```text
+Agent / IDE / CLI
+  -> stdio MCP adapter
+      -> Tachi Streamable HTTP daemon
+          -> Memory DB / Hub / lifecycle / enrichment / distill
+```
+
+工程约束：
+
+- daemon 是唯一权威 kernel，负责 DB handles、project/global routing、
+  background jobs、provider runtime、Hub/GitHub lifecycle。
+- stdio adapter 不构造完整 `MemoryServer`，不打开 SQLite DB；daemon 是
+  provider/runtime 的权威。`--no-project-db` serve 会跳过项目 `.env`
+  读取并切到 `~/.tachi/runtime`，普通项目 stdio 入口在当前启动顺序下仍会
+  经过既有 project-local dotenv 加载，后续要彻底隔离可把 proxy 判定前移到
+  dotenv 之前。
+- `runtime_info` 在 stdio adapter 中必须暴露 `process_role=stdio_proxy`
+  和 `db_handles=0`，方便排查多进程与锁问题。
+- 当 stdio adapter 能从当前 cwd 推导 named project 时，应把 project
+  context 附加到 briefing/write/lifecycle 类调用；不要把 `scope=all`
+  或显式 `scope=global` 的读写请求缩窄成项目请求。
+- 如果没有兼容 daemon，stdio 可以退回本地 embedded mode 作为 first-run
+  fallback；一旦请求已经发往 daemon，写操作不能本地重放。
+
 ---
 
 ## 2. Vault：密钥如何进 Tachi

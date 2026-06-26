@@ -154,6 +154,7 @@ pub(crate) fn resolve_task_pr_target(params: &TachiTaskParams) -> Result<GithubT
     )
 }
 
+mod cycle_status;
 mod flow_artifacts;
 mod github_io;
 mod issue_flow;
@@ -169,6 +170,7 @@ use self::issue_flow::*;
 use self::release_ux::*;
 use self::utils::*;
 
+pub(crate) use self::cycle_status::handle_task_cycle_status;
 pub(crate) use self::flow_artifacts::{
     flow_status_doc_refs, mark_task_close_loop, mark_task_dispatch, mark_task_dispatch_completion,
     resolve_link_pr_issue_ref, write_intake_flow_artifacts, write_link_pr_artifacts,

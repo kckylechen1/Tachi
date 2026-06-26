@@ -49,6 +49,7 @@ pub use memory_crud::{
 };
 pub(crate) use open::{
     acquire_startup_lock, configure_connection, open_read_only, open_read_write,
+    retry_memory_locked, sqlite_error_is_locked,
 };
 pub use pack_db::{
     pack_delete, pack_get, pack_list, pack_upsert, projection_list, projection_upsert,

@@ -966,7 +966,7 @@ fn project_continuity_events_inner(
     dry_run: bool,
     auto_only: bool,
 ) -> Result<Value, String> {
-    let events = read_events(server, &target, &query)?;
+    let events = read_events(server, target, &query)?;
     let mut projected = Vec::new();
     let mut skipped = Vec::new();
     let mut errors = Vec::new();
@@ -995,10 +995,10 @@ fn project_continuity_events_inner(
             }
             let key = projection_key(&event, projection);
             let memory_id = projection_memory_id(projection, &key);
-            let existing = get_projection_memory(server, &target, &memory_id)?;
+            let existing = get_projection_memory(server, target, &memory_id)?;
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
             if !dry_run {
-                if let Err(error) = upsert_projection_memory(server, &target, &entry) {
+                if let Err(error) = upsert_projection_memory(server, target, &entry) {
                     errors.push(json!({
                         "event_id": event.id,
                         "projection": projection.as_str(),

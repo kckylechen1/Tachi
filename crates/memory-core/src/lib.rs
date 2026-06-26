@@ -186,7 +186,7 @@ impl MemoryStore {
                 return Err(MemoryError::InvalidArg(e.to_string()));
             }
         }
-        db::upsert(&mut self.conn, entry, self.vec_available)
+        db::retry_memory_locked(|| db::upsert(&mut self.conn, entry, self.vec_available))
     }
 
     /// Recall-cache lookup by a precomputed context-hash key. Returns a fresh
@@ -884,6 +884,44 @@ mod tests {
             .expect("read-only search");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].entry.id, "readonly-search");
+    }
+
+    #[test]
+    fn upsert_retries_short_lived_sqlite_writer_lock() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let db_path = temp.path().to_string_lossy().to_string();
+        let mut store = MemoryStore::open(&db_path).expect("open writable store");
+        store
+            .connection()
+            .busy_timeout(std::time::Duration::from_millis(1))
+            .expect("short busy timeout");
+
+        let lock_conn = rusqlite::Connection::open(&db_path).expect("open lock connection");
+        lock_conn
+            .busy_timeout(std::time::Duration::from_millis(1))
+            .expect("lock busy timeout");
+        lock_conn
+            .execute_batch("BEGIN IMMEDIATE;")
+            .expect("hold writer lock");
+
+        let handle = std::thread::spawn(move || store.upsert(&test_entry("lock-retry-upsert")));
+
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        lock_conn.execute_batch("COMMIT;").expect("release lock");
+
+        handle
+            .join()
+            .expect("upsert thread joined")
+            .expect("upsert should retry after writer lock clears");
+
+        let store = MemoryStore::open_read_only(&db_path).expect("open read-only store");
+        assert!(
+            store
+                .get("lock-retry-upsert")
+                .expect("read saved entry")
+                .is_some(),
+            "entry should be persisted after retry"
+        );
     }
 
     #[test]
