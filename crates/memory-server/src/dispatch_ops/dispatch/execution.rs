@@ -198,9 +198,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
+        let (watchdog_polls, watchdog_interval) = watchdog_poll_config();
         let mut kanban_state = None;
-        for _ in 0..10 {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        for _ in 0..watchdog_polls {
+            tokio::time::sleep(watchdog_interval).await;
             let state = get_kanban_state(&server_clone, &d_id).await;
             if let Some(ref s) = state {
                 if matches!(
@@ -448,4 +449,28 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         }
         release_flow_dispatch_slot(flow_dispatch_slot_for_spawn);
     });
+}
+
+fn watchdog_poll_config() -> (usize, Duration) {
+    let default_polls = if cfg!(test) { 1 } else { 10 };
+    let default_poll_ms = if cfg!(test) { 10 } else { 300 };
+    let polls = bounded_env_usize("TACHI_DISPATCH_WATCHDOG_POLLS", default_polls, 100);
+    let poll_ms = bounded_env_u64("TACHI_DISPATCH_WATCHDOG_POLL_MS", default_poll_ms, 5_000);
+    (polls, Duration::from_millis(poll_ms))
+}
+
+fn bounded_env_usize(name: &str, default: usize, max: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(default)
+        .clamp(1, max)
+}
+
+fn bounded_env_u64(name: &str, default: u64, max: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .unwrap_or(default)
+        .clamp(1, max)
 }

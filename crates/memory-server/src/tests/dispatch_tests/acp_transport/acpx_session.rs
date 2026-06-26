@@ -24,6 +24,8 @@ print(json.dumps({"event": "end_turn", "final_response": "raven done"}))
     let _acpx_agent = EnvVarGuard::set_value("TACHI_ACPX_AGENT", "codex");
     let _acpx_mode = EnvVarGuard::set_value("TACHI_ACPX_RUN_MODE", "session");
     let _acpx_session = EnvVarGuard::set_value("TACHI_ACPX_SESSION", "");
+    let _watchdog_polls = EnvVarGuard::set_value("TACHI_DISPATCH_WATCHDOG_POLLS", "1");
+    let _watchdog_poll_ms = EnvVarGuard::set_value("TACHI_DISPATCH_WATCHDOG_POLL_MS", "10");
 
     let server = make_server();
     let mut params = dispatch_params(Some("codex"), "Review through fake acpx session");

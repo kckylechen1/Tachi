@@ -700,20 +700,37 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 
 ## Acceptance Criteria
 
-- [ ] Issue direction is narrowed to Tachikoma backplane + Deck/Card evaluation
+- [x] Issue direction is narrowed to Tachikoma backplane + Deck/Card evaluation
       + Skill Slots + Poke probes.
-- [ ] First version has only Poke / SCV / Raven cards and Medic mode.
-- [ ] Card schema can represent existing dispatch profile concepts.
-- [ ] Superpowers are modeled as development guidance, not just ordinary moves.
-- [ ] Waza and approved external skills are modeled as moves/techniques.
-- [ ] Poke smoke suite has a local isolated starter implementation.
-- [ ] Card evolution produces proposals, not silent automatic mutations.
-- [ ] External skill intake requires inspection/scanning/review before approval.
-- [ ] Upstream Superpowers/Waza sources are tracked, pinned, and documented as
+- [x] First version has only Poke / SCV / Raven cards and Medic mode.
+- [x] Card schema can represent existing dispatch profile concepts.
+- [x] Superpowers are modeled as development guidance, not just ordinary moves.
+- [x] Waza and approved external skills are modeled as moves/techniques.
+- [x] Poke smoke suite has a local isolated starter implementation.
+- [x] Card evolution produces proposals, not silent automatic mutations.
+- [x] External skill intake requires inspection/scanning/review before approval.
+- [x] Upstream Superpowers/Waza sources are tracked, pinned, and documented as
       upstream-managed corpora.
-- [ ] acpx is documented as an optional execution backend, not a Card, Move, or
+- [x] acpx is documented as an optional execution backend, not a Card, Move, or
       evidence authority.
-- [ ] acpx defaults are conservative and do not imply `--approve-all`.
-- [ ] acpx raw events are additive and map into existing Tachi run artifacts.
-- [ ] GitHub A2A, daemon/harness, and automatic upstream sync are explicitly
+- [x] acpx defaults are conservative and do not imply `--approve-all`.
+- [x] acpx raw events are additive and map into existing Tachi run artifacts.
+- [x] GitHub A2A, daemon/harness, and automatic upstream sync are explicitly
       deferred from the first PR.
+
+Status as of 2026-06-27:
+
+- Card projection and CLI JSON are implemented through
+  `crates/memory-server/src/dispatch_profile/cards/render.rs` and
+  `crates/memory-server/src/bootstrap/cli_tool/cards.rs`.
+- Poke probes are covered by
+  `poke_smoke_suite_writes_report_and_probe_artifacts`.
+- Card evolution is review-required through
+  `tachi_task(action="proposals" | "review_proposal" | "apply_proposals")`
+  and persists approved changes as `dispatch_profile_card_overlays`.
+- Skill-source intake is read-only and review-gated through
+  `tachi skill-surface sources --json` and
+  `tachi skill-surface sync-plan --json`.
+- acpx remains an optional dispatch backend, with conservative permission
+  mapping, raw event persistence, status/cancel controls for session mode, and
+  actionable missing-command/runtime diagnostics.

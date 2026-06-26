@@ -2,9 +2,8 @@
 
 Date: 2026-06-26
 
-This plan tracks the remaining implementation surface for the Tachikoma Deck,
-Card, Poke, skill-source, and acpx work after the current main branch landed the
-starter architecture.
+This plan tracks the closure evidence for the Tachikoma Deck, Card, Poke,
+skill-source, and acpx starter architecture.
 
 ## Current State
 
@@ -19,31 +18,28 @@ starter architecture.
 | acpx execution backend | Implemented starter | `crates/memory-server/src/dispatch_ops/acpx/` |
 | cycle status read model | Implemented | `crates/memory-server/src/task_lifecycle/cycle_status.rs` |
 
-## Next Work
+## Closure Evidence
 
-1. Close the Card read surface gap.
+1. Card read surface is closed.
    - Keep `dispatch_profiles` for compatibility.
-   - Add stable compact JSON under `cards[]` and `card`.
-   - Verify `tachi card list --json` and `tachi card show <id> --json`.
+   - Stable compact JSON is available under `cards[]` and `card`.
+   - Verified by `bootstrap::cli_tool::cards::tests`.
 
-2. Make skill-source sync review actionable.
+2. Skill-source sync review is actionable and read-only.
    - Keep sync planning read-only.
-   - Add risk-ordered `review_batches`.
-   - Add explicit `next_actions`.
+   - Risk-ordered `review_batches` and explicit `next_actions` are emitted.
    - Preserve corpus-level network or upstream availability errors.
+   - Verified by `bootstrap::skill_surface_cli` tests.
 
-3. Finish acpx verification.
+3. acpx verification is covered by local fixtures.
    - Keep acpx as an optional dispatch backend, not a Card or Move.
-   - Add/verify missing-command and unsupported-runtime diagnostics.
-   - Prefer a fixture-backed adapter smoke in tests; do not require global acpx.
+   - Missing-command and unsupported-runtime diagnostics are covered.
+   - Fixture-backed adapter smokes do not require global acpx.
    - Treat live acpx runs as optional local validation.
+   - Verified by `dispatch_ops::acpx::tests` and the deep acpx gate.
 
-4. Decide when #381 and #383 can close.
-   - #381 can close when Card CLI JSON, Poke smoke, Card evolution proposals,
-     and skill-source review gates have green local evidence.
-   - #383 can close when acpx dispatch, event persistence, status/cancel
-     controls, conservative permissions, and missing-prerequisite errors are
-     covered by tests or local smokes.
+4. #381 and #383 can close when the verification matrix below is green on
+   `main`.
 
 ## Verification Matrix
 
@@ -53,6 +49,7 @@ starter architecture.
 | Deep local gate with acpx dispatch integration | `TACHI_FAST_DEEP=1 bash scripts/verify_tachikoma_fast.sh` |
 | Card compact JSON is stable | `tachi card list --json` and `tachi card show codex_55_review --json` |
 | Poke starter suite works | `tachi poke run --suite smoke --json` |
+| Card evolution remains review-required | `cargo test -p memory-server proposal_evolution --locked -- --test-threads=1` |
 | Skill sources have metadata | `tachi skill-surface sources --json` |
 | Sync plan is actionable and read-only | `tachi skill-surface sync-plan --json` |
 | acpx adapter remains isolated | `cargo test -p memory-server acpx --locked -- --test-threads=1` |

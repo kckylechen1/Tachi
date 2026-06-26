@@ -252,27 +252,30 @@ impl Drop for EnvVarGuard {
     }
 }
 
+const DISPATCH_TEST_WAIT_ATTEMPTS: usize = 240;
+const DISPATCH_TEST_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
 async fn wait_for_dispatch_result(run_dir: &std::path::Path) -> String {
     let result_path = run_dir.join("result.md");
-    for _ in 0..40 {
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
         if let Ok(raw) = std::fs::read_to_string(&result_path) {
             return raw;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
     }
     std::fs::read_to_string(&result_path).expect("dispatch result.md should be written")
 }
 
 async fn wait_for_dispatch_status(run_dir: &std::path::Path) -> Value {
     let status_path = run_dir.join("status.json");
-    for _ in 0..40 {
+    for _ in 0..DISPATCH_TEST_WAIT_ATTEMPTS {
         if let Ok(raw) = std::fs::read_to_string(&status_path) {
             let status: Value = serde_json::from_str(&raw).expect("status JSON");
             if dispatch_status_is_terminal(&status) {
                 return status;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(DISPATCH_TEST_WAIT_INTERVAL).await;
     }
     serde_json::from_str(&std::fs::read_to_string(&status_path).expect("status.json"))
         .expect("status JSON")
