@@ -1,11 +1,9 @@
-use serde_json::json;
-
 use super::cache::{recall_cache_key, recall_cache_read_enabled, recall_cache_ttl_secs};
-use super::exact::has_high_confidence_exact_token_top;
 use super::rows::{query_with_context_symbols, search_memory_rows_with_access};
-use crate::memory_search_ops::search_helpers::{normalize_json_relevance, search_score};
+use crate::memory_search_ops::{
+    apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
+};
 use crate::tool_params::SearchMemoryParams;
-use crate::utils::stable_hash;
 use crate::MemoryServer;
 
 pub(crate) async fn handle_search_memory(
@@ -63,43 +61,12 @@ pub(crate) async fn handle_search_memory_with_access(
     }
 
     let mut search_params = params.clone();
-    if params.enable_rerank {
-        search_params.top_k = top_k.saturating_mul(3);
-        search_params.candidates_per_channel = search_params
-            .candidates_per_channel
-            .max(search_params.top_k)
-            .min(crate::tool_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL);
-    }
+    expand_search_params_for_rerank(&mut search_params, top_k);
     let mut rows =
         search_memory_rows_with_access(server, search_params, project_only, record_access).await?;
-    if params.enable_rerank && rows.len() > top_k {
-        if has_high_confidence_exact_token_top(&rows, &params.query) {
-            if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
-                obj.insert("rerank_policy".into(), json!("skipped_exact_token"));
-            }
-            rows.truncate(top_k);
-        } else if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
-            let (reranked, outcome) = crate::foundry_runtime_ops::rerank_rows_with_outcome(
-                server,
-                &params.query,
-                rows,
-                top_k,
-            )
-            .await;
-            if outcome == crate::foundry_runtime_ops::RerankOutcome::Fallback {
-                eprintln!(
-                    "[search_memory] rerank fail-open: query_hash={} top_k={}",
-                    stable_hash(&params.query),
-                    top_k
-                );
-            }
-            rows = reranked;
-        } else {
-            rows.truncate(top_k);
-        }
-    } else {
-        rows.truncate(top_k);
-    }
+    let (reranked_rows, _rerank_policy) =
+        apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
+    rows = reranked_rows;
     normalize_json_relevance(&mut rows);
     let serialized =
         serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))?;

@@ -1,12 +1,16 @@
 //! Labeled recall replay for `tachi_memory(action="recall_simulate")`.
 
 use super::evidence_format::{json_string, wants_json};
-use crate::memory_search_ops::search_memory_rows_with_recall_config;
+use crate::memory_search_ops::{
+    apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
+    search_memory_rows_with_recall_config, SearchRerankPolicy,
+};
 use crate::tool_params::*;
 use crate::MemoryServer;
 use memory_core::{HybridWeights, RecallConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Deserialize)]
 struct RecallSimCase {
@@ -146,13 +150,6 @@ pub(crate) async fn handle_memory_recall_simulate(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
-    if params.enable_rerank {
-        return Err(
-            "recall_simulate currently replays the deterministic hybrid search path; omit enable_rerank or set it false."
-                .to_string(),
-        );
-    }
-
     let cases = parse_cases(params)?;
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
     let candidate_variants = parse_variants(params)?;
@@ -180,11 +177,16 @@ pub(crate) async fn handle_memory_recall_simulate(
         "action": "recall_simulate",
         "case_count": cases.len(),
         "top_k": default_top_k,
+        "rerank": {
+            "enabled": params.enable_rerank,
+            "policy": if params.enable_rerank { "adaptive" } else { "disabled" },
+        },
         "metrics": current_report["metrics"],
         "cases": current_report["cases"],
         "variants": variants,
         "notes": [
             "Uses the memory hybrid-search path without recall-cache short-circuiting.",
+            "When enable_rerank=true, uses the same adaptive rerank gate as search after expanding candidates.",
             "Does not mutate memory access_count or recall counters.",
             "Variant recall_config overrides apply only inside this simulation call."
         ],
@@ -207,6 +209,7 @@ async fn run_variant(
     let mut reports = Vec::with_capacity(cases.len());
     let mut hit_count = 0usize;
     let mut reciprocal_sum = 0.0f64;
+    let mut rerank_policy_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
 
     for (idx, case) in cases.iter().enumerate() {
         let expected_ids = case.expected_ids();
@@ -221,7 +224,9 @@ async fn run_variant(
         }
 
         let top_k = crate::clamp_facade_top_k(case.top_k.unwrap_or(default_top_k));
-        let search_params = build_search_params(params, case, top_k)?;
+        let mut search_params = build_search_params(params, case, top_k)?;
+        expand_search_params_for_rerank(&mut search_params, top_k);
+        let candidate_top_k = search_params.top_k;
         let rows_result = search_memory_rows_with_recall_config(
             server,
             search_params,
@@ -230,10 +235,25 @@ async fn run_variant(
             recall_config,
         )
         .await;
-        let (rows, error) = match rows_result {
-            Ok(rows) => (rows, None),
-            Err(err) => (Vec::new(), Some(err)),
+        let (rows, rerank_policy, candidate_count, error) = match rows_result {
+            Ok(rows) => {
+                let candidate_count = rows.len();
+                let (mut rows, policy) = apply_search_rerank_policy(
+                    server,
+                    &case.query,
+                    rows,
+                    top_k,
+                    params.enable_rerank,
+                )
+                .await;
+                normalize_json_relevance(&mut rows);
+                (rows, Some(policy), candidate_count, None)
+            }
+            Err(err) => (Vec::new(), None, 0, Some(err)),
         };
+        if let Some(policy) = rerank_policy {
+            *rerank_policy_counts.entry(policy.as_str()).or_insert(0) += 1;
+        }
         let returned_ids = returned_ids(&rows);
         let rank = first_expected_rank(&returned_ids, &expected_ids);
         let reciprocal_rank = rank.map(|rank| 1.0 / rank as f64).unwrap_or(0.0);
@@ -247,11 +267,19 @@ async fn run_variant(
             "query": case.query,
             "expected_ids": expected_ids,
             "top_k": top_k,
+            "candidate_top_k": candidate_top_k,
             "hit": rank.is_some(),
             "rank": rank,
             "reciprocal_rank": reciprocal_rank,
             "returned_ids": returned_ids,
             "returned": rows.iter().map(compact_row).collect::<Vec<_>>(),
+            "rerank": {
+                "enabled": params.enable_rerank,
+                "policy": rerank_policy
+                    .map(SearchRerankPolicy::as_str)
+                    .unwrap_or("not_run"),
+                "candidate_count": candidate_count,
+            },
             "error": error,
         }));
     }
@@ -277,6 +305,10 @@ async fn run_variant(
             "miss_count": case_count.saturating_sub(hit_count),
             "recall_at_k": recall_at_k,
             "mrr": mrr,
+        },
+        "rerank": {
+            "enabled": params.enable_rerank,
+            "policy_counts": rerank_policy_counts,
         },
         "cases": reports,
     }))
@@ -486,7 +518,7 @@ fn build_search_params(
         domain: case.domain.clone().or_else(|| params.domain.clone()),
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),
-        enable_rerank: false,
+        enable_rerank: params.enable_rerank,
         as_of: case.as_of.clone().or_else(|| params.as_of.clone()),
         include_metadata: false,
     })
@@ -514,6 +546,9 @@ fn compact_row(row: &Value) -> Value {
         "relevance": row.get("relevance").cloned().unwrap_or(Value::Null),
         "scores": row.get("scores").cloned().unwrap_or(Value::Null),
         "exact_token_match": row.get("exact_token_match").cloned().unwrap_or(Value::Null),
+        "match_type": row.get("match_type").cloned().unwrap_or(Value::Null),
+        "rerank_policy": row.get("rerank_policy").cloned().unwrap_or(Value::Null),
+        "rerank_score": row.get("rerank_score").cloned().unwrap_or(Value::Null),
     })
 }
 

@@ -188,6 +188,7 @@ To replay labeled recall probes before changing those knobs, use:
 ```json
 {
   "action": "recall_simulate",
+  "enable_rerank": true,
   "metadata": {
     "cases": [
       {
@@ -212,9 +213,10 @@ To replay labeled recall probes before changing those knobs, use:
 `recall_simulate` reports recall@k and MRR over the supplied cases. When
 `variants` are supplied, the response includes the current runtime config plus
 each candidate config so you can compare metrics before changing
-`TACHI_RECALL_*` defaults. It uses the normal memory hybrid-search path,
-bypasses the recall-cache short circuit, and does not mutate memory access
-counters.
+`TACHI_RECALL_*` defaults. If `enable_rerank=true`, it expands candidates and
+uses the same adaptive Voyage rerank gate as normal search, including the
+exact-token skip policy. It bypasses the recall-cache short circuit and does not
+mutate memory access counters.
 
 ---
 

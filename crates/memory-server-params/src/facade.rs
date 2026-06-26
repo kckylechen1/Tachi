@@ -463,7 +463,7 @@ pub struct TachiMemoryParams {
     pub include_training: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask] Enable adaptive Voyage reranking when top hybrid scores are close."
+        description = "[action=search|ask|recall_simulate] Enable adaptive Voyage reranking when top hybrid scores are close; recall_simulate replays the same rerank gate without cache/access mutation."
     )]
     pub enable_rerank: bool,
     #[serde(default)]

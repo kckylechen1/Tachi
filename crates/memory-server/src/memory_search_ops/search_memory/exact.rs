@@ -34,7 +34,7 @@ pub(super) fn annotate_exact_token_matches(rows: &mut [serde_json::Value], query
     }
 }
 
-pub(super) fn has_high_confidence_exact_token_top(rows: &[serde_json::Value], query: &str) -> bool {
+pub(crate) fn has_high_confidence_exact_token_top(rows: &[serde_json::Value], query: &str) -> bool {
     let Some(first) = rows.first() else {
         return false;
     };
