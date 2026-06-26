@@ -214,6 +214,18 @@ This is a read-only status surface. It reports the vendored manifest refs and
 metadata coverage; it does not fetch upstream, compute diffs, update skill text,
 or write GitHub state.
 
+Reviewed upstream sync planning is exposed through:
+
+```bash
+tachi skill-surface sync-plan
+tachi skill-surface sync-plan --json
+```
+
+This is also read-only. It checks the pinned upstream repo/ref/sha against the
+latest upstream ref, computes tracked vendored skill-file changes, classifies
+the review risk, and lists affected Card loadouts. It does not update the local
+snapshot; accepted updates still land through a reviewed PR.
+
 ## MVP Cards
 
 Do not create an agent zoo. First version uses three Cards plus one mode.
@@ -546,7 +558,8 @@ carry the workflow.
 | list/show Cards | `tachi_task(action="profiles" \| "profile" \| "card")` | implemented |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
 | skill discovery / loadout | `tachi_skill(action="discover" \| "bundle" \| "loadout")` | implemented |
-| upstream source status | `tachi skill-sources status` (or `tachi skill-surface sources`) | planned |
+| upstream source status | `tachi skill-surface sources` | implemented |
+| upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
 | dispatch backend status/cancel | `tachi_task(action="status" \| "cancel", dispatch_id=...)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |

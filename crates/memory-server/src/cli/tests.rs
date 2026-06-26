@@ -53,6 +53,18 @@ fn skill_surface_cli_parses_sources() {
 }
 
 #[test]
+fn skill_surface_cli_parses_sync_plan() {
+    let parsed = Cli::try_parse_from(["tachi", "skill-surface", "sync-plan", "--json"])
+        .expect("skill-surface sync-plan should parse");
+    match parsed.command.expect("command") {
+        Commands::SkillSurface {
+            action: SkillSurfaceAction::SyncPlan { json },
+        } => assert!(json),
+        other => panic!("unexpected command: {other:?}"),
+    }
+}
+
+#[test]
 fn backfill_vectors_accepts_named_project() {
     let parsed = Cli::try_parse_from([
         "tachi",

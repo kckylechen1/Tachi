@@ -6,6 +6,7 @@ mod print;
 mod projection;
 mod sources;
 mod stores;
+mod sync_plan;
 #[cfg(test)]
 mod tests;
 

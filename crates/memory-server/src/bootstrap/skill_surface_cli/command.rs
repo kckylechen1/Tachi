@@ -6,6 +6,7 @@ use super::print::{print_skill_source_report, print_skill_surface_report};
 use super::projection::{build_cc_switch_projection_status, read_cc_switch_skills};
 use super::sources::build_skill_source_report;
 use super::stores::{build_drift_groups, scan_skill_store, skill_store_specs};
+use super::sync_plan::{build_skill_source_sync_plan, print_skill_source_sync_plan};
 use super::*;
 
 pub(in crate::bootstrap) async fn run_skill_surface_command(
@@ -28,6 +29,15 @@ pub(in crate::bootstrap) async fn run_skill_surface_command(
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 print_skill_source_report(&report);
+            }
+            Ok(())
+        }
+        SkillSurfaceAction::SyncPlan { json } => {
+            let report = build_skill_source_sync_plan()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print_skill_source_sync_plan(&report);
             }
             Ok(())
         }

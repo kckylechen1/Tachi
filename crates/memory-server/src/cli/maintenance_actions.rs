@@ -351,6 +351,12 @@ pub(crate) enum SkillSurfaceAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only reviewed-sync plan for upstream Superpowers and Waza changes
+    SyncPlan {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

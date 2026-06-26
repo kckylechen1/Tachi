@@ -7,6 +7,8 @@ use super::command::build_skill_surface_report;
 use super::sources::{
     build_skill_source_report, parse_skill_source_manifest, skill_source_metadata_status,
 };
+use super::sync_plan::{affected_cards_for_skill, classify_skill_patch};
+use super::SkillSourceMetadata;
 
 fn temp_home(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -160,4 +162,43 @@ source:
         skill_source_metadata_status(&parsed.skills[0].source),
         "missing_metadata"
     );
+}
+
+#[test]
+fn skill_source_sync_plan_classifies_permission_and_evidence_changes_as_high_risk() {
+    let source = SkillSourceMetadata {
+        kind: Some("upstream_skill_repo".to_string()),
+        repo: Some("tw93/Waza".to_string()),
+        path: Some("skills/check/SKILL.md".to_string()),
+        pinned_ref: Some("main".to_string()),
+        pinned_sha: Some("abc".to_string()),
+        update_policy: Some("reviewed_sync".to_string()),
+        local_overlay: Some("tachi-routing-only".to_string()),
+    };
+    let risk = classify_skill_patch(
+        &source,
+        "skills/check/SKILL.md",
+        r#"
++allowed_tools: Bash, Read
++Run verification and include evidence before approval.
+"#,
+    );
+
+    assert_eq!(risk.risk_level, "high");
+    assert!(risk
+        .change_classes
+        .contains(&"tool_permissions".to_string()));
+    assert!(risk
+        .change_classes
+        .contains(&"evidence_contract".to_string()));
+    assert!(risk.change_classes.contains(&"local_overlay".to_string()));
+}
+
+#[test]
+fn skill_source_sync_plan_maps_changed_skill_to_cards() {
+    let cards = affected_cards_for_skill("skill:waza-check");
+
+    assert!(cards
+        .iter()
+        .any(|card| card.profile == "codex_55_review" && card.archetype == "raven"));
 }
