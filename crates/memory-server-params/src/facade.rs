@@ -51,6 +51,7 @@ fn tachi_memory_action_schema(
             "alerts",
             "ask",
             "consolidate",
+            "recall_simulate",
             "progress",
             "readiness",
         ],
@@ -411,7 +412,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), progress (long-running flow status), readiness (health + tool visibility)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), progress (long-running flow status), readiness (health + tool visibility)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -544,7 +545,7 @@ pub struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}]."
     )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]

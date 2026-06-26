@@ -183,6 +183,27 @@ For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
 same order.
 
+To replay labeled recall probes before changing those knobs, use:
+
+```json
+{
+  "action": "recall_simulate",
+  "metadata": {
+    "cases": [
+      {
+        "query": "RECALL_PROBE_ALPHA_20260607",
+        "expected_ids": ["recall-probe-alpha-20260607"],
+        "top_k": 5
+      }
+    ]
+  }
+}
+```
+
+`recall_simulate` reports recall@k and MRR over the supplied cases. It uses the
+normal memory hybrid-search path, bypasses the recall-cache short circuit, and
+does not mutate memory access counters.
+
 ---
 
 ## Step 4: Verify

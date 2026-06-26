@@ -9,6 +9,7 @@ mod checkpoint_ops;
 mod evidence_format;
 mod progress_ops;
 mod readiness_ops;
+mod recall_simulate_ops;
 
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
@@ -203,10 +204,13 @@ pub(crate) async fn handle_tachi_memory(
         "alerts" => readiness_ops::handle_memory_alerts(server, &params).await,
         "ask" => readiness_ops::handle_memory_ask(server, &params).await,
         "consolidate" => readiness_ops::handle_memory_consolidate(server, &params).await,
+        "recall_simulate" => {
+            recall_simulate_ops::handle_memory_recall_simulate(server, &params).await
+        }
         "progress" => progress_ops::handle_memory_progress(server, &params).await,
         "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'progress', or 'readiness'.",
+            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'progress', or 'readiness'.",
             params.action
         )),
     }
@@ -215,7 +219,14 @@ pub(crate) async fn handle_tachi_memory(
 fn should_forward_facade_read(action: &str) -> bool {
     matches!(
         action,
-        "search" | "get" | "briefing" | "alerts" | "ask" | "consolidate" | "readiness"
+        "search"
+            | "get"
+            | "briefing"
+            | "alerts"
+            | "ask"
+            | "consolidate"
+            | "recall_simulate"
+            | "readiness"
     )
 }
 
@@ -237,6 +248,7 @@ mod tests {
             "alerts",
             "ask",
             "consolidate",
+            "recall_simulate",
             "readiness",
         ] {
             assert!(
