@@ -195,14 +195,26 @@ To replay labeled recall probes before changing those knobs, use:
         "expected_ids": ["recall-probe-alpha-20260607"],
         "top_k": 5
       }
+    ],
+    "variants": [
+      {
+        "name": "or-fallback-0.3",
+        "recall_config": {
+          "or_fallback_fts_score_factor": 0.3,
+          "or_fallback_fts_max_terms": 8
+        }
+      }
     ]
   }
 }
 ```
 
-`recall_simulate` reports recall@k and MRR over the supplied cases. It uses the
-normal memory hybrid-search path, bypasses the recall-cache short circuit, and
-does not mutate memory access counters.
+`recall_simulate` reports recall@k and MRR over the supplied cases. When
+`variants` are supplied, the response includes the current runtime config plus
+each candidate config so you can compare metrics before changing
+`TACHI_RECALL_*` defaults. It uses the normal memory hybrid-search path,
+bypasses the recall-cache short circuit, and does not mutate memory access
+counters.
 
 ---
 

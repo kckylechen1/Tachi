@@ -8,8 +8,8 @@ use crate::types::{HybridScore, MemoryEntry};
 use chrono::{NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 
-fn tier_half_life(tier: &str) -> f64 {
-    RecallConfig::get().half_life_days_for_tier(tier)
+fn tier_half_life_with_config(tier: &str, recall_config: &RecallConfig) -> f64 {
+    recall_config.half_life_days_for_tier(tier)
 }
 
 fn tier_actr_d(tier: &str) -> f64 {
@@ -55,6 +55,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 /// `decay = max(recency × (1 + 0.2 × log10(1 + access_count)), importance × 0.3)`
 /// where `recency = exp(-0.693 × age_days / configured_half_life_days)`
 pub fn decay_score(entry: &MemoryEntry) -> f64 {
+    decay_score_with_config(entry, RecallConfig::get())
+}
+
+pub fn decay_score_with_config(entry: &MemoryEntry, recall_config: &RecallConfig) -> f64 {
     let now = Utc::now();
     let reference = entry
         .last_access
@@ -69,7 +73,7 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
         });
     let age_days = (now - reference).num_seconds().max(0) as f64 / 86_400.0;
 
-    let half_life = tier_half_life(&entry.tier);
+    let half_life = tier_half_life_with_config(&entry.tier, recall_config);
     let recency = (-0.693 * age_days / half_life).exp();
     let frequency = (1.0 + entry.access_count as f64).log10();
     let importance_floor = entry.importance * 0.3;
@@ -128,6 +132,14 @@ pub fn base_level_activation(access_ages_secs: &[f64], d: f64) -> f64 {
 /// Enhanced decay score using ACT-R base-level activation when access history is available.
 /// Falls back to the simplified decay_score when no history is provided.
 pub fn decay_score_actr(entry: &MemoryEntry, access_ages: Option<&[f64]>) -> f64 {
+    decay_score_actr_with_config(entry, access_ages, RecallConfig::get())
+}
+
+pub fn decay_score_actr_with_config(
+    entry: &MemoryEntry,
+    access_ages: Option<&[f64]>,
+    recall_config: &RecallConfig,
+) -> f64 {
     let d = tier_actr_d(&entry.tier);
     match access_ages {
         Some(ages) if !ages.is_empty() => {
@@ -136,10 +148,10 @@ pub fn decay_score_actr(entry: &MemoryEntry, access_ages: Option<&[f64]>) -> f64
             let normalized = (bla + 5.0) / 10.0;
             normalized
                 .clamp(0.0, 1.0)
-                .max(decay_score(entry))
+                .max(decay_score_with_config(entry, recall_config))
                 .max(entry.importance * 0.3)
         }
-        _ => decay_score(entry),
+        _ => decay_score_with_config(entry, recall_config),
     }
 }
 
@@ -411,6 +423,26 @@ pub fn hybrid_score(
     weights: &HybridWeights,
     access_times: &HashMap<String, Vec<f64>>,
 ) -> HashMap<String, HybridScore> {
+    hybrid_score_with_config(
+        entries,
+        vec_scores,
+        fts_scores,
+        symbolic_scores,
+        weights,
+        access_times,
+        RecallConfig::get(),
+    )
+}
+
+pub fn hybrid_score_with_config(
+    entries: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    weights: &HybridWeights,
+    access_times: &HashMap<String, Vec<f64>>,
+    recall_config: &RecallConfig,
+) -> HashMap<String, HybridScore> {
     let all_ids: std::collections::HashSet<&String> = vec_scores
         .keys()
         .chain(fts_scores.keys())
@@ -432,7 +464,7 @@ pub fn hybrid_score(
             .get(id.as_str())
             .map(|e| {
                 let ages = access_times.get(id).map(|v| v.as_slice());
-                decay_score_actr(e, ages)
+                decay_score_actr_with_config(e, ages, recall_config)
             })
             .unwrap_or(0.0);
 
@@ -617,8 +649,17 @@ pub(crate) fn generic_precision_multiplier_impl(
     query: &str,
     entry: &MemoryEntry,
 ) -> f64 {
+    generic_precision_multiplier_impl_with_config(is_id_like, query, entry, RecallConfig::get())
+}
+
+pub(crate) fn generic_precision_multiplier_impl_with_config(
+    is_id_like: bool,
+    query: &str,
+    entry: &MemoryEntry,
+    recall_config: &RecallConfig,
+) -> f64 {
     if is_id_like && entry_has_exact_query_token(entry, query) {
-        RecallConfig::get().id_like_exact_match_boost
+        recall_config.id_like_exact_match_boost
     } else {
         1.0
     }

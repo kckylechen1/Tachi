@@ -1,9 +1,10 @@
 //! Labeled recall replay for `tachi_memory(action="recall_simulate")`.
 
 use super::evidence_format::{json_string, wants_json};
-use crate::memory_search_ops::search_memory_rows_with_access;
+use crate::memory_search_ops::search_memory_rows_with_recall_config;
 use crate::tool_params::*;
 use crate::MemoryServer;
+use memory_core::{HybridWeights, RecallConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -46,6 +47,101 @@ impl RecallSimCase {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RecallConfigOverrides {
+    #[serde(default)]
+    default_semantic: Option<f64>,
+    #[serde(default)]
+    default_fts: Option<f64>,
+    #[serde(default)]
+    default_symbolic: Option<f64>,
+    #[serde(default)]
+    default_decay: Option<f64>,
+    #[serde(default)]
+    default_use_rrf: Option<bool>,
+    #[serde(default)]
+    expanded_fts_score_factor: Option<f64>,
+    #[serde(default)]
+    max_expanded_fts_queries: Option<usize>,
+    #[serde(default)]
+    or_fallback_fts_score_factor: Option<f64>,
+    #[serde(default)]
+    or_fallback_fts_max_terms: Option<usize>,
+    #[serde(default)]
+    raw_half_life_days: Option<f64>,
+    #[serde(default)]
+    consolidated_half_life_days: Option<f64>,
+    #[serde(default)]
+    pattern_half_life_days: Option<f64>,
+    #[serde(default)]
+    id_like_exact_match_boost: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RecallSimVariant {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    recall_config: RecallConfigOverrides,
+    #[serde(flatten)]
+    direct: RecallConfigOverrides,
+}
+
+impl RecallSimVariant {
+    fn configured_name(&self, idx: usize) -> String {
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("variant_{idx}"))
+    }
+
+    fn to_recall_config(&self, base: &RecallConfig) -> RecallConfig {
+        let mut config = base.clone();
+        self.recall_config.apply(&mut config);
+        self.direct.apply(&mut config);
+        config.sanitized()
+    }
+}
+
+impl RecallConfigOverrides {
+    fn apply(&self, config: &mut RecallConfig) {
+        apply_weight_overrides(
+            &mut config.default_weights,
+            self.default_semantic,
+            self.default_fts,
+            self.default_symbolic,
+            self.default_decay,
+            self.default_use_rrf,
+        );
+        if let Some(value) = self.expanded_fts_score_factor {
+            config.expanded_fts_score_factor = value;
+        }
+        if let Some(value) = self.max_expanded_fts_queries {
+            config.max_expanded_fts_queries = value;
+        }
+        if let Some(value) = self.or_fallback_fts_score_factor {
+            config.or_fallback_fts_score_factor = value;
+        }
+        if let Some(value) = self.or_fallback_fts_max_terms {
+            config.or_fallback_fts_max_terms = value;
+        }
+        if let Some(value) = self.raw_half_life_days {
+            config.raw_half_life_days = value;
+        }
+        if let Some(value) = self.consolidated_half_life_days {
+            config.consolidated_half_life_days = value;
+        }
+        if let Some(value) = self.pattern_half_life_days {
+            config.pattern_half_life_days = value;
+        }
+        if let Some(value) = self.id_like_exact_match_boost {
+            config.id_like_exact_match_boost = value;
+        }
+    }
+}
+
 pub(crate) async fn handle_memory_recall_simulate(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -59,6 +155,55 @@ pub(crate) async fn handle_memory_recall_simulate(
 
     let cases = parse_cases(params)?;
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
+    let candidate_variants = parse_variants(params)?;
+    let base_config = RecallConfig::get().clone();
+    let current_report =
+        run_variant(server, params, &cases, default_top_k, "current", None).await?;
+    let mut variants = vec![current_report.clone()];
+    for (idx, variant) in candidate_variants.iter().enumerate() {
+        let config = variant.to_recall_config(&base_config);
+        variants.push(
+            run_variant(
+                server,
+                params,
+                &cases,
+                default_top_k,
+                &variant.configured_name(idx + 1),
+                Some(&config),
+            )
+            .await?,
+        );
+    }
+
+    let report = json!({
+        "status": "completed",
+        "action": "recall_simulate",
+        "case_count": cases.len(),
+        "top_k": default_top_k,
+        "metrics": current_report["metrics"],
+        "cases": current_report["cases"],
+        "variants": variants,
+        "notes": [
+            "Uses the memory hybrid-search path without recall-cache short-circuiting.",
+            "Does not mutate memory access_count or recall counters.",
+            "Variant recall_config overrides apply only inside this simulation call."
+        ],
+    });
+
+    if wants_json(params.format.as_deref()) {
+        return json_string(&report);
+    }
+    Ok(format_recall_simulate_markdown(&report))
+}
+
+async fn run_variant(
+    server: &MemoryServer,
+    params: &TachiMemoryParams,
+    cases: &[RecallSimCase],
+    default_top_k: usize,
+    name: &str,
+    recall_config: Option<&RecallConfig>,
+) -> Result<Value, String> {
     let mut reports = Vec::with_capacity(cases.len());
     let mut hit_count = 0usize;
     let mut reciprocal_sum = 0.0f64;
@@ -77,7 +222,14 @@ pub(crate) async fn handle_memory_recall_simulate(
 
         let top_k = crate::clamp_facade_top_k(case.top_k.unwrap_or(default_top_k));
         let search_params = build_search_params(params, case, top_k)?;
-        let rows_result = search_memory_rows_with_access(server, search_params, false, false).await;
+        let rows_result = search_memory_rows_with_recall_config(
+            server,
+            search_params,
+            false,
+            false,
+            recall_config,
+        )
+        .await;
         let (rows, error) = match rows_result {
             Ok(rows) => (rows, None),
             Err(err) => (Vec::new(), Some(err)),
@@ -116,11 +268,10 @@ pub(crate) async fn handle_memory_recall_simulate(
         reciprocal_sum / case_count as f64
     };
 
-    let report = json!({
-        "status": "completed",
-        "action": "recall_simulate",
+    Ok(json!({
+        "name": name,
+        "config": recall_config.map(recall_config_summary),
         "case_count": case_count,
-        "top_k": default_top_k,
         "metrics": {
             "hit_count": hit_count,
             "miss_count": case_count.saturating_sub(hit_count),
@@ -128,16 +279,7 @@ pub(crate) async fn handle_memory_recall_simulate(
             "mrr": mrr,
         },
         "cases": reports,
-        "notes": [
-            "Uses the memory hybrid-search path without recall-cache short-circuiting.",
-            "Does not mutate memory access_count or recall counters."
-        ],
-    });
-
-    if wants_json(params.format.as_deref()) {
-        return json_string(&report);
-    }
-    Ok(format_recall_simulate_markdown(&report))
+    }))
 }
 
 fn parse_cases(params: &TachiMemoryParams) -> Result<Vec<RecallSimCase>, String> {
@@ -171,6 +313,24 @@ fn parse_cases(params: &TachiMemoryParams) -> Result<Vec<RecallSimCase>, String>
     Ok(cases)
 }
 
+fn parse_variants(params: &TachiMemoryParams) -> Result<Vec<RecallSimVariant>, String> {
+    let variants_value =
+        if let Some(value) = params.metadata.as_ref().and_then(extract_variants_value) {
+            Some(value)
+        } else if let Some(text) = params.text.as_deref() {
+            parse_text_variants_value(text)?
+        } else {
+            None
+        };
+
+    let Some(variants_value) = variants_value else {
+        return Ok(Vec::new());
+    };
+    let variants: Vec<RecallSimVariant> = serde_json::from_value(variants_value)
+        .map_err(|e| format!("parse recall_simulate variants: {e}"))?;
+    Ok(variants)
+}
+
 fn extract_cases_value(value: &Value) -> Option<Value> {
     match value {
         Value::Array(_) => Some(value.clone()),
@@ -181,6 +341,20 @@ fn extract_cases_value(value: &Value) -> Option<Value> {
             map.get("case")
                 .cloned()
                 .map(|case| Value::Array(vec![case]))
+        }
+        _ => None,
+    }
+}
+
+fn extract_variants_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::Object(map) => {
+            if let Some(variants) = map.get("variants") {
+                return Some(variants.clone());
+            }
+            map.get("variant")
+                .cloned()
+                .map(|variant| Value::Array(vec![variant]))
         }
         _ => None,
     }
@@ -200,6 +374,61 @@ fn parse_text_cases_value(text: &str) -> Result<Option<Value>, String> {
         return Ok(Some(value));
     }
     Ok(None)
+}
+
+fn parse_text_variants_value(text: &str) -> Result<Option<Value>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(trimmed)
+        .map_err(|e| format!("parse recall_simulate text JSON: {e}"))?;
+    Ok(extract_variants_value(&value))
+}
+
+fn apply_weight_overrides(
+    weights: &mut HybridWeights,
+    semantic: Option<f64>,
+    fts: Option<f64>,
+    symbolic: Option<f64>,
+    decay: Option<f64>,
+    use_rrf: Option<bool>,
+) {
+    if let Some(value) = semantic {
+        weights.semantic = value;
+    }
+    if let Some(value) = fts {
+        weights.fts = value;
+    }
+    if let Some(value) = symbolic {
+        weights.symbolic = value;
+    }
+    if let Some(value) = decay {
+        weights.decay = value;
+    }
+    if let Some(value) = use_rrf {
+        weights.use_rrf = value;
+    }
+}
+
+fn recall_config_summary(config: &RecallConfig) -> Value {
+    json!({
+        "default_weights": {
+            "semantic": config.default_weights.semantic,
+            "fts": config.default_weights.fts,
+            "symbolic": config.default_weights.symbolic,
+            "decay": config.default_weights.decay,
+            "use_rrf": config.default_weights.use_rrf,
+        },
+        "expanded_fts_score_factor": config.expanded_fts_score_factor,
+        "max_expanded_fts_queries": config.max_expanded_fts_queries,
+        "or_fallback_fts_score_factor": config.or_fallback_fts_score_factor,
+        "or_fallback_fts_max_terms": config.or_fallback_fts_max_terms,
+        "raw_half_life_days": config.raw_half_life_days,
+        "consolidated_half_life_days": config.consolidated_half_life_days,
+        "pattern_half_life_days": config.pattern_half_life_days,
+        "id_like_exact_match_boost": config.id_like_exact_match_boost,
+    })
 }
 
 fn build_search_params(
@@ -344,6 +573,35 @@ fn format_recall_simulate_markdown(report: &Value) -> String {
             out.push(format!(
                 "- {status}: rank={rank} query=\"{query}\" returned=[{returned}]"
             ));
+        }
+    }
+
+    if let Some(variants) = report.get("variants").and_then(Value::as_array) {
+        if variants.len() > 1 {
+            out.push("variants:".to_string());
+            for variant in variants {
+                let name = variant
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("variant");
+                let metrics = &variant["metrics"];
+                out.push(format!(
+                    "- {name}: hit={} miss={} recall@k={:.3} mrr={:.3}",
+                    metrics
+                        .get("hit_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    metrics
+                        .get("miss_count")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    metrics
+                        .get("recall_at_k")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(0.0),
+                    metrics.get("mrr").and_then(Value::as_f64).unwrap_or(0.0),
+                ));
+            }
         }
     }
 

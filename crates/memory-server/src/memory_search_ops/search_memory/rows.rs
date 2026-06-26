@@ -65,9 +65,19 @@ pub(crate) async fn search_memory_rows(
 
 pub(crate) async fn search_memory_rows_with_access(
     server: &MemoryServer,
+    params: SearchMemoryParams,
+    project_only: bool,
+    record_access: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    search_memory_rows_with_recall_config(server, params, project_only, record_access, None).await
+}
+
+pub(crate) async fn search_memory_rows_with_recall_config(
+    server: &MemoryServer,
     mut params: SearchMemoryParams,
     project_only: bool,
     record_access: bool,
+    recall_config: Option<&memory_core::RecallConfig>,
 ) -> Result<Vec<serde_json::Value>, String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let wiki_path_prefix = params
@@ -131,6 +141,7 @@ pub(crate) async fn search_memory_rows_with_access(
                 project_name,
                 &params,
                 record_access,
+                recall_config,
                 format!("Search failed in project DB '{project_name}'"),
             )?;
             combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -151,6 +162,7 @@ pub(crate) async fn search_memory_rows_with_access(
             "wiki",
             &params,
             record_access,
+            recall_config,
             "Search failed in default wiki project DB",
         ) {
             Ok(wiki_results) => {
@@ -185,6 +197,7 @@ pub(crate) async fn search_memory_rows_with_access(
                             server,
                             &params,
                             record_access,
+                            recall_config,
                             "Search failed in workspace project DB",
                         )?;
                         combined_results
@@ -197,6 +210,7 @@ pub(crate) async fn search_memory_rows_with_access(
                             project_name,
                             &params,
                             record_access,
+                            recall_config,
                             format!("Search failed in named project DB '{project_name}'"),
                         )?;
                         combined_results
@@ -207,6 +221,7 @@ pub(crate) async fn search_memory_rows_with_access(
                         server,
                         &params,
                         record_access,
+                        recall_config,
                         "Search failed in workspace project DB",
                     )?;
                     combined_results
@@ -217,6 +232,7 @@ pub(crate) async fn search_memory_rows_with_access(
                     server,
                     &params,
                     record_access,
+                    recall_config,
                     "Search failed in workspace project DB",
                 )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -230,8 +246,13 @@ pub(crate) async fn search_memory_rows_with_access(
             let skip_workspace = inferred_db_path.is_some()
                 && workspace_db_path.as_ref() == inferred_db_path.as_ref();
 
-            let global_results =
-                with_global_search(server, &params, record_access, "Search failed in global DB")?;
+            let global_results = with_global_search(
+                server,
+                &params,
+                record_access,
+                recall_config,
+                "Search failed in global DB",
+            )?;
             combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
             if let Some(ref project_name) = inferred_project {
@@ -244,6 +265,7 @@ pub(crate) async fn search_memory_rows_with_access(
                         project_name,
                         &params,
                         record_access,
+                        recall_config,
                         format!("Search failed in inferred project DB '{project_name}'"),
                     ) {
                         Ok(project_results) => {
@@ -262,6 +284,7 @@ pub(crate) async fn search_memory_rows_with_access(
                     server,
                     &params,
                     record_access,
+                    recall_config,
                     "Search failed in project DB",
                 )?;
                 combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));

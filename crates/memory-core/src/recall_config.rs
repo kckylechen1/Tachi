@@ -159,7 +159,7 @@ impl RecallConfig {
         );
     }
 
-    fn sanitized(mut self) -> Self {
+    pub fn sanitized(mut self) -> Self {
         let defaults = Self::default();
         sanitize_weights(&mut self.default_weights, &defaults.default_weights);
         sanitize_weights(&mut self.guide_weights, &defaults.guide_weights);

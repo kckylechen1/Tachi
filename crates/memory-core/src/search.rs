@@ -18,8 +18,8 @@ use crate::{
     error::MemoryError,
     recall_config::RecallConfig,
     scorer::{
-        cosine_similarity, generic_precision_multiplier_impl, hybrid_score, is_id_like_exact_query,
-        symbolic_score, tokenize, HybridWeights, PrecisionMatcher,
+        cosine_similarity, is_id_like_exact_query, symbolic_score, tokenize, HybridWeights,
+        PrecisionMatcher,
     },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
@@ -66,6 +66,9 @@ pub struct SearchOptions {
     /// additionally multiply an entry's score when it judges the (query, entry)
     /// pair an exact match in its domain. Default: empty (fully generic).
     pub precision_matchers: Vec<Arc<dyn PrecisionMatcher>>,
+    /// Optional per-call recall config override for simulation/eval. Production
+    /// callers normally leave this unset so the process-wide config is used.
+    pub recall_config: Option<RecallConfig>,
 }
 
 fn env_truthy(key: &str) -> bool {
@@ -111,8 +114,15 @@ impl Default for SearchOptions {
             graph_relation_filter: None,
             as_of: None,
             precision_matchers: Vec::new(),
+            recall_config: None,
         }
     }
+}
+
+fn recall_config(opts: &SearchOptions) -> &RecallConfig {
+    opts.recall_config
+        .as_ref()
+        .unwrap_or_else(|| RecallConfig::get())
 }
 
 fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
@@ -169,7 +179,7 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     }
 
     let path = opts.path_prefix.as_deref().unwrap_or("");
-    RecallConfig::get().weights_for_path(path)
+    recall_config(opts).weights_for_path(path)
 }
 
 fn push_unique(out: &mut Vec<String>, term: &str) {
@@ -325,27 +335,6 @@ fn symbolic_query_with_expansion(query: &str) -> String {
         }
     }
     terms.join(" ")
-}
-
-fn search_fts_with_expansion(
-    conn: &Connection,
-    query: &str,
-    limit: usize,
-    include_archived: bool,
-    include_superseded: bool,
-    path_prefix: Option<&str>,
-    as_of: Option<&str>,
-) -> Result<HashMap<String, f64>, MemoryError> {
-    search_fts_with_expansion_config(
-        conn,
-        query,
-        limit,
-        include_archived,
-        include_superseded,
-        path_prefix,
-        as_of,
-        RecallConfig::get(),
-    )
 }
 
 fn search_fts_with_expansion_config(
@@ -613,7 +602,7 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts_with_expansion(
+    let fts_scores = search_fts_with_expansion_config(
         conn,
         query,
         n,
@@ -621,6 +610,7 @@ pub fn hybrid_search(
         include_superseded,
         opts.path_prefix.as_deref(),
         as_of_utc.as_deref(),
+        recall_config(opts),
     )?;
 
     // ── Channel 3 seed: exact symbolic candidates ────────────────────────────
@@ -716,13 +706,14 @@ pub fn hybrid_search(
 
     // ── Hybrid scoring with ACT-R enhancement ─────────────────────────────────
     let weights = resolve_weights(opts);
-    let mut scores = hybrid_score(
+    let mut scores = crate::scorer::hybrid_score_with_config(
         &entries_ref,
         &vec_scores,
         &fts_scores,
         &symbolic_scores,
         &weights,
         &access_times,
+        recall_config(opts),
     );
     if let Some(exact_id) = exact_id.as_ref().filter(|id| entries_ref.contains_key(*id)) {
         scores.insert(
@@ -750,7 +741,12 @@ pub fn hybrid_search(
     // cap the multiplier so it amplifies but doesn't overwhelm.
     let is_id_like = is_id_like_exact_query(query);
     for (id, entry) in &entries_ref {
-        let mut multiplier = generic_precision_multiplier_impl(is_id_like, query, entry);
+        let mut multiplier = crate::scorer::generic_precision_multiplier_impl_with_config(
+            is_id_like,
+            query,
+            entry,
+            recall_config(opts),
+        );
         for matcher in &opts.precision_matchers {
             if let Some(boost) = matcher.boost(query, entry) {
                 // Guard against a buggy/malicious matcher returning NaN, Inf, or
@@ -1181,6 +1177,57 @@ mod tests {
             all_terms > partial,
             "all-term AND precision should outrank partial-term OR fallback"
         );
+    }
+
+    #[test]
+    fn hybrid_search_can_override_recall_config_per_call() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "all-terms",
+            "cleanup cli safe deployment note",
+            &["cleanup", "cli", "safe"],
+        );
+        insert(
+            &mut conn,
+            "partial-term",
+            "cleanup preview deletes stale artifacts",
+            &["cleanup"],
+        );
+
+        let base_opts = SearchOptions {
+            top_k: 3,
+            candidates_per_channel: 20,
+            record_access: false,
+            ..Default::default()
+        };
+        let default_results = hybrid_search(&conn, "cleanup cli safe", &base_opts).unwrap();
+        let default_partial = default_results
+            .iter()
+            .find(|result| result.entry.id == "partial-term")
+            .expect("symbolic candidates should keep partial row visible");
+        assert_eq!(
+            default_partial.score.fts, 0.0,
+            "default config keeps all-terms AND FTS precision"
+        );
+
+        let tuned_opts = SearchOptions {
+            recall_config: Some(RecallConfig {
+                or_fallback_fts_score_factor: 0.3,
+                ..RecallConfig::default()
+            }),
+            ..base_opts
+        };
+        let tuned_results = hybrid_search(&conn, "cleanup cli safe", &tuned_opts).unwrap();
+        let tuned_partial = tuned_results
+            .iter()
+            .find(|result| result.entry.id == "partial-term")
+            .expect("partial row should remain visible");
+        assert!(
+            tuned_partial.score.fts > 0.0,
+            "per-call recall_config should enable OR fallback FTS for eval/simulation"
+        );
+        assert_eq!(tuned_results[0].entry.id, "all-terms");
     }
 
     #[test]

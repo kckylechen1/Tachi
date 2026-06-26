@@ -545,7 +545,7 @@ pub struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}]."
+        description = "[action=save] Arbitrary JSON metadata merged into the stored entry. [action=recall_simulate] Supply cases/eval_cases: [{query, expected_ids|expected_id, top_k?, project?, path_prefix?}] and optional variants: [{name, recall_config:{or_fallback_fts_score_factor?, default_fts?, ...}}]."
     )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]

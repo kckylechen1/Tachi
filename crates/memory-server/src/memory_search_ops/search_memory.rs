@@ -9,5 +9,7 @@ mod store;
 mod tests;
 
 pub(crate) use handlers::{handle_search_memory, handle_search_memory_with_access};
-pub(crate) use rows::{search_memory_rows, search_memory_rows_with_access};
+pub(crate) use rows::{
+    search_memory_rows, search_memory_rows_with_access, search_memory_rows_with_recall_config,
+};
 pub(crate) use similar::handle_find_similar_memory;

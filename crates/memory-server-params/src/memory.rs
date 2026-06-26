@@ -1,5 +1,5 @@
 use chrono::Utc;
-use memory_core::{HybridWeights, MemoryEntry, SearchOptions};
+use memory_core::{HybridWeights, MemoryEntry, RecallConfig, SearchOptions};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -444,6 +444,16 @@ impl SearchMemoryParams {
 
     /// Build SearchOptions from params, only differing by vec_available per DB.
     pub fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+        self.to_search_options_with_recall_config(vec_available, None)
+    }
+
+    /// Build SearchOptions with an optional per-call recall config override for
+    /// read-only simulation/eval surfaces.
+    pub fn to_search_options_with_recall_config(
+        &self,
+        vec_available: bool,
+        recall_config: Option<RecallConfig>,
+    ) -> SearchOptions {
         let weights = match &self.weights {
             Some(w) => HybridWeights {
                 semantic: w.semantic,
@@ -469,6 +479,7 @@ impl SearchMemoryParams {
             record_access: false,
             domain: self.domain.clone(),
             as_of: self.as_of.clone(),
+            recall_config,
             ..Default::default()
         }
     }
