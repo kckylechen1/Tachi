@@ -100,11 +100,53 @@ pub(super) fn is_abandoned_working_run(
     if status_state(status, result_written) != "TASK_STATE_WORKING" {
         return false;
     }
-    if result_written || !is_unresolved_exit(status) {
+    if !is_unresolved_exit(status) {
         return false;
     }
     let Some(updated_at) = updated_at else {
         return false;
     };
     now.signed_duration_since(updated_at) > ChronoDuration::seconds(stale_after_secs(status))
+}
+
+pub(super) fn mark_abandoned_kanban_task(task: &mut Value, now: DateTime<Utc>) {
+    if task.get("source").and_then(Value::as_str) != Some("kanban") {
+        return;
+    }
+    let Some(state) = task.get("state").and_then(Value::as_str) else {
+        return;
+    };
+    if !state_matches_filter("active", state) {
+        return;
+    }
+    let Some(updated_at) = task
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+    else {
+        return;
+    };
+    let stale_after = stale_after_secs(task);
+    if now.signed_duration_since(updated_at) <= ChronoDuration::seconds(stale_after) {
+        return;
+    }
+    let Some(obj) = task.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "state".to_string(),
+        Value::String("TASK_STATE_FAILED".to_string()),
+    );
+    obj.insert("stale".to_string(), Value::Bool(true));
+    obj.insert(
+        "stale_reason".to_string(),
+        Value::String(format!(
+            "kanban card stayed active for more than {stale_after}s without a live run ledger"
+        )),
+    );
+    obj.insert(
+        "state_source".to_string(),
+        Value::String("kanban_stale_timeout".to_string()),
+    );
 }

@@ -346,3 +346,51 @@ async fn tachi_memory_briefing_excludes_stale_run_board_noise() {
 
     let _ = std::fs::remove_dir_all(&run_dir);
 }
+
+#[tokio::test]
+async fn tachi_memory_briefing_excludes_stale_kanban_card_noise() {
+    let server = make_server();
+    let dispatch_id = format!(
+        "20260626T000003Z-arena-stale-kanban-{}",
+        uuid::Uuid::new_v4().as_simple()
+    );
+    let stale_updated_at = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("briefing-stale-kanban-card");
+            entry.path = format!("/kanban/tasks/{dispatch_id}");
+            entry.summary = "Arena persisted kanban briefing noise".to_string();
+            entry.text = "Dispatch Task\nAgent: arena\nTask: Arena persisted kanban briefing noise"
+                .to_string();
+            entry.timestamp = stale_updated_at;
+            entry.topic = "kanban".to_string();
+            entry.keywords = vec!["kanban".to_string(), "dispatch".to_string()];
+            entry.metadata = json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+                "agent": "arena",
+                "timeout_secs": 5,
+            });
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .expect("seed stale kanban card");
+
+    let mut params = tachi_memory_params("briefing");
+    params.format = Some("json".to_string());
+    params.query = Some("current task".to_string());
+    params.compact = true;
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("briefing should succeed");
+    let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+
+    assert!(
+        !parsed["kanban"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["summary"] == json!("Arena persisted kanban briefing noise")),
+        "briefing should not surface stale persisted kanban noise: {parsed}"
+    );
+}

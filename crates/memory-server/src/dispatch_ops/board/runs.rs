@@ -99,7 +99,7 @@ pub(super) fn collect_run_tasks_from_dir(
             });
         let stale_reason = if abandoned {
             Some(format!(
-                "run ledger stayed WORKING for more than {}s without result.md or exit_code",
+                "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
                 stale_after_secs(&status)
             ))
         } else {
@@ -189,7 +189,7 @@ fn collect_run_task_from_dir(run_dir: &Path) -> Option<serde_json::Value> {
         });
     let stale_reason = if abandoned {
         Some(format!(
-            "run ledger stayed WORKING for more than {}s without result.md or exit_code",
+            "run ledger stayed WORKING for more than {}s without terminal status or exit_code",
             stale_after_secs(&status)
         ))
     } else {

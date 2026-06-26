@@ -254,6 +254,7 @@ pub(super) fn slim_search_result(
     obj.insert("id".into(), json!(entry.id));
     obj.insert("db".into(), json!(db.as_str()));
     obj.insert("path".into(), json!(entry.path));
+    obj.insert("timestamp".into(), json!(entry.timestamp));
     if !entry.topic.is_empty() {
         obj.insert("topic".into(), json!(entry.topic));
     }

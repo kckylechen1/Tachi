@@ -1,9 +1,10 @@
 use super::flow::{flow_dispatch_ids, merge_run_task};
 use super::paths::runs_dir_for_server;
 use super::runs::{collect_run_task_by_id, collect_run_tasks_from_dir};
-use super::status::state_matches_filter;
+use super::status::{mark_abandoned_kanban_task, state_matches_filter};
 use crate::tool_params::{SearchMemoryParams, TachiBoardParams};
 use crate::MemoryServer;
+use chrono::Utc;
 use serde_json::json;
 
 pub(crate) async fn handle_tachi_board(
@@ -57,13 +58,18 @@ pub(crate) async fn handle_tachi_board(
         .iter()
         .map(|row| {
             let meta = row.get("metadata").cloned().unwrap_or(json!({}));
+            let updated_at = meta
+                .get("updated_at")
+                .cloned()
+                .or_else(|| row.get("timestamp").cloned());
             json!({
                 "dispatch_id": meta.get("dispatch_id"),
                 "agent": meta.get("agent"),
                 "state": meta.get("a2a_state"),
                 "eval_id": meta.get("eval_ledger_id"),
                 "summary": row.get("summary"),
-                "updated_at": meta.get("updated_at"),
+                "updated_at": updated_at,
+                "timeout_secs": meta.get("timeout_secs"),
                 "source": "kanban",
             })
         })
@@ -138,6 +144,10 @@ pub(crate) async fn handle_tachi_board(
             seen.insert(id.to_string());
         }
         tasks.push(task);
+    }
+    let now = Utc::now();
+    for task in &mut tasks {
+        mark_abandoned_kanban_task(task, now);
     }
     if state_filter_name != "all" {
         tasks.retain(|task| {
