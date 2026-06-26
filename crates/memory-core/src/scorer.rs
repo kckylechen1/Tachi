@@ -3,20 +3,13 @@
 // Replaces JS `scorer.ts` (cosineSimilarity / hybridScore / rankHybrid)
 // and Python `store.py:hybrid_search` weighting logic.
 
+use crate::recall_config::RecallConfig;
 use crate::types::{HybridScore, MemoryEntry};
 use chrono::{NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 
-// Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem).
-// Consolidated memories decay at half speed; pattern memories are virtually permanent.
-const HALF_LIFE_DAYS: f64 = 30.0;
-
 fn tier_half_life(tier: &str) -> f64 {
-    match tier {
-        "pattern" => 30_000.0,  // virtually no decay
-        "consolidated" => 60.0, // half speed
-        _ => HALF_LIFE_DAYS,    // raw default
-    }
+    RecallConfig::get().half_life_days_for_tier(tier)
 }
 
 fn tier_actr_d(tier: &str) -> f64 {
@@ -60,7 +53,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 /// Memory decay score (ACT-R Nowledge Mem formula).
 ///
 /// `decay = max(recency × (1 + 0.2 × log10(1 + access_count)), importance × 0.3)`
-/// where `recency = exp(-0.693 × age_days / HALF_LIFE_DAYS)`
+/// where `recency = exp(-0.693 × age_days / configured_half_life_days)`
 pub fn decay_score(entry: &MemoryEntry) -> f64 {
     let now = Utc::now();
     let reference = entry
@@ -560,18 +553,6 @@ pub fn symbolic_score(
     (overlap as f64) / (query_tokens.len().max(1) as f64)
 }
 
-/// Boost applied when a long, structured, identifier-like query exactly
-/// matches a token in an entry (e.g. `RECALL_PROBE_ALPHA_20260607`).
-///
-/// This is the only precision boost the generic engine applies on its own.
-/// Every domain-specific precision boost (stock tickers, ICD codes, legal
-/// citations, …) is supplied by the caller via [`PrecisionMatcher`] so that
-/// `memory-core`, shared by many projects, stays domain-agnostic.
-///
-/// When `use_rrf` is false (raw weighted-sum mode), the applied multiplier is
-/// clamped to [1.0, 3.0] by the caller so it amplifies rather than overwhelms.
-const ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
-
 /// A caller-injected, domain-specific precision booster.
 ///
 /// A host project registers matchers through `SearchOptions::precision_matchers`
@@ -618,7 +599,7 @@ pub fn entry_has_exact_query_token(entry: &MemoryEntry, query: &str) -> bool {
 
 /// Generic, domain-agnostic precision boost.
 ///
-/// Returns [`ID_LIKE_EXACT_MATCH_BOOST`] when `query` is a long, structured,
+/// Returns the configured id-like exact-match boost when `query` is a long, structured,
 /// identifier-like string that exactly matches a token in `entry`; otherwise
 /// `1.0`. Domain-specific boosts are layered on top by the caller via the
 /// [`PrecisionMatcher`] list on `SearchOptions` — see the precision-boost loop
@@ -637,7 +618,7 @@ pub(crate) fn generic_precision_multiplier_impl(
     entry: &MemoryEntry,
 ) -> f64 {
     if is_id_like && entry_has_exact_query_token(entry, query) {
-        ID_LIKE_EXACT_MATCH_BOOST
+        RecallConfig::get().id_like_exact_match_boost
     } else {
         1.0
     }

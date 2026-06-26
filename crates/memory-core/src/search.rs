@@ -15,6 +15,7 @@ use crate::{
         record_access_with_updates, search_fts, search_symbolic_candidates, search_vec,
     },
     error::MemoryError,
+    recall_config::RecallConfig,
     scorer::{
         cosine_similarity, generic_precision_multiplier_impl, hybrid_score, is_id_like_exact_query,
         symbolic_score, tokenize, HybridWeights, PrecisionMatcher,
@@ -22,8 +23,6 @@ use crate::{
     types::{HybridScore, MemoryEntry, SearchResult},
 };
 
-const EXPANDED_FTS_SCORE_FACTOR: f64 = 0.78;
-const MAX_EXPANDED_FTS_QUERIES: usize = 6;
 const MAX_SYMBOLIC_EXPANSION_TERMS: usize = 16;
 const SYMBOLIC_CANDIDATE_MULTIPLIER: usize = 10;
 
@@ -169,36 +168,7 @@ fn resolve_weights(opts: &SearchOptions) -> HybridWeights {
     }
 
     let path = opts.path_prefix.as_deref().unwrap_or("");
-    if path.starts_with("/guide") {
-        HybridWeights {
-            decay: 0.02,
-            semantic: 0.25,
-            fts: 0.45,
-            symbolic: 0.28,
-            use_rrf: true,
-        }
-    } else if path.starts_with("/wiki")
-        || path.starts_with("/behavior")
-        || path.starts_with("/rules")
-    {
-        HybridWeights {
-            decay: 0.02,
-            semantic: 0.48,
-            fts: 0.30,
-            symbolic: 0.20,
-            use_rrf: true,
-        }
-    } else if path.starts_with("/events") || path.starts_with("/notes") {
-        HybridWeights {
-            decay: 0.25,
-            semantic: 0.35,
-            fts: 0.25,
-            symbolic: 0.15,
-            use_rrf: true,
-        }
-    } else {
-        HybridWeights::default()
-    }
+    RecallConfig::get().weights_for_path(path)
 }
 
 fn push_unique(out: &mut Vec<String>, term: &str) {
@@ -272,11 +242,12 @@ fn phrase_expansion_variants(tokens: &[String]) -> Vec<String> {
     variants
 }
 
-fn expanded_fts_queries(query: &str) -> Vec<String> {
+fn expanded_fts_queries(query: &str, max_queries: usize) -> Vec<String> {
     let tokens = tokenize(query);
     if tokens.is_empty() {
         return Vec::new();
     }
+    let max_queries = max_queries.max(1);
 
     let mut queries = Vec::new();
     push_unique(&mut queries, query.trim());
@@ -287,7 +258,7 @@ fn expanded_fts_queries(query: &str) -> Vec<String> {
             expanded.extend(replacement.iter().map(|part| (*part).to_string()));
             expanded.extend(tokens[idx + 1..].iter().cloned());
             push_unique(&mut queries, &expanded.join(" "));
-            if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+            if queries.len() >= max_queries {
                 return queries;
             }
         }
@@ -295,7 +266,7 @@ fn expanded_fts_queries(query: &str) -> Vec<String> {
 
     for variant in phrase_expansion_variants(&tokens) {
         push_unique(&mut queries, &variant);
-        if queries.len() >= MAX_EXPANDED_FTS_QUERIES {
+        if queries.len() >= max_queries {
             break;
         }
     }
@@ -341,11 +312,15 @@ fn search_fts_with_expansion(
     as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let mut merged = HashMap::new();
-    for (idx, fts_query) in expanded_fts_queries(query).into_iter().enumerate() {
+    let recall_config = RecallConfig::get();
+    for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
+        .into_iter()
+        .enumerate()
+    {
         let factor = if idx == 0 {
             1.0
         } else {
-            EXPANDED_FTS_SCORE_FACTOR
+            recall_config.expanded_fts_score_factor
         };
         for (id, score) in search_fts(
             conn,

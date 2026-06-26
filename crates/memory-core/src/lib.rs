@@ -12,6 +12,7 @@ pub mod namespace;
 pub mod noise;
 pub mod pack;
 pub mod path_router;
+pub mod recall_config;
 pub mod scorer;
 pub mod search;
 pub mod store;
@@ -44,6 +45,7 @@ pub use namespace::{
 };
 pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};
+pub use recall_config::RecallConfig;
 pub use scorer::{generic_precision_multiplier, surprise_score, HybridWeights, PrecisionMatcher};
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{

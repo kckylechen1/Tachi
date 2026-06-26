@@ -14,6 +14,7 @@ fn ensure_test_env() {
         if std::env::var_os("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST").is_none() {
             std::env::set_var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
         }
+        std::env::set_var("TACHI_TEST_DISABLE_RECALL_CONFIG", "1");
         std::env::set_var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE", "1");
         // close_loop's wiki drafting prefers a backend-model distill; force the
         // deterministic result.md fallback in tests so the suite never makes a

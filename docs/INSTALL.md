@@ -155,6 +155,32 @@ For advanced setups, you can still route different LLM tasks to different provid
 
 Each prefix supports `_API_KEY`, `_BASE_URL`, and `_MODEL` suffixes.
 
+### Optional Recall Tuning
+
+Hybrid recall defaults are behavior-preserving, but advanced deployments can
+override scoring knobs in `~/.tachi/config.env` or the process environment.
+Restart `tachi serve` after changing these values.
+
+| Key | Default | Purpose |
+|---|---:|---|
+| `TACHI_RECALL_DEFAULT_SEMANTIC` | `0.35` | Default semantic/vector weight |
+| `TACHI_RECALL_DEFAULT_FTS` | `0.25` | Default FTS weight |
+| `TACHI_RECALL_DEFAULT_SYMBOLIC` | `0.20` | Default symbolic-token weight |
+| `TACHI_RECALL_DEFAULT_DECAY` | `0.20` | Default recency/ACT-R weight |
+| `TACHI_RECALL_GUIDE_*` | `0.25/0.45/0.28/0.02/true` | Override `/guide` namespace weights |
+| `TACHI_RECALL_WIKI_*` | `0.48/0.30/0.20/0.02/true` | Override `/wiki`, `/behavior`, `/rules` weights |
+| `TACHI_RECALL_EVENTS_NOTES_*` | `0.35/0.25/0.15/0.25/true` | Override `/events`, `/notes` weights |
+| `TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR` | `0.78` | Score multiplier for expanded FTS queries |
+| `TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES` | `6` | Max FTS expansion variants |
+| `TACHI_RECALL_RAW_HALF_LIFE_DAYS` | `30` | Decay half-life for raw memories |
+| `TACHI_RECALL_CONSOLIDATED_HALF_LIFE_DAYS` | `60` | Decay half-life for consolidated memories |
+| `TACHI_RECALL_PATTERN_HALF_LIFE_DAYS` | `30000` | Decay half-life for pattern memories |
+| `TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST` | `12` | Boost for exact id-like query matches |
+
+For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
+`SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
+same order.
+
 ---
 
 ## Step 4: Verify
