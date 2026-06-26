@@ -9,6 +9,8 @@ const DEFAULT_RAW_HALF_LIFE_DAYS: f64 = 30.0;
 const DEFAULT_CONSOLIDATED_HALF_LIFE_DAYS: f64 = 60.0;
 const DEFAULT_PATTERN_HALF_LIFE_DAYS: f64 = 30_000.0;
 const DEFAULT_ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
+const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.0;
+const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecallConfig {
@@ -22,6 +24,8 @@ pub struct RecallConfig {
     pub consolidated_half_life_days: f64,
     pub pattern_half_life_days: f64,
     pub id_like_exact_match_boost: f64,
+    pub or_fallback_fts_score_factor: f64,
+    pub or_fallback_fts_max_terms: usize,
 }
 
 impl Default for RecallConfig {
@@ -55,6 +59,8 @@ impl Default for RecallConfig {
             consolidated_half_life_days: DEFAULT_CONSOLIDATED_HALF_LIFE_DAYS,
             pattern_half_life_days: DEFAULT_PATTERN_HALF_LIFE_DAYS,
             id_like_exact_match_boost: DEFAULT_ID_LIKE_EXACT_MATCH_BOOST,
+            or_fallback_fts_score_factor: DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
+            or_fallback_fts_max_terms: DEFAULT_OR_FALLBACK_FTS_MAX_TERMS,
         }
     }
 }
@@ -141,6 +147,16 @@ impl RecallConfig {
             "TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST",
             &mut self.id_like_exact_match_boost,
         );
+        apply_f64(
+            values,
+            "TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR",
+            &mut self.or_fallback_fts_score_factor,
+        );
+        apply_usize(
+            values,
+            "TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS",
+            &mut self.or_fallback_fts_max_terms,
+        );
     }
 
     fn sanitized(mut self) -> Self {
@@ -170,6 +186,12 @@ impl RecallConfig {
             self.id_like_exact_match_boost,
             DEFAULT_ID_LIKE_EXACT_MATCH_BOOST,
         );
+        self.or_fallback_fts_score_factor = finite_or_default(
+            self.or_fallback_fts_score_factor,
+            DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR,
+        )
+        .clamp(0.0, 1.0);
+        self.or_fallback_fts_max_terms = self.or_fallback_fts_max_terms.max(1).min(32);
         self
     }
 }
@@ -305,6 +327,14 @@ mod tests {
             config.id_like_exact_match_boost,
             DEFAULT_ID_LIKE_EXACT_MATCH_BOOST
         );
+        assert_eq!(
+            config.or_fallback_fts_score_factor,
+            DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR
+        );
+        assert_eq!(
+            config.or_fallback_fts_max_terms,
+            DEFAULT_OR_FALLBACK_FTS_MAX_TERMS
+        );
     }
 
     #[test]
@@ -317,6 +347,8 @@ mod tests {
             TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR=0.66
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=9
             TACHI_RECALL_ID_LIKE_EXACT_MATCH_BOOST=15
+            TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=0.22
+            TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=4
             "#,
         );
         let mut config = RecallConfig::default();
@@ -329,6 +361,8 @@ mod tests {
         assert_eq!(config.expanded_fts_score_factor, 0.66);
         assert_eq!(config.max_expanded_fts_queries, 9);
         assert_eq!(config.id_like_exact_match_boost, 15.0);
+        assert_eq!(config.or_fallback_fts_score_factor, 0.22);
+        assert_eq!(config.or_fallback_fts_max_terms, 4);
     }
 
     #[test]
@@ -340,6 +374,8 @@ mod tests {
             TACHI_RECALL_WIKI_USE_RRF=maybe
             TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR=-1
             TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES=0
+            TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR=NaN
+            TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS=0
             "#,
         );
         let mut config = RecallConfig::default();
@@ -354,5 +390,10 @@ mod tests {
         assert!(config.wiki_weights.use_rrf);
         assert_eq!(config.expanded_fts_score_factor, 0.0);
         assert_eq!(config.max_expanded_fts_queries, 1);
+        assert_eq!(
+            config.or_fallback_fts_score_factor,
+            RecallConfig::default().or_fallback_fts_score_factor
+        );
+        assert_eq!(config.or_fallback_fts_max_terms, 1);
     }
 }

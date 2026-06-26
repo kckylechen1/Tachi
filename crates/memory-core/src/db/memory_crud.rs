@@ -736,7 +736,6 @@ pub fn search_fts(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
@@ -749,24 +748,77 @@ pub fn search_fts(
         return Ok(HashMap::new());
     }
 
+    search_fts_match(
+        conn,
+        &safe_query,
+        true,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of,
+    )
+}
+
+pub(crate) fn search_fts_raw_match(
+    conn: &Connection,
+    match_query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    if match_query.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+    search_fts_match(
+        conn,
+        match_query,
+        false,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of,
+    )
+}
+
+fn search_fts_match(
+    conn: &Connection,
+    match_query: &str,
+    use_simple_query: bool,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+) -> Result<HashMap<String, f64>, MemoryError> {
+    let as_of_utc = as_of.map(normalize_utc_iso).transpose()?;
     let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
-    // Use simple_query() for automatic CJK segmentation in MATCH clause
-    let mut stmt = conn.prepare(
+    let match_operand = if use_simple_query {
+        "simple_query(?1)"
+    } else {
+        "?1"
+    };
+    // The ordinary path uses simple_query() for automatic CJK segmentation.
+    // Raw match mode is only for internally constructed, sanitized FTS expressions.
+    let mut stmt = conn.prepare(&format!(
         r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
            FROM memories_fts
            JOIN memories m ON m.id = memories_fts.id
-           WHERE memories_fts MATCH simple_query(?1)
+           WHERE memories_fts MATCH {match_operand}
               AND (?2 = 1 OR m.archived = 0)
               AND (?4 = 1 OR m.superseded_by IS NULL)
               AND (?5 IS NULL OR m.path LIKE ?5)
               AND (?6 IS NULL OR (COALESCE(NULLIF(m.valid_from, ''), m.timestamp) <= ?6 AND (m.valid_until IS NULL OR m.valid_until > ?6)))
              ORDER BY bm25(memories_fts)
             LIMIT ?3"#,
-    )?;
+    ))?;
 
     let rows = stmt.query_map(
         params![
-            safe_query,
+            match_query,
             include_archived as i64,
             limit as i64,
             include_superseded as i64,

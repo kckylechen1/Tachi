@@ -12,7 +12,8 @@ use std::sync::Arc;
 use crate::{
     db::{
         fetch_by_ids, get_access_times, get_superseded_ids, graph_expand,
-        record_access_with_updates, search_fts, search_symbolic_candidates, search_vec,
+        record_access_with_updates, search_fts, search_fts_raw_match, search_symbolic_candidates,
+        search_vec,
     },
     error::MemoryError,
     recall_config::RecallConfig,
@@ -274,6 +275,30 @@ fn expanded_fts_queries(query: &str, max_queries: usize) -> Vec<String> {
     queries
 }
 
+fn fts_or_fallback_match_query(query: &str, max_terms: usize) -> Option<String> {
+    let max_terms = max_terms.max(1);
+    let mut terms = Vec::new();
+    for token in tokenize(query) {
+        if token.len() < 2 || !token.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+            continue;
+        }
+        push_unique(&mut terms, &token);
+        if terms.len() >= max_terms {
+            break;
+        }
+    }
+    if terms.len() < 2 {
+        return None;
+    }
+    Some(
+        terms
+            .into_iter()
+            .map(|term| format!("{term}*"))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
+}
+
 fn symbolic_query_with_expansion(query: &str) -> String {
     let tokens = tokenize(query);
     if tokens.is_empty() {
@@ -311,8 +336,29 @@ fn search_fts_with_expansion(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
+    search_fts_with_expansion_config(
+        conn,
+        query,
+        limit,
+        include_archived,
+        include_superseded,
+        path_prefix,
+        as_of,
+        RecallConfig::get(),
+    )
+}
+
+fn search_fts_with_expansion_config(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    include_archived: bool,
+    include_superseded: bool,
+    path_prefix: Option<&str>,
+    as_of: Option<&str>,
+    recall_config: &RecallConfig,
+) -> Result<HashMap<String, f64>, MemoryError> {
     let mut merged = HashMap::new();
-    let recall_config = RecallConfig::get();
     for (idx, fts_query) in expanded_fts_queries(query, recall_config.max_expanded_fts_queries)
         .into_iter()
         .enumerate()
@@ -336,6 +382,27 @@ fn search_fts_with_expansion(
                 .entry(id)
                 .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
                 .or_insert(adjusted);
+        }
+    }
+    if recall_config.or_fallback_fts_score_factor > 0.0 {
+        if let Some(or_query) =
+            fts_or_fallback_match_query(query, recall_config.or_fallback_fts_max_terms)
+        {
+            for (id, score) in search_fts_raw_match(
+                conn,
+                &or_query,
+                limit,
+                include_archived,
+                include_superseded,
+                path_prefix,
+                as_of,
+            )? {
+                let adjusted = score * recall_config.or_fallback_fts_score_factor;
+                merged
+                    .entry(id)
+                    .and_modify(|existing: &mut f64| *existing = existing.max(adjusted))
+                    .or_insert(adjusted);
+            }
         }
     }
     Ok(merged)
@@ -1031,6 +1098,89 @@ mod tests {
         let results = hybrid_search(&conn, "RECALL_PROBE_ALPHA_20260607", &opts).unwrap();
         assert_eq!(results[0].entry.id, "alpha");
         assert!(results[0].score.symbolic > results[1].score.symbolic);
+    }
+
+    #[test]
+    fn fts_or_fallback_is_config_gated_and_preserves_all_terms_precision() {
+        let mut conn = setup();
+        insert(
+            &mut conn,
+            "all-terms",
+            "cleanup cli safe deployment note",
+            &["cleanup", "cli", "safe"],
+        );
+        insert(
+            &mut conn,
+            "partial-term",
+            "cleanup preview deletes stale artifacts",
+            &["cleanup"],
+        );
+        insert(
+            &mut conn,
+            "no-match",
+            "router audit status page",
+            &["router"],
+        );
+
+        let and_only = search_fts(&conn, "cleanup cli safe", 10, false, false, None, None).unwrap();
+        assert!(
+            and_only.contains_key("all-terms"),
+            "simple_query FTS should match the row containing every query term"
+        );
+        assert!(
+            !and_only.contains_key("partial-term"),
+            "simple_query FTS is intentionally all-terms AND across query tokens"
+        );
+
+        let default_config = RecallConfig::default();
+        let default_scores = search_fts_with_expansion_config(
+            &conn,
+            "cleanup cli safe",
+            10,
+            false,
+            false,
+            None,
+            None,
+            &default_config,
+        )
+        .unwrap();
+        assert!(
+            !default_scores.contains_key("partial-term"),
+            "OR fallback must stay disabled by default to preserve current behavior"
+        );
+
+        let tuned_config = RecallConfig {
+            or_fallback_fts_score_factor: 0.3,
+            ..RecallConfig::default()
+        };
+        let tuned_scores = search_fts_with_expansion_config(
+            &conn,
+            "cleanup cli safe",
+            10,
+            false,
+            false,
+            None,
+            None,
+            &tuned_config,
+        )
+        .unwrap();
+        let all_terms = tuned_scores
+            .get("all-terms")
+            .copied()
+            .expect("all-terms score");
+        let partial = tuned_scores
+            .get("partial-term")
+            .copied()
+            .expect("partial term should enter through OR fallback");
+        assert_eq!(all_terms, 1.0);
+        assert!(
+            partial > 0.0 && partial <= tuned_config.or_fallback_fts_score_factor,
+            "fallback score should be bounded by the configured factor, got {partial}"
+        );
+        assert!(
+            all_terms > partial,
+            "all-term AND precision should outrank partial-term OR fallback"
+        );
     }
 
     #[test]

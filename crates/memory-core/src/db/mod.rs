@@ -37,6 +37,7 @@ pub use hub_db::{
 #[cfg(test)]
 pub(crate) use memory_crud::record_access;
 pub(crate) use memory_crud::record_access_with_updates;
+pub(crate) use memory_crud::search_fts_raw_match;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
 pub use memory_crud::{

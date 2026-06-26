@@ -172,6 +172,8 @@ Restart `tachi serve` after changing these values.
 | `TACHI_RECALL_EVENTS_NOTES_*` | `0.35/0.25/0.15/0.25/true` | Override `/events`, `/notes` weights |
 | `TACHI_RECALL_EXPANDED_FTS_SCORE_FACTOR` | `0.78` | Score multiplier for expanded FTS queries |
 | `TACHI_RECALL_MAX_EXPANDED_FTS_QUERIES` | `6` | Max FTS expansion variants |
+| `TACHI_RECALL_OR_FALLBACK_FTS_SCORE_FACTOR` | `0` | Optional partial-term `OR` FTS fallback multiplier; `0` disables it |
+| `TACHI_RECALL_OR_FALLBACK_FTS_MAX_TERMS` | `8` | Max query terms used by the optional `OR` FTS fallback |
 | `TACHI_RECALL_RAW_HALF_LIFE_DAYS` | `30` | Decay half-life for raw memories |
 | `TACHI_RECALL_CONSOLIDATED_HALF_LIFE_DAYS` | `60` | Decay half-life for consolidated memories |
 | `TACHI_RECALL_PATTERN_HALF_LIFE_DAYS` | `30000` | Decay half-life for pattern memories |
