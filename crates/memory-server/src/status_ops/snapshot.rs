@@ -216,6 +216,30 @@ pub(crate) fn list_recent_checkpoint_entries(
     list_recent_entries_by_path(server, "/agent/checkpoints/", limit)
 }
 
+pub(crate) fn list_recent_checkpoint_entries_for_project(
+    project_name: &str,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let Ok(db_path) = crate::MemoryServer::resolve_named_project_db_path(project_name) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    collect_entries_for_status(
+        db_path.as_path(),
+        "/agent/checkpoints/",
+        limit,
+        "project",
+        &mut rows,
+    );
+    rows.sort_by(|a, b| {
+        let aa = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        let bb = b.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
+        bb.cmp(aa)
+    });
+    rows.truncate(limit.max(1).min(50));
+    rows
+}
+
 pub(crate) fn list_recent_kanban_entries(
     server: &crate::MemoryServer,
     limit: usize,

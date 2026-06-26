@@ -152,13 +152,22 @@ pub(crate) async fn handle_memory_briefing(
         crate::dispatch_ops::handle_tachi_board(
             server,
             TachiBoardParams {
-                state_filter: Some("all".to_string()),
+                state_filter: Some("active".to_string()),
                 limit: Some(top_k.min(kanban_cap)),
                 project: named_project.clone(),
                 flow_id: None,
             },
         ),
-        async { crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap) },
+        async {
+            if let Some(project_name) = named_project.as_deref() {
+                crate::status_ops::list_recent_checkpoint_entries_for_project(
+                    project_name,
+                    checkpoint_cap,
+                )
+            } else {
+                crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap)
+            }
+        },
         async { crate::wiki_ops::wiki_hygiene_counts(server).await },
     );
     let warnings: Vec<String> = warnings_res;

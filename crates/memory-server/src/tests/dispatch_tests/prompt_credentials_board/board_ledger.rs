@@ -154,6 +154,27 @@ async fn board_marks_abandoned_working_run_as_failed() {
         "stale run should not remain on working board: {working:#}"
     );
 
+    let active_raw = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("active".to_string()),
+            limit: Some(20),
+            project: None,
+            flow_id: None,
+        },
+    )
+    .await
+    .expect("active board should render");
+    let active: serde_json::Value = serde_json::from_str(&active_raw).expect("active board JSON");
+    assert!(
+        !active["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["dispatch_id"].as_str() == Some(dispatch_id.as_str())),
+        "stale failed run should not appear on active board: {active:#}"
+    );
+
     let _ = std::fs::remove_dir_all(&run_dir);
 }
 

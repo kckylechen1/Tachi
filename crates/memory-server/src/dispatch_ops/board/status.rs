@@ -18,6 +18,21 @@ pub(super) fn map_filter_state(state_filter: &str) -> &str {
     }
 }
 
+pub(super) fn state_matches_filter(state_filter: &str, state: &str) -> bool {
+    match state_filter {
+        "all" => true,
+        "active" => matches!(
+            state,
+            "TASK_STATE_WORKING"
+                | "TASK_STATE_RUNNING"
+                | "TASK_STATE_PENDING"
+                | "TASK_STATE_INPUT_REQUIRED"
+                | "TASK_STATE_PENDING_REVIEW"
+        ),
+        other => state == map_filter_state(other),
+    }
+}
+
 pub(super) fn status_state(status: &serde_json::Value, result_written: bool) -> &'static str {
     if let Some(state) = status.get("state").and_then(|s| s.as_str()) {
         return match state {

@@ -1,7 +1,7 @@
 use super::flow::{flow_dispatch_ids, merge_run_task};
 use super::paths::runs_dir_for_server;
 use super::runs::{collect_run_task_by_id, collect_run_tasks_from_dir};
-use super::status::map_filter_state;
+use super::status::state_matches_filter;
 use crate::tool_params::{SearchMemoryParams, TachiBoardParams};
 use crate::MemoryServer;
 use serde_json::json;
@@ -46,7 +46,11 @@ pub(crate) async fn handle_tachi_board(
     )
     .await?;
 
-    let state_filter = params.state_filter.as_deref().unwrap_or("all");
+    let state_filter = params
+        .state_filter
+        .clone()
+        .unwrap_or_else(|| "all".to_string());
+    let state_filter_name = state_filter.as_str();
 
     // Build compact board view
     let mut tasks: Vec<serde_json::Value> = rows
@@ -105,8 +109,9 @@ pub(crate) async fn handle_tachi_board(
     let run_tasks = if flow_filter.is_some() {
         Vec::new()
     } else {
+        let run_state_filter = state_filter.clone();
         tokio::task::spawn_blocking(move || {
-            collect_run_tasks_from_dir(runs_dir, "all", run_scan_limit)
+            collect_run_tasks_from_dir(runs_dir, &run_state_filter, run_scan_limit)
         })
         .await
         .unwrap_or_default()
@@ -134,9 +139,12 @@ pub(crate) async fn handle_tachi_board(
         }
         tasks.push(task);
     }
-    if state_filter != "all" {
-        let target_state = map_filter_state(state_filter);
-        tasks.retain(|task| task.get("state").and_then(|v| v.as_str()) == Some(target_state));
+    if state_filter_name != "all" {
+        tasks.retain(|task| {
+            task.get("state")
+                .and_then(|v| v.as_str())
+                .is_some_and(|state| state_matches_filter(state_filter_name, state))
+        });
     }
     tasks.sort_by(|a, b| {
         b.get("updated_at")
@@ -148,7 +156,7 @@ pub(crate) async fn handle_tachi_board(
     serde_json::to_string(&json!({
         "board": "kanban",
         "flow_id": flow_filter,
-        "filter": state_filter,
+        "filter": state_filter_name,
         "count": tasks.len(),
         "kanban_count": kanban_count,
         "run_count": run_count,

@@ -515,7 +515,7 @@ pub struct TachiMemoryParams {
     pub retention_policy: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Kind hint: memory, note, or wiki (auto-detected if omitted)."
+        description = "[action=save] Kind hint: memory, note, or wiki. If omitted, tachi_memory defaults to memory unless scope='note'; use tachi_save for title-based auto-detection."
     )]
     pub kind: Option<String>,
     #[serde(default)]
@@ -2233,7 +2233,7 @@ pub struct TachiAgentsParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiBoardParams {
-    /// Filter by state: "working", "completed", "failed", "all" (default: "all")
+    /// Filter by state: "active", "working", "completed", "failed", "all" (default: "all")
     #[serde(default)]
     pub state_filter: Option<String>,
 

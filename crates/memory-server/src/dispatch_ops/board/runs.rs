@@ -1,6 +1,6 @@
 use super::paths::runs_dir_for_server;
 use super::status::{
-    is_abandoned_working_run, map_filter_state, parse_status_updated_at, stale_after_secs,
+    is_abandoned_working_run, parse_status_updated_at, stale_after_secs, state_matches_filter,
     status_state,
 };
 use crate::dispatch_ops::probe_harness_server_status;
@@ -44,7 +44,6 @@ pub(super) fn collect_run_tasks_from_dir(
             .then_with(|| b.file_name().cmp(&a.file_name()))
     });
 
-    let target_state = map_filter_state(state_filter);
     let mut runs = Vec::new();
     let now = Utc::now();
 
@@ -84,7 +83,7 @@ pub(super) fn collect_run_tasks_from_dir(
         } else {
             status_state(&status, result_written)
         };
-        if state_filter != "all" && state != target_state {
+        if !state_matches_filter(state_filter, state) {
             continue;
         }
         let updated_at = status

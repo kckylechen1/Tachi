@@ -110,17 +110,6 @@ pub(crate) async fn handle_tachi_memory(
                 .text
                 .clone()
                 .ok_or_else(|| "text is required when action='save'".to_string())?;
-            // kind="wiki" should go through tachi_wiki — reject it here
-            if params
-                .kind
-                .as_deref()
-                .map(|k| k.eq_ignore_ascii_case("wiki"))
-                .unwrap_or(false)
-            {
-                return Err(
-                    "kind='wiki' is not supported via tachi_memory. Use tachi_wiki with action='write' instead.".to_string()
-                );
-            }
             let scope_is_note = params
                 .scope
                 .as_deref()

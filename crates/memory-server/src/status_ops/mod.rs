@@ -61,6 +61,6 @@ pub(crate) use runtime::{
 use snapshot::paths_equal;
 pub(crate) use snapshot::{
     collect_snapshot, collect_snapshot_with_provider_value_compare, list_recent_checkpoint_entries,
-    list_recent_kanban_entries,
+    list_recent_checkpoint_entries_for_project, list_recent_kanban_entries,
 };
 pub(crate) use types::*;
