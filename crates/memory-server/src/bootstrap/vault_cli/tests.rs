@@ -39,7 +39,7 @@ fn config_for_password(password: &str) -> memory_core::vault::VaultConfig {
         salt: B64.encode(salt),
         verifier,
         kdf_algorithm: "argon2id".to_string(),
-        kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+        kdf_params: crate::vault_crypto::active_kdf_params_json().to_string(),
         cipher: memory_core::vault::VaultCipher::Aes256Gcm,
         created_at: "2026-06-14T00:00:00Z".to_string(),
         updated_at: "2026-06-14T00:00:00Z".to_string(),

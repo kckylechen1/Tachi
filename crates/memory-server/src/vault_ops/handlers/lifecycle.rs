@@ -22,7 +22,7 @@ pub(crate) async fn handle_vault_init(
             salt: salt_b64,
             verifier,
             kdf_algorithm: "argon2id".to_string(),
-            kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            kdf_params: crypto::active_kdf_params_json().to_string(),
             cipher: VaultCipher::Aes256Gcm,
             created_at: now.clone(),
             updated_at: now,

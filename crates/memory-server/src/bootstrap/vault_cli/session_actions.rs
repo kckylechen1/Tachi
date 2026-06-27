@@ -74,7 +74,7 @@ pub(super) async fn run_session_action(
                     salt: salt_b64,
                     verifier,
                     kdf_algorithm: "argon2id".to_string(),
-                    kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+                    kdf_params: crate::vault_crypto::active_kdf_params_json().to_string(),
                     cipher: memory_core::vault::VaultCipher::Aes256Gcm,
                     created_at: now.clone(),
                     updated_at: now,

@@ -11,11 +11,66 @@ use rand::RngCore;
 const VERIFIER_PLAINTEXT: &[u8] = b"tachi-vault-ok";
 const AES_GCM_NONCE_LEN: usize = 12;
 const AES_GCM_TAG_LEN: usize = 16;
+#[cfg(not(test))]
+const PRODUCTION_KDF_MEMORY_COST: u32 = 65_536;
+#[cfg(not(test))]
+const PRODUCTION_KDF_TIME_COST: u32 = 3;
+#[cfg(not(test))]
+const PRODUCTION_KDF_PARALLELISM: u32 = 4;
+#[cfg(not(test))]
+const PRODUCTION_KDF_PARAMS_JSON: &str = r#"{"m":65536,"t":3,"p":4}"#;
+
+#[cfg(test)]
+const TEST_KDF_MEMORY_COST: u32 = 64;
+#[cfg(test)]
+const TEST_KDF_TIME_COST: u32 = 1;
+#[cfg(test)]
+const TEST_KDF_PARALLELISM: u32 = 1;
+#[cfg(test)]
+const TEST_KDF_PARAMS_JSON: &str = r#"{"m":64,"t":1,"p":1}"#;
+
+#[derive(Clone, Copy)]
+struct VaultKdfParams {
+    memory_cost: u32,
+    time_cost: u32,
+    parallelism: u32,
+}
+
+fn active_kdf_params() -> VaultKdfParams {
+    #[cfg(test)]
+    {
+        VaultKdfParams {
+            memory_cost: TEST_KDF_MEMORY_COST,
+            time_cost: TEST_KDF_TIME_COST,
+            parallelism: TEST_KDF_PARALLELISM,
+        }
+    }
+    #[cfg(not(test))]
+    {
+        VaultKdfParams {
+            memory_cost: PRODUCTION_KDF_MEMORY_COST,
+            time_cost: PRODUCTION_KDF_TIME_COST,
+            parallelism: PRODUCTION_KDF_PARALLELISM,
+        }
+    }
+}
+
+pub(crate) fn active_kdf_params_json() -> &'static str {
+    #[cfg(test)]
+    {
+        TEST_KDF_PARAMS_JSON
+    }
+    #[cfg(not(test))]
+    {
+        PRODUCTION_KDF_PARAMS_JSON
+    }
+}
 
 /// Derive a 32-byte encryption key from password + salt using Argon2id.
 fn derive_key_into(password: &str, salt: &[u8], key: &mut [u8; 32]) -> Result<(), String> {
-    let params =
-        Params::new(65536, 3, 4, Some(32)).map_err(|e| format!("Argon2 params error: {e}"))?;
+    let kdf = active_kdf_params();
+    let params = Params::new(kdf.memory_cost, kdf.time_cost, kdf.parallelism, Some(32))
+        .map_err(|e| format!("Argon2 params error: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     argon2
         .hash_password_into(password.as_bytes(), salt, key)
@@ -211,6 +266,15 @@ pub fn validate_secret_name(name: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_kdf_params_use_lightweight_test_profile() {
+        let params = active_kdf_params();
+        assert_eq!(params.memory_cost, TEST_KDF_MEMORY_COST);
+        assert_eq!(params.time_cost, TEST_KDF_TIME_COST);
+        assert_eq!(params.parallelism, TEST_KDF_PARALLELISM);
+        assert_eq!(active_kdf_params_json(), TEST_KDF_PARAMS_JSON);
+    }
 
     #[test]
     fn test_derive_key_deterministic() {
