@@ -41,6 +41,7 @@ pub(crate) struct DispatchResult {
 }
 
 mod artifacts;
+mod backend;
 mod backend_failure;
 mod credentials;
 mod dedupe;
@@ -53,6 +54,7 @@ mod start;
 mod tests;
 
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
+use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
 use self::credentials::*;
 use self::dedupe::*;
@@ -396,100 +398,29 @@ pub(crate) async fn handle_tachi_dispatch(
     }
 
     // 5. Build execution backend
-    let acpx_enabled = is_acpx_transport(&harness_transport);
-    let native_acp_enabled = is_native_acp_transport(&harness_transport);
-    let mut execution_backend_metadata: Option<serde_json::Value> = None;
-    let execution_backend_name = if acpx_enabled {
-        Some("acpx")
-    } else if native_acp_enabled {
-        Some("acp_native")
-    } else {
-        None
-    };
-    let record_backend_prepare_failure = |backend: &str, err: &str| {
-        record_execution_backend_prepare_failure(ExecutionBackendPrepareFailure {
-            trajectory_path: &trajectory_path,
-            workspace_dir: &workspace_dir,
-            dispatch_id: &dispatch_id,
-            agent_norm: &agent_norm,
-            params: &params,
-            backend,
-            error: err,
-            v2,
-            plan_generated_at: plan_generated_at.as_deref(),
-            plan_duration_ms,
-            harness_transport: &harness_transport,
-            harness_server_url: &harness_server_url,
-            capability_bundle_card: &capability_bundle_card,
-            timeout_secs_for_status,
-        });
-    };
-    let mut execution = if acpx_enabled {
-        let acpx_prompt_path = match prepare_acpx_prompt(&prompt_md_path, &prompt) {
-            Ok(path) => path,
-            Err(err) => {
-                record_backend_prepare_failure("acpx", &err);
-                return Err(err);
-            }
-        };
-        let acpx_spec = match build_acpx_command_spec(&params, &agent_norm, &acpx_prompt_path) {
-            Ok(spec) => spec,
-            Err(err) => {
-                record_backend_prepare_failure("acpx", &err);
-                return Err(err);
-            }
-        };
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "execution_backend_prepared",
-                "dispatch_id": dispatch_id,
-                "agent": agent_norm.clone(),
-                "execution_backend": "acpx",
-                "acpx": acpx_spec.metadata.clone(),
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
-        execution_backend_metadata = Some(acpx_spec.metadata.clone());
-        DispatchExecution::Subprocess(build_acpx_command(&acpx_spec))
-    } else if native_acp_enabled {
-        let native_spec = match build_native_acp_run_spec(&params, &agent_norm, &prompt) {
-            Ok(spec) => spec,
-            Err(err) => {
-                record_backend_prepare_failure("acp_native", &err);
-                return Err(err);
-            }
-        };
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "execution_backend_prepared",
-                "dispatch_id": dispatch_id,
-                "agent": agent_norm.clone(),
-                "execution_backend": "acp_native",
-                "acp_native": native_spec.metadata.clone(),
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
-        execution_backend_metadata = Some(native_spec.metadata.clone());
-        DispatchExecution::NativeAcp(native_spec)
-    } else {
-        let cmd = match agent_norm.as_str() {
-            "claude" => build_claude_command(&params, &prompt, mcp_config_path.as_ref())?,
-            "codex" => build_codex_command(&params, &prompt, mcp_config_path.as_ref())?,
-            "grok" => build_grok_command(&params, &prompt, mcp_config_path.as_ref())?,
-            "kimi" => build_kimi_command(&params, &prompt)?,
-            "custom" => build_custom_command(&params, &prompt)?,
-            other => {
-                return Err(format!(
-                    "Internal error: unhandled dispatch agent '{}'. {}",
-                    other,
-                    dispatch_agent_help_list()
-                ));
-            }
-        };
-        DispatchExecution::Subprocess(cmd)
-    };
+    let PreparedDispatchBackend {
+        mut execution,
+        execution_backend_name,
+        execution_backend_metadata,
+        acpx_enabled,
+        native_acp_enabled,
+    } = prepare_dispatch_backend(DispatchBackendContext {
+        trajectory_path: &trajectory_path,
+        workspace_dir: &workspace_dir,
+        dispatch_id: &dispatch_id,
+        agent_norm: &agent_norm,
+        params: &params,
+        prompt: &prompt,
+        prompt_md_path: &prompt_md_path,
+        mcp_config_path: mcp_config_path.as_ref(),
+        v2,
+        plan_generated_at: plan_generated_at.as_deref(),
+        plan_duration_ms,
+        harness_transport: &harness_transport,
+        harness_server_url: &harness_server_url,
+        capability_bundle_card: &capability_bundle_card,
+        timeout_secs_for_status,
+    })?;
     let legacy_vault_env =
         unlocked_vault_child_env_map(server, params.cwd.as_deref().map(std::path::Path::new));
     let legacy_vault_env_count = legacy_vault_env.len();
