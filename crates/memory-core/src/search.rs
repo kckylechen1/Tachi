@@ -1657,7 +1657,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            after.as_deref().unwrap_or_default().starts_with("2021-06-01"),
+            after
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("2021-06-01"),
             "explicit valid_until must be preserved, got {after:?}"
         );
     }
