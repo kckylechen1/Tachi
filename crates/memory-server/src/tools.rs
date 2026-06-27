@@ -52,34 +52,17 @@ use crate::kanban::{
     UpdateCardParams,
 };
 use crate::memory_ops::{
-    handle_archive_memory, handle_delete_domain, handle_delete_memory, handle_get_domain,
-    handle_get_memory, handle_list_domains, handle_list_memories, handle_memory_gc,
-    handle_memory_stats, handle_register_domain, handle_runtime_info,
+    handle_archive_memory, handle_delete_memory, handle_get_memory, handle_list_memories,
+    handle_memory_gc, handle_memory_stats, handle_runtime_info,
 };
 use crate::memory_search_ops::{handle_find_similar_memory, handle_remember, handle_save_memory};
-use crate::pack_ops::{
-    handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
-    handle_pack_remove, handle_projection_list,
-};
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest, handle_ingest_event,
     handle_ingest_source, handle_sync_memories,
 };
 use crate::project_db_ops::handle_tachi_init_project_db;
-use crate::sandbox_ops::{
-    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
-    handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
-};
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
-use crate::vault_ops::{
-    handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
-    handle_vault_lock, handle_vault_record_key_result, handle_vault_remove, handle_vault_set,
-    handle_vault_set_api_key_pool, handle_vault_setup_rotation, handle_vault_status,
-    handle_vault_unlock, VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
-    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams,
-};
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
     collect_wiki_browse_value, collect_wiki_read_value, collect_wiki_search_value,
@@ -91,11 +74,15 @@ const TASK_WAIT_INITIAL_POLL_DELAY: StdDuration = StdDuration::from_millis(250);
 const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
 
 mod dispatch_complete_defaults;
+mod domain_facade;
 mod formatting;
+mod pack_facade;
+mod sandbox_facade;
 mod skill_discovery;
 mod skill_facade;
 mod task_facade;
 mod task_router;
+mod vault_facade;
 mod wiki_facade;
 
 #[cfg(test)]
@@ -1045,302 +1032,6 @@ impl MemoryServer {
         Parameters(params): Parameters<DlqRetryParams>,
     ) -> Result<String, String> {
         handle_dlq_retry(self, params).await
-    }
-
-    // ─── Semantic Sandboxing Tools ───────────────────────────────────────────
-
-    #[tool(
-        description = "Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny."
-    )]
-    pub(crate) async fn sandbox_set_rule(
-        &self,
-        Parameters(params): Parameters<SandboxSetRuleParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_set_rule(self, params).await
-    }
-
-    #[tool(
-        description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration)."
-    )]
-    pub(crate) async fn sandbox_check(
-        &self,
-        Parameters(params): Parameters<SandboxCheckParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_check(self, params).await
-    }
-
-    #[tool(
-        description = "Set runtime sandbox policy for a capability (timeouts, concurrency, env allowlist, fs/cwd roots)."
-    )]
-    pub(crate) async fn sandbox_set_policy(
-        &self,
-        Parameters(params): Parameters<SandboxSetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_set_policy(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for sandbox_set_policy. Configure shell execution policy."
-    )]
-    pub(crate) async fn shell_set_policy(
-        &self,
-        Parameters(params): Parameters<SandboxSetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_set_policy(self, params).await
-    }
-
-    #[tool(description = "Get runtime sandbox policy for a capability.")]
-    pub(crate) async fn sandbox_get_policy(
-        &self,
-        Parameters(params): Parameters<SandboxGetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_get_policy(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for sandbox_get_policy. Read shell execution policy."
-    )]
-    pub(crate) async fn shell_get_policy(
-        &self,
-        Parameters(params): Parameters<SandboxGetPolicyParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_get_policy(self, params).await
-    }
-
-    #[tool(description = "List runtime sandbox policies.")]
-    pub(crate) async fn sandbox_list_policies(
-        &self,
-        Parameters(params): Parameters<SandboxListPoliciesParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_list_policies(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for sandbox_list_policies. List shell policies."
-    )]
-    pub(crate) async fn shell_list_policies(
-        &self,
-        Parameters(params): Parameters<SandboxListPoliciesParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_list_policies(self, params).await
-    }
-
-    #[tool(
-        description = "List sandbox execution audit rows (policy decisions, startup, runtime outcomes)."
-    )]
-    pub(crate) async fn sandbox_exec_audit(
-        &self,
-        Parameters(params): Parameters<SandboxExecAuditParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_exec_audit(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for sandbox_exec_audit. Inspect shell execution audit."
-    )]
-    pub(crate) async fn shell_exec_audit(
-        &self,
-        Parameters(params): Parameters<SandboxExecAuditParams>,
-    ) -> Result<String, String> {
-        handle_sandbox_exec_audit(self, params).await
-    }
-
-    // ─── Pack System Tools ────────────────────────────────────────────────────
-
-    #[tool(description = "List installed skill packs. Optionally filter by enabled_only.")]
-    pub(crate) async fn pack_list(
-        &self,
-        Parameters(params): Parameters<PackListParams>,
-    ) -> Result<String, String> {
-        handle_pack_list(self, params).await
-    }
-
-    #[tool(description = "Get details of a single installed skill pack by ID.")]
-    pub(crate) async fn pack_get(
-        &self,
-        Parameters(params): Parameters<PackGetParams>,
-    ) -> Result<String, String> {
-        handle_pack_get(self, params).await
-    }
-
-    #[tool(
-        description = "Register a skill pack after git clone / download. Records the pack in the registry with its metadata, source, and skill count."
-    )]
-    pub(crate) async fn pack_register(
-        &self,
-        Parameters(params): Parameters<PackRegisterParams>,
-    ) -> Result<String, String> {
-        handle_pack_register(self, params).await
-    }
-
-    #[tool(
-        description = "Remove a skill pack from the registry. Also cleans up projected files in agent directories unless clean_files=false."
-    )]
-    pub(crate) async fn pack_remove(
-        &self,
-        Parameters(params): Parameters<PackRemoveParams>,
-    ) -> Result<String, String> {
-        handle_pack_remove(self, params).await
-    }
-
-    #[tool(
-        description = "Project a pack's skills, workflows, and host overlays to one or more agents. Converts SKILL.md files to each agent's native format (e.g. .mdc rules for Cursor) and emits a tachi-projection manifest for adapters such as OpenClaw."
-    )]
-    pub(crate) async fn pack_project(
-        &self,
-        Parameters(params): Parameters<PackProjectParams>,
-    ) -> Result<String, String> {
-        handle_pack_project(self, params).await
-    }
-
-    #[tool(description = "List agent projections. Filter by agent and/or pack_id.")]
-    pub(crate) async fn projection_list(
-        &self,
-        Parameters(params): Parameters<ProjectionListParams>,
-    ) -> Result<String, String> {
-        handle_projection_list(self, params).await
-    }
-
-    // ─── Domain Management ─────────────────────────────────────────────────
-
-    #[tool(
-        description = "Register a domain configuration for memory routing, GC thresholds, and default retention policies."
-    )]
-    pub(crate) async fn register_domain(
-        &self,
-        Parameters(params): Parameters<RegisterDomainParams>,
-    ) -> Result<String, String> {
-        handle_register_domain(self, params).await
-    }
-
-    #[tool(description = "Get a domain configuration by name.")]
-    pub(crate) async fn get_domain(
-        &self,
-        Parameters(params): Parameters<GetDomainParams>,
-    ) -> Result<String, String> {
-        handle_get_domain(self, params).await
-    }
-
-    #[tool(description = "List all registered domain configurations.")]
-    pub(crate) async fn list_domains(
-        &self,
-        Parameters(_params): Parameters<ListDomainsParams>,
-    ) -> Result<String, String> {
-        handle_list_domains(self).await
-    }
-
-    #[tool(description = "Delete a domain configuration by name.")]
-    pub(crate) async fn delete_domain(
-        &self,
-        Parameters(params): Parameters<DeleteDomainParams>,
-    ) -> Result<String, String> {
-        handle_delete_domain(self, params).await
-    }
-
-    // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
-
-    #[tool(description = "Initialize the vault with a master password. Can only be called once.")]
-    pub(crate) async fn vault_init(
-        &self,
-        Parameters(params): Parameters<VaultInitParams>,
-    ) -> Result<String, String> {
-        handle_vault_init(self, params).await
-    }
-
-    #[tool(description = "Unlock the vault by verifying the master password.")]
-    pub(crate) async fn vault_unlock(
-        &self,
-        Parameters(params): Parameters<VaultUnlockParams>,
-    ) -> Result<String, String> {
-        handle_vault_unlock(self, params).await
-    }
-
-    #[tool(description = "Lock the vault (clear encryption key from memory).")]
-    pub(crate) async fn vault_lock(&self) -> Result<String, String> {
-        handle_vault_lock(self).await
-    }
-
-    #[tool(
-        description = "Store or update an encrypted secret in the vault. Supports multi-key rotation when name ends with _N."
-    )]
-    pub(crate) async fn vault_set(
-        &self,
-        Parameters(params): Parameters<VaultSetParams>,
-    ) -> Result<String, String> {
-        handle_vault_set(self, params).await
-    }
-
-    #[tool(
-        description = "Retrieve and decrypt a secret from the vault. Supports auto-rotation for multi-key secrets."
-    )]
-    pub(crate) async fn vault_get(
-        &self,
-        Parameters(params): Parameters<VaultGetParams>,
-    ) -> Result<String, String> {
-        handle_vault_get(self, params).await
-    }
-
-    #[tool(
-        description = "List all stored secrets (names and metadata only, not values). Does not require vault to be unlocked."
-    )]
-    pub(crate) async fn vault_list(
-        &self,
-        Parameters(params): Parameters<VaultListParams>,
-    ) -> Result<String, String> {
-        handle_vault_list(self, params).await
-    }
-
-    #[tool(description = "Delete a secret from the vault.")]
-    pub(crate) async fn vault_remove(
-        &self,
-        Parameters(params): Parameters<VaultRemoveParams>,
-    ) -> Result<String, String> {
-        handle_vault_remove(self, params).await
-    }
-
-    #[tool(description = "Check vault status (initialized, locked/unlocked, entry count).")]
-    pub(crate) async fn vault_status(&self) -> Result<String, String> {
-        handle_vault_status(self).await
-    }
-
-    #[tool(
-        description = "Setup key rotation for a prefix. Requires keys like PREFIX_1, PREFIX_2, etc. to already exist."
-    )]
-    pub(crate) async fn vault_setup_rotation(
-        &self,
-        Parameters(params): Parameters<VaultSetupRotationParams>,
-    ) -> Result<String, String> {
-        handle_vault_setup_rotation(self, params).await
-    }
-
-    #[tool(
-        description = "Store multiple provider API keys as one logical Vault pool. Values are encrypted as PREFIX_1, PREFIX_2, ... and rotation is configured under PREFIX."
-    )]
-    pub(crate) async fn vault_set_api_key_pool(
-        &self,
-        Parameters(params): Parameters<VaultSetApiKeyPoolParams>,
-    ) -> Result<String, String> {
-        handle_vault_set_api_key_pool(self, params).await
-    }
-
-    #[tool(
-        description = "Lease one usable provider API key from Vault and return an env injection map. Skips disabled/auth-failed/exhausted/rate-limited keys."
-    )]
-    pub(crate) async fn vault_lease_api_key(
-        &self,
-        Parameters(params): Parameters<VaultLeaseApiKeyParams>,
-    ) -> Result<String, String> {
-        handle_vault_lease_api_key(self, params).await
-    }
-
-    #[tool(
-        description = "Record a provider API key result into Vault health. HTTP 429 enters cooldown, 401/403 marks auth_failed, success clears errors, and future leases skip unhealthy keys."
-    )]
-    pub(crate) async fn vault_record_key_result(
-        &self,
-        Parameters(params): Parameters<VaultRecordKeyResultParams>,
-    ) -> Result<String, String> {
-        handle_vault_record_key_result(self, params).await
     }
 
     // ─── Facade tools (consolidated surface for Antigravity minimal profile) ──────

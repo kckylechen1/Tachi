@@ -182,7 +182,11 @@ impl MemoryServer {
                 mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router()
+                + Self::pack_tool_router()
+                + Self::domain_tool_router()
+                + Self::vault_tool_router()
+                + Self::sandbox_tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
