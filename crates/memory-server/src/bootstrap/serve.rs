@@ -455,6 +455,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
                 );
                 stdio::serve_stdio_proxy(
                     info,
+                    app_home.clone(),
                     global_db_path.clone(),
                     project_db_path.clone(),
                     client_project_name,
