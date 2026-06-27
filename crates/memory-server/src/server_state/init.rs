@@ -183,6 +183,7 @@ impl MemoryServer {
             }),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router()
+                + Self::memory_tool_router()
                 + Self::pack_tool_router()
                 + Self::domain_tool_router()
                 + Self::vault_tool_router()
