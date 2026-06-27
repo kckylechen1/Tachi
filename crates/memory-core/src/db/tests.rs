@@ -23,7 +23,9 @@ mod events;
 mod gc;
 mod graph;
 mod read_ops;
+mod sandbox_ops;
 mod search_ops;
+mod stats_ops;
 mod tier;
 mod write_ops;
 
@@ -66,85 +68,4 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
         query_diversity: 0,
         tier: "raw".to_string(),
     }
-}
-
-#[test]
-fn stats_aggregation() {
-    let mut conn = make_conn();
-
-    let mut e1 = make_entry("s1", "fact entry");
-    e1.scope = "general".into();
-    e1.category = "fact".into();
-    e1.path = "/project/alpha".into();
-    upsert(&mut conn, &e1, false).unwrap();
-
-    let mut e2 = make_entry("s2", "decision entry");
-    e2.scope = "project".into();
-    e2.category = "decision".into();
-    e2.path = "/project/beta".into();
-    upsert(&mut conn, &e2, false).unwrap();
-
-    let mut e3 = make_entry("s3", "user preference");
-    e3.scope = "user".into();
-    e3.category = "preference".into();
-    e3.path = "/user/settings".into();
-    upsert(&mut conn, &e3, false).unwrap();
-
-    let s = stats(&conn, false).unwrap();
-    assert_eq!(s.total, 3);
-    assert_eq!(s.by_scope.get("general"), Some(&1_u64));
-    assert_eq!(s.by_scope.get("project"), Some(&1_u64));
-    assert_eq!(s.by_scope.get("user"), Some(&1_u64));
-    assert_eq!(s.by_category.get("fact"), Some(&1_u64));
-    assert_eq!(s.by_category.get("decision"), Some(&1_u64));
-    assert_eq!(s.by_root_path.get("/project"), Some(&2_u64));
-    assert_eq!(s.by_root_path.get("/user"), Some(&1_u64));
-}
-
-#[test]
-fn sandbox_policy_crud_roundtrip() {
-    let conn = make_conn();
-
-    set_sandbox_policy(
-        &conn,
-        "mcp:alpha",
-        "process",
-        r#"["PATH"]"#,
-        r#"["/safe/read"]"#,
-        r#"["/safe/write"]"#,
-        r#"["/work"]"#,
-        10_000,
-        30_000,
-        2,
-        true,
-    )
-    .unwrap();
-
-    set_sandbox_policy(
-        &conn,
-        "mcp:beta",
-        "container",
-        r#"["HOME"]"#,
-        r#"["/ro"]"#,
-        r#"["/rw"]"#,
-        r#"["/sandbox"]"#,
-        20_000,
-        40_000,
-        1,
-        false,
-    )
-    .unwrap();
-
-    let alpha = get_sandbox_policy(&conn, "mcp:alpha").unwrap().unwrap();
-    assert_eq!(alpha["capability_id"], "mcp:alpha");
-    assert_eq!(alpha["runtime_type"], "process");
-    assert_eq!(alpha["enabled"], true);
-    assert_eq!(alpha["env_allowlist"], json!(["PATH"]));
-
-    let enabled = list_sandbox_policies(&conn, true, 10).unwrap();
-    assert_eq!(enabled.len(), 1);
-    assert_eq!(enabled[0]["capability_id"], "mcp:alpha");
-
-    let limited = list_sandbox_policies(&conn, false, 1).unwrap();
-    assert_eq!(limited.len(), 1);
 }
