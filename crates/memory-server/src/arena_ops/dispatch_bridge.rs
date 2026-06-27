@@ -12,6 +12,16 @@ fn default_opencode_model(role: Option<&str>) -> &'static str {
     }
 }
 
+fn opencode_binary() -> String {
+    #[cfg(test)]
+    {
+        if let Ok(path) = std::env::var("TACHI_TEST_OPENCODE_BIN") {
+            return path;
+        }
+    }
+    "opencode".to_string()
+}
+
 pub(super) fn dispatch_params_for_mission(
     params: &TachiArenaParams,
     lane: &HarnessLane,
@@ -29,7 +39,7 @@ pub(super) fn dispatch_params_for_mission(
             .as_deref()
             .unwrap_or_else(|| default_opencode_model(params.role.as_deref()));
         command = vec![
-            "opencode".to_string(),
+            opencode_binary(),
             "--pure".to_string(),
             "run".to_string(),
             "--model".to_string(),
