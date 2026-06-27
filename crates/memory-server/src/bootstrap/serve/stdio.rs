@@ -221,31 +221,33 @@ impl StdioProxyServer {
             .clone()
     }
 
-    /// Re-resolve the daemon after a BeforeDispatch (transport) failure. Because
-    /// the request never reached the daemon, it may have restarted on a new
-    /// ephemeral port or died. Re-read the scoped discovery file (which TCP-probes
-    /// the port), and if no live daemon matches this global DB, auto-spawn one
-    /// (the daemon_lock keeps concurrent spawns from racing into duplicates).
-    /// Persist the fresh endpoint so later calls skip the dead URL. Returns None
-    /// when nothing new is reachable, so the caller surfaces the original error.
+    /// Re-resolve the daemon after a BeforeDispatch (transport) failure. The
+    /// request never reached the daemon, so it may have restarted on a new
+    /// ephemeral port or died. Reuse the EXACT startup path
+    /// (`ensure_stdio_proxy_daemon`: version-compatible discovery +
+    /// stale-replace + auto-spawn) so a self-healed daemon is never one startup
+    /// would have rejected, then apply startup's project-context gate so a
+    /// project-scoped request is never rerouted to a daemon that can't preserve
+    /// this project. Persist the fresh endpoint so later calls skip the dead URL.
+    /// Returns None when nothing compatible is reachable, so the caller surfaces
+    /// the original error.
     async fn refresh_daemon(&self, stale_url: &str) -> Option<crate::cli_client::DaemonInfo> {
-        let mut info =
-            crate::cli_client::detect_daemon_for_global_db(&self.app_home, &self.global_db_path)
-                .await;
-        if info.is_none() && !auto_daemon_disabled() {
-            spawn_stdio_daemon(
-                &self.app_home,
-                &self.global_db_path,
-                self.project_db_path.as_deref(),
-            )
-            .await;
-            info = crate::cli_client::detect_daemon_for_global_db(
-                &self.app_home,
-                &self.global_db_path,
-            )
-            .await;
+        let fresh = ensure_stdio_proxy_daemon(
+            &self.app_home,
+            &self.global_db_path,
+            self.project_db_path.as_deref(),
+        )
+        .await?;
+        if !proxy_can_preserve_project_context(
+            &fresh,
+            &self.global_db_path,
+            self.project_db_path.as_deref(),
+            self.client_project.as_deref(),
+        ) {
+            // A same-global daemon that can't preserve this project would
+            // misroute writes; refuse it and surface the original error.
+            return None;
         }
-        let fresh = info?;
         if fresh.url == stale_url {
             // Same endpoint resolved again; retrying it would fail identically.
             return None;
