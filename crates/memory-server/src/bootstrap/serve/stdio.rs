@@ -41,12 +41,14 @@ pub(super) fn proxy_can_preserve_project_context(
 
 pub(super) async fn serve_stdio_proxy(
     info: crate::cli_client::DaemonInfo,
+    app_home: PathBuf,
     global_db_path: PathBuf,
     project_db_path: Option<PathBuf>,
     client_project: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let proxy = StdioProxyServer {
-        daemon: info,
+        daemon: std::sync::Arc::new(std::sync::RwLock::new(info)),
+        app_home,
         global_db_path,
         project_db_path,
         client_project,
@@ -200,14 +202,68 @@ async fn wait_for_daemon_ready(app_home: &Path, global_db_path: &Path) {
 
 #[derive(Clone)]
 struct StdioProxyServer {
-    daemon: crate::cli_client::DaemonInfo,
+    // Shared + refreshable so a daemon restart (new ephemeral port) or death is
+    // self-healed at call time instead of stranding the adapter on a dead URL.
+    daemon: std::sync::Arc<std::sync::RwLock<crate::cli_client::DaemonInfo>>,
+    app_home: PathBuf,
     global_db_path: PathBuf,
     project_db_path: Option<PathBuf>,
     client_project: Option<String>,
 }
 
 impl StdioProxyServer {
+    /// Snapshot the currently-targeted daemon. Cheap clone out of the lock so the
+    /// guard is never held across an await.
+    fn current_daemon(&self) -> crate::cli_client::DaemonInfo {
+        self.daemon
+            .read()
+            .expect("stdio proxy daemon lock poisoned")
+            .clone()
+    }
+
+    /// Re-resolve the daemon after a BeforeDispatch (transport) failure. The
+    /// request never reached the daemon, so it may have restarted on a new
+    /// ephemeral port or died. Reuse the EXACT startup path
+    /// (`ensure_stdio_proxy_daemon`: version-compatible discovery +
+    /// stale-replace + auto-spawn) so a self-healed daemon is never one startup
+    /// would have rejected, then apply startup's project-context gate so a
+    /// project-scoped request is never rerouted to a daemon that can't preserve
+    /// this project. Persist the fresh endpoint so later calls skip the dead URL.
+    /// Returns None when nothing compatible is reachable, so the caller surfaces
+    /// the original error.
+    async fn refresh_daemon(&self, stale_url: &str) -> Option<crate::cli_client::DaemonInfo> {
+        let fresh = ensure_stdio_proxy_daemon(
+            &self.app_home,
+            &self.global_db_path,
+            self.project_db_path.as_deref(),
+        )
+        .await?;
+        if !proxy_can_preserve_project_context(
+            &fresh,
+            &self.global_db_path,
+            self.project_db_path.as_deref(),
+            self.client_project.as_deref(),
+        ) {
+            // A same-global daemon that can't preserve this project would
+            // misroute writes; refuse it and surface the original error.
+            return None;
+        }
+        if fresh.url == stale_url {
+            // Same endpoint resolved again; retrying it would fail identically.
+            return None;
+        }
+        if let Ok(mut guard) = self.daemon.write() {
+            *guard = fresh.clone();
+        }
+        eprintln!(
+            "[stdio-proxy] self-healed daemon endpoint: {stale_url} -> {}",
+            fresh.url
+        );
+        Some(fresh)
+    }
+
     fn runtime_info_result(&self) -> rmcp::model::CallToolResult {
+        let daemon = self.current_daemon();
         let body = serde_json::json!({
             "mode": "stdio_proxy",
             "process_role": "stdio_proxy",
@@ -217,13 +273,13 @@ impl StdioProxyServer {
             "transport": {
                 "inbound": "stdio",
                 "outbound": "streamable_http",
-                "target": self.daemon.url,
+                "target": daemon.url,
             },
             "daemon": {
-                "pid": self.daemon.pid,
-                "version": self.daemon.version,
-                "global_db": self.daemon.global_db,
-                "project_db": self.daemon.project_db,
+                "pid": daemon.pid,
+                "version": daemon.version,
+                "global_db": daemon.global_db,
+                "project_db": daemon.project_db,
             },
             "client": {
                 "global_db": self.global_db_path.display().to_string(),
@@ -254,9 +310,21 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            crate::cli_client::list_daemon_tools(&self.daemon, request)
-                .await
-                .map_err(daemon_error_data)
+            let current = self.current_daemon();
+            match crate::cli_client::list_daemon_tools(&current, request.clone()).await {
+                Ok(result) => Ok(result),
+                // BeforeDispatch = the request never reached the daemon; safe to
+                // re-resolve and retry (list_tools is read-only regardless).
+                Err(err) if err.allows_in_process_fallback() => {
+                    match self.refresh_daemon(&current.url).await {
+                        Some(fresh) => crate::cli_client::list_daemon_tools(&fresh, request)
+                            .await
+                            .map_err(daemon_error_data),
+                        None => Err(daemon_error_data(err)),
+                    }
+                }
+                Err(err) => Err(daemon_error_data(err)),
+            }
         }
     }
 
@@ -271,9 +339,23 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 return Ok(self.runtime_info_result());
             }
             let request = prepare_proxy_tool_call(request, self.client_project.as_deref());
-            crate::cli_client::call_daemon_tool_raw(&self.daemon, request)
-                .await
-                .map_err(daemon_error_data)
+            let current = self.current_daemon();
+            match crate::cli_client::call_daemon_tool_raw(&current, request.clone()).await {
+                Ok(result) => Ok(result),
+                // Only BeforeDispatch is safe to retry: the request never reached
+                // the daemon, so a re-resolved retry cannot duplicate a write.
+                // AfterDispatch (timeout / post-handshake failure) must surface
+                // as-is to avoid replaying a possibly-applied write.
+                Err(err) if err.allows_in_process_fallback() => {
+                    match self.refresh_daemon(&current.url).await {
+                        Some(fresh) => crate::cli_client::call_daemon_tool_raw(&fresh, request)
+                            .await
+                            .map_err(daemon_error_data),
+                        None => Err(daemon_error_data(err)),
+                    }
+                }
+                Err(err) => Err(daemon_error_data(err)),
+            }
         }
     }
 }
