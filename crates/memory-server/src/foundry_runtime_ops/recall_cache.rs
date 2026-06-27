@@ -39,4 +39,5 @@ mod queries;
 mod search;
 mod text;
 
+pub(super) use config::durable_recall_cache_enabled;
 pub(super) use process::process_recall_rerank_cache_job;
