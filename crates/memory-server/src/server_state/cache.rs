@@ -20,7 +20,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "tachi_task_brief",
     "tachi_wiki_search",
     "search_memory",
-    "cyberbrain_search",
     "find_similar_memory",
     "get_memory",
     "memory_graph",
@@ -42,14 +41,12 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     // Facade tools (read-only)
     "tachi_search",
     "tachi_web_search",
-    "tachi_plan",
     "tachi_browse",
 ];
 
 /// Tools that invalidate the cache (write operations)
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "save_memory",
-    "cyberbrain_write",
     "remember",
     "extract_facts",
     "ingest",
@@ -59,7 +56,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_register",
     "hub_quick_add",
     "hub_review",
-    "section9_review",
     "hub_set_active_version",
     "hub_export_skills",
     "skill_evolve",
@@ -77,7 +73,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_feedback",
     "sandbox_set_rule",
     "sandbox_set_policy",
-    "shell_set_policy",
     "tachi_init_project_db",
     "handoff_leave",
     "handoff_check",
