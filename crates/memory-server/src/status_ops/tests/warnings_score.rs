@@ -47,6 +47,7 @@ fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
         provider_probe_cache: None,
         project_warnings: Vec::new(),
         plan_c_split_brain: Vec::new(),
+        health_deductions: Vec::new(),
         health_score: 95,
     }
 }
@@ -224,4 +225,46 @@ fn health_score_drops_for_background_enrichment_failures_and_orphans() {
         score < 100,
         "background failures/orphans must prevent perfect health score"
     );
+}
+
+#[test]
+fn health_deductions_explain_daemon_and_enrichment_score_loss() {
+    let mut quant = db_status("quant", 0, 0, 1.0);
+    quant.enrichment_failed_recent = 1;
+    quant.enrichment_failures = vec![EnrichmentFailureSummary {
+        stage: "embedding".to_string(),
+        last_error: "Missing API key".to_string(),
+        count: 1,
+    }];
+    let marker = DistillMarkerStatus {
+        path: "/tmp/marker".to_string(),
+        last_run_at: "2026-06-09T00:00:00Z".to_string(),
+        age_seconds: 0,
+        age: "0s ago".to_string(),
+        is_stale: false,
+        groups_distilled: Some(4),
+        groups_skipped: Some(0),
+        fallback_used: Some(0),
+        errors: Some(0),
+    };
+
+    let deductions = status_health::calculate_health_deductions(
+        &DaemonStatus::None,
+        &[quant],
+        Some(&marker),
+        &[],
+        Some(&[]),
+        Some(&[]),
+    );
+    let score = status_health::health_score_from_deductions(&deductions);
+
+    assert_eq!(score, 75);
+    assert!(deductions
+        .iter()
+        .any(|deduction| { deduction.code == "daemon_not_running" && deduction.points == 20 }));
+    assert!(deductions.iter().any(|deduction| {
+        deduction.code == "enrichment_failures"
+            && deduction.points == 5
+            && deduction.detail.contains("quant")
+    }));
 }

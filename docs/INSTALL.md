@@ -376,8 +376,6 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 `save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
 
-*(Aliases: `cyberbrain_write`, `cyberbrain_search`)*
-
 ### Knowledge Graph & Domains
 
 `add_edge`, `get_edges`, `memory_graph`
@@ -399,8 +397,6 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 ### Capability Hub
 
 `hub_register`, `hub_discover`, `hub_get`, `hub_call`, `hub_feedback`, `hub_stats`, `hub_set_enabled`, `hub_disconnect`, `hub_review`, `hub_set_active_version`, `hub_export_skills`
-
-*(Aliases: `section9_review`)*
 
 ### Skill Packs
 
@@ -482,15 +478,13 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, `sandbox_exec_audit`
 
-*(Aliases: `shell_set_policy`, `shell_get_policy`, `shell_list_policies`, `shell_exec_audit`)*
-
 ### Recommendations
 
 `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`
 
 ### Facade & Delegation
 
-`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_plan`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
 
 *(Aliases for real tools: `tachi_task_brief`, `tachi_progress_check`)*
 
@@ -500,7 +494,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Utilities
 
-`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `section9_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`, `tachi_doctor_scan`
+`skill_evolve`, `run_skill`, `chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`, `tachi_doctor_scan`
 
 ---
 

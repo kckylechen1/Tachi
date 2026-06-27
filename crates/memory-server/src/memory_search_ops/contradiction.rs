@@ -215,10 +215,14 @@ pub(crate) fn persist_confirmed_contradiction(
         .add_edge(&supersedes_edge)
         .map_err(|e| format!("add supersedes edge: {e}"))?;
 
+    // Close valid_until at supersession time (same invariant as
+    // db::supersede_memory) so as_of point-in-time recall stops returning the
+    // contradicted fact once it has been superseded. COALESCE keeps any
+    // explicit window intact.
     store
         .connection()
         .execute(
-            "UPDATE memories SET superseded_by = ?1, updated_at = ?2 WHERE id = ?3 AND superseded_by IS NULL",
+            "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
             rusqlite::params![&entry.id, &now, &candidate.entry.id],
         )
         .map_err(|e| format!("mark contradicted memory superseded: {e}"))?;
@@ -417,5 +421,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(superseded_by.as_deref(), Some("new"));
+
+        // Supersession via contradiction must also close the validity window,
+        // otherwise as_of point-in-time recall would keep returning the
+        // contradicted fact forever (the bug codex review caught: this path
+        // bypasses db::supersede_memory).
+        let valid_until: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT valid_until FROM memories WHERE id = 'old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            valid_until.is_some(),
+            "contradiction supersession must close valid_until"
+        );
     }
 }

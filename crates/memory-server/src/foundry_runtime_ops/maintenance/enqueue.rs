@@ -2,6 +2,7 @@ use crate::server_state::{DbScope, MemoryServer};
 use chrono::Utc;
 use serde_json::json;
 
+use super::super::recall_cache::durable_recall_cache_enabled;
 use super::super::{
     FoundryMaintenanceItem, FOUNDRY_DISTILL_KEEP, FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
     FOUNDRY_RECALL_RERANK_TOP_K, FOUNDRY_RELATED_LIMIT,
@@ -139,21 +140,22 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
     merged_count: usize,
     duplicate_count: usize,
 ) -> Vec<memory_core::FoundryJobSpec> {
-    vec![
-        build_foundry_maintenance_job(
-            server,
-            memory_core::FoundryJobKind::MemoryNeighborhood,
-            agent_id,
-            path_prefix,
-            memory_ids,
-            json!({
-                "kind": "memory_neighborhood",
-                "neighbor_limit": FOUNDRY_RELATED_LIMIT,
-                "merged_count": merged_count,
-                "duplicate_count": duplicate_count,
-            }),
-        ),
-        build_foundry_maintenance_job(
+    let mut specs = vec![build_foundry_maintenance_job(
+        server,
+        memory_core::FoundryJobKind::MemoryNeighborhood,
+        agent_id,
+        path_prefix,
+        memory_ids,
+        json!({
+            "kind": "memory_neighborhood",
+            "neighbor_limit": FOUNDRY_RELATED_LIMIT,
+            "merged_count": merged_count,
+            "duplicate_count": duplicate_count,
+        }),
+    )];
+
+    if durable_recall_cache_enabled() {
+        specs.push(build_foundry_maintenance_job(
             server,
             memory_core::FoundryJobKind::RecallRerankCache,
             agent_id,
@@ -164,24 +166,27 @@ pub(in crate::foundry_runtime_ops) fn capture_maintenance_specs(
                 "top_k": FOUNDRY_RECALL_RERANK_TOP_K,
                 "candidate_multiplier": FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
             }),
-        ),
-        // NOTE: Phase 1 — MemoryDistill is no longer enqueued from capture.
-        // The daily batch distill (`run_daily_batch_distill`, invoked from
-        // the bootstrap scheduler) replaces the per-capture distill job.
-        // We still enqueue ForgetSweep so per-capture sweeps continue to
-        // garbage-collect stale distill memories.
-        build_foundry_maintenance_job(
-            server,
-            memory_core::FoundryJobKind::ForgetSweep,
-            agent_id,
-            path_prefix,
-            memory_ids,
-            json!({
-                "kind": "forget_sweep",
-                "keep_latest": FOUNDRY_DISTILL_KEEP,
-            }),
-        ),
-    ]
+        ));
+    }
+
+    // NOTE: Phase 1 — MemoryDistill is no longer enqueued from capture.
+    // The daily batch distill (`run_daily_batch_distill`, invoked from
+    // the bootstrap scheduler) replaces the per-capture distill job.
+    // We still enqueue ForgetSweep so per-capture sweeps continue to
+    // garbage-collect stale distill memories.
+    specs.push(build_foundry_maintenance_job(
+        server,
+        memory_core::FoundryJobKind::ForgetSweep,
+        agent_id,
+        path_prefix,
+        memory_ids,
+        json!({
+            "kind": "forget_sweep",
+            "keep_latest": FOUNDRY_DISTILL_KEEP,
+        }),
+    ));
+
+    specs
 }
 
 pub(crate) fn enqueue_foundry_capture_maintenance(

@@ -136,7 +136,9 @@ async fn render_one(
             );
         }
         crate::status_ops::DaemonStatus::None => {
-            println!("  [OK] no daemon running (single-process mode)");
+            println!(
+                "  [!] no daemon running (single-process/stdio mode; background tasks paused)"
+            );
         }
     }
     println!();
@@ -468,6 +470,17 @@ async fn render_one(
         println!("Plan C Warnings");
         for issue in &snapshot.plan_c_split_brain {
             println!("  [!] {}", issue.warning_message());
+        }
+        println!();
+    }
+
+    if !snapshot.health_deductions.is_empty() {
+        println!("Health Deductions");
+        for deduction in &snapshot.health_deductions {
+            println!(
+                "  -{} {:<28} {}",
+                deduction.points, deduction.label, deduction.detail
+            );
         }
         println!();
     }

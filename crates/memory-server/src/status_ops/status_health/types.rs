@@ -1,6 +1,14 @@
 use crate::status_ops::ApiKeyRotationMemberStatus;
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub(crate) struct HealthDeduction {
+    pub(crate) code: String,
+    pub(crate) label: String,
+    pub(crate) points: u8,
+    pub(crate) detail: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct ProviderProbeResult {
     pub(crate) name: String,
     pub(crate) status: String,

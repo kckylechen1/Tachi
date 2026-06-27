@@ -100,7 +100,7 @@ Latency-sensitive calls used during active agent turns:
 Worker-driven jobs that should not block tool use:
 
 - `memory_neighborhood` (split out of the legacy `memory_rerank` job; on the Maintenance lane, writes `metadata.related_entries` back onto the source memory)
-- `recall_rerank_cache` (split out of the legacy `memory_rerank` job; on the Rerank lane, writes ephemeral `recall-cache/*` entries with `source=foundry_recall_rerank_cache` and `retention_policy=ephemeral`)
+- `recall_rerank_cache` (split out of the legacy `memory_rerank` job; on the Rerank lane, writes ephemeral `recall-cache/*` entries with `source=foundry_recall_rerank_cache` and `retention_policy=ephemeral` only when durable recall-cache writes are explicitly enabled via `TACHI_ENABLE_DURABLE_RECALL_CACHE=1`)
 - `memory_distill`
 - `forget_or_archive`
 - `skill_evolution`
@@ -245,7 +245,7 @@ Already done:
 - `recall_context` can auto-scope by `agent_id`, and OpenClaw now passes it through
 - OpenClaw `before_agent_start` uses `recall_context` first, with local FTS fallback only for resilience
 - user-initiated OpenClaw memory search now also degrades only to local FTS fallback instead of local embedding + rerank
-- `capture_session` now queues Foundry maintenance jobs for `memory_neighborhood`, `recall_rerank_cache`, `memory_distill`, and `forget_sweep` (the legacy `memory_rerank` kind was split — see the §Offline path entry above)
+- `capture_session` now queues Foundry maintenance jobs for `memory_neighborhood` and `forget_sweep`; `memory_distill` runs through the daily batch scheduler, and durable `recall_rerank_cache` jobs are opt-in via `TACHI_ENABLE_DURABLE_RECALL_CACHE=1` (the legacy `memory_rerank` kind was split — see the §Offline path entry above)
 - capture entries that wait for background enrichment now re-enter Foundry maintenance after vectors land
 - Foundry maintenance now tracks worker counters through `get_pipeline_status`
 - `recall_context` now enforces agent-scoped path policy server-side

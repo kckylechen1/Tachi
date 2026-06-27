@@ -1,5 +1,103 @@
 use super::*;
 
+#[tool_router(router = wiki_tool_router, vis = "pub(crate)")]
+impl MemoryServer {
+    #[tool(
+        description = "Run health checks over wiki memories and skill graph state. Returns orphan nodes, contradiction candidates, stale nodes, missing edge hints, and current skill quality guard status."
+    )]
+    pub(crate) async fn wiki_lint(
+        &self,
+        Parameters(params): Parameters<WikiLintParams>,
+    ) -> Result<String, String> {
+        handle_wiki_lint(self, params).await
+    }
+
+    #[tool(
+        description = "Write a durable wiki entry under /wiki with sane defaults for path, retention, metadata, and auto-linking."
+    )]
+    pub(crate) async fn tachi_wiki_write(
+        &self,
+        Parameters(params): Parameters<WikiWriteParams>,
+    ) -> Result<String, String> {
+        if let Some(body) =
+            crate::cli_client::maybe_forward_server_write(self, "tachi_wiki_write", &params).await?
+        {
+            return Ok(body);
+        }
+        handle_tachi_wiki_write(self, params).await
+    }
+
+    #[tool(
+        description = "Search wiki entries under /wiki. Use this before debugging from scratch or when a prior lesson may exist."
+    )]
+    pub(crate) async fn tachi_wiki_search(
+        &self,
+        Parameters(params): Parameters<WikiSearchParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_search(self, params).await
+    }
+
+    #[tool(
+        description = "Ingest a URL or local file into the wiki project DB, extract metadata when possible, and link related wiki entries by shared entities."
+    )]
+    pub(crate) async fn tachi_wiki_ingest(
+        &self,
+        Parameters(params): Parameters<TachiWikiIngestParams>,
+    ) -> Result<String, String> {
+        handle_wiki_ingest(self, params).await
+    }
+
+    #[tool(
+        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree. Pass dry_run=true to preview planned moves/frontmatter/task-sync changes without modifying any files."
+    )]
+    pub(crate) async fn tachi_wiki_organize(
+        &self,
+        Parameters(params): Parameters<TachiWikiOrganizeParams>,
+    ) -> Result<String, String> {
+        crate::docs_ops::handle_wiki_organize(self, &params.dir_path, params.dry_run).await
+    }
+
+    #[tool(
+        description = "Search the wiki knowledge base for relevant entries. The wiki contains distilled knowledge from past development sessions organized by category (quant, engineering, agent, product). Supports short category aliases like 'quant', 'strategy', 'tachi', 'debugging', etc."
+    )]
+    pub(crate) async fn wiki_search(
+        &self,
+        Parameters(params): Parameters<WikiSearchParams>,
+    ) -> Result<String, String> {
+        handle_wiki_search(self, params).await
+    }
+
+    #[tool(
+        description = "Browse wiki entries by category. Without a category, returns category stats (counts per path). With a category, lists entries under that path. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
+    )]
+    pub(crate) async fn wiki_browse(
+        &self,
+        Parameters(params): Parameters<WikiBrowseParams>,
+    ) -> Result<String, String> {
+        handle_wiki_browse(self, params)
+    }
+
+    #[tool(
+        description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc. (Alias: wiki_browse)"
+    )]
+    pub(crate) async fn tachi_browse(
+        &self,
+        Parameters(params): Parameters<WikiBrowseParams>,
+    ) -> Result<String, String> {
+        handle_wiki_browse(self, params)
+    }
+
+    #[tool(
+        description = "Stable, reusable knowledge base. action='search': look up lessons, patterns, and how-tos BEFORE debugging from scratch or reaching for web search — a prior lesson may already exist. action='browse': explore available categories. action='read': load a specific entry by path. action='write': persist a reusable lesson, architecture decision, pattern, or how-to. WHEN: wiki for durable knowledge that helps future sessions (patterns, lessons, decisions, conventions). Use tachi_memory for session-specific facts (decisions, findings, commands for the current task). Pass project to target a named library."
+    )]
+    pub(crate) async fn tachi_wiki(
+        &self,
+        Parameters(params): Parameters<TachiWikiParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_facade(self, params).await
+    }
+}
+
 pub(super) async fn handle_tachi_wiki_facade(
     server: &MemoryServer,
     params: TachiWikiParams,

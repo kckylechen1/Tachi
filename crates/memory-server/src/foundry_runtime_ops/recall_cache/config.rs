@@ -1,4 +1,4 @@
-pub(in crate::foundry_runtime_ops::recall_cache) fn durable_recall_cache_enabled() -> bool {
+pub(in crate::foundry_runtime_ops) fn durable_recall_cache_enabled() -> bool {
     std::env::var("TACHI_ENABLE_DURABLE_RECALL_CACHE")
         .ok()
         .map(|value| {

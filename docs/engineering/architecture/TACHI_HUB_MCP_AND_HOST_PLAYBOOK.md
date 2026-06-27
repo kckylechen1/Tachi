@@ -119,7 +119,7 @@ Agent / IDE / CLI
 ## 7. Bash / Shell 与「装进 Tachi」
 
 - **Shell / bash / zsh**：Shell 是总称；**bash** 偏脚本与通用；**zsh** 在 macOS 上常为默认交互 shell，补全与插件生态好；脚本可移植性常选 **bash** 或 **POSIX sh**。
-- **Tachi 现状**：`shell_exec_audit` 等用于 **审计查询**，**不是**通用「执行任意 bash」；通用执行可通过 **注册外部 MCP** + Hub **sandbox policy**，或在 Rust 侧未来增加 **受控 `sandbox_exec`**（需单独安全设计）。
+- **Tachi 现状**：`sandbox_exec_audit` 等用于 **审计查询**，**不是**通用「执行任意 bash」；通用执行可通过 **注册外部 MCP** + Hub **sandbox policy**，或在 Rust 侧未来增加 **受控 `sandbox_exec`**（需单独安全设计）。
 
 ---
 

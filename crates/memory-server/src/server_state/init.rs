@@ -50,6 +50,11 @@ impl MemoryServer {
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        ensure_db_parent(&global_db_path)?;
+        if let Some(project_db_path) = project_db_path.as_ref() {
+            ensure_db_parent(project_db_path)?;
+        }
+
         // Open stores once at startup (init_schema runs here, not per-request)
         let global_db_str = global_db_path.to_str().ok_or_else(|| {
             std::io::Error::new(
@@ -182,7 +187,23 @@ impl MemoryServer {
                 mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
-            tool_router: Self::tool_router(),
+            tool_router: Self::continuity_tool_router()
+                + Self::agent_profile_tool_router()
+                + Self::copilot_tool_router()
+                + Self::dispatch_tool_router()
+                + Self::handoff_tool_router()
+                + Self::graph_state_tool_router()
+                + Self::runtime_context_tool_router()
+                + Self::hub_tool_router()
+                + Self::pipeline_tool_router()
+                + Self::kanban_tool_router()
+                + Self::memory_tool_router()
+                + Self::pack_tool_router()
+                + Self::domain_tool_router()
+                + Self::vault_tool_router()
+                + Self::workflow_tool_router()
+                + Self::wiki_tool_router()
+                + Self::sandbox_tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
@@ -296,5 +317,32 @@ impl MemoryServer {
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 
         Ok(server)
+    }
+}
+
+fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryServer;
+
+    #[test]
+    fn memory_server_new_creates_global_and_project_db_parents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_db = temp.path().join("nested/global/memory.db");
+        let project_db = temp.path().join("nested/project/memory.db");
+
+        let server = MemoryServer::new(global_db.clone(), Some(project_db.clone()))
+            .expect("server should create missing db parent dirs");
+
+        assert!(global_db.parent().expect("global parent").is_dir());
+        assert!(project_db.parent().expect("project parent").is_dir());
+        assert_eq!(server.global_db_path_buf(), global_db);
+        assert_eq!(server.project_db_path_buf(), Some(project_db));
     }
 }

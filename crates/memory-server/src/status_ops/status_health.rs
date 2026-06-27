@@ -25,9 +25,12 @@ pub(crate) use probe_cache::{
 };
 pub(crate) use probes::{run_provider_probe_report, run_provider_probes};
 pub(crate) use readiness::{agent_readiness_json, format_backfill_command};
+#[cfg(test)]
 pub(crate) use scoring::calculate_health_score;
+pub(crate) use scoring::{calculate_health_deductions, health_score_from_deductions};
 pub(crate) use types::{
-    ProviderProbeCache, ProviderProbeReport, ProviderProbeResult, ProviderRotationGroupProbe,
+    HealthDeduction, ProviderProbeCache, ProviderProbeReport, ProviderProbeResult,
+    ProviderRotationGroupProbe,
 };
 pub(crate) use vault::load_keychain_vault_api_key_values;
 
