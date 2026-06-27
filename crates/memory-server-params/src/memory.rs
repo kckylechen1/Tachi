@@ -1209,11 +1209,33 @@ pub struct TachiWikiIngestParams {
 pub const MIN_FACT_CHAR_COUNT: usize = 30;
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
+///
+/// Lossy wrapper around [`fact_to_entry_with_reason`]: returns `None` when the
+/// capture gate rejects the fact. Callers that need to surface *why* a fact was
+/// dropped (e.g. `extract_facts`, so `facts_extracted` vs `facts_saved` gaps are
+/// explainable) should call [`fact_to_entry_with_reason`] instead.
 pub fn fact_to_entry(
     fact: &serde_json::Value,
     source: &str,
     metadata: serde_json::Value,
 ) -> Option<MemoryEntry> {
+    fact_to_entry_with_reason(fact, source, metadata).ok()
+}
+
+/// Stable capture-gate rejection reasons surfaced to callers. Kept as `&'static
+/// str` so they can be embedded directly in JSON responses.
+pub const FACT_DROP_EMPTY: &str = "empty_text";
+pub const FACT_DROP_TOO_SHORT: &str = "too_short";
+pub const FACT_DROP_NOISE: &str = "noise";
+
+/// Build a MemoryEntry from a JSON fact value, or return the capture-gate
+/// rejection reason. This is the single source of truth for the gate; keep
+/// `fact_to_entry`'s behavior identical by routing it through here.
+pub fn fact_to_entry_with_reason(
+    fact: &serde_json::Value,
+    source: &str,
+    metadata: serde_json::Value,
+) -> Result<MemoryEntry, &'static str> {
     fn string_list(value: &serde_json::Value) -> Vec<String> {
         value
             .as_array()
@@ -1230,7 +1252,7 @@ pub fn fact_to_entry(
 
     let text = fact["text"].as_str().unwrap_or("").to_string();
     if text.is_empty() {
-        return None;
+        return Err(FACT_DROP_EMPTY);
     }
     let force = metadata
         .get("force")
@@ -1245,14 +1267,14 @@ pub fn fact_to_entry(
                 MIN_FACT_CHAR_COUNT,
                 text
             );
-            return None;
+            return Err(FACT_DROP_TOO_SHORT);
         }
         if memory_core::is_noise_text(&text) {
             tracing::warn!(
                 "[capture_gate] Fact rejected: noise assessment failed. Text: {:?}",
                 text
             );
-            return None;
+            return Err(FACT_DROP_NOISE);
         }
     }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
@@ -1269,7 +1291,7 @@ pub fn fact_to_entry(
         _ => "general".to_string(),
     };
     let summary = text.chars().take(100).collect::<String>();
-    Some(MemoryEntry {
+    Ok(MemoryEntry {
         id: uuid::Uuid::new_v4().to_string(),
         path: format!("/{}/{}", scope, topic.replace(' ', "_")),
         summary,

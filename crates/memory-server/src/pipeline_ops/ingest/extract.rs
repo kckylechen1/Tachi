@@ -32,6 +32,7 @@ pub(crate) async fn handle_extract_facts(
 
     let count = facts.len();
     let mut saved_facts = Vec::new();
+    let mut dropped: Vec<serde_json::Value> = Vec::new();
     let saved = server
         .with_store_for_scope(target_db, |store| {
             let mut saved = 0;
@@ -47,9 +48,18 @@ pub(crate) async fn handle_extract_facts(
                         "extract_source": source.clone(),
                     }),
                 );
-                // Apply capture_gate filters (min-length and noise assessment) via fact_to_entry
-                let Some(mut entry) = fact_to_entry(fact, "extraction", metadata) else {
-                    continue;
+                // Apply capture_gate filters (min-length and noise assessment) and
+                // surface the rejection reason so facts_extracted vs facts_saved
+                // gaps are explainable instead of silently vanishing.
+                let mut entry = match fact_to_entry_with_reason(fact, "extraction", metadata) {
+                    Ok(entry) => entry,
+                    Err(reason) => {
+                        dropped.push(serde_json::json!({
+                            "reason": reason,
+                            "text": fact.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                        }));
+                        continue;
+                    }
                 };
                 if is_lazy_source(&entry.source) && entry.importance < 0.5 {
                     entry.retention_policy = Some("ephemeral".to_string());
@@ -75,6 +85,8 @@ pub(crate) async fn handle_extract_facts(
         "source": source,
         "facts_extracted": count,
         "facts_saved": saved,
+        "facts_dropped": dropped.len(),
         "facts": saved_facts,
+        "dropped": dropped,
     }))
 }
