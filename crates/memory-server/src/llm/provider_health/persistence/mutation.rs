@@ -144,6 +144,33 @@ impl super::super::super::LlmClient {
     }
 
     #[cfg(test)]
+    pub(crate) fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
+        let now = Self::now_utc();
+        let past = now - chrono::Duration::seconds(1);
+        let persisted = {
+            let mut state = self
+                .provider_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.cooldowns.remove(key_id);
+            let health = state.get_or_insert_health(logical_name, key_id);
+            health.status = HEALTH_RATE_LIMITED.to_string();
+            health.cooldown_until = Some(past.to_rfc3339());
+            health.auth_failed = false;
+            health.disabled = false;
+            health.updated_at = now.to_rfc3339();
+            let persisted = health.clone();
+            state.set_health_snapshot(
+                logical_name,
+                key_id,
+                ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), Some(past)),
+            );
+            persisted
+        };
+        self.persist_key_health_now(&persisted);
+    }
+
+    #[cfg(test)]
     pub(crate) fn mark_provider_key_auth_failed_for_tests(&self, logical_name: &str, key_id: &str) {
         let selected = SelectedProviderSecret {
             logical_name: logical_name.to_string(),

@@ -171,7 +171,7 @@ fn expired_cooldown_reinstates_pool_key() {
     );
     let key_id = format!("{KEY}_1");
     client.mark_provider_key_rate_limited_for_tests(&key_id, Some(1));
-    std::thread::sleep(Duration::from_millis(1100));
+    client.expire_provider_key_cooldown_for_tests(KEY, &key_id);
 
     assert_eq!(
         client.provider_key_id_for_tests(&[KEY]).as_deref(),

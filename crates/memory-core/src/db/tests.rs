@@ -1109,6 +1109,12 @@ fn record_access_bumps_count_and_last_access_only() {
     let mut conn = make_conn();
     let e = make_entry("touch-1", "first text");
     upsert(&mut conn, &e, false).unwrap();
+    let fixed_updated_at = "2000-01-01T00:00:00Z";
+    conn.execute(
+        "UPDATE memories SET updated_at = ?1 WHERE id = ?2",
+        params![fixed_updated_at, "touch-1"],
+    )
+    .unwrap();
 
     let (rev0, upd0, ac0): (i64, String, i64) = conn
         .query_row(
@@ -1121,9 +1127,8 @@ fn record_access_bumps_count_and_last_access_only() {
         ac0, 0,
         "freshly upserted memory must start with access_count=0"
     );
+    assert_eq!(upd0, fixed_updated_at);
 
-    // Sleep ≥1s so any (incorrect) `updated_at` bump would be visibly newer.
-    std::thread::sleep(std::time::Duration::from_millis(1100));
     record_access(&conn, &["touch-1".to_string()], &[], None).unwrap();
 
     let (rev1, upd1, ac1, la1): (i64, String, i64, Option<String>) = conn

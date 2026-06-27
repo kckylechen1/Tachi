@@ -207,10 +207,9 @@ async fn test_docs_mtime_conflict_resolution() {
     let dest_api_path = arch_dir.join("api.md");
     fs::write(&dest_api_path, "Existing architecture doc content.").unwrap();
 
-    // 睡 1.1 秒以确保 mtime 有明显差异
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-
     // 准备一个在根目录下的同名散落文件，比如 "api.md"
+    // The resolver treats equal mtimes as "source wins" (`>=`), so same-tick
+    // writes exercise the intended conflict path without a wall-clock sleep.
     let src_api_path = docs_path.join("api.md");
     fs::write(&src_api_path, "Newer scattered API doc content.").unwrap();
 
@@ -248,8 +247,6 @@ async fn test_docs_conflict_archive_names_are_unique() {
     fs::create_dir_all(&arch_dir).unwrap();
     let dest_api_path = arch_dir.join("api.md");
     fs::write(&dest_api_path, "Original destination API doc.").unwrap();
-
-    std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let scattered_a = docs_path.join("a");
     let scattered_b = docs_path.join("b");

@@ -44,7 +44,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
     // Trigger save_memory with auto_link=true and an entity that matches the
     // seeded entry. Auto-link will search global store for "sigil", which will
     // return the seeded entry as a candidate.
-    let _ = server
+    let save_response = server
         .save_memory(Parameters(SaveMemoryParams {
             text: "New observation about sigil rotation".to_string(),
             summary: String::new(),
@@ -72,10 +72,32 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         }))
         .await
         .expect("save_memory should succeed");
+    let saved: serde_json::Value =
+        serde_json::from_str(&save_response).expect("save response should be valid JSON");
+    let saved_id = saved["id"]
+        .as_str()
+        .expect("save response should include id")
+        .to_string();
 
-    // Auto-link runs in tokio::spawn; give it time to execute the search.
-    // 500ms is generous for a sync sqlite read against an in-memory test DB.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        let edge_ready = server
+            .with_global_store_read(|store| {
+                store
+                    .get_edges(&saved_id, "outgoing", None)
+                    .map(|edges| edges.iter().any(|edge| edge.target_id == seeded_id))
+                    .map_err(|e| format!("edges: {e}"))
+            })
+            .expect("read auto-link edges");
+        if edge_ready {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "auto-link did not persist an edge before timeout"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     // Re-read the seeded entry. Its access_count MUST still be 0 — auto-link
     // is a write-side side effect, not a user read.

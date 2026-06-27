@@ -196,7 +196,7 @@ async fn run_claude_cli_kills_timed_out_child() {
     let sentinel = tmp.path().join("sentinel");
     std::fs::write(
         &fake_claude,
-        "#!/bin/sh\nsleep 1\nprintf done > \"$SENTINEL_FILE\"\nprintf '{\"result\":\"late\"}\\n'\n",
+        "#!/bin/sh\nsleep 0.2\nprintf done > \"$SENTINEL_FILE\"\nprintf '{\"result\":\"late\"}\\n'\n",
     )
     .unwrap();
     {
@@ -218,7 +218,7 @@ async fn run_claude_cli_kills_timed_out_child() {
         .await
         .expect_err("fake claude should time out");
     assert!(err.contains("timed out"), "unexpected error: {err}");
-    tokio::time::sleep(Duration::from_millis(1_200)).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
     assert!(
         !sentinel.exists(),
         "timed-out claude child should be killed before it continues work"
