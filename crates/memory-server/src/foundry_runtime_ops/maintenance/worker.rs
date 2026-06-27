@@ -1,7 +1,7 @@
 use super::super::recall_cache::process_recall_rerank_cache_job;
 use super::super::FoundryMaintenanceItem;
 use super::distill_job::process_memory_distill_job;
-use super::enqueue::foundry_worker_name;
+use super::enqueue::{foundry_job_label, foundry_worker_name};
 use super::forget::process_forget_sweep_job;
 use super::neighborhood::process_memory_neighborhood_job;
 use super::store::{build_foundry_event_hash, with_foundry_store};
@@ -13,6 +13,10 @@ use tokio::sync::mpsc;
 enum FoundryMaintenanceOutcome {
     Terminal(memory_core::FoundryJobStatus, Option<String>),
     NotClaimed,
+}
+
+fn unsupported_foundry_job_reason(kind: &memory_core::FoundryJobKind) -> String {
+    format!("unsupported_foundry_job_kind:{}", foundry_job_label(kind))
 }
 
 async fn handle_foundry_maintenance_item(
@@ -98,7 +102,7 @@ async fn handle_foundry_maintenance_item(
         }
         _ => Ok(FoundryMaintenanceOutcome::Terminal(
             memory_core::FoundryJobStatus::Skipped,
-            Some("unknown_job_kind".to_string()),
+            Some(unsupported_foundry_job_reason(&item.job.kind)),
         )),
     };
 

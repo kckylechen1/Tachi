@@ -76,3 +76,75 @@ async fn capture_specs_exclude_disabled_jobs_and_gate_recall_cache() {
         assert!(kinds.contains(&memory_core::FoundryJobKind::RecallRerankCache));
     }
 }
+
+#[tokio::test]
+async fn unsupported_foundry_job_kinds_skip_with_explicit_reason() {
+    let tmp = tempdir().expect("tempdir");
+    let db_path = tmp.path().join("global.db");
+    let server = crate::MemoryServer::new(db_path, None).expect("server");
+    let job_id = "foundry-job:unsupported-session-ingest";
+    let now = chrono::Utc::now().to_rfc3339();
+    let job = memory_core::FoundryJobSpec {
+        id: job_id.to_string(),
+        kind: memory_core::FoundryJobKind::SessionIngest,
+        lane: memory_core::FoundryModelLane::Reasoning,
+        status: memory_core::FoundryJobStatus::Queued,
+        target_agent_id: None,
+        requested_by: None,
+        created_at: now,
+        evidence_count: 0,
+        goal_count: 0,
+        metadata: serde_json::json!({}),
+    };
+    let memory_ids = Vec::new();
+    let persisted = memory_core::PersistedFoundryJob {
+        spec: job.clone(),
+        target_db: crate::server_state::DbScope::Global.as_str().to_string(),
+        named_project: None,
+        path_prefix: "/scratch".to_string(),
+        memory_ids: memory_ids.clone(),
+    };
+    server
+        .with_store_for_scope(crate::server_state::DbScope::Global, |store| {
+            memory_core::insert_foundry_job(store.connection(), &persisted)
+                .map_err(|e| format!("insert foundry job: {e}"))
+        })
+        .expect("insert unsupported job");
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    tx.send(crate::foundry_runtime_ops::FoundryMaintenanceItem {
+        job,
+        target_db: crate::server_state::DbScope::Global,
+        named_project: None,
+        db_path: None,
+        path_prefix: "/scratch".to_string(),
+        memory_ids,
+        counted_queue_slot: false,
+    })
+    .await
+    .expect("send foundry job");
+    drop(tx);
+
+    run_foundry_maintenance_worker(server.clone(), rx).await;
+
+    let (status, reason) = server
+        .with_store_for_scope_read(crate::server_state::DbScope::Global, |store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT status, json_extract(metadata, '$.terminal_reason.reason')
+                     FROM foundry_jobs
+                     WHERE id = ?1",
+                    rusqlite::params![job_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|e| format!("load foundry terminal state: {e}"))
+        })
+        .expect("load terminal status");
+
+    assert_eq!(status, "skipped");
+    assert_eq!(
+        reason.as_deref(),
+        Some("unsupported_foundry_job_kind:session_ingest")
+    );
+}

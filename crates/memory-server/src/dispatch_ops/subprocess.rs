@@ -399,15 +399,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_agent_subprocess_closes_child_stdin() {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-c")
-            .arg("import sys; data = sys.stdin.read(); print('stdin-eof:' + data)");
+        let cmd = Command::new("/bin/cat");
 
         let result = run_agent_subprocess(cmd, Duration::from_secs(5))
             .await
             .expect("stdin reader should observe EOF and exit");
 
         assert_eq!(result.exit_code, Some(0));
-        assert_eq!(result.output.trim(), "stdin-eof:");
+        assert_eq!(result.output, "");
     }
 }
