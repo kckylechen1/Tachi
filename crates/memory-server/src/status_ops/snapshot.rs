@@ -184,7 +184,7 @@ fn collect_snapshot_inner(
         .and_then(crate::path_utils::plan_c_split_brain_for_local_db)
         .into_iter()
         .collect();
-    let health_score = status_health::calculate_health_score(
+    let health_deductions = status_health::calculate_health_deductions(
         &daemon,
         &dbs,
         distill_marker.as_ref(),
@@ -192,6 +192,7 @@ fn collect_snapshot_inner(
         cached_probe_results,
         fresh_provider_probe_cache.map(|cache| cache.rotation_groups.as_slice()),
     );
+    let health_score = status_health::health_score_from_deductions(&health_deductions);
 
     StatusSnapshot {
         daemon,
@@ -205,6 +206,7 @@ fn collect_snapshot_inner(
         provider_probe_cache,
         project_warnings,
         plan_c_split_brain,
+        health_deductions,
         health_score,
     }
 }

@@ -448,6 +448,7 @@ async fn handle_tachi_status_detail(
             "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
+            "health_deductions": snapshot.health_deductions,
             "databases": {
                 "total": total_dbs,
                 "active_jobs": total_active,
@@ -511,6 +512,7 @@ async fn handle_tachi_status_detail(
             "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
+            "health_deductions": snapshot.health_deductions,
             "warnings": warnings.into_iter().take(8).collect::<Vec<_>>(),
             "jobs": {
                 "active": total_active,

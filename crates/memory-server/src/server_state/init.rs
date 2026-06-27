@@ -50,6 +50,11 @@ impl MemoryServer {
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        ensure_db_parent(&global_db_path)?;
+        if let Some(project_db_path) = project_db_path.as_ref() {
+            ensure_db_parent(project_db_path)?;
+        }
+
         // Open stores once at startup (init_schema runs here, not per-request)
         let global_db_str = global_db_path.to_str().ok_or_else(|| {
             std::io::Error::new(
@@ -312,5 +317,32 @@ impl MemoryServer {
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 
         Ok(server)
+    }
+}
+
+fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryServer;
+
+    #[test]
+    fn memory_server_new_creates_global_and_project_db_parents() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_db = temp.path().join("nested/global/memory.db");
+        let project_db = temp.path().join("nested/project/memory.db");
+
+        let server = MemoryServer::new(global_db.clone(), Some(project_db.clone()))
+            .expect("server should create missing db parent dirs");
+
+        assert!(global_db.parent().expect("global parent").is_dir());
+        assert!(project_db.parent().expect("project parent").is_dir());
+        assert_eq!(server.global_db_path_buf(), global_db);
+        assert_eq!(server.project_db_path_buf(), Some(project_db));
     }
 }
