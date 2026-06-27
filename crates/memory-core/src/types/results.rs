@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{default_metadata, MemoryEntry};
+use super::entry::{default_metadata, MemoryEntry};
 
 // ─── Scoring Types ───────────────────────────────────────────────────────────
 
