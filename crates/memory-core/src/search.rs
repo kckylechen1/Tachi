@@ -1601,6 +1601,68 @@ mod tests {
     }
 
     #[test]
+    fn supersede_closes_open_valid_until_for_point_in_time_recall() {
+        let mut conn = setup();
+        let mut old = memory_entry("sup-old", "SupersedeNeedle old memory", &[]);
+        old.valid_from = "2020-01-01T00:00:00Z".to_string();
+        upsert(&mut conn, &old, false).unwrap();
+        let new = memory_entry("sup-new", "SupersedeNeedle new memory", &[]);
+        upsert(&mut conn, &new, false).unwrap();
+
+        // Before supersession the row's validity window is open.
+        let before: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memories WHERE id = 'sup-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(before.is_none(), "valid_until should start open");
+
+        crate::db::supersede_memory(&conn, "sup-old", "sup-new").unwrap();
+
+        // After supersession valid_until is closed, so `as_of` after that time
+        // prefers the superseding row instead of returning the stale fact.
+        let after: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memories WHERE id = 'sup-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            after.is_some(),
+            "supersede_memory must close valid_until at supersession time"
+        );
+    }
+
+    #[test]
+    fn supersede_preserves_explicit_valid_until() {
+        let mut conn = setup();
+        let mut old = memory_entry("sup-old2", "SupersedeNeedle2 old memory", &[]);
+        old.valid_from = "2020-01-01T00:00:00Z".to_string();
+        old.valid_until = Some("2021-06-01T00:00:00Z".to_string());
+        upsert(&mut conn, &old, false).unwrap();
+        let new = memory_entry("sup-new2", "SupersedeNeedle2 new memory", &[]);
+        upsert(&mut conn, &new, false).unwrap();
+
+        crate::db::supersede_memory(&conn, "sup-old2", "sup-new2").unwrap();
+
+        // COALESCE keeps an explicitly-set window; supersession does not clobber it.
+        let after: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memories WHERE id = 'sup-old2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            after.as_deref().unwrap_or_default().starts_with("2021-06-01"),
+            "explicit valid_until must be preserved, got {after:?}"
+        );
+    }
+
+    #[test]
     fn hybrid_hides_operation_logs() {
         let mut conn = setup();
         insert(
