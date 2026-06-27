@@ -3,7 +3,8 @@ use serde_json::json;
 
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
-    fact_to_entry, ExtractFactsParams, IngestEventParams, IngestParams, IngestSourceParams,
+    fact_to_entry, fact_to_entry_with_reason, ExtractFactsParams, IngestEventParams, IngestParams,
+    IngestSourceParams,
 };
 use crate::utils::{stable_hash, value_to_template_text};
 
