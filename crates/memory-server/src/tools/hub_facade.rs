@@ -33,16 +33,6 @@ impl MemoryServer {
         handle_hub_review(self, params).await
     }
 
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for hub_review (Section 9 governance review)."
-    )]
-    pub(crate) async fn section9_review(
-        &self,
-        Parameters(params): Parameters<HubReviewParams>,
-    ) -> Result<String, String> {
-        handle_hub_review(self, params).await
-    }
-
     #[tool(description = "Route an alias capability ID to a concrete active capability version.")]
     pub(crate) async fn hub_set_active_version(
         &self,
@@ -222,16 +212,6 @@ impl MemoryServer {
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
     pub(crate) async fn tachi_audit_log(
-        &self,
-        Parameters(params): Parameters<AuditLogParams>,
-    ) -> Result<String, String> {
-        handle_tachi_audit_log(self, params).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for tachi_audit_log (Section 9 audit view)."
-    )]
-    pub(crate) async fn section9_audit_log(
         &self,
         Parameters(params): Parameters<AuditLogParams>,
     ) -> Result<String, String> {

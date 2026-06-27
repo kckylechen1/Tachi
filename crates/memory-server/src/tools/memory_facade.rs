@@ -31,21 +31,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Ghost-in-the-Shell style alias for save_memory. Write memory into cyberbrain."
-    )]
-    pub(crate) async fn cyberbrain_write(
-        &self,
-        Parameters(params): Parameters<SaveMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "save_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        handle_save_memory(self, params).await
-    }
-
-    #[tool(
         description = "Low-friction shortcut to save a note. Only `text` is required; path defaults to /notes/{YYYY-MM-DD}, category to \"fact\", importance to 0.6, scope to \"project\". Use save_memory directly when you need full control over path, importance, retention, vector, or auto-link."
     )]
     pub(crate) async fn remember(
@@ -64,21 +49,6 @@ impl MemoryServer {
         description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores."
     )]
     pub(crate) async fn search_memory(
-        &self,
-        Parameters(params): Parameters<SearchMemoryParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_read(self, "search_memory", &params).await?
-        {
-            return Ok(body);
-        }
-        crate::memory_search_ops::handle_search_memory_with_access(self, params, false, true).await
-    }
-
-    #[tool(
-        description = "Ghost-in-the-Shell style alias for search_memory. Query memories from cyberbrain."
-    )]
-    pub(crate) async fn cyberbrain_search(
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {

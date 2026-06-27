@@ -22,7 +22,6 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     // Facade read tools
     "tachi_search",
     "tachi_web_search",
-    "tachi_plan",
     "tachi_unstick",
     "tachi_browse",
     "tachi_board",
