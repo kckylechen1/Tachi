@@ -120,43 +120,10 @@ fn count_sql(conn: &rusqlite::Connection, sql: &str) -> Result<usize, rusqlite::
     conn.query_row(sql, [], |row| row.get::<_, i64>(0).map(|n| n as usize))
 }
 
-fn count_where(conn: &rusqlite::Connection, where_sql: &str) -> Result<usize, rusqlite::Error> {
-    count_sql(
-        conn,
-        &format!("SELECT COUNT(*) FROM memories WHERE {where_sql}"),
-    )
-}
-
 pub(crate) fn namespace_health(
     conn: &rusqlite::Connection,
 ) -> Result<NamespaceHealth, rusqlite::Error> {
-    let recall_cache_rows = count_where(conn, RECALL_CACHE_WHERE)?;
-    let wiki_rows = count_where(conn, WIKI_WHERE)?;
-    // A `/wiki/` path already marks a row as wiki (see is_wiki_entry / wiki
-    // recall, which key off the path). A wiki page legitimately carries a
-    // content-area domain (e.g. `equity_trading`), so only flag rows that are
-    // GENUINELY untagged: empty domain AND a non-wiki source. Those are the
-    // ones a domain/source backfill would actually help.
-    let wiki_non_source_rows = count_where(
-        conn,
-        &format!("({WIKI_WHERE}) AND source != 'wiki' AND COALESCE(domain, '') = ''"),
-    )?;
-    let wiki_non_category_rows =
-        count_where(conn, &format!("({WIKI_WHERE}) AND category != 'wiki'"))?;
-    let kanban_rows = count_where(
-        conn,
-        "path = '/kanban' OR path LIKE '/kanban/%' OR source = 'kanban' OR category = 'kanban'",
-    )?;
-    let handoff_rows = count_where(
-        conn,
-        "path = '/handoff' OR path LIKE '/handoff/%' OR source = 'handoff' OR category = 'handoff'",
-    )?;
-    let eval_rows = count_where(
-        conn,
-        "path = '/eval' OR path LIKE '/eval/%' OR category = 'eval'",
-    )?;
-    let project_scope_rows = count_where(conn, "scope = 'project'")?;
-    let non_project_scope_rows = count_where(conn, "scope != 'project'")?;
+    let counts = memory_namespace_counts(conn)?;
     let derived_items = if table_exists(conn, "derived_items") {
         count_sql(conn, "SELECT COUNT(*) FROM derived_items")?
     } else {
@@ -186,20 +153,75 @@ pub(crate) fn namespace_health(
     };
 
     Ok(NamespaceHealth {
-        recall_cache_rows,
-        wiki_rows,
-        wiki_non_source_rows,
-        wiki_non_category_rows,
-        kanban_rows,
-        handoff_rows,
-        eval_rows,
-        project_scope_rows,
-        non_project_scope_rows,
+        recall_cache_rows: counts.recall_cache_rows,
+        wiki_rows: counts.wiki_rows,
+        wiki_non_source_rows: counts.wiki_non_source_rows,
+        wiki_non_category_rows: counts.wiki_non_category_rows,
+        kanban_rows: counts.kanban_rows,
+        handoff_rows: counts.handoff_rows,
+        eval_rows: counts.eval_rows,
+        project_scope_rows: counts.project_scope_rows,
+        non_project_scope_rows: counts.non_project_scope_rows,
         derived_items,
         graph_edges,
         graph_orphan_edges,
         graph_relation_types,
     })
+}
+
+struct MemoryNamespaceCounts {
+    recall_cache_rows: usize,
+    wiki_rows: usize,
+    wiki_non_source_rows: usize,
+    wiki_non_category_rows: usize,
+    kanban_rows: usize,
+    handoff_rows: usize,
+    eval_rows: usize,
+    project_scope_rows: usize,
+    non_project_scope_rows: usize,
+}
+
+fn memory_namespace_counts(
+    conn: &rusqlite::Connection,
+) -> Result<MemoryNamespaceCounts, rusqlite::Error> {
+    // A `/wiki/` path already marks a row as wiki (see is_wiki_entry / wiki
+    // recall, which key off the path). A wiki page legitimately carries a
+    // content-area domain (e.g. `equity_trading`), so only flag rows that are
+    // genuinely untagged: empty domain and a non-wiki source.
+    conn.query_row(
+        &format!(
+            "SELECT
+                SUM(CASE WHEN ({RECALL_CACHE_WHERE}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN ({WIKI_WHERE}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN ({WIKI_WHERE}) AND source != 'wiki' AND COALESCE(domain, '') = '' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN ({WIKI_WHERE}) AND category != 'wiki' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN path = '/kanban' OR path LIKE '/kanban/%' OR source = 'kanban' OR category = 'kanban' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN path = '/handoff' OR path LIKE '/handoff/%' OR source = 'handoff' OR category = 'handoff' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN path = '/eval' OR path LIKE '/eval/%' OR category = 'eval' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN scope = 'project' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN scope != 'project' THEN 1 ELSE 0 END)
+             FROM memories"
+        ),
+        [],
+        |row| {
+            Ok(MemoryNamespaceCounts {
+                recall_cache_rows: optional_count(row, 0)?,
+                wiki_rows: optional_count(row, 1)?,
+                wiki_non_source_rows: optional_count(row, 2)?,
+                wiki_non_category_rows: optional_count(row, 3)?,
+                kanban_rows: optional_count(row, 4)?,
+                handoff_rows: optional_count(row, 5)?,
+                eval_rows: optional_count(row, 6)?,
+                project_scope_rows: optional_count(row, 7)?,
+                non_project_scope_rows: optional_count(row, 8)?,
+            })
+        },
+    )
+}
+
+fn optional_count(row: &rusqlite::Row<'_>, idx: usize) -> Result<usize, rusqlite::Error> {
+    row.get::<_, Option<i64>>(idx)
+        .map(|n| n.unwrap_or(0).max(0) as usize)
 }
 
 fn relation_type_counts(
@@ -226,51 +248,14 @@ fn relation_type_counts(
 }
 
 pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
-    let total: usize = conn.query_row(
-        &format!("SELECT COUNT(*) FROM memories WHERE NOT ({RECALL_CACHE_WHERE})"),
-        [],
-        |row| row.get::<_, i64>(0).map(|n| n as usize),
-    )?;
-    let with_vec: usize = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(DISTINCT v.id)
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE NOT ({RECALL_CACHE_WHERE_M})"
-            ),
-            [],
-            |row| row.get::<_, i64>(0).map(|n| n as usize),
-        )
-        .unwrap_or(0);
+    let (total, enrichment_failed_recent) = memory_vector_status_counts(conn)?;
+    let (with_vec, pending_enrichment) = memory_vector_join_counts(conn).unwrap_or_default();
     let orphans: usize = conn
         .query_row(
             "SELECT COUNT(*)
              FROM memories_vec v
              LEFT JOIN memories m ON m.id = v.id
              WHERE m.id IS NULL",
-            [],
-            |row| row.get::<_, i64>(0).map(|n| n as usize),
-        )
-        .unwrap_or(0);
-    let enrichment_failed_recent: usize = conn
-        .query_row(
-            "SELECT COUNT(*) FROM memories
-             WHERE json_extract(metadata, '$.enrichment.status') = 'failed'",
-            [],
-            |row| row.get::<_, i64>(0).map(|n| n as usize),
-        )
-        .unwrap_or(0);
-    let pending_enrichment: usize = conn
-        .query_row(
-            &format!(
-                "SELECT COUNT(*)
-             FROM memories m
-             LEFT JOIN memories_vec v ON v.id = m.id
-             WHERE NOT ({RECALL_CACHE_WHERE_M})
-               AND v.id IS NULL
-               AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'"
-            ),
             [],
             |row| row.get::<_, i64>(0).map(|n| n as usize),
         )
@@ -294,6 +279,41 @@ pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth,
         enrichment_failed_recent,
         enrichment_failures,
     })
+}
+
+fn memory_vector_status_counts(
+    conn: &rusqlite::Connection,
+) -> Result<(usize, usize), rusqlite::Error> {
+    conn.query_row(
+        &format!(
+            "SELECT
+                SUM(CASE WHEN NOT ({RECALL_CACHE_WHERE}) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN json_extract(metadata, '$.enrichment.status') = 'failed' THEN 1 ELSE 0 END)
+             FROM memories"
+        ),
+        [],
+        |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
+    )
+}
+
+fn memory_vector_join_counts(
+    conn: &rusqlite::Connection,
+) -> Result<(usize, usize), rusqlite::Error> {
+    conn.query_row(
+        &format!(
+            "SELECT
+                COUNT(DISTINCT v.id),
+                SUM(CASE
+                    WHEN v.id IS NULL
+                     AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'
+                    THEN 1 ELSE 0 END)
+             FROM memories m
+             LEFT JOIN memories_vec v ON v.id = m.id
+             WHERE NOT ({RECALL_CACHE_WHERE_M})"
+        ),
+        [],
+        |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
+    )
 }
 
 fn enrichment_failure_summary(

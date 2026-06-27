@@ -1,5 +1,7 @@
 use super::*;
 
+const SKILL_QUALITY_PAIRWISE_CAP: usize = 500;
+
 fn extract_skill_content(cap: &HubCapability) -> Option<String> {
     let def: Value = serde_json::from_str(&cap.definition).ok()?;
     def.get("content")
@@ -42,6 +44,13 @@ fn latest_snapshot_for_skill(store: &mut MemoryStore, skill_path: &str) -> Optio
         .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
 }
 
+fn skill_activity_timestamp(cap: &HubCapability) -> Option<DateTime<Utc>> {
+    cap.last_used
+        .as_deref()
+        .and_then(parse_rfc3339_utc)
+        .or_else(|| parse_rfc3339_utc(&cap.updated_at))
+}
+
 #[derive(Clone)]
 struct SkillQualitySnapshot {
     cap: HubCapability,
@@ -79,33 +88,45 @@ fn run_skill_quality_guards_for_scope(
             }
             Ok(out)
         })?;
+    snapshots.sort_by(|a, b| {
+        skill_activity_timestamp(&b.cap)
+            .cmp(&skill_activity_timestamp(&a.cap))
+            .then_with(|| b.cap.uses.cmp(&a.cap.uses))
+            .then_with(|| a.cap.id.cmp(&b.cap.id))
+    });
 
     let now = Utc::now();
     let mut merge_map: HashMap<String, Vec<Value>> = HashMap::new();
     let mut graph_edges = Vec::<memory_core::MemoryEdge>::new();
+    let pairwise_evaluated_skills = snapshots.len().min(SKILL_QUALITY_PAIRWISE_CAP);
+    let pairwise_skipped_skills = snapshots.len().saturating_sub(pairwise_evaluated_skills);
+    let snapshots_for_pairwise = &snapshots[..pairwise_evaluated_skills];
 
-    for i in 0..snapshots.len() {
-        for j in (i + 1)..snapshots.len() {
-            let similarity = token_cosine_similarity(&snapshots[i].content, &snapshots[j].content);
+    for i in 0..snapshots_for_pairwise.len() {
+        for j in (i + 1)..snapshots_for_pairwise.len() {
+            let similarity = token_cosine_similarity(
+                &snapshots_for_pairwise[i].content,
+                &snapshots_for_pairwise[j].content,
+            );
             if similarity > 0.92 {
                 merge_map
-                    .entry(snapshots[i].cap.id.clone())
+                    .entry(snapshots_for_pairwise[i].cap.id.clone())
                     .or_default()
                     .push(json!({
-                        "skill_id": snapshots[j].cap.id,
+                        "skill_id": snapshots_for_pairwise[j].cap.id,
                         "similarity": similarity,
                     }));
                 merge_map
-                    .entry(snapshots[j].cap.id.clone())
+                    .entry(snapshots_for_pairwise[j].cap.id.clone())
                     .or_default()
                     .push(json!({
-                        "skill_id": snapshots[i].cap.id,
+                        "skill_id": snapshots_for_pairwise[i].cap.id,
                         "similarity": similarity,
                     }));
 
                 if let (Some(left), Some(right)) = (
-                    snapshots[i].latest_snapshot.as_ref(),
-                    snapshots[j].latest_snapshot.as_ref(),
+                    snapshots_for_pairwise[i].latest_snapshot.as_ref(),
+                    snapshots_for_pairwise[j].latest_snapshot.as_ref(),
                 ) {
                     graph_edges.push(memory_core::MemoryEdge {
                         source_id: left.id.clone(),
@@ -225,6 +246,9 @@ fn run_skill_quality_guards_for_scope(
         "scope": scope.as_str(),
         "archived_skills": archived_skills,
         "merge_hints": merge_map,
+        "pairwise_cap": SKILL_QUALITY_PAIRWISE_CAP,
+        "pairwise_evaluated_skills": pairwise_evaluated_skills,
+        "pairwise_skipped_skills": pairwise_skipped_skills,
         "pagerank": pagerank,
         "updated_caps": changed_caps.iter().map(|cap| cap.id.clone()).collect::<Vec<_>>(),
     }))

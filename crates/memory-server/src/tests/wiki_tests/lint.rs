@@ -338,6 +338,14 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
         .await
         .expect("wiki_lint should succeed");
     let json: Value = serde_json::from_str(&response).expect("wiki_lint json");
+    assert_eq!(json["skill_quality"]["global"]["pairwise_cap"], json!(500));
+    assert!(json["skill_quality"]["global"]["pairwise_evaluated_skills"]
+        .as_u64()
+        .is_some_and(|count| count >= 2));
+    assert_eq!(
+        json["skill_quality"]["global"]["pairwise_skipped_skills"],
+        json!(0)
+    );
     assert!(
         json["orphans"]
             .as_array()
