@@ -1,4 +1,5 @@
 use super::*;
+use crate::copilot_ops::handle_tachi_task_brief;
 
 pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
