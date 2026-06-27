@@ -1469,9 +1469,16 @@ pub fn supersede_memory(
         return Ok(false);
     }
     let now = now_utc_iso();
+    // Closing valid_until at supersession time turns the superseded row into a
+    // point-in-time-recoverable version: `as_of` before `now` still returns it,
+    // `as_of` after `now` correctly prefers the superseding row. COALESCE keeps
+    // an explicitly-set validity window intact. NOTE: this invalidation is
+    // specific to supersession; archive_memory (stale/dedup eviction) must NOT
+    // close valid_until, since a GC'd fact may still have been true.
     conn.execute(
         "UPDATE memories
-         SET superseded_by = ?1, updated_at = ?2, revision = revision + 1
+         SET superseded_by = ?1, updated_at = ?2, revision = revision + 1,
+             valid_until = COALESCE(valid_until, ?2)
          WHERE id = ?3 AND (superseded_by IS NULL OR superseded_by != ?1)",
         params![superseded_by, now, id],
     )?;
