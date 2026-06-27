@@ -40,6 +40,7 @@ pub(crate) struct DispatchResult {
     pub exit_code: Option<i32>,
 }
 
+mod artifacts;
 mod backend_failure;
 mod credentials;
 mod dedupe;
@@ -51,6 +52,7 @@ mod start;
 #[cfg(test)]
 mod tests;
 
+use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
 use self::backend_failure::*;
 use self::credentials::*;
 use self::dedupe::*;
@@ -123,120 +125,25 @@ pub(crate) async fn handle_tachi_dispatch(
     // assembled prompt. In V2 it is rewritten after Stage 1 succeeds.
     let mut prompt = base_prompt.clone();
 
-    let plan_path = workspace_dir.join("plan.md");
-    // V1 writes the assembled prompt as a placeholder plan.md (legacy);
-    // V2 will overwrite this with the real LLM-generated plan below.
-    crate::utils::write_owner_only_file_atomic(&plan_path, base_prompt.as_bytes())
-        .map_err(|e| format!("Failed to write plan file: {e}"))?;
-
-    // Write prompt.md (full assembled prompt for tracked run)
-    let prompt_md_path = workspace_dir.join("prompt.md");
-    tokio::fs::write(&prompt_md_path, &base_prompt)
-        .await
-        .map_err(|e| format!("Failed to write prompt.md: {e}"))?;
-
-    let capability_bundle_path = workspace_dir.join("capability_bundle.json");
-    let mut capability_bundle_trace = prompt_assembly.capability_bundle.clone();
-    if let Some(obj) = capability_bundle_trace.as_object_mut() {
-        obj.insert(
-            "feedback_rules".to_string(),
-            prompt_assembly.feedback_rules.clone(),
-        );
-    }
-    let feedback_rules_trace = prompt_assembly.feedback_rules.clone();
-    let capability_bundle_artifact = serde_json::to_string_pretty(&capability_bundle_trace)
-        .map_err(|e| format!("Failed to serialize capability bundle artifact: {e}"))?;
-    tokio::fs::write(&capability_bundle_path, capability_bundle_artifact)
-        .await
-        .map_err(|e| format!("Failed to write capability_bundle.json: {e}"))?;
-    let capability_bundle_file = capability_bundle_path.to_string_lossy().to_string();
-    let capability_bundle_card =
-        capability_bundle_summary(&capability_bundle_trace, Some(&capability_bundle_file));
-
-    // Write context.md (summary of injected context/skills — for MVP, same as prompt)
-    let context_md_path = workspace_dir.join("context.md");
-    let context_summary = {
-        let mut sections = Vec::new();
-        sections.push(format!("# Dispatch Context: {}", dispatch_id));
-        sections.push(format!("Agent: {}", agent_norm));
-        sections.push(format!(
-            "Dispatch profile: {}",
-            params.profile.as_deref().unwrap_or("none")
-        ));
-        sections.push(format!(
-            "Tool profile: {}",
-            params.tool_profile.as_deref().unwrap_or("none")
-        ));
-        if let Some(flow_id) = params.flow_id.as_deref() {
-            sections.push(format!("Flow: {}", flow_id));
-        }
-        if let Some(issue_ref) = params.issue_ref.as_deref() {
-            sections.push(format!("Issue: {}", issue_ref));
-        }
-        if let Some(pr_ref) = params.pr_ref.as_deref() {
-            sections.push(format!("PR: {}", pr_ref));
-        }
-        sections.push(format!(
-            "Stage: {}",
-            params.stage.as_deref().unwrap_or("none")
-        ));
-        sections.push(format!("V2: {}", v2));
-        sections.push(format!("Skills: {:?}", effective_skills_for_files));
-        sections.push(format!(
-            "Capability bundle: status={} requested={} injected={} artifact={}",
-            capability_bundle_trace
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("unknown"),
-            capability_bundle_trace
-                .get("requested")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            capability_bundle_trace
-                .get("injected")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            capability_bundle_file
-        ));
-        sections.push(String::new());
-        sections.push(base_prompt.clone());
-        sections.join("\n\n")
-    };
-    tokio::fs::write(&context_md_path, &context_summary)
-        .await
-        .map_err(|e| format!("Failed to write context.md: {e}"))?;
-
-    // Write trajectory.jsonl — initial dispatch_started event
-    let trajectory_path = workspace_dir.join("trajectory.jsonl");
-    {
-        let started_event = json!({
-            "event": "dispatch_started",
-            "dispatch_id": dispatch_id,
-            "agent": agent_norm,
-            "stage": params.stage,
-            "profile": params.profile,
-            "tool_profile": params.tool_profile,
-            "mcp_access": params.mcp_access,
-            "allowed_mcp_servers": params.allowed_mcp_servers,
-            "issue_ref": params.issue_ref,
-            "pr_ref": params.pr_ref,
-            "flow_id": params.flow_id,
-            "auto_capability_bundle": params.auto_capability_bundle,
-            "capability_bundle": capability_bundle_card.clone(),
-            "feedback_rules": feedback_rules_trace.clone(),
-            "v2": v2,
-            "timestamp": Utc::now().to_rfc3339(),
-        });
-        let line = serde_json::to_string(&started_event)
-            .map_err(|e| format!("Failed to serialize started event: {e}"))?;
-        tokio::fs::write(&trajectory_path, format!("{}\n", line))
-            .await
-            .map_err(|e| format!("Failed to write trajectory.jsonl: {e}"))?;
-        let progress_path = workspace_dir.join("progress.jsonl");
-        tokio::fs::write(&progress_path, format!("{}\n", line))
-            .await
-            .map_err(|e| format!("Failed to write progress.jsonl: {e}"))?;
-    }
+    let DispatchArtifacts {
+        plan_path,
+        prompt_md_path,
+        context_md_path,
+        trajectory_path,
+        capability_bundle_file,
+        capability_bundle_card,
+        feedback_rules_trace,
+    } = write_dispatch_artifacts(DispatchArtifactInputs {
+        workspace_dir: &workspace_dir,
+        dispatch_id: &dispatch_id,
+        agent_norm: &agent_norm,
+        params: &params,
+        base_prompt: &base_prompt,
+        prompt_assembly: &prompt_assembly,
+        effective_skills_for_files: &effective_skills_for_files,
+        v2,
+    })
+    .await?;
 
     let harness_transport = params.harness_transport.clone().unwrap_or_else(|| {
         if agent_norm == "custom"
