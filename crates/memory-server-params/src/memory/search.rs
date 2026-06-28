@@ -118,7 +118,7 @@ pub struct SearchMemoryParams {
     #[serde(default)]
     pub context_symbols: Vec<String>,
 
-    /// Optional agent role for sandbox filtering (e.g. "finance", "code-review")
+    /// Optional agent role for sandbox filtering (e.g. "domain-pack", "code-review")
     #[serde(default)]
     pub agent_role: Option<String>,
 

@@ -37,7 +37,7 @@ pub struct SearchOptions {
     pub weights: HybridWeights,
     /// Optionally restrict results to a path prefix (e.g. "/openclaw")
     pub path_prefix: Option<String>,
-    /// Optionally restrict results to a specific domain (e.g. "finance")
+    /// Optionally restrict results to a specific domain (e.g. "domain-pack")
     pub domain: Option<String>,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,

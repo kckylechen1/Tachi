@@ -185,7 +185,7 @@ impl Default for GcConfig {
 /// Per-domain configuration for memory routing and GC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainConfig {
-    /// Unique domain name, e.g. "finance", "code-review", "personal"
+    /// Unique domain name, e.g. "domain-pack", "code-review", "personal"
     pub name: String,
     /// Human-readable description
     #[serde(default)]
@@ -320,7 +320,7 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub retention_policy: Option<String>,
 
-    /// Domain this memory belongs to (e.g. "finance", "code-review").
+    /// Domain this memory belongs to (e.g. "domain-pack", "code-review").
     /// NULL means no domain scoping. HyperTachi JSON uses `domain_key` for this field.
     #[serde(default, alias = "domain_key")]
     pub domain: Option<String>,

@@ -110,7 +110,7 @@ pub struct TachiEventParams {
     #[schemars(description = "Named project DB selector and event project label.")]
     pub project: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional domain label, e.g. trading, bonding, coding, project.")]
+    #[schemars(description = "Optional domain label, e.g. bonding, coding, project.")]
     pub domain: Option<String>,
     #[serde(default)]
     #[schemars(description = "Optional session/conversation/run id.")]

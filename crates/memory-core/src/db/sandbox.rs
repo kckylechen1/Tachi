@@ -83,9 +83,9 @@ pub fn check_sandbox_access(
 
 /// Simple path pattern matching.
 /// Supports:
-/// - Exact match: "/finance/reports" matches "/finance/reports"
-/// - Wildcard suffix: "/finance/*" matches "/finance/anything"
-/// - Prefix match: "/finance" matches "/finance" and "/finance/sub"
+/// - Exact match: "/domain-pack/reports" matches "/domain-pack/reports"
+/// - Wildcard suffix: "/domain-pack/*" matches "/domain-pack/anything"
+/// - Prefix match: "/domain-pack" matches "/domain-pack" and "/domain-pack/sub"
 fn path_matches_pattern(path: &str, pattern: &str) -> bool {
     if pattern == "*" || pattern == "/*" {
         return true;

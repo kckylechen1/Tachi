@@ -85,7 +85,7 @@ pub struct DistillTrajectoryParams {
     /// Source agent identifier
     pub agent_id: String,
 
-    /// Memory / skill path, e.g. /skills/hyperion/factor-evolution
+    /// Memory / skill path, e.g. /skills/domain-pack/factor-evolution
     pub skill_path: String,
 
     /// Optional distilled skill capability id. Defaults to one derived from skill_path.

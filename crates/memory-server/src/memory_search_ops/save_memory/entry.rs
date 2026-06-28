@@ -121,8 +121,8 @@ mod tests {
             Some("scratch".to_string())
         );
         assert_eq!(
-            resolve_save_domain(Some("Hyperion".to_string()), "/project/hapi", "fact"),
-            Some("hyperion".to_string())
+            resolve_save_domain(Some("ProjectAlpha".to_string()), "/project/example", "fact"),
+            Some("projectalpha".to_string())
         );
         assert_eq!(
             resolve_save_domain(Some("/notes/raw".to_string()), "/notes/today", "note"),

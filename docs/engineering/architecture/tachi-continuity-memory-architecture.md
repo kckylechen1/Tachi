@@ -235,6 +235,10 @@ finance tickers, trading lesson paths, or Quant-specific defaults should live in
 Quant adapter pack/fork that emits the same neutral events or normal memory writes;
 it should not be exposed by the generic agent surface.
 
+Generic Tachi therefore ships an empty routing configuration by default. Products
+such as HyperTachi must opt in through their own `routing.json` or adapter pack
+instead of relying on built-in finance/trading routes in the shared package.
+
 The target runtime path is:
 
 ```

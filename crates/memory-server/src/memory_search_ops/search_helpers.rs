@@ -272,18 +272,37 @@ pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<
     infer_search_project_with(query, domain, super::routing_config::RoutingConfig::get())
 }
 
-/// Config-injectable core. Domain-specific routing (tickers, finance terms) is
-/// supplied by [`RoutingConfig`] rather than hardcoded here; the engine itself
-/// stays domain-agnostic.
+/// Config-injectable core. Domain-specific routing is supplied by
+/// [`RoutingConfig`] rather than hardcoded here; the engine itself stays
+/// domain-agnostic.
 fn infer_search_project_with(
     query: &str,
     domain: Option<&str>,
     config: &super::routing_config::RoutingConfig,
 ) -> Option<String> {
+    infer_search_project_with_available(
+        query,
+        domain,
+        config,
+        named_project_db_exists,
+        list_available_named_projects(),
+    )
+}
+
+fn infer_search_project_with_available<F>(
+    query: &str,
+    domain: Option<&str>,
+    config: &super::routing_config::RoutingConfig,
+    project_exists: F,
+    available_projects: Vec<String>,
+) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
     if let Some(domain) = domain.map(str::trim).filter(|d| !d.is_empty()) {
         for route in &config.domain_routes {
             if route.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
-                && named_project_db_exists(&route.project)
+                && project_exists(&route.project)
             {
                 return Some(route.project.clone());
             }
@@ -299,12 +318,12 @@ fn infer_search_project_with(
     if let Some(project) = config.ticker_route_project.as_deref() {
         static TICKER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
         let ticker_re = TICKER_RE.get_or_init(|| regex::Regex::new(r"\b\d{6}\b").unwrap());
-        if ticker_re.is_match(q) && named_project_db_exists(project) {
+        if ticker_re.is_match(q) && project_exists(project) {
             return Some(project.to_string());
         }
     }
 
-    for project in list_available_named_projects() {
+    for project in available_projects {
         if q_lower.contains(&project.to_lowercase()) {
             return Some(project);
         }
@@ -312,9 +331,7 @@ fn infer_search_project_with(
 
     for route in &config.project_routes {
         // Check the cheap term match before the disk-I/O project-exists lookup.
-        if route.terms.iter().any(|term| q_lower.contains(term))
-            && named_project_db_exists(&route.project)
-        {
+        if route.terms.iter().any(|term| q_lower.contains(term)) && project_exists(&route.project) {
             return Some(route.project.clone());
         }
     }
@@ -360,44 +377,74 @@ mod tests {
     }
 
     #[test]
-    fn infer_search_project_routes_tickers_to_hyperion() {
-        if !named_project_db_exists("hyperion") {
-            return;
-        }
-        // Use the default config explicitly so the test is deterministic
-        // regardless of any ~/.tachi/routing.json on the test host.
+    fn infer_search_project_defaults_do_not_route_domain_terms() {
         let config = crate::memory_search_ops::routing_config::RoutingConfig::default();
         assert_eq!(
-            infer_search_project_with("688981 止损记录", None, &config).as_deref(),
-            Some("hyperion")
+            infer_search_project_with_available(
+                "123456 stop rule",
+                None,
+                &config,
+                |_| true,
+                Vec::new()
+            ),
+            None
         );
         assert_eq!(
-            infer_search_project_with("portfolio risk", Some("equity_trading"), &config).as_deref(),
-            Some("hyperion")
+            infer_search_project_with_available(
+                "portfolio risk",
+                Some("domain_pack"),
+                &config,
+                |_| true,
+                Vec::new()
+            ),
+            None
         );
     }
 
     #[test]
-    fn empty_routing_config_makes_engine_domain_agnostic() {
-        // With every routing list emptied, no finance/ticker term routes anywhere
-        // — the engine is fully generic. Only an explicit project-name match
-        // (handled separately) would still route.
+    fn explicit_routing_config_can_route_domain_pack_terms() {
         let config = crate::memory_search_ops::routing_config::RoutingConfig {
-            domain_routes: Vec::new(),
-            ticker_route_project: None,
-            project_routes: Vec::new(),
+            domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
+                project: "domain_pack".into(),
+                domains: vec!["domain_pack".into()],
+            }],
+            ticker_route_project: Some("domain_pack".into()),
+            project_routes: vec![crate::memory_search_ops::routing_config::ProjectRoute {
+                project: "domain_pack".into(),
+                terms: vec!["domain-specific-term".into()],
+            }],
             foreign_domain_word_terms: Vec::new(),
             foreign_domain_substring_terms: Vec::new(),
             foreign_domains: Vec::new(),
             foreign_path_prefixes: Vec::new(),
         };
+        let exists = |name: &str| name == "domain_pack";
         assert_eq!(
-            infer_search_project_with("688981 止损记录", None, &config),
-            None
+            infer_search_project_with_available("123456 notes", None, &config, exists, Vec::new())
+                .as_deref(),
+            Some("domain_pack")
         );
         assert_eq!(
-            infer_search_project_with("portfolio risk", Some("equity_trading"), &config),
-            None
+            infer_search_project_with_available(
+                "portfolio risk",
+                Some("domain_pack"),
+                &config,
+                exists,
+                Vec::new()
+            )
+            .as_deref(),
+            Some("domain_pack")
+        );
+        assert_eq!(
+            infer_search_project_with_available(
+                "domain-specific-term recall",
+                None,
+                &config,
+                exists,
+                Vec::new()
+            )
+            .as_deref(),
+            Some("domain_pack")
         );
     }
 

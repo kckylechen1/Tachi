@@ -213,7 +213,7 @@ pub(crate) enum Commands {
         /// Optional topic / subject area.
         #[arg(long)]
         topic: Option<String>,
-        /// Optional domain (e.g. "finance", "code-review").
+        /// Optional domain (e.g. "domain-pack", "code-review").
         #[arg(long)]
         domain: Option<String>,
         /// Optional retention policy.

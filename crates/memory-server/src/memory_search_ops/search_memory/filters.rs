@@ -37,11 +37,14 @@ pub(super) fn eval_recall_opted_in(params: &SearchMemoryParams) -> bool {
         .is_some_and(|prefix| is_eval_path(prefix.trim_end_matches('/')))
 }
 
-fn query_explicitly_requests_foreign_sigil_domain(query: &str, domain: Option<&str>) -> bool {
+fn query_explicitly_requests_foreign_sigil_domain_with(
+    query: &str,
+    domain: Option<&str>,
+    config: &RoutingConfig,
+) -> bool {
     if domain.is_some() {
         return true;
     }
-    let config = RoutingConfig::get();
     let q = query.to_lowercase();
     // Whole-word ASCII terms (so common coding queries like "change"/"channel"
     // → "chan", "quantity" → "quant" don't trip the filter) plus CJK/numeric
@@ -56,8 +59,7 @@ fn query_explicitly_requests_foreign_sigil_domain(query: &str, domain: Option<&s
             .any(|term| q.contains(term))
 }
 
-fn is_foreign_sigil_memory(entry: &memory_core::MemoryEntry) -> bool {
-    let config = RoutingConfig::get();
+fn is_foreign_sigil_memory_with(entry: &memory_core::MemoryEntry, config: &RoutingConfig) -> bool {
     let domain = entry.domain.as_deref().unwrap_or("");
     let path = entry.path.to_ascii_lowercase();
     config
@@ -75,13 +77,26 @@ pub(super) fn project_scope_allows_memory(
     params: &SearchMemoryParams,
     entry: &memory_core::MemoryEntry,
 ) -> bool {
+    project_scope_allows_memory_with_config(project_name, params, entry, RoutingConfig::get())
+}
+
+pub(super) fn project_scope_allows_memory_with_config(
+    project_name: &str,
+    params: &SearchMemoryParams,
+    entry: &memory_core::MemoryEntry,
+    config: &RoutingConfig,
+) -> bool {
     if !project_name.eq_ignore_ascii_case("sigil") {
         return true;
     }
-    if query_explicitly_requests_foreign_sigil_domain(&params.query, params.domain.as_deref()) {
+    if query_explicitly_requests_foreign_sigil_domain_with(
+        &params.query,
+        params.domain.as_deref(),
+        config,
+    ) {
         return true;
     }
-    !is_foreign_sigil_memory(entry)
+    !is_foreign_sigil_memory_with(entry, config)
 }
 
 pub(super) fn project_filter_name(

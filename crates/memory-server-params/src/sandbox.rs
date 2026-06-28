@@ -41,9 +41,9 @@ fn default_sandbox_exec_audit_limit() -> usize {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct SandboxSetRuleParams {
-    /// Agent role (e.g. "code-review", "finance", "admin")
+    /// Agent role (e.g. "code-review", "domain-pack", "admin")
     pub agent_role: String,
-    /// Path pattern to match (e.g. "/finance/*", "/project/secrets")
+    /// Path pattern to match (e.g. "/domain-pack/*", "/project/secrets")
     pub path_pattern: String,
     /// Access level: "read", "write", or "deny"
     #[serde(default = "default_access_level")]

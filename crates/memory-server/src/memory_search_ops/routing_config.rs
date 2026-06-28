@@ -1,15 +1,8 @@
 //! Project-routing and cross-domain filter rules, as data.
 //!
-//! These rules used to be hardcoded constants inline in the search layer —
-//! A-share/finance terms (`止损`, `688981`, `iron rules`, `trading`, …) baked
-//! into the otherwise generic engine, exactly the "domain logic in the shared
-//! layer" smell. They now live in [`RoutingConfig`], whose **defaults reproduce
-//! the previous behavior exactly** (zero recall change on upgrade) and which can
-//! be overridden by `~/.tachi/routing.json`.
-//!
-//! To make the engine fully domain-agnostic, ship a `routing.json` with the
-//! lists emptied (and your own projects' routes added); to extend routing for a
-//! new project, add an entry rather than editing this crate.
+//! The generic Tachi package must not ship product-specific recall routes.
+//! Domain packs or forks can opt into routes by writing `~/.tachi/routing.json`;
+//! the built-in defaults stay empty so coding-agent recall is domain-agnostic.
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -34,7 +27,7 @@ pub(crate) struct DomainRoute {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct RoutingConfig {
-    /// Domain → project routing (e.g. `equity_trading` → `hyperion`).
+    /// Domain -> project routing (e.g. `domain_pack` -> `domain_pack_project`).
     pub domain_routes: Vec<DomainRoute>,
     /// When set, a bare 6-digit token in the query routes to this project
     /// (the A-share ticker heuristic). `None` disables ticker routing entirely.
@@ -57,68 +50,13 @@ pub(crate) struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            domain_routes: vec![DomainRoute {
-                project: "hyperion".to_string(),
-                domains: vec![
-                    "equity_trading".into(),
-                    "trading".into(),
-                    "finance".into(),
-                    "hyperion".into(),
-                ],
-            }],
-            ticker_route_project: Some("hyperion".to_string()),
-            project_routes: vec![
-                ProjectRoute {
-                    project: "hyperion".to_string(),
-                    terms: vec![
-                        "hyperion".into(),
-                        "radar".into(),
-                        "warpcore".into(),
-                        "hapi".into(),
-                        "hermes".into(),
-                        "trading".into(),
-                        "止损".into(),
-                        "iron rules".into(),
-                        "牛市".into(),
-                        "daemon".into(),
-                    ],
-                },
-                ProjectRoute {
-                    project: "sigil".to_string(),
-                    terms: vec![
-                        "sigil".into(),
-                        "memory-server".into(),
-                        "tachi".into(),
-                        "mcp".into(),
-                        "foundry".into(),
-                    ],
-                },
-            ],
-            foreign_domain_word_terms: vec![
-                "hyperion".into(),
-                "quant".into(),
-                "trading".into(),
-                "equity".into(),
-                "kronos".into(),
-                "warpcore".into(),
-                "chan".into(),
-                "v8".into(),
-            ],
-            foreign_domain_substring_terms: vec![
-                "股票".into(),
-                "个股".into(),
-                "止损".into(),
-                "盘中".into(),
-                "持仓".into(),
-                "688981".into(),
-            ],
-            foreign_domains: vec![
-                "equity_trading".into(),
-                "trading".into(),
-                "finance".into(),
-                "hyperion".into(),
-            ],
-            foreign_path_prefixes: vec!["/trading/".into(), "/scratch/hyperion/".into()],
+            domain_routes: Vec::new(),
+            ticker_route_project: None,
+            project_routes: Vec::new(),
+            foreign_domain_word_terms: Vec::new(),
+            foreign_domain_substring_terms: Vec::new(),
+            foreign_domains: Vec::new(),
+            foreign_path_prefixes: Vec::new(),
         }
     }
 }
@@ -143,7 +81,7 @@ impl RoutingConfig {
                 );
                 Self::default()
             }),
-            // No override file → behavior-preserving defaults.
+            // No override file -> generic, domain-agnostic defaults.
             Err(_) => Self::default(),
         }
     }
@@ -168,21 +106,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_preserve_legacy_routing_terms() {
+    fn defaults_are_domain_agnostic() {
         let config = RoutingConfig::default();
-        assert_eq!(config.ticker_route_project.as_deref(), Some("hyperion"));
-        assert!(config
-            .project_routes
-            .iter()
-            .any(|r| r.project == "hyperion" && r.terms.iter().any(|t| t == "止损")));
-        assert!(config
-            .foreign_domain_substring_terms
-            .iter()
-            .any(|t| t == "688981"));
-        assert!(config
-            .foreign_path_prefixes
-            .iter()
-            .any(|p| p == "/scratch/hyperion/"));
+        assert!(config.domain_routes.is_empty());
+        assert!(config.ticker_route_project.is_none());
+        assert!(config.project_routes.is_empty());
+        assert!(config.foreign_domain_word_terms.is_empty());
+        assert!(config.foreign_domain_substring_terms.is_empty());
+        assert!(config.foreign_domains.is_empty());
+        assert!(config.foreign_path_prefixes.is_empty());
     }
 
     #[test]

@@ -207,7 +207,7 @@ pub struct RememberParams {
     #[serde(default)]
     pub category: Option<String>,
 
-    /// Optional domain (e.g. "finance", "code-review").
+    /// Optional domain (e.g. "domain-pack", "code-review").
     #[serde(default)]
     pub domain: Option<String>,
 
@@ -345,7 +345,7 @@ pub struct GetStateParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct RegisterDomainParams {
-    /// Unique domain name (e.g. "finance", "code-review")
+    /// Unique domain name (e.g. "domain-pack", "code-review")
     pub name: String,
 
     /// Human-readable description of this domain

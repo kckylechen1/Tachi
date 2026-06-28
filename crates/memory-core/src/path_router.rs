@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(classify_path("/handoff/agent-x"), PathRouting::Project);
         assert_eq!(classify_path("/kanban/board-1"), PathRouting::Project);
         assert_eq!(classify_path("/agents/x"), PathRouting::Project);
-        assert_eq!(classify_path("/domain/finance/notes"), PathRouting::Any);
+        assert_eq!(classify_path("/domain/domain-pack/notes"), PathRouting::Any);
         assert_eq!(classify_path("/foo/bar"), PathRouting::Project);
         assert_eq!(classify_path("/"), PathRouting::Project);
     }
@@ -265,8 +265,8 @@ mod tests {
 
     #[test]
     fn validate_allows_any_in_any() {
-        assert!(validate_path_for_db("/domain/finance/x", "global", false).is_ok());
-        assert!(validate_path_for_db("/domain/finance/x", "wiki", false).is_ok());
+        assert!(validate_path_for_db("/domain/domain-pack/x", "global", false).is_ok());
+        assert!(validate_path_for_db("/domain/domain-pack/x", "wiki", false).is_ok());
     }
 
     #[test]

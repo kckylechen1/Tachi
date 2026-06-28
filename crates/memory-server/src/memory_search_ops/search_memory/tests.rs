@@ -1,7 +1,8 @@
 use serde_json::json;
 
 use super::cache::recall_cache_key;
-use super::filters::project_scope_allows_memory;
+use super::filters::{project_scope_allows_memory, project_scope_allows_memory_with_config};
+use crate::memory_search_ops::routing_config::RoutingConfig;
 use crate::tool_params::SearchMemoryParams;
 
 fn entry(domain: Option<&str>, path: &str) -> memory_core::MemoryEntry {
@@ -58,6 +59,18 @@ fn params(query: &str) -> SearchMemoryParams {
         enable_rerank: false,
         as_of: None,
         include_metadata: false,
+    }
+}
+
+fn domain_pack_routing_config() -> RoutingConfig {
+    RoutingConfig {
+        domain_routes: Vec::new(),
+        ticker_route_project: None,
+        project_routes: Vec::new(),
+        foreign_domain_word_terms: vec!["domainpack".into(), "v8".into()],
+        foreign_domain_substring_terms: vec!["领域包".into(), "123456".into()],
+        foreign_domains: vec!["domain_pack".into()],
+        foreign_path_prefixes: vec!["/domain-pack/".into()],
     }
 }
 
@@ -130,7 +143,7 @@ fn recall_cache_key_separates_result_affecting_fields() {
     assert_ne!(base_key, recall_cache_key(&p, 5, false), "project");
 
     let mut p = base.clone();
-    p.domain = Some("finance".into());
+    p.domain = Some("domain_pack".into());
     assert_ne!(base_key, recall_cache_key(&p, 5, false), "domain");
 
     let mut p = base.clone();
@@ -166,18 +179,13 @@ fn recall_cache_key_ignores_rerank_intent() {
 }
 
 #[test]
-fn sigil_project_scope_filters_foreign_domains_for_default_recall() {
+fn sigil_project_scope_defaults_do_not_special_case_domain_pack_rows() {
     let params = params("Tachi 召回 向量 有没有问题");
 
-    assert!(!project_scope_allows_memory(
+    assert!(project_scope_allows_memory(
         "sigil",
         &params,
-        &entry(Some("equity_trading"), "/")
-    ));
-    assert!(!project_scope_allows_memory(
-        "sigil",
-        &params,
-        &entry(Some("hyperion"), "/scratch/hyperion/v4")
+        &entry(Some("domain_pack"), "/domain-pack/v4")
     ));
     assert!(project_scope_allows_memory(
         "sigil",
@@ -187,13 +195,40 @@ fn sigil_project_scope_filters_foreign_domains_for_default_recall() {
 }
 
 #[test]
-fn sigil_project_scope_allows_foreign_domains_when_query_requests_them() {
-    let params = params("Hyperion V8 股票召回");
+fn sigil_project_scope_filters_configured_foreign_domains_for_default_recall() {
+    let params = params("Tachi recall vector issue");
+    let config = domain_pack_routing_config();
 
-    assert!(project_scope_allows_memory(
+    assert!(!project_scope_allows_memory_with_config(
         "sigil",
         &params,
-        &entry(Some("equity_trading"), "/")
+        &entry(Some("domain_pack"), "/"),
+        &config
+    ));
+    assert!(!project_scope_allows_memory_with_config(
+        "sigil",
+        &params,
+        &entry(Some("scratch"), "/domain-pack/v4"),
+        &config
+    ));
+    assert!(project_scope_allows_memory_with_config(
+        "sigil",
+        &params,
+        &entry(Some("scratch"), "/scratch/sigil/recall"),
+        &config
+    ));
+}
+
+#[test]
+fn sigil_project_scope_allows_configured_foreign_domains_when_query_requests_them() {
+    let params = params("DomainPack V8 领域包 recall");
+    let config = domain_pack_routing_config();
+
+    assert!(project_scope_allows_memory_with_config(
+        "sigil",
+        &params,
+        &entry(Some("domain_pack"), "/"),
+        &config
     ));
 }
 
@@ -208,19 +243,29 @@ fn sigil_project_scope_keeps_filtering_when_query_only_substring_matches_terms()
     ] {
         let params = params(query);
         assert!(
-            !project_scope_allows_memory("sigil", &params, &entry(Some("equity_trading"), "/")),
-            "query {query:?} should not unlock foreign trading memories"
+            !project_scope_allows_memory_with_config(
+                "sigil",
+                &params,
+                &entry(Some("domain_pack"), "/"),
+                &domain_pack_routing_config()
+            ),
+            "query {query:?} should not unlock configured foreign-domain memories"
         );
     }
 }
 
 #[test]
-fn sigil_project_scope_allows_foreign_domains_on_whole_word_match() {
+fn sigil_project_scope_allows_configured_foreign_domains_on_whole_word_match() {
     // Whole-word foreign terms (even without CJK) must still open the gate.
-    for query in ["quant trading recall", "v8 engine notes", "chan pump-fake"] {
+    for query in ["domainpack recall", "v8 engine notes"] {
         let params = params(query);
         assert!(
-            project_scope_allows_memory("sigil", &params, &entry(Some("equity_trading"), "/")),
+            project_scope_allows_memory_with_config(
+                "sigil",
+                &params,
+                &entry(Some("domain_pack"), "/"),
+                &domain_pack_routing_config()
+            ),
             "query {query:?} explicitly names a foreign domain term"
         );
     }
