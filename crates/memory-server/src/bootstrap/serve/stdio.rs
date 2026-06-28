@@ -15,8 +15,10 @@ pub(super) async fn ensure_stdio_proxy_daemon(
         replace_stale_daemon_if_needed(app_home, global_db_path).await;
     }
 
-    if let Some(info) = compatible_daemon(app_home, global_db_path).await {
-        return Some(info);
+    match compatible_daemon(app_home, global_db_path, project_db_path).await {
+        DaemonCompatibility::Compatible(info) => return Some(info),
+        DaemonCompatibility::Incompatible => return None,
+        DaemonCompatibility::Missing => {}
     }
 
     if auto_daemon_disabled {
@@ -25,18 +27,19 @@ pub(super) async fn ensure_stdio_proxy_daemon(
     }
 
     spawn_stdio_daemon(app_home, global_db_path, project_db_path).await;
-    compatible_daemon(app_home, global_db_path).await
+    match compatible_daemon(app_home, global_db_path, project_db_path).await {
+        DaemonCompatibility::Compatible(info) => Some(info),
+        DaemonCompatibility::Missing | DaemonCompatibility::Incompatible => None,
+    }
 }
 
 pub(super) fn proxy_can_preserve_project_context(
     info: &crate::cli_client::DaemonInfo,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
-    client_project: Option<&str>,
+    _client_project: Option<&str>,
 ) -> bool {
-    project_db_path.is_none()
-        || client_project.is_some()
-        || crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path)
+    crate::cli_client::daemon_matches_requested_dbs(info, global_db_path, project_db_path)
 }
 
 pub(super) async fn serve_stdio_proxy(
@@ -102,20 +105,43 @@ fn auto_daemon_disabled() -> bool {
         .unwrap_or(false)
 }
 
+enum DaemonCompatibility {
+    Compatible(crate::cli_client::DaemonInfo),
+    Missing,
+    Incompatible,
+}
+
 async fn compatible_daemon(
     app_home: &Path,
     global_db_path: &Path,
-) -> Option<crate::cli_client::DaemonInfo> {
-    let info = crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path).await?;
+    project_db_path: Option<&Path>,
+) -> DaemonCompatibility {
+    let Some(info) = crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path).await
+    else {
+        return DaemonCompatibility::Missing;
+    };
     if crate::cli_client::daemon_version_matches(&info) {
-        Some(info)
+        if crate::cli_client::daemon_matches_requested_dbs(&info, global_db_path, project_db_path) {
+            DaemonCompatibility::Compatible(info)
+        } else {
+            eprintln!(
+                "[stdio-proxy] daemon DB scope mismatch (daemon global={}, project={}; requested global={}, project={}); using local fallback",
+                info.global_db.as_deref().unwrap_or("<unknown>"),
+                info.project_db.as_deref().unwrap_or("<none>"),
+                global_db_path.display(),
+                project_db_path
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            );
+            DaemonCompatibility::Incompatible
+        }
     } else {
         eprintln!(
             "[stdio-proxy] daemon version mismatch (daemon {:?}, binary {}); using local fallback",
             info.version,
             env!("CARGO_PKG_VERSION")
         );
-        None
+        DaemonCompatibility::Incompatible
     }
 }
 
@@ -171,7 +197,7 @@ async fn spawn_stdio_daemon(
                     tokio::spawn(async move {
                         let _ = child.wait();
                     });
-                    wait_for_daemon_ready(app_home, global_db_path).await;
+                    wait_for_daemon_ready(app_home, global_db_path, project_db_path).await;
                 }
                 Err(e) => eprintln!("[auto-daemon] failed to spawn daemon: {e}"),
             }
@@ -180,15 +206,18 @@ async fn spawn_stdio_daemon(
     }
 }
 
-async fn wait_for_daemon_ready(app_home: &Path, global_db_path: &Path) {
+async fn wait_for_daemon_ready(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) {
     let ready = tokio::time::timeout(Duration::from_secs(5), async {
         for _ in 0..25 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            if crate::cli_client::detect_daemon_for_global_db(app_home, global_db_path)
-                .await
-                .is_some()
-            {
-                return true;
+            match compatible_daemon(app_home, global_db_path, project_db_path).await {
+                DaemonCompatibility::Compatible(_) => return true,
+                DaemonCompatibility::Incompatible => return false,
+                DaemonCompatibility::Missing => {}
             }
         }
         false
@@ -475,6 +504,16 @@ fn auto_daemon_command_args(
 mod tests {
     use super::*;
 
+    fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::DaemonInfo {
+        crate::cli_client::DaemonInfo {
+            url: "http://127.0.0.1:6919/mcp".to_string(),
+            global_db: global.map(|path| path.display().to_string()),
+            project_db: project.map(|path| path.display().to_string()),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            pid: Some(std::process::id() as i64),
+        }
+    }
+
     #[test]
     fn auto_daemon_args_preserve_global_only_scope() {
         let args = auto_daemon_command_args(Path::new("/tmp/agent.db"), None, "0");
@@ -520,6 +559,56 @@ mod tests {
                 "/tmp/project.db"
             ]
         );
+    }
+
+    #[test]
+    fn stdio_proxy_accepts_matching_project_daemon() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let project = Path::new("/tmp/tachi/sigil/memory.db");
+        let info = daemon(Some(global), Some(project));
+
+        assert!(proxy_can_preserve_project_context(
+            &info,
+            global,
+            Some(project),
+            Some("Sigil-test")
+        ));
+    }
+
+    #[test]
+    fn stdio_proxy_rejects_named_project_when_daemon_project_differs() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let daemon_project = Path::new("/tmp/tachi/quant/memory.db");
+        let requested_project = Path::new("/tmp/tachi/sigil/memory.db");
+        let info = daemon(Some(global), Some(daemon_project));
+
+        assert!(!proxy_can_preserve_project_context(
+            &info,
+            global,
+            Some(requested_project),
+            Some("Sigil-test")
+        ));
+    }
+
+    #[test]
+    fn stdio_proxy_rejects_project_daemon_for_no_project_client() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let project = Path::new("/tmp/tachi/quant/memory.db");
+        let info = daemon(Some(global), Some(project));
+
+        assert!(!proxy_can_preserve_project_context(
+            &info, global, None, None
+        ));
+    }
+
+    #[test]
+    fn stdio_proxy_accepts_global_only_daemon_for_no_project_client() {
+        let global = Path::new("/tmp/tachi/global/memory.db");
+        let info = daemon(Some(global), None);
+
+        assert!(proxy_can_preserve_project_context(
+            &info, global, None, None
+        ));
     }
 
     #[test]
