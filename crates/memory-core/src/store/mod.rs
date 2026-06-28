@@ -19,7 +19,16 @@
 
 pub mod agent_state;
 pub mod audit;
+pub mod crud;
+pub mod derived;
+pub mod domain;
+pub mod enrichment;
+pub mod events;
+pub mod graph;
 pub mod hub;
+pub mod open;
 pub mod pack;
+pub mod recall_cache;
 pub mod sandbox;
+pub mod state;
 pub mod vault;
