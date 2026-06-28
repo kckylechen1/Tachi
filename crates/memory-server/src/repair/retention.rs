@@ -32,6 +32,31 @@ const RETENTION_RULES: &[(&str, &str, &str)] = &[
     ),
 ];
 
+pub(crate) fn default_retention_for_row(path: &str, category: &str, source: &str) -> &'static str {
+    let path_lower = path.trim().to_ascii_lowercase();
+    let category_lower = category.trim().to_ascii_lowercase();
+    let source_lower = source.trim().to_ascii_lowercase();
+
+    if category_lower == "handoff"
+        || category_lower == "kanban"
+        || path_lower.starts_with("/handoff")
+        || path_lower.starts_with("/kanban")
+    {
+        "pinned"
+    } else if category_lower == "ghost" || path_lower.starts_with("/ghost") {
+        "ephemeral"
+    } else if path_lower.starts_with("/wiki")
+        || path_lower.starts_with("/skills")
+        || path_lower.starts_with("/behavior")
+        || matches!(category_lower.as_str(), "decision" | "preference")
+        || source_lower == "foundry_distill"
+    {
+        "permanent"
+    } else {
+        "durable"
+    }
+}
+
 fn count_clause(ctx: &DbContext, clause: &str) -> Result<usize, RepairError> {
     let sql = format!(
         "SELECT COUNT(*) FROM memories WHERE (retention_policy IS NULL OR TRIM(retention_policy) = '') AND ({clause})"

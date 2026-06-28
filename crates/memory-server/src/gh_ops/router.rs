@@ -4,7 +4,8 @@ pub(crate) async fn handle_tachi_gh(
     server: &MemoryServer,
     params: TachiGhParams,
 ) -> Result<String, String> {
-    match params.action.as_str() {
+    let action = params.action.clone();
+    let raw = match action.as_str() {
         "repo_view" => {
             handle_gh_repo_view(server, GhRepoViewParams { repo: params.repo }).await
         }
@@ -156,5 +157,19 @@ pub(crate) async fn handle_tachi_gh(
             "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge",
             other
         )),
+    }?;
+    normalize_gh_response(&action, &raw)
+}
+
+fn normalize_gh_response(action: &str, raw: &str) -> Result<String, String> {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+        return Ok(raw.to_string());
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("status".to_string())
+            .or_insert_with(|| Value::String("completed".to_string()));
+        obj.entry("action".to_string())
+            .or_insert_with(|| Value::String(action.to_string()));
     }
+    serde_json::to_string(&value).map_err(|err| format!("serialize normalized gh response: {err}"))
 }

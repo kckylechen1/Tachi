@@ -214,6 +214,8 @@ pub(crate) async fn handle_tachi_web_search(
             Ok(result) if !result.is_error.unwrap_or(false) => {
                 let content = first_text_blocks(&result);
                 let response = json!({
+                    "status": "completed",
+                    "action": "search",
                     "query": params.query,
                     "backend": capability_id,
                     "tool": tool_name,

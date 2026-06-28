@@ -5,7 +5,7 @@ pub(super) async fn handle_tachi_skill_facade(
     params: TachiSkillParams,
 ) -> Result<String, String> {
     let action = params.action.to_ascii_lowercase();
-    match action.as_str() {
+    let raw = match action.as_str() {
         "discover" => {
             let discover_params = HubDiscoverParams {
                 query: params.query.clone(),
@@ -67,6 +67,8 @@ pub(super) async fn handle_tachi_skill_facade(
                 results.extend(local);
             }
             serde_json::to_string(&json!({
+                "status": "completed",
+                "action": "discover",
                 "query": params.query,
                 "search_backend": if params.query.is_some() { "hub_search+local_skill_index" } else { "hub_list+local_skill_index" },
                 "online_search": false,
@@ -131,6 +133,7 @@ pub(super) async fn handle_tachi_skill_facade(
             let bundle_value: Value = serde_json::from_str(&bundle_raw)
                 .map_err(|e| format!("parse capability bundle: {e}"))?;
             serde_json::to_string(&json!({
+                "status": "completed",
                 "action": "loadout",
                 "profile": profile.name,
                 "display_name": profile.display_name,
@@ -156,5 +159,35 @@ pub(super) async fn handle_tachi_skill_facade(
             "Invalid action '{}'. Use 'discover', 'bundle', 'from_pattern', 'loadout', or 'run'.",
             params.action
         )),
+    }?;
+    normalize_skill_response(&action, &raw)
+}
+
+fn normalize_skill_response(action: &str, raw: &str) -> Result<String, String> {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+        return Ok(raw.to_string());
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("status".to_string())
+            .or_insert_with(|| Value::String("completed".to_string()));
+        obj.entry("action".to_string())
+            .or_insert_with(|| Value::String(action.to_string()));
+    }
+    serde_json::to_string(&value)
+        .map_err(|err| format!("serialize normalized skill response: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_skill_response_adds_missing_envelope_fields() {
+        let raw = r#"{"bundle":{"skills":[]}}"#;
+        let normalized = normalize_skill_response("bundle", raw).unwrap();
+        let value: Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(value["action"], "bundle");
+        assert_eq!(value["status"], "completed");
+        assert!(value.get("bundle").is_some());
     }
 }

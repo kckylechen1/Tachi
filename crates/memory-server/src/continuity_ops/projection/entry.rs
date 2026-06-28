@@ -203,6 +203,20 @@ fn projection_path(event: &TachiEventRecord, projection: ProjectionKind, key: &s
     )
 }
 
+fn projection_domain_label(event: &TachiEventRecord, path: &str, category: &str) -> Option<String> {
+    let raw = event.domain.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    crate::repair::domain::repair_target(
+        Some(raw),
+        path,
+        category,
+        "external:tachi_event_projection",
+    )
+    .or_else(|| Some(raw.to_string()))
+}
+
 fn projected_summary(event: &TachiEventRecord, projection: ProjectionKind) -> String {
     let payload = nested_payload(event);
     string_value(payload, &["summary", "title", "state", "outcome", "label"])
@@ -491,6 +505,8 @@ pub(super) fn build_projection_entry(
     );
     let text = projected_text(event, projection);
     let summary = projected_summary(event, projection);
+    let category = projection_category(projection).to_string();
+    let domain = projection_domain_label(event, &path, &category);
     let timestamp = if event.created_at.trim().is_empty() {
         now_rfc3339()
     } else {
@@ -515,7 +531,7 @@ pub(super) fn build_projection_entry(
         timestamp: timestamp.clone(),
         valid_from: timestamp.clone(),
         valid_until: None,
-        category: projection_category(projection).to_string(),
+        category: category.clone(),
         topic: projection.as_str().to_string(),
         keywords: projection_keywords(event, projection, &key),
         persons: Vec::new(),
@@ -529,7 +545,7 @@ pub(super) fn build_projection_entry(
         revision: 1,
         vector: None,
         retention_policy: projection_retention(projection, event.authority),
-        domain: (!event.domain.trim().is_empty()).then(|| event.domain.clone()),
+        domain: domain.clone(),
         metadata: json!({}),
         recall_count: 0,
         query_diversity: 0,
@@ -540,7 +556,7 @@ pub(super) fn build_projection_entry(
     entry.summary = summary;
     entry.text = text;
     entry.importance = projection_importance(projection, event.authority);
-    entry.category = projection_category(projection).to_string();
+    entry.category = category;
     entry.topic = projection.as_str().to_string();
     entry.keywords = projection_keywords(event, projection, &key);
     entry.entities = entities;
@@ -548,7 +564,39 @@ pub(super) fn build_projection_entry(
     entry.scope = projection_scope(projection).to_string();
     entry.metadata = metadata;
     entry.retention_policy = projection_retention(projection, event.authority);
-    entry.domain = (!event.domain.trim().is_empty()).then(|| event.domain.clone());
+    entry.domain = domain;
     entry.tier = tier;
     (entry, already_projected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event_with_domain(domain: &str) -> TachiEventRecord {
+        TachiEventRecord {
+            id: "event-1".to_string(),
+            source_repo: "sigil".to_string(),
+            adapter: "test".to_string(),
+            project: "Sigil".to_string(),
+            domain: domain.to_string(),
+            session_id: "session-1".to_string(),
+            actor: "codex".to_string(),
+            event_type: "pattern.observed".to_string(),
+            authority: AuthorityLevel::CollectOnly,
+            effects: vec![memory_core::EffectScope::None],
+            projection_hints: vec![ProjectionKind::Pattern],
+            payload: json!({"summary": "product pattern"}),
+            provenance: json!({}),
+            created_at: "2026-06-28T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn projection_domain_label_is_repair_clean() {
+        let event = event_with_domain("product-test");
+        let (entry, _) = build_projection_entry(None, &event, ProjectionKind::Pattern);
+        assert_eq!(entry.domain.as_deref(), Some("product_test"));
+        assert!(entry.path.contains("/product-test/"));
+    }
 }

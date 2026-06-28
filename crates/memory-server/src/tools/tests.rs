@@ -4,7 +4,10 @@ use super::*;
 fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
     let raw = r#"{"flow_id":"flow_1","stage":"plan","state":"instruction_ready","tasks":[{"dispatch_id":"d1","state":"running","agent":"codex","task":"Fix search"}]}"#;
     let json = format_facade_response("Tachi shell plan", "plan", raw, None).unwrap();
-    assert_eq!(json, raw);
+    let value = serde_json::from_str::<Value>(&json).unwrap();
+    assert_eq!(value["action"], "plan");
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["flow_id"], "flow_1");
 
     let markdown =
         format_facade_response("Tachi shell plan", "plan", raw, Some("markdown")).unwrap();
@@ -68,7 +71,10 @@ fn facade_response_renders_recommend_and_profiles_as_markdown_tables() {
     // JSON remains the default when markdown is not requested.
     let recommend_json =
         format_facade_response("Tachi task recommend", "recommend", recommend_raw, None).unwrap();
-    assert_eq!(recommend_json, recommend_raw);
+    let recommend_value = serde_json::from_str::<Value>(&recommend_json).unwrap();
+    assert_eq!(recommend_value["action"], "recommend");
+    assert_eq!(recommend_value["status"], "completed");
+    assert_eq!(recommend_value["recommended_profile"], "codex_55_review");
 
     let profiles_raw = r#"{
         "dispatch_profiles": [

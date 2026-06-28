@@ -46,7 +46,9 @@ pub(crate) async fn run_daemon(
                             lock_path.display()
                         )
                     }
-                    crate::status_ops::DaemonStatus::None => println!("[OK] no daemon running"),
+                    crate::status_ops::DaemonStatus::None => println!(
+                        "[i] no daemon running for this DB scope; background workers are paused. Stdio MCP clients may still be active; run `tachi daemon reap --json` to inspect live/stale clients."
+                    ),
                 }
             }
             Ok(())
@@ -118,6 +120,39 @@ fn flag_value(command: &str, flag: &str) -> Option<String> {
     None
 }
 
+fn truncate_command(command: &str) -> String {
+    command.chars().take(160).collect()
+}
+
+fn host_hint(command: Option<&str>) -> &'static str {
+    let lower = command.unwrap_or_default().to_ascii_lowercase();
+    if lower.contains("codex") {
+        "codex"
+    } else if lower.contains("claude") {
+        "claude"
+    } else if lower.contains("cursor") {
+        "cursor"
+    } else if lower.contains("gemini") || lower.contains("antigravity") {
+        "gemini"
+    } else if lower.contains("openclaw") {
+        "openclaw"
+    } else if lower.contains("opencode") {
+        "opencode"
+    } else if lower.contains("windsurf") {
+        "windsurf"
+    } else if lower.contains("node") {
+        "node"
+    } else if lower.contains("tmux") {
+        "tmux"
+    } else if lower.contains("zsh") || lower.contains("bash") || lower.contains("fish") {
+        "shell"
+    } else if command.is_some() {
+        "unknown_live_parent"
+    } else {
+        "unknown"
+    }
+}
+
 /// Machine-wide sweep for stale tachi processes. Only ever reaps the
 /// unambiguously dead: stdio servers whose launching host died (reparented to
 /// pid 1) and daemons whose backing global DB no longer exists. Healthy live
@@ -133,11 +168,8 @@ fn reap_stale_processes(
         .args(["-ax", "-o", "pid=,ppid=,command="])
         .output()?;
     let text = String::from_utf8_lossy(&out.stdout);
-
-    let mut findings: Vec<serde_json::Value> = Vec::new();
-    let mut reaped = 0usize;
-    let mut kept = 0usize;
-
+    let mut process_table = std::collections::BTreeMap::<i64, String>::new();
+    let mut parsed_rows = Vec::<(i64, i64, String)>::new();
     for line in text.lines() {
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.len() < 3 {
@@ -146,12 +178,23 @@ fn reap_stale_processes(
         let (Ok(pid), Ok(ppid)) = (tokens[0].parse::<i64>(), tokens[1].parse::<i64>()) else {
             continue;
         };
+        let command = tokens[2..].join(" ");
+        process_table.insert(pid, command.clone());
+        parsed_rows.push((pid, ppid, command));
+    }
+
+    let mut findings: Vec<serde_json::Value> = Vec::new();
+    let mut reaped = 0usize;
+    let mut kept = 0usize;
+    let mut active_stdio_clients = 0usize;
+    let mut active_daemons = 0usize;
+
+    for (pid, ppid, command) in parsed_rows {
         if pid == self_pid {
             continue;
         }
-        let command = tokens[2..].join(" ");
         // Only consider processes whose argv[0] basename is a tachi binary.
-        let argv0 = tokens[2];
+        let argv0 = command.split_whitespace().next().unwrap_or_default();
         let base = argv0.rsplit('/').next().unwrap_or(argv0);
         if base != "tachi" && base != "memory-server" {
             continue;
@@ -168,6 +211,11 @@ fn reap_stale_processes(
         } else {
             ("stdio", false)
         };
+        if is_daemon && !reap {
+            active_daemons += 1;
+        } else if !is_daemon && !reap {
+            active_stdio_clients += 1;
+        }
 
         if reap {
             reaped += 1;
@@ -177,12 +225,36 @@ fn reap_stale_processes(
         } else {
             kept += 1;
         }
+        let parent_command = process_table
+            .get(&ppid)
+            .map(|command| truncate_command(command));
+        let reason = if reap && kind == "orphan-stdio" {
+            "stdio server was reparented to pid 1; launching MCP host is gone"
+        } else if reap && kind == "dead-db-daemon" {
+            "daemon global DB path no longer exists"
+        } else if kind == "daemon" {
+            "daemon is live for an existing DB scope"
+        } else {
+            "stdio MCP client has a live parent process"
+        };
         findings.push(serde_json::json!({
             "pid": pid,
             "ppid": ppid,
             "kind": kind,
             "reap": reap,
-            "command": command.chars().take(120).collect::<String>(),
+            "state": if reap { "reap_candidate" } else { "kept_healthy" },
+            "reason": reason,
+            "command": truncate_command(&command),
+            "parent": {
+                "pid": ppid,
+                "host_hint": host_hint(parent_command.as_deref()),
+                "command": parent_command,
+            },
+            "db_scope": {
+                "global_db": flag_value(&command, "--global-db"),
+                "project_db": flag_value(&command, "--project-db"),
+                "no_project_db": command.split_whitespace().any(|token| token == "--no-project-db"),
+            }
         }));
     }
 
@@ -218,6 +290,17 @@ fn reap_stale_processes(
                 "applied": apply,
                 "reaped": reaped,
                 "kept": kept,
+                "summary": {
+                    "applied": apply,
+                    "would_reap": if apply { 0 } else { reaped },
+                    "reaped": if apply { reaped } else { 0 },
+                    "kept_healthy": kept,
+                    "active_stdio_clients": active_stdio_clients,
+                    "active_daemons": active_daemons,
+                    "stale_file_count": stale_files.len(),
+                    "process_count": findings.len(),
+                    "message": "Healthy stdio processes are live MCP clients owned by their parent host; they are not daemon conflicts and are not safe to kill from reap.",
+                },
                 "stale_files": stale_files,
                 "processes": findings,
             }))?
@@ -231,7 +314,7 @@ fn reap_stale_processes(
         if apply {
             ""
         } else {
-            " (dry-run — pass --apply to act)"
+            " (dry-run; pass --apply to act)"
         }
     );
     for f in &findings {
@@ -241,11 +324,17 @@ fn reap_stale_processes(
             "keep"
         };
         println!(
-            "  [{mark}] pid={} ppid={} {} :: {}",
+            "  [{mark}] pid={} ppid={} {} parent={} :: {}",
             f["pid"],
             f["ppid"],
             f["kind"].as_str().unwrap_or(""),
+            f["parent"]["host_hint"].as_str().unwrap_or("unknown"),
             f["command"].as_str().unwrap_or("")
+        );
+    }
+    if kept > 0 {
+        println!(
+            "  note: kept stdio processes have live parent hosts; use --json to inspect parent.host_hint and DB scope."
         );
     }
     if !stale_files.is_empty() {
@@ -262,4 +351,33 @@ fn reap_stale_processes(
     _json_out: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     Err("daemon reap is only implemented on unix".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_hint_classifies_known_mcp_parent_hosts() {
+        assert_eq!(host_hint(Some("/usr/local/bin/codex --model gpt")), "codex");
+        assert_eq!(host_hint(Some("Claude Desktop Helper")), "claude");
+        assert_eq!(
+            host_hint(Some("/Applications/Cursor.app/Contents/MacOS/Cursor")),
+            "cursor"
+        );
+        assert_eq!(host_hint(Some("openclaw mcp serve")), "openclaw");
+        assert_eq!(host_hint(Some("zsh -l")), "shell");
+    }
+
+    #[test]
+    fn host_hint_distinguishes_missing_and_unknown_live_parent() {
+        assert_eq!(host_hint(None), "unknown");
+        assert_eq!(host_hint(Some("/usr/bin/launchd")), "unknown_live_parent");
+    }
+
+    #[test]
+    fn truncate_command_keeps_output_bounded() {
+        let command = "x".repeat(200);
+        assert_eq!(truncate_command(&command).chars().count(), 160);
+    }
 }

@@ -107,7 +107,7 @@ fn infer_domain_from_row(path: &str, category: &str, source: &str) -> String {
     "general".to_string()
 }
 
-fn repair_target(
+pub(crate) fn repair_target(
     current_domain: Option<&str>,
     path: &str,
     category: &str,

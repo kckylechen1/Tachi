@@ -11,7 +11,7 @@ pub(super) fn format_facade_response(
     format: Option<&str>,
 ) -> Result<String, String> {
     if wants_json_format(format) {
-        return Ok(raw.to_string());
+        return normalize_json_facade_response(action, raw);
     }
     let value = serde_json::from_str::<Value>(raw).map_err(|e| {
         format!("format {title} markdown response: expected JSON from action '{action}': {e}")
@@ -152,6 +152,19 @@ pub(super) fn format_facade_response(
         lines.push(format!("```json\n{}\n```", value));
     }
     Ok(lines.join("\n"))
+}
+
+fn normalize_json_facade_response(action: &str, raw: &str) -> Result<String, String> {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw) else {
+        return Ok(raw.to_string());
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("status".to_string())
+            .or_insert_with(|| Value::String("completed".to_string()));
+        obj.entry("action".to_string())
+            .or_insert_with(|| Value::String(action.to_string()));
+    }
+    serde_json::to_string(&value).map_err(|e| format!("serialize normalized facade JSON: {e}"))
 }
 
 /// Escape pipe characters so free-form text stays inside one markdown table cell.

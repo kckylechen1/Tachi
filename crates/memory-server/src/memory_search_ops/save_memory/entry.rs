@@ -15,6 +15,8 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
     let requested_scope = params.scope;
     let path = params.path;
     let category = params.category;
+    let domain = resolve_save_domain(params.domain, &path, &category);
+    let retention_policy = resolve_save_retention_policy(params.retention_policy, &path, &category);
     let topic = params.topic;
     let mut metadata = crate::provenance::inject_provenance(
         server,
@@ -71,10 +73,88 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_entry(
         revision: 1,
         metadata,
         vector: params.vector,
-        retention_policy: params.retention_policy,
-        domain: params.domain,
+        retention_policy,
+        domain,
         recall_count: 0,
         query_diversity: 0,
         tier,
+    }
+}
+
+fn resolve_save_domain(
+    requested_domain: Option<String>,
+    path: &str,
+    category: &str,
+) -> Option<String> {
+    if let Some(target) =
+        crate::repair::domain::repair_target(requested_domain.as_deref(), path, category, "mcp")
+    {
+        return Some(target);
+    }
+    requested_domain
+        .map(|domain| domain.trim().to_string())
+        .filter(|domain| !domain.is_empty())
+}
+
+fn resolve_save_retention_policy(
+    requested_retention: Option<String>,
+    path: &str,
+    category: &str,
+) -> Option<String> {
+    if let Some(retention) = requested_retention
+        .map(|retention| retention.trim().to_ascii_lowercase())
+        .filter(|retention| !retention.is_empty())
+    {
+        return Some(retention);
+    }
+    Some(crate::repair::retention::default_retention_for_row(path, category, "mcp").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_save_domain_matches_r9_repair_targets() {
+        assert_eq!(
+            resolve_save_domain(None, "/scratch/sigil/fix", "decision"),
+            Some("scratch".to_string())
+        );
+        assert_eq!(
+            resolve_save_domain(Some("Hyperion".to_string()), "/project/hapi", "fact"),
+            Some("hyperion".to_string())
+        );
+        assert_eq!(
+            resolve_save_domain(Some("/notes/raw".to_string()), "/notes/today", "note"),
+            Some("notes".to_string())
+        );
+        assert_eq!(
+            resolve_save_domain(Some("coding".to_string()), "/scratch/sigil", "fact"),
+            Some("coding".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_save_retention_policy_matches_r2_backfill_targets() {
+        assert_eq!(
+            resolve_save_retention_policy(None, "/scratch/sigil/fix", "fact"),
+            Some("durable".to_string())
+        );
+        assert_eq!(
+            resolve_save_retention_policy(None, "/scratch/sigil/decision", "decision"),
+            Some("permanent".to_string())
+        );
+        assert_eq!(
+            resolve_save_retention_policy(None, "/handoff/worker", "fact"),
+            Some("pinned".to_string())
+        );
+        assert_eq!(
+            resolve_save_retention_policy(None, "/ghost/run", "fact"),
+            Some("ephemeral".to_string())
+        );
+        assert_eq!(
+            resolve_save_retention_policy(Some("Permanent".to_string()), "/scratch", "fact"),
+            Some("permanent".to_string())
+        );
     }
 }

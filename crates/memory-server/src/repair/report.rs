@@ -137,14 +137,28 @@ impl ReportBuilder {
             .sum::<usize>()
             + self.open_errors.len();
         let exit = compute_exit(self.apply_mode, total_findings, total_applied, total_errors);
+        let maintenance_status =
+            maintenance_status(self.apply_mode, total_findings, total_applied, total_errors);
+        let by_rule = findings_by_rule(&self.rule_reports);
 
         let body = json!({
             "summary": {
                 "apply_mode": self.apply_mode,
+                "status": maintenance_status,
+                "maintenance_status": maintenance_status,
                 "total_findings": total_findings,
                 "total_applied": total_applied,
                 "total_errors": total_errors,
+                "health_blocking": total_errors > 0,
+                "findings_are_health_deductions": false,
+                "health_relationship": "repair findings are maintenance recommendations unless total_errors is non-zero; tachi status health covers active runtime blockers",
                 "exit_code": exit,
+            },
+            "maintenance": {
+                "status": maintenance_status,
+                "requires_apply": !self.apply_mode && total_findings > 0,
+                "safe_to_ignore_for_runtime_health": total_errors == 0,
+                "by_rule": by_rule,
             },
             "notes": self.notes,
             "open_errors": self.open_errors.iter().map(|(l, m)| json!({"db": l, "error": m})).collect::<Vec<_>>(),
@@ -239,6 +253,9 @@ impl ReportBuilder {
             exit
         );
         if !self.apply_mode && total_findings > 0 {
+            println!(
+                "Maintenance: findings are repair recommendations, not health deductions unless errors are present."
+            );
             println!("Re-run with --apply to perform repairs (per-DB backup auto-taken).");
         }
         exit
@@ -263,4 +280,89 @@ fn compute_exit(apply_mode: bool, findings: usize, applied: usize, errors: usize
         return 1;
     }
     0
+}
+
+fn maintenance_status(
+    apply_mode: bool,
+    findings: usize,
+    applied: usize,
+    errors: usize,
+) -> &'static str {
+    if errors > 0 {
+        "error"
+    } else if apply_mode && applied > 0 {
+        "applied"
+    } else if findings > 0 {
+        "maintenance_recommended"
+    } else {
+        "clean"
+    }
+}
+
+fn findings_by_rule(rule_reports: &[RuleReport]) -> Vec<serde_json::Value> {
+    let mut by_rule: std::collections::BTreeMap<
+        (&'static str, &'static str),
+        (usize, usize, usize, std::collections::BTreeSet<String>),
+    > = std::collections::BTreeMap::new();
+    for report in rule_reports {
+        let entry = by_rule
+            .entry((report.rule_id, report.rule_name))
+            .or_insert((0, 0, 0, std::collections::BTreeSet::new()));
+        entry.0 += report.finding_total();
+        entry.1 += report.errors.len();
+        entry.2 += report.skipped;
+        if report.finding_total() > 0 || !report.errors.is_empty() || report.skipped > 0 {
+            entry.3.insert(report.db_label.clone());
+        }
+    }
+    by_rule
+        .into_iter()
+        .filter_map(|((rule_id, rule_name), (findings, errors, skipped, dbs))| {
+            (findings > 0 || errors > 0 || skipped > 0).then(|| {
+                json!({
+                    "rule_id": rule_id,
+                    "rule_name": rule_name,
+                    "findings": findings,
+                    "errors": errors,
+                    "skipped": skipped,
+                    "dbs": dbs.into_iter().collect::<Vec<_>>(),
+                })
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maintenance_status_separates_runtime_health_from_repair_findings() {
+        assert_eq!(maintenance_status(false, 0, 0, 0), "clean");
+        assert_eq!(
+            maintenance_status(false, 3, 0, 0),
+            "maintenance_recommended"
+        );
+        assert_eq!(maintenance_status(true, 3, 3, 0), "applied");
+        assert_eq!(maintenance_status(false, 0, 0, 1), "error");
+    }
+
+    #[test]
+    fn findings_by_rule_groups_impacted_dbs_for_product_summaries() {
+        let mut first = RuleReport::new("R2", "Retention backfill", "global".to_string());
+        first.findings.push(Finding::new("missing_retention", 2));
+        let mut second = RuleReport::new("R2", "Retention backfill", "project:tachi".to_string());
+        second.findings.push(Finding::new("missing_retention", 3));
+        let clean = RuleReport::new("R9", "Domain repair", "project:clean".to_string());
+
+        let grouped = findings_by_rule(&[first, second, clean]);
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0]["rule_id"], "R2");
+        assert_eq!(grouped[0]["findings"], 5);
+        assert_eq!(
+            grouped[0]["dbs"],
+            serde_json::json!(["global", "project:tachi"])
+        );
+    }
 }
