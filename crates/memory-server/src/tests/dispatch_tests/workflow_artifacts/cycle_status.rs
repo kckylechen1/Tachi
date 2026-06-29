@@ -65,6 +65,7 @@ fn write_passed_verification(flow_id: &str) {
     .expect("write verification");
 }
 
+mod cycle_plan;
 mod flow_read_model;
 mod issue_lookup;
 mod spec_drift;

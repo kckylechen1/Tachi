@@ -26,6 +26,9 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 - `tachi_task(action="merge")` remains local dispatched worktree merge only.
 
 `tachi_task(action="cycle_status")` is the read-only projection across those artifacts.
+`tachi_task(action="cycle_plan")` is the read-only agent navigation layer on top of
+that projection: it turns the same evidence into an ordered checklist, current
+blockers, readiness flags, and concrete next command suggestions.
 
 ## Authority Order
 
@@ -58,7 +61,7 @@ fall back to external issue/PR refs and report `no_local_flow` drift.
 
 ## Output Contract
 
-The response is JSON-first and read-only:
+The `cycle_status` response is JSON-first and read-only:
 
 - `flow_id` / `cycle_id`
 - `stage`
@@ -82,6 +85,19 @@ evidence, including missing docs/specs, missing verification, mismatched refs,
 unclosed result artifacts, stale verification heads, or release notes that were
 written before the PR gate became ready.
 
+The `cycle_plan` response is also read-only. It does not dispatch, comment, merge,
+or close anything. It derives:
+
+- `steps`: ordered lifecycle checkpoints from intake through close_loop.
+- `next_step`: the first required checkpoint that is not passed.
+- `current_blockers`: blocking gaps from the next step plus blocking drift items.
+- `readiness`: booleans for dispatch, PR handoff, PR gate, release note, close_loop,
+  and closed state.
+- `status_summary`: the status evidence used to derive the plan.
+
+This gives agents a single "what should I do next?" surface without making
+`cycle_plan` another write path.
+
 ## Why This Belongs With Memory
 
 Continuity memory needs project lifecycle boundaries so it can distinguish:
@@ -99,7 +115,8 @@ the flow artifacts.
 ## Non-Goals
 
 - Do not create a second GitHub sync database.
-- Do not merge PRs through `tachi_task(action="cycle_status")`.
+- Do not merge PRs through `tachi_task(action="cycle_status")` or
+  `tachi_task(action="cycle_plan")`.
 - Do not treat memory/wiki summaries as higher authority than linked docs/specs or
   verification.
 - Do not require live GitHub reads when a local flow already contains the needed

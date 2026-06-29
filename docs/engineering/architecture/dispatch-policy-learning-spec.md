@@ -195,23 +195,25 @@ Every substantial policy-learning slice should be able to pass this workflow:
 
 1. `tachi_task(action="intake", issue_ref=...)`
 2. `tachi_task(action="briefing", flow_id=...)`
-3. `tachi_task(action="ux_matrix", flow_id=...)`
-4. `tachi_task(action="recommend", task=..., doc_paths=[...])`
-5. `tachi_task(action="dispatch", profile=..., flow_id=..., issue_ref=...)`
-6. `tachi_task(action="board", flow_id=...)`
-7. leader verification and `tachi_verify`
-8. `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
-9. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
-10. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
-11. `tachi_task(action="release_note", flow_id=...)`
-12. `tachi_task(action="close_loop", flow_id=...)`
+3. `tachi_task(action="cycle_plan", flow_id=...)`
+4. `tachi_task(action="ux_matrix", flow_id=...)`
+5. `tachi_task(action="recommend", task=..., doc_paths=[...])`
+6. `tachi_task(action="dispatch", profile=..., flow_id=..., issue_ref=...)`
+7. `tachi_task(action="board", flow_id=...)`
+8. leader verification and `tachi_verify`
+9. `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
+10. rerun `tachi_task(action="cycle_plan", flow_id=...)` before PR handoff
+11. `tachi_task(action="link_pr", flow_id=..., pr_ref=...)`
+12. `tachi_task(action="pr_status", flow_id=..., pr_ref=...)`
+13. `tachi_task(action="release_note", flow_id=...)`
+14. `tachi_task(action="close_loop", flow_id=...)`
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
 
 ## Implemented Baseline
 
-As of 2026-06-09, the baseline includes:
+As of 2026-06-28, the baseline includes:
 
 - feature-scoped `tachi_task(action="briefing")`;
 - built-in dispatch profiles and MBIT-like profile cards;
@@ -239,8 +241,11 @@ As of 2026-06-09, the baseline includes:
   weakness markers and skill demotion targets, and merged weak-against signals
   affect route recommendation scoring;
 - credentialed `opencode_builder` profile;
-- feature lifecycle actions: `intake`, `link_pr`, `pr_status`, `release_note`,
-  `ux_matrix`, `build_references`, and `close_loop`;
+- feature lifecycle actions: `intake`, `cycle_status`, `cycle_plan`, `link_pr`,
+  `pr_status`, `release_note`, `ux_matrix`, `build_references`, and `close_loop`;
+- feature briefing, intake instructions, issue automation plans, and GitHub
+  handoff text route flow/issue/PR-backed work through read-only `cycle_plan`
+  before recommend, dispatch, PR handoff, release notes, or close-loop;
 - `dispatch(profile=...)` records flow-visible dispatch ids and compact dispatch
   card artifacts when `flow_id` is valid;
 - dispatch card artifacts include the suggested completion payload, and

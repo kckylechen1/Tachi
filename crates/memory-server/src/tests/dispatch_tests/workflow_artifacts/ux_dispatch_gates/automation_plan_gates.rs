@@ -2,6 +2,23 @@ use super::*;
 
 #[test]
 fn issue_automation_plan_blocks_missing_acceptance_and_high_risk() {
+    let ready = crate::task_lifecycle::IssueSnapshot {
+        repo: "kckylechen1/tachi".to_string(),
+        number: 379,
+        title: "Automate safe issue dispatch".to_string(),
+        body: Some("## Acceptance criteria\n- Dispatch only after lifecycle planning.".to_string()),
+        labels: Vec::new(),
+        state: Some("OPEN".to_string()),
+        url: "https://github.com/kckylechen1/tachi/issues/379".to_string(),
+        doc_paths: vec!["docs/engineering/specs/dispatch-policy.md".to_string()],
+        spec_paths: vec!["docs/engineering/specs/dispatch-policy.md".to_string()],
+    };
+    let plan = crate::task_lifecycle::build_issue_automation_plan(&ready, None);
+    assert_eq!(plan["dispatch_allowed"], json!(true));
+    assert!(plan["recommended_next_action"]
+        .as_str()
+        .is_some_and(|action| action.contains("tachi_task(action='cycle_plan'")));
+
     let missing_acceptance = crate::task_lifecycle::IssueSnapshot {
         repo: "kckylechen1/tachi".to_string(),
         number: 380,

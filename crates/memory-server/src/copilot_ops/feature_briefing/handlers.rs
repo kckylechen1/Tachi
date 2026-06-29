@@ -240,7 +240,13 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
     let suggested_dispatch = suggested_feature_dispatch(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
-    let next_action = feature_next_action(&canonical_docs, &run_artifacts, &board, &memory_rows);
+    let next_action = feature_next_action(
+        params,
+        &canonical_docs,
+        &run_artifacts,
+        &board,
+        &memory_rows,
+    );
     let open_loops = crate::shell_ops::scan_open_loops(8);
     let wiki_hits = compact_layer_rows(wiki_rows, top_k, Some("wiki"), Some("advisory"));
     let memory_fragments = compact_layer_rows(memory_rows, top_k, Some("memory"), Some("context"));

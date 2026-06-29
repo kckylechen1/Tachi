@@ -156,6 +156,7 @@ pub(super) async fn handle_tachi_task_facade(
         "intake" => crate::task_lifecycle::handle_task_intake(server, &params).await,
         "link_pr" => crate::task_lifecycle::handle_task_link_pr(server, &params).await,
         "cycle_status" => crate::task_lifecycle::handle_task_cycle_status(server, &params).await,
+        "cycle_plan" => crate::task_lifecycle::handle_task_cycle_plan(server, &params).await,
         "recommend" => {
             let task = params
                 .task
@@ -276,7 +277,7 @@ pub(super) async fn handle_tachi_task_facade(
             Ok(result)
         }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'status', 'cancel', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'cycle_status', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
+            "Invalid action '{}'. Use 'briefing', 'doc_index', 'plan', 'dispatch', 'complete', 'status', 'cancel', 'board', 'wait', 'profiles', 'profile', 'card', 'recommend', 'route_simulate', 'proposals', 'review_proposal', 'apply_proposals', 'intake', 'link_pr', 'cycle_status', 'cycle_plan', 'pr_status', 'pr_handoff', 'release_note', 'ux_matrix', 'build_references', 'close_loop', or 'merge'.",
             params.action
         )),
     }?;

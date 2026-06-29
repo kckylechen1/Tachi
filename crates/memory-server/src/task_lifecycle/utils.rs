@@ -125,6 +125,7 @@ pub(super) fn write_intake_instruction(
         }
     }
     body.push_str("\n## Next Lifecycle Actions\n\n");
+    body.push_str("- `tachi_task(action='cycle_plan', flow_id=...)`\n");
     body.push_str("- `tachi_task(action='briefing', flow_id=...)`\n");
     body.push_str("- `tachi_task(action='recommend', task=..., doc_paths=[...])`\n");
     body.push_str("- `tachi_task(action='dispatch', flow_id=..., issue_ref=...)`\n");

@@ -28,6 +28,7 @@ fn tachi_task_action_schema(
             "intake",
             "link_pr",
             "cycle_status",
+            "cycle_plan",
             "pr_status",
             "pr_handoff",
             "release_note",
@@ -35,7 +36,7 @@ fn tachi_task_action_schema(
             "build_references",
             "close_loop",
         ],
-        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the same project-first layered source index for agent context assembly; action='status' reads one dispatch ledger and may query backend-local status; action='cancel' requests cooperative cancellation for a dispatch backend that supports it; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='cycle_status' returns a read-only project lifecycle status from linked issue/PR, docs/specs, flow artifacts, verification, and closure state; action='pr_status' previews GitHub PR safe-merge status without merging; action='pr_handoff' writes a PR body/branch handoff with verification and known gaps; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
+        "Required Tachi task facade action. action='briefing' returns a feature-scoped handoff board; action='doc_index' returns the same project-first layered source index for agent context assembly; action='status' reads one dispatch ledger and may query backend-local status; action='cancel' requests cooperative cancellation for a dispatch backend that supports it; action='wait' polls a dispatch until terminal state; action='complete' records evaluated completion evidence; action='route_simulate' replays recent /eval rows across current, cost_sensitive, and quality_first routing policies without mutating policy; action='proposals' lists/generates route-policy and loadout-evolution proposals from replay/eval evidence; action='review_proposal' approves/rejects a proposal; action='apply_proposals' persists an approved route-policy rule without silently mutating recommendation scoring; approved loadout-evolution proposals wait for MBIT/profile-card projection; action='intake' binds a GitHub issue to a Tachi flow; action='link_pr' attaches a PR to a flow; action='cycle_status' returns a read-only project lifecycle status from linked issue/PR, docs/specs, flow artifacts, verification, and closure state; action='cycle_plan' turns cycle_status into a read-only ordered action plan/checklist for agents; action='pr_status' previews GitHub PR safe-merge status without merging; action='pr_handoff' writes a PR body/branch handoff with verification and known gaps; action='release_note' synthesizes a release/changelog note from flow GitHub state, docs, and verification evidence; action='ux_matrix' writes/returns a feature UX workflow checklist for the issue→briefing→dispatch→PR→release lifecycle; action='close_loop' writes issue/doc/wiki closure; action='merge' is local dispatched worktree git merge only; use tachi_gh(action='safe_merge') to execute GitHub PR merges.",
         generator,
     )
 }
@@ -44,12 +45,13 @@ fn tachi_task_action_schema(
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiTaskParams {
-    /// Action: "plan", "briefing", "doc_index", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "status", "cancel", "board", "wait", "merge", "intake", "link_pr", "cycle_status", "pr_status", "pr_handoff", "release_note", "ux_matrix", "build_references", or "close_loop".
+    /// Action: "plan", "briefing", "doc_index", "recommend", "dispatch", "complete", "profiles", "profile", "card", "route_simulate", "proposals", "review_proposal", "apply_proposals", "status", "cancel", "board", "wait", "merge", "intake", "link_pr", "cycle_status", "cycle_plan", "pr_status", "pr_handoff", "release_note", "ux_matrix", "build_references", or "close_loop".
     /// action="merge" is local dispatched worktree git merge only; use
     /// tachi_gh(action='safe_merge') to execute GitHub PR merges.
     /// action="intake" reads/binds a GitHub issue to a Tachi flow and seeds flow artifacts.
     /// action="link_pr" attaches a GitHub PR to an existing flow.
     /// action="cycle_status" returns a read-only lifecycle status from linked issue/PR, docs/specs, flow artifacts, verification, and closure state.
+    /// action="cycle_plan" returns a read-only ordered lifecycle action plan derived from cycle_status.
     /// action="pr_status" previews GitHub PR safe-merge status and may persist flow status.
     /// action="pr_handoff" writes a PR body/branch handoff from flow, issue, verification, and gaps.
     /// action="release_note" synthesizes a release/changelog note from a flow or PR and writes

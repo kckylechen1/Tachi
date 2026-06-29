@@ -20,9 +20,9 @@ pub(crate) fn build_issue_automation_plan(
         slug_for_branch(&issue.title)
     );
     let recommended_next_action = if dispatch_allowed {
-        "Run tachi_task(action='recommend'), then dispatch a bounded worker with flow_id and issue_ref."
+        "Run tachi_task(action='cycle_plan', flow_id=...), then follow its next_step for recommend/dispatch/verification/PR handoff."
     } else {
-        "Ask the leader to clarify acceptance criteria or approve the high-risk boundary before dispatch."
+        "Ask the leader to clarify acceptance criteria or approve the high-risk boundary, then rerun tachi_task(action='cycle_plan', flow_id=...)."
     };
 
     json!({

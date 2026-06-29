@@ -27,6 +27,7 @@ pub(super) fn infer_feature_stage(run_artifacts: &[Value], board: &Value) -> Str
 }
 
 pub(super) fn feature_next_action(
+    params: &TachiTaskParams,
     canonical_docs: &[Value],
     run_artifacts: &[Value],
     board: &Value,
@@ -45,6 +46,11 @@ pub(super) fn feature_next_action(
         })
     {
         return "Poll tachi_task(action='board') and collect the active worker result before dispatching more work.".to_string();
+    }
+    if let Some(command) = cycle_plan_command(params) {
+        return format!(
+            "Run {command} to select the next lifecycle step from current issue/PR/docs/verification state."
+        );
     }
     if run_artifacts.iter().any(|artifact| {
         artifact
@@ -65,4 +71,28 @@ pub(super) fn feature_next_action(
         return "Start with tachi_task(action='plan') or save a checkpoint after the next concrete decision.".to_string();
     }
     "Run tachi_task(action='recommend') for the next worker profile, then dispatch or review with explicit verification.".to_string()
+}
+
+fn cycle_plan_command(params: &TachiTaskParams) -> Option<String> {
+    params
+        .flow_id
+        .as_deref()
+        .filter(|flow_id| !flow_id.trim().is_empty())
+        .map(|flow_id| format!("tachi_task(action='cycle_plan', flow_id='{flow_id}')"))
+        .or_else(|| {
+            params
+                .issue_ref
+                .as_deref()
+                .filter(|issue_ref| !issue_ref.trim().is_empty())
+                .map(|issue_ref| {
+                    format!("tachi_task(action='cycle_plan', issue_ref='{issue_ref}')")
+                })
+        })
+        .or_else(|| {
+            params
+                .pr_ref
+                .as_deref()
+                .filter(|pr_ref| !pr_ref.trim().is_empty())
+                .map(|pr_ref| format!("tachi_task(action='cycle_plan', pr_ref='{pr_ref}')"))
+        })
 }

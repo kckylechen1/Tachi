@@ -8,6 +8,7 @@ pub(super) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 pub(crate) fn mcp_server_instructions() -> String {
     "Tachi — memory + Hub copilot for coding agents. \
 WORKFLOW: (1) briefing at session start: tachi_memory(action='briefing'). \
+(1b) issue/PR lifecycle navigation when a flow, issue, or PR exists: tachi_task(action='cycle_plan', flow_id=..., issue_ref=..., or pr_ref=...) before recommend/dispatch/PR handoff/close-loop. \
 (2) save PROACTIVELY after any meaningful milestone — decision made, root cause found, sub-task done, key command confirmed. Do NOT wait until session end: tachi_memory(action='save', text=…, path='/scratch/…' or '/code-review/…', keywords=[tags], entities=[repos/modules], project='<git-project>'). \
 (3) checkpoint for mid-task pause or handoff (not a substitute for save): action='checkpoint'. \
 (4) extract_facts to atomize raw text/logs via LLM into N searchable facts: action='extract_facts'. \
@@ -25,6 +26,9 @@ pub(super) fn agent_memory_rules_block() -> String {
 ### Session start (non-trivial work)\n\
 - Call `tachi_memory` with `action=\"briefing\"` (or `tachi_task` `action=\"plan\"`).\n\
 - Optionally `tachi_status` when DB health, vectors, or Foundry jobs may matter.\n\n\
+### Project lifecycle (issue/PR/flow work)\n\
+- When a `flow_id`, `issue_ref`, or `pr_ref` exists, run `tachi_task` with `action=\"cycle_plan\"` before `recommend`, `dispatch`, PR handoff, release notes, or close-loop.\n\
+- Treat `cycle_plan` as read-only navigation; follow its `next_step`, blockers, and readiness flags.\n\n\
 ### Save — call proactively after any meaningful milestone\n\
 - **Do NOT wait until session end.** Save after: decision made, root cause found, sub-task done, key command confirmed.\n\
 - **`tachi_memory` `action=\"save\"`**: your own concise conclusion. Pass `project` (git repo), `path` under `/scratch/…` or `/code-review/…`, `keywords` + `entities`.\n\
