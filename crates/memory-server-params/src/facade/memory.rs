@@ -34,6 +34,7 @@ fn tachi_memory_action_schema(
             "recall_proposals",
             "review_recall_proposal",
             "apply_recall_proposals",
+            "pattern_feedback",
             "progress",
             "readiness",
         ],
@@ -48,7 +49,7 @@ pub struct TachiSearchParams {
     /// tachi_memory(action=search) (which defaults to JSON); same retrieval, formatted output.
     pub query: String,
 
-    /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "all" searches both (default), "sft" searches training/distillation corpus.
+    /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "patterns" searches projected pattern memory, "all" searches both memory/wiki (default), "sft" searches training/distillation corpus.
     #[serde(default = "default_facade_search_scope")]
     pub scope: String,
 
@@ -254,7 +255,7 @@ fn default_memory_top_k() -> usize {
 pub struct TachiMemoryParams {
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), progress (long-running flow status), readiness (health + tool visibility)."
+        description = "Required. One of: search (hybrid vector+FTS+symbolic recall), get (fetch one memory by id), save (persist memory entry; prefer tachi_save for decisions), extract_facts (LLM atomize raw text into entries), briefing (session-start context), checkpoint (mid-task handoff summary), alerts (compact warnings when stuck), ask (Q&A over evidence; set synthesize=true for LLM answer), consolidate (merge related memories), recall_simulate (replay labeled query→expected-id cases and report recall@k/MRR without mutating access counters), recall_proposals (generate/list evidence-backed RecallConfig proposals), review_recall_proposal (approve/reject one recall proposal), apply_recall_proposals (persist approved TACHI_RECALL_* config.env values), pattern_feedback (record explicit hit/miss/stale/seen feedback for projected pattern memory), progress (long-running flow status), readiness (health + tool visibility)."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -406,7 +407,9 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=progress] Flow id (create or resume a tracked command).")]
     pub flow_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=progress] Event name, e.g. step_done, failed.")]
+    #[schemars(
+        description = "[action=progress] Event name, e.g. step_done, failed. [action=pattern_feedback] Outcome: hit, miss, stale, or seen."
+    )]
     pub event: Option<String>,
     #[serde(default)]
     #[schemars(description = "[action=progress] State payload or status line.")]

@@ -52,6 +52,20 @@ fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
     }
 }
 
+fn fresh_distill_marker() -> DistillMarkerStatus {
+    DistillMarkerStatus {
+        path: "/tmp/marker".to_string(),
+        last_run_at: "2026-06-09T00:00:00Z".to_string(),
+        age_seconds: 0,
+        age: "0s ago".to_string(),
+        is_stale: false,
+        groups_distilled: Some(4),
+        groups_skipped: Some(0),
+        fallback_used: Some(0),
+        errors: Some(0),
+    }
+}
+
 #[test]
 fn build_status_warnings_names_foreign_daemon() {
     let snapshot = empty_snapshot(vec![db_status("global", 0, 0, 1.0)]);
@@ -228,7 +242,30 @@ fn health_score_drops_for_background_enrichment_failures_and_orphans() {
 }
 
 #[test]
-fn health_deductions_explain_daemon_and_enrichment_score_loss() {
+fn health_deductions_do_not_penalize_missing_daemon() {
+    let deductions = status_health::calculate_health_deductions(
+        &DaemonStatus::None,
+        &[db_status("global", 0, 0, 1.0)],
+        Some(&fresh_distill_marker()),
+        &[],
+        Some(&[]),
+        Some(&[]),
+    );
+
+    assert_eq!(
+        status_health::health_score_from_deductions(&deductions),
+        100
+    );
+    assert!(
+        deductions
+            .iter()
+            .all(|deduction| deduction.code != "daemon_not_running"),
+        "missing daemon is a runtime mode, not a health failure: {deductions:?}"
+    );
+}
+
+#[test]
+fn health_deductions_explain_enrichment_score_loss_without_daemon_noise() {
     let mut quant = db_status("quant", 0, 0, 1.0);
     quant.enrichment_failed_recent = 1;
     quant.enrichment_failures = vec![EnrichmentFailureSummary {
@@ -236,17 +273,7 @@ fn health_deductions_explain_daemon_and_enrichment_score_loss() {
         last_error: "Missing API key".to_string(),
         count: 1,
     }];
-    let marker = DistillMarkerStatus {
-        path: "/tmp/marker".to_string(),
-        last_run_at: "2026-06-09T00:00:00Z".to_string(),
-        age_seconds: 0,
-        age: "0s ago".to_string(),
-        is_stale: false,
-        groups_distilled: Some(4),
-        groups_skipped: Some(0),
-        fallback_used: Some(0),
-        errors: Some(0),
-    };
+    let marker = fresh_distill_marker();
 
     let deductions = status_health::calculate_health_deductions(
         &DaemonStatus::None,
@@ -258,10 +285,10 @@ fn health_deductions_explain_daemon_and_enrichment_score_loss() {
     );
     let score = status_health::health_score_from_deductions(&deductions);
 
-    assert_eq!(score, 75);
+    assert_eq!(score, 95);
     assert!(deductions
         .iter()
-        .any(|deduction| { deduction.code == "daemon_not_running" && deduction.points == 20 }));
+        .all(|deduction| { deduction.code != "daemon_not_running" }));
     assert!(deductions.iter().any(|deduction| {
         deduction.code == "enrichment_failures"
             && deduction.points == 5

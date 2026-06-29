@@ -75,10 +75,19 @@ fn parse_memory_rows(raw: String, top_k: usize) -> Value {
     Value::Array(rows)
 }
 
-fn parse_pattern_rows(mut rows: Vec<Value>, top_k: usize) -> Value {
+fn parse_pattern_rows(mut rows: Vec<Value>, top_k: usize) -> Vec<Value> {
     rows.retain(is_pattern_row);
     rows.truncate(top_k);
-    Value::Array(rows)
+    rows
+}
+
+fn strip_metadata(mut rows: Vec<Value>) -> Vec<Value> {
+    for row in &mut rows {
+        if let Some(object) = row.as_object_mut() {
+            object.remove("metadata");
+        }
+    }
+    rows
 }
 
 pub(crate) async fn handle_tachi_search(
@@ -175,10 +184,19 @@ pub(crate) async fn collect_tachi_search_sections(
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
             as_of: params.as_of.clone(),
-            include_metadata: false,
+            include_metadata: true,
         };
         match search_memory_rows_with_access(server, pattern_params, false, true).await {
-            Ok(rows) => sections.push(("Patterns".to_string(), parse_pattern_rows(rows, top_k))),
+            Ok(rows) => {
+                let rows = parse_pattern_rows(rows, top_k);
+                let _feedback = crate::continuity_ops::emit_pattern_seen_events(
+                    server,
+                    params.project.as_deref(),
+                    Some(&params.query),
+                    &rows,
+                );
+                sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
+            }
             Err(e) => sections.push(("Patterns".to_string(), Value::String(format!("Error: {e}")))),
         }
     }

@@ -30,7 +30,7 @@ pub(crate) fn health_score_from_deductions(deductions: &[HealthDeduction]) -> u8
 }
 
 pub(crate) fn calculate_health_deductions(
-    daemon: &crate::status_ops::DaemonStatus,
+    _daemon: &crate::status_ops::DaemonStatus,
     dbs: &[DbStatus],
     distill_marker: Option<&crate::status_ops::DistillMarkerStatus>,
     api_keys: &[ApiKeyStatus],
@@ -38,15 +38,10 @@ pub(crate) fn calculate_health_deductions(
     rotation_group_results: Option<&[ProviderRotationGroupProbe]>,
 ) -> Vec<HealthDeduction> {
     let mut deductions = Vec::new();
-    if !matches!(daemon, crate::status_ops::DaemonStatus::Running { .. }) {
-        push_deduction(
-            &mut deductions,
-            "daemon_not_running",
-            "daemon not running",
-            20,
-            "status could not find a matching daemon pid/lock; background workers are not owned by a daemon for this DB scope",
-        );
-    }
+    // A missing daemon is visible in the daemon/status surfaces, but it is not
+    // itself a health failure. Tachi often runs as stdio MCP servers or short
+    // CLI invocations; penalize the concrete consequences instead (stale
+    // distill, failed jobs, provider failures, vector gaps).
     // Only dead-lettered (retry-exhausted) jobs count as genuine, current
     // failures. Transient failures are auto-retried with backoff and self-heal,
     // so they no longer drag the score down for their full GC-retention window.

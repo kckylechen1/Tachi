@@ -46,6 +46,10 @@ This line makes Tachi's project-cycle direction explicit:
 - Continuity memory is now typed: session captures, memory writes, outcome
   labels, projections, and active patterns can be stored and queried as durable
   project context.
+- Pattern memory now has an explicit feedback loop: `tachi_search`
+  `scope="patterns"` records `seen`, while `tachi_memory`
+  `action="pattern_feedback"` records reviewed `hit`, `miss`, and `stale`
+  signals without promoting anything into skills automatically.
 - `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
   cycle plan, verification status, PR handoff, release notes, reference
   building, and close-loop writes back to memory/wiki/docs.
@@ -57,6 +61,9 @@ This line makes Tachi's project-cycle direction explicit:
   `--no-project-db` serves are isolated from project launch context, and
   `TACHI_DISABLE_STDIO_PROXY=1` lets source-tree MCP debug sessions avoid
   reusing an existing daemon.
+- Health scoring now treats a missing daemon as a runtime mode, not a failure
+  by itself; concrete problems such as stale distill, provider failures,
+  vector gaps, or failed Foundry jobs still lower the score.
 - OpenClaw remains a thin MCP facade. It owns hook timing and OpenClaw-facing
   tool exposure; Tachi owns database writes, embedding, rerank, distill, graph
   maintenance, Foundry jobs, and continuity projection.

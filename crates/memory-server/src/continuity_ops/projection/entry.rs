@@ -281,13 +281,14 @@ fn counter_delta(event_type: &str, projection: ProjectionKind) -> (i64, i64, i64
         || event_type.contains(".failure")
     {
         (1, 0, 1)
-    } else if matches!(
+    } else if (matches!(
         projection,
         ProjectionKind::Pattern
             | ProjectionKind::Bonding
             | ProjectionKind::WorldBook
             | ProjectionKind::Affect
-    ) && (event_type.contains(".observed") || event_type.contains(".candidate"))
+    ) && (event_type.contains(".observed") || event_type.contains(".candidate")))
+        || event_type.contains(".seen")
     {
         (1, 0, 0)
     } else {

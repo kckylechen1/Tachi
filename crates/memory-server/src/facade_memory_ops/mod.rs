@@ -7,6 +7,7 @@
 mod briefing_ops;
 mod checkpoint_ops;
 mod evidence_format;
+mod pattern_feedback_ops;
 mod progress_ops;
 mod readiness_ops;
 mod recall_proposal_ops;
@@ -215,10 +216,19 @@ pub(crate) async fn handle_tachi_memory(
             recall_proposal_ops::handle_recall_config_review(server, &params)
         }
         "apply_recall_proposals" => recall_proposal_ops::handle_recall_config_apply(server, &params),
+        "pattern_feedback" => {
+            if let Some(body) =
+                crate::cli_client::maybe_forward_server_write(server, "tachi_memory", &params)
+                    .await?
+            {
+                return Ok(body);
+            }
+            pattern_feedback_ops::handle_pattern_feedback(server, &params)
+        }
         "progress" => progress_ops::handle_memory_progress(server, &params).await,
         "readiness" => readiness_ops::handle_memory_readiness(server, &params).await,
         _ => Err(format!(
-            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'progress', or 'readiness'.",
+            "Invalid action '{}'. Use 'search', 'save', 'extract_facts', 'briefing', 'checkpoint', 'alerts', 'ask', 'consolidate', 'recall_simulate', 'recall_proposals', 'review_recall_proposal', 'apply_recall_proposals', 'pattern_feedback', 'progress', or 'readiness'.",
             params.action
         )),
     }
@@ -268,7 +278,13 @@ mod tests {
 
     #[test]
     fn facade_write_actions_do_not_use_read_forwarding() {
-        for action in ["save", "extract_facts", "checkpoint", "progress"] {
+        for action in [
+            "save",
+            "extract_facts",
+            "checkpoint",
+            "pattern_feedback",
+            "progress",
+        ] {
             assert!(
                 !should_forward_facade_read(action),
                 "{action} should keep its write/state-specific forwarding path"

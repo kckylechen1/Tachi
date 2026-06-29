@@ -45,6 +45,7 @@ Major release for turning Tachi from a memory + workflow backend into a project-
 
 - **Continuity event substrate**: typed continuity events, storage, metrics, projection, context building, outcome labeling, and optional distill/labeler pipeline hooks.
 - **Continuity projections**: session captures can project into pattern/timeline memory entries with maturity metadata, active-pattern context, and read-only status exposure.
+- **Pattern memory feedback loop**: `tachi_search scope="patterns"` records `seen` exposure through continuity events, and `tachi_memory action="pattern_feedback"` records reviewed `hit` / `miss` / `stale` signals without auto-promoting patterns into skills.
 - **Project-cycle memory spine**: new architecture docs and examples for moving from session events to reusable patterns, bonding memory, and issue/doc/wiki closure.
 - **Lifecycle task actions**: `tachi_task` now covers `doc_index`, `cycle_status`, `cycle_plan`, `pr_status`, `release_note`, `build_references`, and `close_loop` so issues, PRs, docs/specs, memory, wiki, verification, and release notes can be treated as one project loop.
 - **GitHub lifecycle wiring**: issue intake, PR linking/status, review digest routing, linked issue checks, and close-loop comments are wired into the task lifecycle surfaces.
@@ -68,6 +69,7 @@ Major release for turning Tachi from a memory + workflow backend into a project-
 - **No-project/global serve isolation**: `--no-project-db serve` runs from a neutral runtime directory and skips project `.env` loading so global/OpenClaw/desktop launches do not inherit unrelated project paths.
 - **Stdio proxy self-healing**: stdio proxy forwarding detects dead or stale daemons, checks version/project-scope compatibility, and avoids forwarding writes across project DB boundaries.
 - **Status and health are product-facing**: `tachi status` reports real health scores, clearer deductions, compact default surfaces, provider probe context, namespace drift, continuity metrics, and self-explanatory remediation hints.
+- Missing daemon state remains visible in runtime/status output, but no longer lowers health by itself; health scoring now penalizes concrete consequences such as stale distill, provider probe failures, vector gaps, or exhausted Foundry jobs.
 - **Foundry failure handling**: failed jobs retry with backoff, terminal failures become visible, stale failure markers can be repaired, and health scoring only penalizes exhausted failures.
 - **Daily/background work covers named projects**: distill and WAL checkpoint routines now cover named/project DBs instead of only the currently bound store.
 - **OpenClaw stays a thin facade**: the plugin owns hook timing, tool exposure, and MCP calls; embedding, rerank, distill, graph maintenance, Foundry work, and database writes stay in Tachi.
