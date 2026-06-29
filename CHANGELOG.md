@@ -56,6 +56,7 @@ Major release for turning Tachi from a memory + workflow backend into a project-
 - **Built-in workflow skills**: Superpowers and Waza gates are embedded as first-class skill capabilities for planning, execution, review, verification, release, audit, research, and writing workflows.
 - **Poke smoke suites**: `tachi poke` adds isolated local product probes for memory, dispatch, skill, shell, and verification paths.
 - **Vault onboarding**: setup can funnel provider keys into the encrypted vault, and the TypeScript onboarding UI supports masked/skippable API-key entry.
+- **macOS daemon service installer**: the shell installer can install/restart a user LaunchAgent for the global Tachi daemon, with idle shutdown disabled and logs under `~/.tachi/logs`.
 - **Release version gate**: `scripts/check_release_versions.py` verifies that Cargo package versions, Cargo.lock entries, npm package files, package-lock files, installer URLs, OpenClaw metadata, and `docs/current-state.agent.yaml` agree with the `memory-server` version.
 - CI now runs the release version sync check before clippy.
 - `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio MCP process to serve locally instead of forwarding to an already-running compatible daemon.
@@ -65,6 +66,7 @@ Major release for turning Tachi from a memory + workflow backend into a project-
 
 - `memory-core`, `memory-node`, `memory-server`, `memory-server-params`, the OpenClaw plugin, and npm package metadata are aligned to `1.6.0`.
 - Installer URLs across README, install docs, scripts, and OpenClaw docs now point at the `v1.6.0` release tag.
+- The Homebrew formula updater now emits a daemon `service do` block so tap releases can support `brew services restart tachi`; the shell installer keeps a LaunchAgent fallback for older/private taps without a trusted service definition.
 - **Project DB routing is repo-local first**: source-tree MCP launches, daemon facades, and embedded adapters now prefer the active project store instead of relying on Plan C symlink behavior.
 - **No-project/global serve isolation**: `--no-project-db serve` runs from a neutral runtime directory and skips project `.env` loading so global/OpenClaw/desktop launches do not inherit unrelated project paths.
 - **Stdio proxy self-healing**: stdio proxy forwarding detects dead or stale daemons, checks version/project-scope compatibility, and avoids forwarding writes across project DB boundaries.

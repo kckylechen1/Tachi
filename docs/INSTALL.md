@@ -28,11 +28,29 @@ brew tap kckylechen1/tachi && brew install tachi
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.0/scripts/install.sh)" -- --skip-plugin
 ```
 
+On macOS, the shell installer also installs and restarts a user LaunchAgent for
+the global Tachi daemon:
+
+```text
+~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
+```
+
+That service runs `tachi --daemon --port 0 --global-db ~/.tachi/global/memory.db
+--no-project-db` with `TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`, so it is a stable
+global/background worker and does not accidentally bind itself to the directory
+where the installer was run. It keeps projection, vector sweep, Foundry, and
+daily maintenance alive after the installing shell exits. Skip service
+installation with `--skip-daemon-service` when you only want stdio MCP clients
+to auto-spawn short-lived daemons.
+
 ### Verify Installation
 
 ```bash
 tachi --version
 # Expected: tachi 1.6.0 (or later)
+
+tachi daemon status
+# Expected on macOS after the full installer: daemon running
 ```
 
 If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
@@ -40,6 +58,34 @@ If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 ```
+
+### Daemon Service Operations (macOS)
+
+The installer-managed service is a user LaunchAgent, not a root daemon. To
+restart it manually:
+
+```bash
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
+launchctl kickstart -k "gui/$(id -u)/com.kckylechen.tachi.daemon"
+tachi daemon status
+```
+
+To disable it:
+
+```bash
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist 2>/dev/null || true
+rm -f ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
+```
+
+Logs live under `~/.tachi/logs/launchd-daemon.out.log` and
+`~/.tachi/logs/launchd-daemon.err.log`.
+
+Homebrew remains the recommended way to install and upgrade the binary. The
+release formula update script also emits a `service do` block so the tap can
+support `brew services restart tachi` once the formula is published with the
+service definition. The shell installer keeps the LaunchAgent fallback because
+older/private taps may not expose a trusted service block yet.
 
 ---
 

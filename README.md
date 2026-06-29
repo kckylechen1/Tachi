@@ -64,6 +64,9 @@ This line makes Tachi's project-cycle direction explicit:
 - Health scoring now treats a missing daemon as a runtime mode, not a failure
   by itself; concrete problems such as stale distill, provider failures,
   vector gaps, or failed Foundry jobs still lower the score.
+- The shell installer now installs a user LaunchAgent for the global Tachi
+  daemon on macOS, with idle shutdown disabled so background projection,
+  vector sweep, and Foundry work keep running after the installing shell exits.
 - OpenClaw remains a thin MCP facade. It owns hook timing and OpenClaw-facing
   tool exposure; Tachi owns database writes, embedding, rerank, distill, graph
   maintenance, Foundry jobs, and continuity projection.
@@ -116,10 +119,15 @@ Or use the shell installer (also installs the OpenClaw plugin when detected):
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.0/scripts/install.sh)"
 ```
 
+On macOS the shell installer also installs/restarts a user LaunchAgent at
+`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`. Skip that with
+`--skip-daemon-service` if you only want the CLI/MCP stdio binary.
+
 Verify:
 
 ```bash
 tachi --version
+tachi daemon status
 ```
 
 OpenClaw users should use the full installer above to refresh both the Tachi

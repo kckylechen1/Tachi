@@ -12,6 +12,7 @@ PLUGIN_DIR="${TACHI_OPENCLAW_PLUGIN_DIR:-${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/ext
 REPO="kckylechen1/tachi"
 SKIP_BREW=0
 SKIP_PLUGIN=0
+DAEMON_SERVICE="${TACHI_DAEMON_SERVICE:-1}"
 
 print_help() {
   echo "Usage: install.sh [options]"
@@ -19,6 +20,9 @@ print_help() {
   echo "  --dir <path>        OpenClaw plugin install dir (default: ~/.openclaw/extensions/tachi)"
   echo "  --skip-brew         Skip installing/updating the Tachi Homebrew package"
   echo "  --skip-plugin       Skip installing/updating the OpenClaw plugin"
+  echo "  --daemon-service    Install/restart the user launchd daemon service (default on macOS)"
+  echo "  --skip-daemon-service"
+  echo "                       Do not install/restart the daemon service"
   echo "  -h, --help          Show this help"
 }
 
@@ -28,6 +32,8 @@ while [[ $# -gt 0 ]]; do
     --dir) PLUGIN_DIR="$2"; shift 2 ;;
     --skip-brew) SKIP_BREW=1; shift ;;
     --skip-plugin) SKIP_PLUGIN=1; shift ;;
+    --daemon-service) DAEMON_SERVICE=1; shift ;;
+    --skip-daemon-service) DAEMON_SERVICE=0; shift ;;
     -h|--help)
       print_help
       exit 0
@@ -39,6 +45,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+DAEMON_SERVICE_NORMALIZED=$(printf '%s' "$DAEMON_SERVICE" | tr '[:upper:]' '[:lower:]')
+case "$DAEMON_SERVICE_NORMALIZED" in
+  1|true|yes|on) DAEMON_SERVICE=1 ;;
+  0|false|no|off) DAEMON_SERVICE=0 ;;
+  *)
+    echo "Invalid TACHI_DAEMON_SERVICE value: $DAEMON_SERVICE (expected true/false)"
+    exit 1
+    ;;
+esac
 
 echo "========================================================="
 echo "🧠 Installing Tachi + OpenClaw Plugin"
@@ -109,6 +125,129 @@ install_tachi_brew() {
   echo "   Installed binary: $(command -v tachi || echo 'not on PATH yet')"
   if command -v tachi >/dev/null 2>&1; then
     echo "   Tachi version: $(tachi --version || true)"
+  fi
+}
+
+xml_escape() {
+  local value="$1"
+  value=${value//&/&amp;}
+  value=${value//</&lt;}
+  value=${value//>/&gt;}
+  value=${value//\"/&quot;}
+  value=${value//\'/&apos;}
+  printf '%s' "$value"
+}
+
+launchctl_bootout_plist() {
+  local plist="$1"
+  local label="$2"
+  local uid
+  uid=$(id -u)
+  launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+  launchctl remove "$label" >/dev/null 2>&1 || true
+  launchctl unload "$plist" >/dev/null 2>&1 || true
+}
+
+launchctl_bootstrap_plist() {
+  local plist="$1"
+  local label="$2"
+  local uid
+  uid=$(id -u)
+  if ! launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
+    launchctl load "$plist" >/dev/null
+  fi
+  launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
+}
+
+install_daemon_service() {
+  if [ "$(uname -s)" != "Darwin" ]; then
+    echo ""
+    echo ">> Skipping daemon service: launchd service management is macOS-only"
+    return 0
+  fi
+
+  require_cmd launchctl
+  if ! command -v tachi >/dev/null 2>&1; then
+    echo "❌ tachi is not on PATH; install the binary before enabling the daemon service"
+    exit 1
+  fi
+
+  local tachi_bin
+  local label="com.kckylechen.tachi.daemon"
+  local launch_agents="$HOME/Library/LaunchAgents"
+  local app_home="${TACHI_HOME:-$HOME/.tachi}"
+  local logs_dir="$app_home/logs"
+  local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/memory.db}"
+  local port="${TACHI_DAEMON_PORT:-0}"
+  local profile="${TACHI_PROFILE:-standard}"
+  local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"
+  local plist="$launch_agents/$label.plist"
+
+  tachi_bin=$(command -v tachi)
+  mkdir -p "$launch_agents" "$logs_dir" "$(dirname "$global_db")"
+
+  echo ""
+  echo ">> Installing Tachi daemon LaunchAgent..."
+  echo "   Label: $label"
+  echo "   Binary: $tachi_bin"
+  echo "   Global DB: $global_db"
+
+  cat >"$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$label")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$tachi_bin")</string>
+    <string>--daemon</string>
+    <string>--port</string>
+    <string>$(xml_escape "$port")</string>
+    <string>--global-db</string>
+    <string>$(xml_escape "$global_db")</string>
+    <string>--no-project-db</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>$(xml_escape "$HOME")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>$(xml_escape "$path_env")</string>
+    <key>TACHI_HOME</key>
+    <string>$(xml_escape "$app_home")</string>
+    <key>TACHI_PROFILE</key>
+    <string>$(xml_escape "$profile")</string>
+    <key>TACHI_DAEMON_IDLE_TIMEOUT_SECS</key>
+    <string>0</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$logs_dir/launchd-daemon.out.log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$logs_dir/launchd-daemon.err.log")</string>
+</dict>
+</plist>
+PLIST
+
+  launchctl_bootout_plist "$plist" "$label"
+  launchctl_bootstrap_plist "$plist" "$label"
+
+  sleep 2
+  local daemon_json
+  daemon_json=$(tachi daemon status --json 2>/dev/null || true)
+  if printf '%s\n' "$daemon_json" | grep -q '"state": "running"'; then
+    tachi daemon status || true
+  else
+    echo "❌ daemon service did not report state=running"
+    echo "   Inspect: $logs_dir/launchd-daemon.err.log"
+    printf '%s\n' "$daemon_json"
+    exit 1
   fi
 }
 
@@ -217,6 +356,12 @@ else
   echo ">> Skipping Homebrew install (--skip-brew)"
 fi
 
+if [ "$DAEMON_SERVICE" = "1" ]; then
+  install_daemon_service
+else
+  echo ">> Skipping daemon service (--skip-daemon-service)"
+fi
+
 if [ "$SKIP_PLUGIN" -eq 0 ]; then
   install_openclaw_plugin
 else
@@ -232,6 +377,10 @@ if [ "$SKIP_BREW" -eq 0 ]; then
   echo "Tachi CLI:"
   echo "  $(command -v tachi || echo 'tachi not on PATH yet')"
 fi
+if [ "$DAEMON_SERVICE" = "1" ] && [ "$(uname -s)" = "Darwin" ]; then
+  echo "Tachi daemon service:"
+  echo "  ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist"
+fi
 if [ "$SKIP_PLUGIN" -eq 0 ]; then
   echo "OpenClaw plugin path:"
   echo "  $PLUGIN_DIR"
@@ -242,4 +391,4 @@ echo ""
 echo "Next steps:"
 echo "  1. Configure API keys (VOYAGE_API_KEY, VOYAGE_RERANK_API_KEY [optional], SILICONFLOW_API_KEY, MINIMAX_API_KEY, REASONING_API_KEY)"
 echo "  2. Restart the OpenClaw gateway"
-echo "  3. Verify Tachi with: tachi --help"
+echo "  3. Verify Tachi with: tachi daemon status && tachi status"
