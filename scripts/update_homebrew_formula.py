@@ -88,13 +88,79 @@ def update_bottle_block(text: str, bottle_block: str) -> str:
     raise ValueError("Could not find insertion point for bottle block (no def install found)")
 
 
+def replace_block(text: str, name: str, replacement: str) -> str:
+    pattern = rf"  def {name}\b\n.*?\n  end\n?"
+    updated, count = re.subn(pattern, replacement + "\n", text, count=1, flags=re.DOTALL)
+    if count != 1:
+        raise ValueError(f"Could not update {name} block")
+    return updated
+
+
+def ensure_modern_formula_style(text: str) -> str:
+    text = text.replace('  license "AGPL-3.0"', '  license "AGPL-3.0-only"')
+    install_block = """  def install
+    system "cargo", "install", *std_cargo_args(path: "crates/memory-server"),
+           "--bin", "memory-server"
+    mv bin/"memory-server", bin/"tachi"
+  end"""
+    text = replace_block(text, "install", install_block)
+    return text
+
+
+def ensure_current_test_block(text: str) -> str:
+    test_block = """  test do
+    assert_match version.to_s, shell_output("#{bin}/tachi --version")
+    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")
+    assert_match "Hub registry", shell_output("#{bin}/tachi hub --help")
+    db_path = testpath/"tachi-homebrew-test.db"
+    text = "Homebrew smoke test memory from formula verification with enough " \\
+           "characters to avoid the capture floor warning. It validates that " \\
+           "the installed Tachi binary can save to an isolated MEMORY_DB_PATH."
+
+    saved = shell_output("MEMORY_DB_PATH=#{db_path} #{bin}/tachi --no-project-db save " \\
+                         "--path /scratch/homebrew '#{text}'")
+    assert_match "\\"status\\": \\"saved", saved
+
+    stats = shell_output("MEMORY_DB_PATH=#{db_path} #{bin}/tachi --no-project-db stats")
+    assert_match "\\"total\\": 1", stats
+    assert_match db_path.to_s, stats
+  end"""
+    updated, count = re.subn(
+        r"  test do\b\n.*?\n  end\n?",
+        test_block + "\n",
+        text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    if count != 1:
+        raise ValueError("Could not update test block")
+    return updated
+
+
+def move_caveats_before_test(text: str) -> str:
+    caveats = re.search(r"\n  def caveats\b\n.*?\n  end\n?", text, re.DOTALL)
+    test = re.search(r"\n  test do\b\n.*?\n  end\n?", text, re.DOTALL)
+    if not caveats or not test or caveats.start() < test.start():
+        return text
+    caveats_block = caveats.group(0).strip("\n")
+    without = text[: caveats.start()] + text[caveats.end() :]
+    test = re.search(r"\n  test do\b", without)
+    if not test:
+        return text
+    return without[: test.start()] + "\n" + caveats_block + "\n" + without[test.start() :]
+
+
+def normalize_blank_lines(text: str) -> str:
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
 def ensure_service_block(text: str) -> str:
     """Formula service runs a global/background daemon, not a cwd-bound project daemon."""
     service_block = """  service do
     run [opt_bin/"tachi", "--daemon", "--port", "0", "--no-project-db"]
-    environment_variables PATH: std_service_path_env,
+    environment_variables PATH:                           std_service_path_env,
                           TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
-                          TACHI_PROFILE: "standard"
+                          TACHI_PROFILE:                  "standard"
     keep_alive true
     log_path var/"log/tachi.log"
     error_log_path var/"log/tachi.err.log"
@@ -102,11 +168,13 @@ def ensure_service_block(text: str) -> str:
 
     existing = re.search(r"  service do\n.*?  end\n?", text, re.DOTALL)
     if existing:
-        return text[: existing.start()] + service_block + "\n\n" + text[existing.end() :]
+        updated = text[: existing.start()] + service_block + "\n\n" + text[existing.end() :]
+        return re.sub(r"\n{3,}(  test do\b)", r"\n\n\1", updated)
 
     insert_point = re.search(r"  test do\b", text)
     if insert_point:
-        return text[: insert_point.start()] + service_block + "\n\n" + text[insert_point.start() :]
+        updated = text[: insert_point.start()] + service_block + "\n\n" + text[insert_point.start() :]
+        return re.sub(r"\n{3,}(  test do\b)", r"\n\n\1", updated)
 
     insert_point = re.search(r"  def caveats\b", text)
     if insert_point:
@@ -144,15 +212,16 @@ def ensure_tachi_hub_install(text: str) -> str:
         text,
         flags=re.M,
     )
+    text = re.sub(
+        r"^\s*tachi-hub\s+stats\s*\n",
+        "",
+        text,
+        flags=re.M,
+    )
 
     if 'shell_output("#{bin}/tachi hub --help")' not in text:
         hook = '    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")'
-        replacement = (
-            hook
-            + '\n'
-            + '    assert_match version.to_s, shell_output("#{bin}/tachi --version")\n'
-            + '    assert_match "Hub registry", shell_output("#{bin}/tachi hub --help")'
-        )
+        replacement = hook + '\n' + '    assert_match "Hub registry", shell_output("#{bin}/tachi hub --help")'
         text = replace_or_fail(
             r'^\s*assert_match "memory \+ Hub MCP server", shell_output\("#\{bin\}/tachi --help"\)$',
             replacement,
@@ -169,6 +238,13 @@ def ensure_tachi_hub_install(text: str) -> str:
             text,
             "tachi hub caveat smoke test",
         )
+
+    version_line = '    assert_match version.to_s, shell_output("#{bin}/tachi --version")\n'
+    if text.count(version_line) > 1:
+        first = text.find(version_line)
+        prefix = text[: first + len(version_line)]
+        suffix = text[first + len(version_line) :].replace(version_line, "")
+        text = prefix + suffix
 
     return text
 
@@ -191,8 +267,12 @@ def main() -> int:
     updated = replace_or_fail(
         r'^\s*sha256 ".*"$', f'  sha256 "{sha256}"', updated, "sha256"
     )
+    updated = ensure_modern_formula_style(updated)
     updated = ensure_tachi_hub_install(updated)
     updated = ensure_service_block(updated)
+    updated = ensure_current_test_block(updated)
+    updated = move_caveats_before_test(updated)
+    updated = normalize_blank_lines(updated)
 
     # Optional: inject bottle block
     if args.bottle_manifest and args.bottle_root_url:

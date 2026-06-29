@@ -48,7 +48,8 @@ pub(super) async fn serve_http_daemon(
     // routable scopes (own global/project + named projects), counts
     // orphans for unroutable manifest entries (dark DBs).
     let manifest_path = app_home.join("manifest.json");
-    let manifest_background = daemon_uses_manifest_background(&app_home, &global_db_path);
+    let manifest_background =
+        daemon_uses_manifest_background(&app_home, &global_db_path, project_db_path.as_deref());
     let scheduler = if manifest_background {
         crate::foundry_scheduler::FoundryScheduler::start(
             manifest_path.clone(),
@@ -295,8 +296,13 @@ pub(super) async fn serve_http_daemon(
     Ok(())
 }
 
-fn daemon_uses_manifest_background(app_home: &Path, global_db_path: &Path) -> bool {
-    paths_match(global_db_path, &app_home.join("global").join("memory.db"))
+fn daemon_uses_manifest_background(
+    app_home: &Path,
+    global_db_path: &Path,
+    project_db_path: Option<&Path>,
+) -> bool {
+    project_db_path.is_some()
+        && paths_match(global_db_path, &app_home.join("global").join("memory.db"))
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -325,7 +331,22 @@ mod tests {
         std::fs::write(&default_global, b"").expect("default db");
         std::fs::write(&agent_global, b"").expect("agent db");
 
-        assert!(daemon_uses_manifest_background(&app_home, &default_global));
-        assert!(!daemon_uses_manifest_background(&app_home, &agent_global));
+        let project_db = app_home.join("projects").join("repo").join("memory.db");
+
+        assert!(daemon_uses_manifest_background(
+            &app_home,
+            &default_global,
+            Some(&project_db)
+        ));
+        assert!(!daemon_uses_manifest_background(
+            &app_home,
+            &default_global,
+            None
+        ));
+        assert!(!daemon_uses_manifest_background(
+            &app_home,
+            &agent_global,
+            Some(&project_db)
+        ));
     }
 }

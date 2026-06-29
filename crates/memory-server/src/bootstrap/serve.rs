@@ -35,6 +35,10 @@ fn should_load_project_local_env(no_project_db: bool) -> bool {
     !no_project_db
 }
 
+fn should_defer_manifest_startup(command: &Commands, daemon: bool, no_project_db: bool) -> bool {
+    daemon && no_project_db && matches!(command, Commands::Serve)
+}
+
 fn should_refresh_plan_c_symlink(
     project_db_path: Option<&Path>,
     git_root: Option<&Path>,
@@ -88,6 +92,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         );
     }
     let load_project_local_env = should_load_project_local_env(cli.no_project_db);
+    let defer_manifest_startup =
+        should_defer_manifest_startup(&command, cli.daemon, cli.no_project_db);
     let git_root = if load_project_local_env {
         find_project_git_root()
     } else {
@@ -170,7 +176,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     let manifest_path = app_home.join("manifest.json");
     // PR-2: hygiene pass before any manifest consumer reads. Idempotent.
     // Failures are logged and swallowed — startup must never block on GC.
-    if matches!(command, Commands::Serve) && manifest_path.exists() {
+    if defer_manifest_startup {
+        tracing::info!(
+            target: "tachi::manifest::startup",
+            "--daemon --no-project-db serve deferred manifest startup hygiene"
+        );
+    } else if matches!(command, Commands::Serve) && manifest_path.exists() {
         match crate::manifest::gc_manifest(&manifest_path) {
             Ok(report) => {
                 if report.aborted {
@@ -204,7 +215,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             }
         }
     }
-    let manifest_opt = if manifest_path.exists() {
+    let manifest_opt = if !defer_manifest_startup && manifest_path.exists() {
         crate::manifest::Manifest::load(&manifest_path).ok()
     } else {
         None
@@ -605,6 +616,29 @@ mod tests {
     fn project_local_env_loading_is_disabled_for_no_project_db() {
         assert!(!should_load_project_local_env(true));
         assert!(should_load_project_local_env(false));
+    }
+
+    #[test]
+    fn manifest_startup_is_deferred_for_no_project_daemon_serve() {
+        assert!(should_defer_manifest_startup(&Commands::Serve, true, true));
+    }
+
+    #[test]
+    fn manifest_startup_stays_enabled_for_no_project_stdio_serve() {
+        assert!(!should_defer_manifest_startup(
+            &Commands::Serve,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn manifest_startup_stays_enabled_for_project_daemon_serve() {
+        assert!(!should_defer_manifest_startup(
+            &Commands::Serve,
+            true,
+            false
+        ));
     }
 
     #[test]

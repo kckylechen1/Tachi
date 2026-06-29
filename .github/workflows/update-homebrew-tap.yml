@@ -1,6 +1,9 @@
-name: Manual Update Homebrew Tap
+name: Update Homebrew Tap
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version:

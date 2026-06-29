@@ -115,7 +115,7 @@ pub(super) fn reserve_dispatch_dedupe_lock(
             let existing = match crate::task_lifecycle::read_json_file(&lock_path) {
                 Ok(Some(existing)) => existing,
                 Ok(None) => json!({}),
-                Err(err) if dispatch_dedupe_lock_file_is_stale(&lock_path) => {
+                Err(_) if dispatch_dedupe_lock_file_is_stale(&lock_path) => {
                     let _ = std::fs::remove_file(&lock_path);
                     return reserve_dispatch_dedupe_lock(
                         lock_dir,

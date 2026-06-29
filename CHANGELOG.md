@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.6.1](#161---2026-06-29) — Homebrew daemon startup and tap automation
 - [1.6.0](#160---2026-06-29) — continuity memory, lifecycle routing, and runtime hardening
 - [1.5.x](#156---2026-06-15) — repair and tidy cleanup UX
 - [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
@@ -36,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.6.1] - 2026-06-29 — Homebrew daemon startup and tap automation
+
+Patch release for making the Homebrew install path safer on macOS launchd and restoring tag-driven tap updates.
+
+### Changed
+
+- `serve --daemon --no-project-db` now defers manifest startup hygiene and scopes daemon background jobs to its own DBs so the Homebrew service can bind to the global daemon without synchronously scanning project entries under protected folders such as Desktop.
+- The Homebrew tap update workflow now runs automatically on `v*` tag pushes while retaining manual dispatch for patch retries.
+- Release-facing Cargo, npm, installer, README, OpenClaw, and current-state version fields are aligned to `1.6.1`.
+
+### Fixed
+
+- Homebrew formula generation now emits the modern single-binary install path, current `tachi hub` smoke tests, and a `brew services` daemon block for the global no-project service.
 
 ## [1.6.0] - 2026-06-29 — Continuity memory, lifecycle routing, and runtime hardening
 

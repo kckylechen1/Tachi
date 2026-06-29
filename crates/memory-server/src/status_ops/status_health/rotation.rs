@@ -76,17 +76,14 @@ pub(super) fn build_rotation_status(
                 } else {
                     match health.status.as_str() {
                         "exhausted" => "exhausted",
-                        "rate_limited" | "cooldown" => {
+                        "rate_limited" | "cooldown"
                             if health
                                 .cooldown_until
                                 .as_deref()
                                 .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                                .is_some_and(|until| until.with_timezone(&chrono::Utc) > now)
-                            {
-                                "rate_limited"
-                            } else {
-                                "ok"
-                            }
+                                .is_some_and(|until| until.with_timezone(&chrono::Utc) > now) =>
+                        {
+                            "rate_limited"
                         }
                         _ => "ok",
                     }
