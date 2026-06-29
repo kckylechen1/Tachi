@@ -161,6 +161,7 @@ pub(crate) async fn handle_tachi_wiki_write(
             "wiki_duplicates_superseded".to_string(),
             json!(duplicates_superseded),
         );
+        obj.insert("pattern_refs".to_string(), json!(pattern_refs.clone()));
         if update_id.is_some() {
             obj.insert(
                 "wiki_previous_revision".to_string(),
@@ -234,20 +235,8 @@ fn wiki_pattern_refs(
         crate::continuity_ops::list_active_patterns(server, project, Some(&query), limit)?;
     Ok(entries
         .into_iter()
-        .map(pattern_ref_json)
+        .map(|entry| crate::continuity_ops::pattern_ref_json(&entry))
         .collect::<Vec<_>>())
-}
-
-fn pattern_ref_json(entry: MemoryEntry) -> Value {
-    json!({
-        "id": entry.id,
-        "path": entry.path,
-        "summary": entry.summary,
-        "projection_kind": entry.metadata.get("projection_kind").cloned().unwrap_or(Value::Null),
-        "projection_key": entry.metadata.get("projection_key").cloned().unwrap_or(Value::Null),
-        "source_event_id": entry.metadata.get("source_event_id").cloned().unwrap_or(Value::Null),
-        "counters": entry.metadata.get("counters").cloned().unwrap_or_else(|| json!({})),
-    })
 }
 
 pub(super) fn wiki_slug(input: &str) -> String {

@@ -371,6 +371,12 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 
 Current implementation path: call `tachi_skill(action="from_pattern", query=..., args={"skill_id": "...", "name": "..."})`. The generated Hub capability starts `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`; promotion to `listed` remains a human/maturity-gated step.
 
+Current implementation path: projection reports for mature patterns now include
+review artifacts for a wiki draft, pending skill candidate, and agent-profile
+proposal. The runtime still does not execute those artifacts automatically. Today an
+agent must call `from_pattern` explicitly, and maturity gates do not yet require
+external-validation, timeline-depth, or cold-seat checks before promotion.
+
 ```json
 {
   "id": "skill:continuity-memory-design-check",
@@ -414,6 +420,8 @@ To verify these patterns are real and not session-specific hallucinations:
 
 5. **crystallization_pipeline**
    - Try to generate a skill from this pattern and see if it is useful in a future session.
+   - Verify that a future maturity gate can generate a wiki draft and a pending skill
+     candidate without listing the skill automatically.
 
 ---
 
@@ -428,3 +436,13 @@ This session is not a hypothetical. It is a real design conversation that:
 - Became self-referential ("this conversation is a memory microcosm")
 
 If the continuity memory system cannot capture and crystallize this session, it cannot capture the work it is meant to support.
+
+Current code-alignment note: capture, projection, pattern search, wiki pattern
+references, explicit pattern feedback, `tachi_complete` evidence-ref feedback,
+`close_loop` pattern hit feedback, promotion review artifacts, and pending skill
+generation exist. `tachi_event action=promote` can execute conservative review
+artifact creation, and `tachi_event action=context` exposes first-slice
+`timeline[]` / `bonding[]` read models. Automatic Agent MD writes,
+briefing/context hit/miss decisions, enforced TimelineEntry/SharedLexicon schemas,
+causal graph storage, final maturity promotion, and A2A cold-seat transport remain
+future work.

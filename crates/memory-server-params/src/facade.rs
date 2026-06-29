@@ -32,7 +32,9 @@ fn tachi_event_action_schema(
             "query",
             "metrics",
             "project",
+            "promote",
             "context",
+            "a2a",
             "label_eval",
         ],
         "Required Tachi event ledger action.",
@@ -86,7 +88,7 @@ fn default_tachi_event_limit() -> usize {
 pub struct TachiEventParams {
     #[schemars(
         schema_with = "tachi_event_action_schema",
-        description = "Required. emit appends a domain-neutral continuity event; query lists recent events; metrics returns read-only continuity metrics; project materializes candidate events into stable memory projections; context returns projected continuity memory for prompt/read-model use; label_eval compares session.outcome labels to session.outcome.review gold labels."
+        description = "Required. emit appends a domain-neutral continuity event; query lists recent events; metrics returns read-only continuity metrics; project materializes candidate events into stable memory projections; promote explicitly creates review artifacts for a mature pattern; context returns projected continuity memory for prompt/read-model use and records seen feedback; a2a returns the read-only evidence/open-thread bundle without feedback writes; label_eval compares session.outcome labels to session.outcome.review gold labels."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -140,7 +142,7 @@ pub struct TachiEventParams {
     pub projection_hints: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=emit] Domain payload. Stored as JSON; not interpreted by the kernel."
+        description = "[action=emit|promote] Domain payload. For promote, supports force, skip_wiki_draft, skip_skill_candidate, and skip_agent_profile_proposal."
     )]
     pub payload: Option<serde_json::Value>,
     #[serde(default)]
@@ -163,7 +165,7 @@ pub struct TachiEventParams {
     pub path_prefix: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=project] Preview projection writes without upserting memories."
+        description = "[action=project|promote] Preview writes without upserting memories or creating review artifacts."
     )]
     pub dry_run: bool,
 }

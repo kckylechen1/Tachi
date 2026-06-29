@@ -368,6 +368,12 @@ pub(crate) async fn handle_workflow(
                 &references,
             );
             let spec_advisory = spec_advisory(&spec_paths, &doc_paths);
+            let pattern_query = format!(
+                "{} {} {}",
+                title,
+                params.wiki_summary.as_deref().unwrap_or_default(),
+                text.chars().take(500).collect::<String>()
+            );
 
             let wiki_result = crate::copilot_ops::handle_tachi_wiki_write(
                 server,
@@ -394,12 +400,37 @@ pub(crate) async fn handle_workflow(
                     metadata: Some(metadata),
                     force: params.force,
                     references,
-                    include_patterns: false,
-                    pattern_query: None,
-                    pattern_top_k: None,
+                    include_patterns: true,
+                    pattern_query: Some(pattern_query),
+                    pattern_top_k: Some(5),
                 },
             )
             .await?;
+            let wiki_json =
+                serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result));
+            let pattern_refs = wiki_json
+                .get("pattern_refs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let pattern_feedback = if pattern_refs.is_empty() {
+                json!("skipped (no pattern refs attached)")
+            } else {
+                crate::continuity_ops::emit_pattern_feedback_for_refs(
+                    server,
+                    params.project.as_deref(),
+                    &pattern_refs,
+                    "hit",
+                    Some(&comment_body),
+                    Some("close_loop promoted a reviewed closure artifact that referenced this pattern"),
+                    "tachi_task.close_loop",
+                    json!({
+                        "source": "close_loop.pattern_refs",
+                        "issue_ref": issue_ref,
+                        "wiki_path": params.wiki_path,
+                    }),
+                )
+            };
 
             // Write-back arc: post the closure comment to the source issue (and
             // PR, if given). Best-effort — a GitHub outage never fails the wiki
@@ -422,7 +453,8 @@ pub(crate) async fn handle_workflow(
                 "action": "close_loop",
                 "issue_ref": issue_ref,
                 "promotion_plan": promotion_plan,
-                "wiki": serde_json::from_str::<Value>(&wiki_result).unwrap_or(json!(wiki_result)),
+                "wiki": wiki_json,
+                "pattern_feedback": pattern_feedback,
                 "closure_actions": {
                     "comment_body": comment_body,
                     "issue_comment": issue_comment,

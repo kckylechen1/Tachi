@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use memory_core::{ContinuityMetrics, MemoryEntry, TachiEventQuery, TachiEventRecord};
+use memory_core::{ContinuityMetrics, MemoryEdge, MemoryEntry, TachiEventQuery, TachiEventRecord};
 
 use crate::{DbScope, MemoryServer};
 
@@ -160,6 +160,32 @@ pub(super) fn get_projection_memory(
             store
                 .get(id)
                 .map_err(|e| format!("get projection memory: {e}"))
+        })
+    }
+}
+
+pub(super) fn add_memory_edge(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    edge: &MemoryEdge,
+) -> Result<(), String> {
+    if let Some(project_name) = target.named_project.as_deref() {
+        server.with_named_project_store(project_name, |store| {
+            store
+                .add_edge(edge)
+                .map_err(|e| format!("add continuity graph edge: {e}"))
+        })
+    } else if let Some(db_path) = target.db_path.as_ref() {
+        server.with_path_store(db_path, |store| {
+            store
+                .add_edge(edge)
+                .map_err(|e| format!("add continuity graph edge: {e}"))
+        })
+    } else {
+        server.with_store_for_scope(target.target_db, |store| {
+            store
+                .add_edge(edge)
+                .map_err(|e| format!("add continuity graph edge: {e}"))
         })
     }
 }

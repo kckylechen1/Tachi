@@ -182,6 +182,7 @@ fn feedback_event_type(projection: ProjectionKind, outcome: &str) -> String {
 fn pattern_row_projection_key(row: &Value) -> Option<&str> {
     row.get("metadata")
         .and_then(|metadata| metadata.get("projection_key"))
+        .or_else(|| row.get("projection_key"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -191,6 +192,7 @@ fn pattern_row_projection(row: &Value) -> ProjectionKind {
     pattern_projection_from_str(
         row.get("metadata")
             .and_then(|metadata| metadata.get("projection_kind"))
+            .or_else(|| row.get("projection_kind"))
             .and_then(Value::as_str),
     )
 }
@@ -287,6 +289,7 @@ pub(crate) fn emit_pattern_seen_events(
     project: Option<&str>,
     query: Option<&str>,
     rows: &[Value],
+    source: Option<&str>,
 ) -> Value {
     let mut seen_keys = HashSet::new();
     let mut saved = Vec::new();
@@ -309,7 +312,7 @@ pub(crate) fn emit_pattern_seen_events(
             "seen",
             query,
             None,
-            Some("tachi_search"),
+            source.or(Some("pattern_seen")),
             None,
         ) {
             Ok(value) => saved.push(value),

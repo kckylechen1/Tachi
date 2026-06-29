@@ -188,6 +188,7 @@ async fn tachi_search_patterns_scope_records_seen_feedback() {
         .expect("patterns scoped search");
 
     assert!(response.contains(&memory_id));
+    assert!(response.contains("pattern_ref:"));
     let after = server
         .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
         .expect("read pattern after")
@@ -303,5 +304,146 @@ async fn tachi_search_patterns_scope_is_explicit() {
         .expect("patterns scoped search");
 
     assert!(pattern_response.contains("projected-pattern-row"));
+    assert!(pattern_response.contains("pattern_ref:"));
     assert!(!pattern_response.contains("plain-pattern-word-memory"));
+}
+
+#[tokio::test]
+async fn tachi_memory_patterns_json_returns_pattern_refs() {
+    let server = make_server();
+    let memory_id = seed_projected_pattern(
+        &server,
+        "json-pattern-ref",
+        "UniquePatternJsonRefNeedle should expose a machine-readable pattern_ref.",
+    )
+    .await;
+
+    let response = server
+        .tachi_memory(Parameters({
+            let mut params = memory_params("search");
+            params.query = Some("UniquePatternJsonRefNeedle".to_string());
+            params.scope = Some("patterns".to_string());
+            params
+        }))
+        .await
+        .expect("pattern search json");
+    let parsed: Value = serde_json::from_str(&response).expect("search response json");
+    let rows = parsed["sections"][0]["rows"]
+        .as_array()
+        .expect("pattern rows");
+    assert_eq!(rows[0]["id"], json!(memory_id));
+    assert_eq!(rows[0]["pattern_ref"]["id"], json!(memory_id));
+    assert_eq!(
+        rows[0]["pattern_ref"]["projection_key"],
+        json!("json-pattern-ref")
+    );
+}
+
+#[tokio::test]
+async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
+    let server = make_server();
+    let memory_id = seed_projected_pattern(
+        &server,
+        "complete-pattern-hit",
+        "UniquePatternCompleteNeedle should become a hit when task completion cites it.",
+    )
+    .await;
+
+    let response = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("pattern-complete-001".to_string()),
+            task: "Use UniquePatternCompleteNeedle while completing a task".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: None,
+            risk: None,
+            duration_ms: None,
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.9),
+            notes: Some("The cited pattern matched the task.".to_string()),
+            trajectory: None,
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: None,
+            flow_id: None,
+            issue_ref: None,
+            pr_ref: None,
+            evidence_refs: vec![format!("pattern:{memory_id}")],
+            tests_run: Vec::new(),
+            diff_present: Some(false),
+            scope: Some("project".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("complete with pattern ref");
+    let parsed: Value = serde_json::from_str(&response).expect("complete response json");
+    assert_eq!(
+        parsed["pipeline"]["pattern_feedback"]["saved_count"],
+        json!(1)
+    );
+
+    let entry = server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
+        .expect("read pattern after complete")
+        .expect("pattern exists after complete");
+    assert_eq!(entry.metadata["counters"]["seen"], json!(2));
+    assert_eq!(entry.metadata["counters"]["hit"], json!(1));
+    assert_eq!(entry.metadata["counters"]["miss"], json!(0));
+}
+
+#[tokio::test]
+async fn close_loop_attaches_pattern_refs_and_records_hit_feedback() {
+    let server = make_server();
+    let memory_id = seed_projected_pattern(
+        &server,
+        "close-loop-pattern-hit",
+        "UniquePatternCloseLoopNeedle should be attached to reviewed closure artifacts.",
+    )
+    .await;
+
+    let response = server
+        .tachi_workflow(Parameters(TachiWorkflowParams {
+            action: "close_loop".to_string(),
+            issue_ref: Some("kckylechen1/tachi#250".to_string()),
+            pr_ref: None,
+            doc_paths: vec![],
+            spec_paths: vec![],
+            related_issues: vec![],
+            post_comment: Some(false),
+            flow_id: None,
+            wiki_title: Some("UniquePatternCloseLoopNeedle closure".to_string()),
+            wiki_text: Some(
+                "Reviewed closure should cite UniquePatternCloseLoopNeedle.".to_string(),
+            ),
+            wiki_path: None,
+            wiki_topic: Some("pattern-close-loop".to_string()),
+            wiki_summary: Some("UniquePatternCloseLoopNeedle closure".to_string()),
+            wiki_category: None,
+            wiki_keywords: Vec::new(),
+            wiki_entities: Vec::new(),
+            wiki_importance: Some(0.8),
+            wiki_scope: None,
+            wiki_domain: None,
+            project: None,
+            force: true,
+        }))
+        .await
+        .expect("close_loop with pattern refs");
+    let parsed: Value = serde_json::from_str(&response).expect("close_loop response json");
+    assert_eq!(parsed["ok"], json!(true));
+    assert_eq!(parsed["wiki"]["pattern_refs"][0]["id"], json!(memory_id));
+    assert_eq!(parsed["pattern_feedback"]["saved_count"], json!(1));
+
+    let entry = server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
+        .expect("read pattern after close_loop")
+        .expect("pattern exists after close_loop");
+    assert_eq!(entry.metadata["counters"]["seen"], json!(2));
+    assert_eq!(entry.metadata["counters"]["hit"], json!(1));
+    assert_eq!(entry.metadata["counters"]["miss"], json!(0));
 }

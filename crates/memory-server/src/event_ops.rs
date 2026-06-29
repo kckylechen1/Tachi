@@ -224,8 +224,17 @@ pub(crate) async fn handle_tachi_event(
             let value = crate::continuity_ops::project_continuity_events(server, &params)?;
             json_string(&value)
         }
+        "promote" => {
+            let value = crate::continuity_ops::promote_pattern_review_artifacts(server, &params)
+                .await?;
+            json_string(&value)
+        }
         "context" => {
             let value = crate::continuity_ops::build_continuity_context(server, &params)?;
+            json_string(&value)
+        }
+        "a2a" => {
+            let value = crate::continuity_ops::build_a2a_context(server, &params)?;
             json_string(&value)
         }
         "label_eval" => {
@@ -233,7 +242,7 @@ pub(crate) async fn handle_tachi_event(
             json_string(&value)
         }
         _ => Err(format!(
-            "Invalid action '{}'. Use 'emit', 'query', 'metrics', 'project', 'context', or 'label_eval'.",
+            "Invalid action '{}'. Use 'emit', 'query', 'metrics', 'project', 'promote', 'context', 'a2a', or 'label_eval'.",
             params.action
         )),
     }

@@ -3,6 +3,9 @@ use serde_json::Map;
 use serde_json::{json, Value};
 
 use super::super::now_rfc3339;
+use super::super::read_models::{
+    affect_projection_metadata, bonding_projection_metadata, timeline_projection_metadata,
+};
 
 pub(in crate::continuity_ops) fn projection_kind_metadata(entry: &MemoryEntry) -> Option<&str> {
     entry
@@ -425,18 +428,28 @@ fn projection_metadata(
             "last_seen": event.created_at,
         }),
     );
+    if projection == ProjectionKind::Timeline {
+        metadata.insert(
+            "timeline".to_string(),
+            timeline_projection_metadata(existing, event, payload),
+        );
+    }
+    if projection == ProjectionKind::Bonding {
+        metadata.insert(
+            "lexicon".to_string(),
+            bonding_projection_metadata(existing, event, payload, hit, hit_delta),
+        );
+    }
     if projection == ProjectionKind::Affect {
+        let affect = affect_projection_metadata(event, payload);
         metadata.insert(
             "guardrails".to_string(),
-            json!({
-                "authority": "tone_and_reminder_only",
-                "live_effect": "tone_only",
-                "score_effect": "none",
-                "iron_effect": "none",
-                "execution_effect": "none",
-                "portfolio_effect": "none",
-            }),
+            affect
+                .get("guardrails")
+                .cloned()
+                .unwrap_or_else(|| json!({})),
         );
+        metadata.insert("affect".to_string(), affect);
     }
     if projection == ProjectionKind::WorldBook {
         let mut lorebook = Map::new();
@@ -593,11 +606,69 @@ mod tests {
         }
     }
 
+    fn bonding_event(id: &str, event_type: &str, created_at: &str) -> TachiEventRecord {
+        TachiEventRecord {
+            id: id.to_string(),
+            source_repo: "sigil".to_string(),
+            adapter: "test".to_string(),
+            project: "Sigil".to_string(),
+            domain: "agent_os".to_string(),
+            session_id: "session-1".to_string(),
+            actor: "codex".to_string(),
+            event_type: event_type.to_string(),
+            authority: AuthorityLevel::CollectOnly,
+            effects: vec![memory_core::EffectScope::None],
+            projection_hints: vec![ProjectionKind::Bonding],
+            payload: json!({
+                "bonding_key": "shared-protocol",
+                "summary": "Shared protocol",
+                "meaning": "Shared shorthand and context",
+            }),
+            provenance: json!({}),
+            created_at: created_at.to_string(),
+        }
+    }
+
     #[test]
     fn projection_domain_label_is_repair_clean() {
         let event = event_with_domain("product-test");
         let (entry, _) = build_projection_entry(None, &event, ProjectionKind::Pattern);
         assert_eq!(entry.domain.as_deref(), Some("product_test"));
         assert!(entry.path.contains("/product-test/"));
+    }
+
+    #[test]
+    fn bonding_last_successful_use_only_updates_on_current_hit() {
+        let observed = bonding_event(
+            "bonding-observed-1",
+            "bonding.observed",
+            "2026-06-28T00:00:00Z",
+        );
+        let (entry, _) = build_projection_entry(None, &observed, ProjectionKind::Bonding);
+        assert!(entry
+            .metadata
+            .get("lexicon")
+            .and_then(|value| value.get("last_successful_use"))
+            .is_none());
+
+        let hit = bonding_event("bonding-hit-1", "bonding.hit", "2026-06-28T01:00:00Z");
+        let (entry, _) = build_projection_entry(Some(entry), &hit, ProjectionKind::Bonding);
+        assert_eq!(
+            entry.metadata["lexicon"]["last_successful_use"],
+            json!("2026-06-28T01:00:00Z")
+        );
+
+        let later_observed = bonding_event(
+            "bonding-observed-2",
+            "bonding.observed",
+            "2026-06-28T02:00:00Z",
+        );
+        let (entry, _) =
+            build_projection_entry(Some(entry), &later_observed, ProjectionKind::Bonding);
+        assert_eq!(
+            entry.metadata["lexicon"]["last_successful_use"],
+            json!("2026-06-28T01:00:00Z")
+        );
+        assert_eq!(entry.metadata["lexicon"]["callback_hits"], json!(1));
     }
 }

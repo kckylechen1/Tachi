@@ -1,6 +1,7 @@
 use crate::hub_helpers::CapabilityVisibility;
 use memory_core::HubCapability;
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub(super) struct CapabilityRecord {
@@ -24,6 +25,8 @@ pub(super) struct CapabilityRecommendation {
     pub(super) uses: u64,
     pub(super) avg_rating: f64,
     pub(super) suggested_tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) pattern_refs: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]

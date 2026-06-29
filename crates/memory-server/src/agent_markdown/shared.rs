@@ -47,6 +47,25 @@ pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
                 out.push(format!("   📎 {}", paths.join(", ")));
             }
         }
+        if let Some(pattern_ref) = row.get("pattern_ref") {
+            let ref_id = pattern_ref
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| pattern_ref.as_str());
+            if let Some(ref_id) = ref_id {
+                let projection_key = pattern_ref
+                    .get("projection_key")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!(" projection_key=`{}`", md_escape(value)))
+                    .unwrap_or_default();
+                out.push(format!(
+                    "   pattern_ref: `{}`{}",
+                    md_escape(ref_id),
+                    projection_key
+                ));
+            }
+        }
     }
     out.join("\n")
 }

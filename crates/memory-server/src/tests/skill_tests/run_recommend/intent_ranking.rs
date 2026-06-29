@@ -170,3 +170,70 @@ async fn recommend_skill_prefers_ship_for_create_pr_queries() {
     let json: Value = serde_json::from_str(&result).expect("json");
     assert_eq!(json["skills"][0]["id"], "skill:ship");
 }
+
+#[tokio::test]
+async fn recommend_skill_uses_active_patterns_as_ranking_context() {
+    let server = make_server();
+    let closure = make_skill_capability(
+        "skill:marmalade-closure",
+        "marmalade-closure",
+        "Write marmalade closure notes and durable project completion records.",
+        "listed",
+    );
+    let spreadsheet = make_skill_capability(
+        "skill:spreadsheet",
+        "spreadsheet",
+        "Build spreadsheet reports from CSV exports.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&closure).map_err(|e| e.to_string())?;
+            store
+                .hub_register(&spreadsheet)
+                .map_err(|e| e.to_string())?;
+            let mut pattern = make_entry("pattern-alignment-bridge-closure");
+            pattern.path = "/user/patterns/agent_os/alignment-bridge".to_string();
+            pattern.summary = "Zephyr alignment bridge closes through marmalade closure".to_string();
+            pattern.text =
+                "When the user asks about the zephyr alignment bridge, use marmalade closure to write durable completion records."
+                    .to_string();
+            pattern.metadata = json!({
+                "projection_kind": "pattern",
+                "projection_key": "alignment-bridge-closure",
+                "source_event_id": "pattern-event-recommend-skill",
+                "counters": {"seen": 4, "hit": 2}
+            });
+            store.upsert(&pattern).map_err(|e| e.to_string())
+        })
+        .expect("seed skills and pattern");
+
+    let result = server
+        .recommend_skill(Parameters(RecommendSkillParams {
+            query: "zephyr".to_string(),
+            host: Some("codex".to_string()),
+            limit: 3,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_skill should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let top = &json["skills"][0];
+    assert_eq!(top["id"], json!("skill:marmalade-closure"));
+    assert_eq!(
+        top["pattern_refs"][0]["projection_key"],
+        json!("alignment-bridge-closure")
+    );
+    assert!(
+        top["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .unwrap_or_default()
+                .contains("active pattern 'alignment-bridge-closure'")),
+        "expected active pattern reason in {json}"
+    );
+}

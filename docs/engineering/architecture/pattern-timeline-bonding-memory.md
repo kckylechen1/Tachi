@@ -29,11 +29,11 @@ Because this bridge can drift toward the user's short-term feedback at the
 expense of their long-term interests, the system keeps an **over-fit brake**
 and an **un-revocable cold seat** as structural safeguards.
 
-## Verdict
+## Audit stance
 
-~85% of the direction is endorsed. The 15% is not "cut these" — it is "these claims
-out-run their evidence, and these mechanisms are unbuilt." Two findings change the
-design, not just the prose:
+This document is a code-aligned audit, not a value judgment. Each mechanism is
+classified as implemented, partially implemented, or missing against the current
+Tachi codebase. Two findings shape the implementation order:
 
 1. **The outcome labeler is the linchpin and has no free signal** (see Constraint 1).
 2. **The cold seat must be structurally un-revocable** (see Constraint 5).
@@ -71,26 +71,30 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   classify events, what evidence they trust, when they revise a belief, and what
   recurring shapes they have found in prior work. It is a model of the user's
   thinking, not merely a catalog of world facts.
-- **Storage:** memories under a `/user/patterns/*` path prefix. Paths are free-form
-  with prefix matching (`db/memory_crud.rs`, `path_prefix LIKE 'x%'`) — no schema
-  change needed.
-- **Decay:** the `"pattern"` tier already exists (`scorer.rs:16` half-life 30000d;
-  `scorer.rs:24` ACT-R d=0.01) — "virtually permanent." Wire pattern weights to it.
-- **Weight:** three counters `seen / hit / last_seen` in entry metadata. Everything
-  derives: confidence = sample size, strength = hit rate, recency = decay on last_seen.
-- **Recall:** existing hybrid search; preload top-weighted patterns at session start,
-  no per-turn MCP calls.
+- **Storage:** implemented as `ProjectionKind::Pattern` rows under `/user/patterns/*`.
+  Ordinary memory recall filters continuity projections; `tachi_search scope="patterns"`
+  reads them explicitly.
+- **Decay:** the `"pattern"` tier already exists with a much longer half-life and
+  lower ACT-R decay than raw/consolidated memories.
+- **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
+  last_seen`. Explicit feedback updates counters; pattern search records `seen`;
+  `tachi_complete` can consume `pattern:<id>` evidence refs; `close_loop` records
+  reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
+  hit/miss automatically.
+- **Recall:** existing hybrid search supports pattern scope. Session-start preload is
+  available through context/briefing surfaces, but the host-adapter contract is not yet
+  packaged as one protocol.
 
 ### Timeline memory
 - **What it stores:** the credibility history of a judgment or pattern — how it was
 discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
-- **Evolution chain:** the causal graph is the home — `add_edge` (`db/graph.rs:10`)
-  already carries `relation / weight / valid_from / valid_to`. A judgment transition
-  ("defended → revised") is an edge with a relation type and temporal validity.
-- **Generation:** session-end, via the existing `capture_session` / `compact_context`
-  (`tools.rs:714`). Emit a `TimelineEntry` (summary / discoveries / decisions /
-  open_threads) + the causal edges. Surface `open_threads` at next session start.
+- **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
+  projections exist. Causal graph `add_edge` integration is still a target.
+- **Generation:** `capture_session` emits `session.captured`; the optional continuity
+  pipeline can emit candidates and `session.outcome`. Context output now carries a
+  `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still
+  missing.
 
 ### Bonding layer
 - **What it stores:** a per-user shared communication protocol — shorthand references,
@@ -99,7 +103,9 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 - **What it is not:** bonding is neither an emotional state of the model nor an RLHF
   warmth output. The model does not "feel" attached; it reads a structured read model
   that compresses bandwidth between user and system.
-- **Storage:** `SharedLexicon` entries under the pattern namespace.
+- **Storage:** bonding projections exist under `/user/patterns/bonding/*`.
+  Context output now carries a `SharedLexicon` schema marker and lexicon metadata;
+  enforced Rust validation is still missing.
 - **Precedent:** the RomanBath character card's prose protocol is the working model;
   formalize it (origin, meaning, callback_hits, appropriate/inappropriate contexts).
 - **Delivery carrier:** see Constraint 2 — bonding is **not** warmth.
@@ -107,8 +113,10 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 ### A2A (replaces the deleted "Ghost Whispers")
 - **Substrate exists:** shared global DB + daemon + namespace (the process-lifecycle
   work) is the transport; zeroclaw's shared gateway is the cross-product precedent.
-- **Missing:** the timeline/bonding schema + a "subscribe to another agent's timeline"
-  read pattern. See Constraint 5 for the hard rule on what A2A may and may not share.
+- **Partial:** `tachi_event action="context"` exposes a local read-only A2A evidence
+  bundle with pattern refs, bonding refs, open threads, and compact event refs. A
+  cross-process "subscribe to another agent's timeline" transport is still missing.
+  See Constraint 5 for the hard rule on what A2A may and may not share.
 
 ## Load-bearing constraints (the review, as design decisions)
 
@@ -141,12 +149,11 @@ an inverse guard; (b) a low rate may be a domain-expert user, not over-fitting.
 Threshold and window are unjustified until calibrated on real data.
 
 **4. Outcome enum is too coarse; `adversarial_tested` needs a second axis.**
-Real outcomes don't fit 5 buckets — the DeepSeek "both partially right, user reframed
-scope" case is a 6th (Partial/Reframe). Quant already uses `true_S/stale_S/neutral`
-(a neutral middle). And `adversarial_tested: bool` cannot tell "stress-tested against
-external evidence" from "argued into the user's preferred conclusion" (the Grace Jin
-case); split it: revision driven by **new external evidence** (strong) vs **interlocutor
-argument** (weak).
+Resolved in the current type layer: `SessionOutcomeKind` now includes partial/reframe
+style outcomes such as `PartialReframe` and `MutualCorrection`, and
+`OutcomeEvidenceBasis` splits external evidence from interlocutor argument. The
+remaining design requirement is to keep these axes visible in labels, metrics, and
+future promotion gates.
 
 **5. The cold seat must be un-revocable; A2A shares evidence, not conclusions.**
 The cold seat is the system's retained generic-alignment reference. As pattern
@@ -214,13 +221,29 @@ Implemented substrate:
   stable memory projections. Pattern/bonding/worldbook keys map to stable memory ids;
   rerunning projection does not double-count the same event.
 - `tachi_event action="context"` now returns projected continuity memories plus typed
-  `patterns`, `lorebook`, and `affect` read-model sections for prompt/runtime
-  consumers.
+  `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, and `a2a`
+  read-model sections for prompt/runtime consumers. It records `seen` feedback for
+  returned pattern refs; `tachi_event action="a2a"` returns the local evidence bundle
+  without feedback writes.
 - Pattern/bonding projections maintain basic `seen / hit / miss / last_seen` counters
   in metadata. Promotion remains conservative: `CollectOnly` does not become an
   execution/scoring authority.
+- Timeline projections preserve a first typed metadata slice:
+  `discoveries`, `decisions`, `open_threads`, `evolution`, `causal_edges`,
+  `external_validations`, validity fields, and a validated `TimelineEntry` schema
+  marker. Explicit causal edges with existing memory-id endpoints persist to
+  `memory_edges`; natural-language-only edges are skipped.
+- Bonding projections preserve a SharedLexicon-shaped metadata slice:
+  `origin_session`, `origin_context`, `meaning`, `shorthand_triggers`,
+  `appropriate_contexts`, `inappropriate_contexts`, `callback_hits`, and
+  `last_successful_use`, plus a validated `SharedLexicon` schema marker.
+- Context responses expose a local read-only `a2a` evidence bundle with share policy,
+  cold-seat constraints, poll-subscription metadata, pattern refs, bonding refs,
+  timeline open threads, and compact event refs without raw payloads.
 - Affect/emotion projections carry explicit guardrails: `tone_and_reminder_only`,
-  `execution_effect=none`, `score_effect=none`, and `portfolio_effect=none`.
+  `execution_effect=none`, `score_effect=none`, and `portfolio_effect=none`. They also
+  expose first-slice local signals for language switch, known markers, length, and IO
+  ratio.
 - `tachi_event action="label_eval"` provides a read-only label-quality harness:
   compare `session.outcome` events against `session.outcome.review` gold labels by
   `target_event_id` or `session_id`.
@@ -233,18 +256,43 @@ Implemented substrate:
   `wiki.saved` events.
 - `tachi_skill action="from_pattern"` registers disabled, pending-review,
   discoverable skill candidates carrying `pattern_ref` metadata.
+- `recommend_skill` and `tachi_task` lightweight skill recommendation use active
+  pattern bridge signals so a query can route through remembered project/user
+  patterns into relevant skills. Matching recommendations expose `pattern_refs`.
+- `tachi_event action="promote"` can materialize conservative review artifacts for
+  an eligible or forced mature pattern: a pending wiki draft, a disabled skill
+  candidate, and an `agent_profile.proposal` event. Promotion responses and reports
+  include external-validation / cold-seat-review gate status.
 - The daemon runs a background continuity projection loop. Projection reports expose
-  `projected_count`, `skipped_count`, and `promotion_candidate_count`.
+  `projected_count`, `skipped_count`, `promotion_candidate_count`, and review
+  artifacts for wiki drafts, skill candidates, and agent-profile proposals.
 
 Still missing:
 
-- No `Agent MD` crystallization reads this ledger yet.
+- `Agent MD` crystallization is only first-slice: profile import/render/context exists,
+  but mature continuity patterns do not automatically synthesize reviewed profile
+  proposals.
 - No cross-process A2A subscription transport has been wired on top of these events;
-  the local read model exists through `tachi_event action="context"`.
+  only the local read-only `a2a` evidence bundle and poll surface exist through
+  `tachi_event action="context"` / `action="a2a"`.
 - Label-quality calibration is not complete; the harness and smoke fixture exist, but
   it still needs a larger reviewed held-out corpus.
-- Runtime recall does not yet emit `pattern.hit` / `pattern.miss` feedback events;
-  supplied callback events update counters, but search itself is not feeding them yet.
+- Runtime recall feedback is partial: pattern search and context emit `seen`, supplied
+  callbacks update counters, `tachi_complete` consumes `pattern:<id>` evidence refs,
+  and `close_loop` records reviewed attached patterns as `hit`; ordinary briefing use
+  and outcome-backed automatic hit/miss classification are still missing.
+- Maturity gates produce and can execute conservative review artifacts, but they do
+  not yet promote drafts/candidates into final wiki, listed skills, or host Agent MD
+  writes. External-validation / cold-seat readiness is exposed as gate status.
+- Timeline projections expose `metadata.timeline` / `timeline[]` with a validated
+  `TimelineEntry` schema marker; explicit memory-id causal edges persist to the graph,
+  but enforced Rust validation, typed `JudgmentEvolution`, and automatic endpoint
+  resolution are not wired.
+- Bonding projections expose `metadata.lexicon` / `bonding[]` with a validated
+  `SharedLexicon` schema marker; fields are not enforced as a standalone Rust domain
+  type.
+- A local rule-based affect detector extracts language switches, known markers, length,
+  and IO ratio; response-latency-like signals still need host timing input.
 
 ## Lorebook and emotion mapping
 
@@ -274,3 +322,9 @@ deciding what a downstream agent may do with it.
 - Is "three agents" the right decomposition, or is it one capability with orthogonal
   `(carrier, honesty, bonding)` dials? The best bonding moment in review came from the
   cold agent on an abrasive carrier — suggesting modes, not separate agents.
+- Should user-level patterns live globally with project-scoped instances, or should
+  each project DB own its own pattern namespace and only selected patterns promote
+  globally?
+- How should every CLI/IDE adapter consume the shared lifecycle contract:
+  startup preload, in-session buffer, session-end capture, outcome label, pattern
+  feedback, and profile refresh?

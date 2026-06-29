@@ -4,7 +4,12 @@ use serde_json::{json, Value};
 use crate::tool_params::TachiEventParams;
 use crate::MemoryServer;
 
+use super::emit::emit_pattern_seen_events;
+use super::feedback::pattern_ref_json;
 use super::projection::{projected_path_prefix, projection_filters, projection_kind_metadata};
+use super::read_models::{
+    a2a_context_bundle, bonding_context_json, host_lifecycle_contract, timeline_context_json,
+};
 use super::storage::{continuity_metrics, list_projection_memories, read_events};
 use super::{
     event_query_from_params, query_limit, target_from_event_params, trim_opt, ContinuityEventTarget,
@@ -30,7 +35,7 @@ fn pattern_matches_query(entry: &MemoryEntry, query: Option<&str>) -> bool {
         .get("projection_key")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    [
+    let haystack = [
         entry.id.as_str(),
         entry.path.as_str(),
         entry.summary.as_str(),
@@ -39,15 +44,27 @@ fn pattern_matches_query(entry: &MemoryEntry, query: Option<&str>) -> bool {
         projection_key,
     ]
     .iter()
-    .any(|value| value.to_ascii_lowercase().contains(&query))
+    .map(|value| value.to_ascii_lowercase())
+    .collect::<Vec<_>>()
+    .join("\n");
+    if haystack.contains(&query) {
+        return true;
+    }
+    query
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';' || ch == ':')
+        .map(str::trim)
+        .filter(|token| token.chars().count() >= 3)
+        .any(|token| haystack.contains(token))
 }
 
 fn pattern_context_json(entry: &MemoryEntry) -> Value {
+    let pattern_ref = pattern_ref_json(entry);
     json!({
         "id": entry.id,
         "path": entry.path,
         "summary": entry.summary,
         "content": entry.text,
+        "pattern_ref": pattern_ref,
         "projection_kind": projection_kind_metadata(entry).unwrap_or("pattern"),
         "projection_key": entry.metadata.get("projection_key").cloned().unwrap_or(Value::Null),
         "authority": entry.metadata.get("authority").cloned().unwrap_or(Value::Null),
@@ -55,6 +72,15 @@ fn pattern_context_json(entry: &MemoryEntry) -> Value {
         "source_event_id": entry.metadata.get("source_event_id").cloned().unwrap_or(Value::Null),
         "projected_event_ids": entry.metadata.get("projected_event_ids").cloned().unwrap_or_else(|| json!([])),
     })
+}
+
+fn is_projection(entry: &MemoryEntry, projection: &str, prefix: &str) -> bool {
+    entry.path.starts_with(prefix)
+        || entry
+            .metadata
+            .get("projection_kind")
+            .and_then(Value::as_str)
+            == Some(projection)
 }
 
 pub(crate) fn list_active_patterns(
@@ -97,6 +123,28 @@ pub(crate) fn build_continuity_context(
     server: &MemoryServer,
     params: &TachiEventParams,
 ) -> Result<Value, String> {
+    build_continuity_context_inner(server, params, true)
+}
+
+pub(crate) fn build_a2a_context(
+    server: &MemoryServer,
+    params: &TachiEventParams,
+) -> Result<Value, String> {
+    let context = build_continuity_context_inner(server, params, false)?;
+    Ok(json!({
+        "status": "completed",
+        "action": "a2a",
+        "a2a": context.get("a2a").cloned().unwrap_or(Value::Null),
+        "host_lifecycle": context.get("host_lifecycle").cloned().unwrap_or(Value::Null),
+        "guardrails": context.get("guardrails").cloned().unwrap_or(Value::Null),
+    }))
+}
+
+fn build_continuity_context_inner(
+    server: &MemoryServer,
+    params: &TachiEventParams,
+    record_seen: bool,
+) -> Result<Value, String> {
     let target = target_from_event_params(server, params);
     let filters = default_context_projections(projection_filters(&params.projection_hints)?);
     let limit = query_limit(params.limit);
@@ -135,13 +183,7 @@ pub(crate) fn build_continuity_context(
 
     let lorebook = memories
         .iter()
-        .filter(|entry| {
-            entry
-                .metadata
-                .get("projection_kind")
-                .and_then(Value::as_str)
-                == Some("world_book")
-        })
+        .filter(|entry| is_projection(entry, "world_book", "/lorebook"))
         .map(|entry| {
             json!({
                 "id": entry.id,
@@ -157,26 +199,55 @@ pub(crate) fn build_continuity_context(
         .filter(|entry| is_active_pattern_projection(entry))
         .map(pattern_context_json)
         .collect::<Vec<_>>();
+    let pattern_refs = patterns
+        .iter()
+        .filter_map(|pattern| pattern.get("pattern_ref").cloned())
+        .collect::<Vec<_>>();
     let affect = memories
         .iter()
-        .filter(|entry| {
-            entry
-                .metadata
-                .get("projection_kind")
-                .and_then(Value::as_str)
-                == Some("affect")
-        })
+        .filter(|entry| is_projection(entry, "affect", "/user/affect"))
         .map(|entry| {
             json!({
                 "id": entry.id,
                 "path": entry.path,
                 "summary": entry.summary,
                 "state": entry.summary,
+                "affect": entry.metadata.get("affect").cloned().unwrap_or_else(|| json!({})),
                 "guardrails": entry.metadata.get("guardrails").cloned().unwrap_or_else(|| json!({})),
                 "counters": entry.metadata.get("counters").cloned().unwrap_or_else(|| json!({})),
             })
         })
         .collect::<Vec<_>>();
+    let bonding = memories
+        .iter()
+        .filter(|entry| is_projection(entry, "bonding", "/user/patterns/bonding"))
+        .map(bonding_context_json)
+        .collect::<Vec<_>>();
+    let timeline = memories
+        .iter()
+        .filter(|entry| is_projection(entry, "timeline", "/timeline"))
+        .map(timeline_context_json)
+        .collect::<Vec<_>>();
+    let a2a = a2a_context_bundle(&pattern_refs, &bonding, &timeline, &events);
+    let feedback = if record_seen {
+        emit_pattern_seen_events(
+            server,
+            params.project.as_deref(),
+            query
+                .event_type
+                .as_deref()
+                .or(query.session_id.as_deref())
+                .or(query.domain.as_deref()),
+            &patterns,
+            Some("tachi_event.context"),
+        )
+    } else {
+        json!({
+            "status": "skipped",
+            "reason": "read_only_bundle",
+        })
+    };
+    let host_lifecycle = host_lifecycle_contract();
 
     Ok(json!({
         "status": "completed",
@@ -186,8 +257,14 @@ pub(crate) fn build_continuity_context(
         "memories": memories,
         "events": events,
         "patterns": patterns,
+        "pattern_refs": pattern_refs,
         "lorebook": lorebook,
         "affect": affect,
+        "bonding": bonding,
+        "timeline": timeline,
+        "a2a": a2a,
+        "host_lifecycle": host_lifecycle,
+        "feedback": feedback,
         "metrics": metrics,
         "guardrails": {
             "a2a": "share evidence and open questions, not conclusions",

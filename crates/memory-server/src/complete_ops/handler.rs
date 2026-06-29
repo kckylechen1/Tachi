@@ -89,6 +89,32 @@ pub(crate) async fn handle_tachi_complete(
         &subagent_event_payloads,
         params.project.as_deref(),
     );
+    let pattern_feedback_refs =
+        crate::continuity_ops::pattern_feedback_refs_from_strings(&safe_evidence_refs);
+    let default_pattern_outcome = match outcome_norm.as_str() {
+        "success" => "hit",
+        "failure" => "miss",
+        _ => "seen",
+    };
+    pipeline_status["pattern_feedback"] = if pattern_feedback_refs.is_empty() {
+        json!("skipped (no pattern refs in evidence_refs)")
+    } else {
+        crate::continuity_ops::emit_pattern_feedback_for_refs(
+            server,
+            params.project.as_deref(),
+            &pattern_feedback_refs,
+            default_pattern_outcome,
+            Some(&safe_task),
+            safe_notes.as_deref(),
+            "tachi_complete",
+            json!({
+                "task_id": task_id,
+                "outcome": outcome_norm,
+                "eval_memory_id": eval_memory_id,
+                "source": "tachi_complete.evidence_refs",
+            }),
+        )
+    };
 
     if let Some(ref trajectory) = safe_trajectory {
         if let Some(trace_arr) = trajectory.as_array() {

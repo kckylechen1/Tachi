@@ -4,8 +4,16 @@ use crate::hub_helpers::{
     CapabilityVisibility,
 };
 use crate::MemoryServer;
-use memory_core::HubCapability;
+use memory_core::{HubCapability, MemoryEntry};
+use serde_json::Value;
 use std::collections::HashSet;
+
+#[derive(Debug, Clone)]
+struct PatternSignal {
+    pattern_ref: Value,
+    projection_key: String,
+    tokens: Vec<String>,
+}
 
 pub(super) fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
@@ -93,6 +101,130 @@ pub(super) fn token_overlap_ratio(query_tokens: &[String], candidate_tokens: &[S
     intersection as f64 / union as f64
 }
 
+fn tokens_from_parts(parts: &[&str]) -> Vec<String> {
+    let mut tokens = parts
+        .iter()
+        .flat_map(|part| tokenize_query(part))
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn is_bridge_token(token: &str) -> bool {
+    if token.chars().count() < 4 {
+        return false;
+    }
+    const STOPWORDS: &[&str] = &[
+        "about",
+        "after",
+        "agent",
+        "alignment",
+        "asks",
+        "before",
+        "bridge",
+        "completion",
+        "context",
+        "durable",
+        "project",
+        "pattern",
+        "record",
+        "records",
+        "skill",
+        "through",
+        "workflow",
+        "user",
+        "when",
+        "with",
+        "write",
+    ];
+    !STOPWORDS.contains(&token)
+}
+
+fn bridge_tokens_from_parts(parts: &[&str]) -> Vec<String> {
+    tokens_from_parts(parts)
+        .into_iter()
+        .filter(|token| is_bridge_token(token))
+        .collect()
+}
+
+fn projection_key(entry: &MemoryEntry) -> String {
+    entry
+        .metadata
+        .get("projection_key")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(entry.id.as_str())
+        .to_string()
+}
+
+fn pattern_signal_from_entry(entry: &MemoryEntry) -> PatternSignal {
+    let key = projection_key(entry);
+    let tokens = bridge_tokens_from_parts(&[
+        entry.id.as_str(),
+        entry.path.as_str(),
+        entry.summary.as_str(),
+        entry.text.as_str(),
+        key.as_str(),
+    ]);
+    PatternSignal {
+        pattern_ref: crate::continuity_ops::pattern_ref_json(entry),
+        projection_key: key,
+        tokens,
+    }
+}
+
+fn collect_pattern_signals(server: &MemoryServer, query: &str) -> Vec<PatternSignal> {
+    crate::continuity_ops::list_active_patterns(server, None, Some(query), 5)
+        .unwrap_or_default()
+        .iter()
+        .map(pattern_signal_from_entry)
+        .filter(|signal| !signal.tokens.is_empty())
+        .collect()
+}
+
+fn pattern_signal_bonus(
+    cap: &HubCapability,
+    query_tokens: &[String],
+    pattern_signals: &[PatternSignal],
+    reasons: &mut Vec<String>,
+) -> (f64, Vec<Value>) {
+    if pattern_signals.is_empty() {
+        return (0.0, Vec::new());
+    }
+    let cap_tokens = bridge_tokens_from_parts(&[
+        cap.id.as_str(),
+        cap.name.as_str(),
+        cap.description.as_str(),
+        cap.definition.as_str(),
+    ]);
+    if cap_tokens.is_empty() {
+        return (0.0, Vec::new());
+    }
+
+    let mut bonus = 0.0;
+    let mut refs = Vec::new();
+    for signal in pattern_signals {
+        let query_overlap = token_overlap_ratio(query_tokens, &signal.tokens);
+        let cap_overlap = token_overlap_ratio(&cap_tokens, &signal.tokens);
+        if query_overlap <= 0.0 || cap_overlap <= 0.0 {
+            continue;
+        }
+        let signal_bonus = (query_overlap * 4.0 + cap_overlap * 6.0).min(2.0);
+        if signal_bonus <= 0.0 {
+            continue;
+        }
+        bonus += signal_bonus;
+        refs.push(signal.pattern_ref.clone());
+        reasons.push(format!(
+            "active pattern '{}' bridges query to skill",
+            signal.projection_key
+        ));
+    }
+    (round3(bonus.min(3.0)), refs)
+}
+
 fn telemetry_bonus(cap: &HubCapability, reasons: &mut Vec<String>) -> f64 {
     let mut bonus = 0.0;
     if cap.uses > 0 {
@@ -119,7 +251,8 @@ fn capability_score(
     callable: bool,
     query: &str,
     host: Option<&str>,
-) -> Option<(f64, Vec<String>)> {
+    pattern_signals: &[PatternSignal],
+) -> Option<(f64, Vec<String>, Vec<Value>)> {
     let query = query.trim().to_ascii_lowercase();
     if query.is_empty() {
         return None;
@@ -192,6 +325,13 @@ fn capability_score(
         ));
     }
 
+    let (pattern_bonus, pattern_refs) =
+        pattern_signal_bonus(cap, &query_tokens, pattern_signals, &mut reasons);
+    if pattern_bonus > 0.0 {
+        score += pattern_bonus;
+        matched = true;
+    }
+
     if !matched {
         return None;
     }
@@ -224,7 +364,7 @@ fn capability_score(
     if score <= 0.0 {
         None
     } else {
-        Some((round3(score), dedup_strings(reasons)))
+        Some((round3(score), dedup_strings(reasons), pattern_refs))
     }
 }
 
@@ -287,15 +427,17 @@ pub(super) fn recommend_capabilities_inner(
     include_uncallable: bool,
 ) -> Result<Vec<CapabilityRecommendation>, String> {
     let host = normalize_host_label(host);
+    let pattern_signals = collect_pattern_signals(server, query);
     let mut ranked = collect_capabilities(server, cap_type, include_hidden, include_uncallable)?
         .into_iter()
         .filter_map(|record| {
-            let (score, reasons) = capability_score(
+            let (score, reasons, pattern_refs) = capability_score(
                 &record.cap,
                 record.visibility,
                 record.callable,
                 query,
                 host.as_deref(),
+                &pattern_signals,
             )?;
             Some(CapabilityRecommendation {
                 id: record.cap.id.clone(),
@@ -314,6 +456,7 @@ pub(super) fn recommend_capabilities_inner(
                 } else {
                     None
                 },
+                pattern_refs,
             })
         })
         .collect::<Vec<_>>();

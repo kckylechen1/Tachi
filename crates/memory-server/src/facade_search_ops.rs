@@ -83,6 +83,7 @@ fn parse_pattern_rows(mut rows: Vec<Value>, top_k: usize) -> Vec<Value> {
 
 fn strip_metadata(mut rows: Vec<Value>) -> Vec<Value> {
     for row in &mut rows {
+        crate::continuity_ops::attach_pattern_ref_to_row(row);
         if let Some(object) = row.as_object_mut() {
             object.remove("metadata");
         }
@@ -194,6 +195,7 @@ pub(crate) async fn collect_tachi_search_sections(
                     params.project.as_deref(),
                     Some(&params.query),
                     &rows,
+                    Some("tachi_search"),
                 );
                 sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
             }

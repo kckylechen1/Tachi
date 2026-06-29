@@ -49,7 +49,9 @@ fn tachi_event_action_schema_declares_enum_values() {
     assert!(values.contains(&json!("query")));
     assert!(values.contains(&json!("metrics")));
     assert!(values.contains(&json!("project")));
+    assert!(values.contains(&json!("promote")));
     assert!(values.contains(&json!("context")));
+    assert!(values.contains(&json!("a2a")));
     assert!(values.contains(&json!("label_eval")));
 }
 
