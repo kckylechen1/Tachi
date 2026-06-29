@@ -10,6 +10,10 @@ pub(super) async fn ensure_stdio_proxy_daemon(
     project_db_path: Option<&Path>,
 ) -> Option<crate::cli_client::DaemonInfo> {
     let auto_daemon_disabled = auto_daemon_disabled();
+    if stdio_proxy_disabled() {
+        eprintln!("[stdio-proxy] disabled by TACHI_DISABLE_STDIO_PROXY");
+        return None;
+    }
 
     if !auto_daemon_disabled {
         replace_stale_daemon_if_needed(app_home, global_db_path).await;
@@ -98,11 +102,19 @@ async fn wait_for_stdio_shutdown(
 
 fn auto_daemon_disabled() -> bool {
     std::env::var("TACHI_DISABLE_AUTO_DAEMON")
-        .map(|value| {
-            let value = value.trim();
-            value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
-        })
+        .map(|value| env_truthy(&value))
         .unwrap_or(false)
+}
+
+fn stdio_proxy_disabled() -> bool {
+    std::env::var("TACHI_DISABLE_STDIO_PROXY")
+        .map(|value| env_truthy(&value))
+        .unwrap_or(false)
+}
+
+fn env_truthy(value: &str) -> bool {
+    let value = value.trim();
+    value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
 }
 
 enum DaemonCompatibility {
@@ -609,6 +621,16 @@ mod tests {
         assert!(proxy_can_preserve_project_context(
             &info, global, None, None
         ));
+    }
+
+    #[test]
+    fn stdio_proxy_env_gate_accepts_common_truthy_values() {
+        assert!(env_truthy("1"));
+        assert!(env_truthy("true"));
+        assert!(env_truthy(" yes "));
+        assert!(!env_truthy("0"));
+        assert!(!env_truthy("false"));
+        assert!(!env_truthy(""));
     }
 
     #[test]

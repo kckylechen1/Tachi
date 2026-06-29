@@ -146,14 +146,16 @@ pub fn hybrid_search(
     let entries_map = fetch_by_ids(conn, &candidates.candidate_ids, opts.include_archived)?;
     let mut results = ranking::rank_candidate_entries(
         conn,
-        query,
-        opts,
-        entries_map,
-        &candidates.vec_scores,
-        &candidates.fts_scores,
-        candidates.exact_id.as_ref(),
-        include_superseded,
-        as_of_utc.as_deref(),
+        ranking::CandidateRanking {
+            query,
+            opts,
+            entries_map,
+            vec_scores: &candidates.vec_scores,
+            fts_scores: &candidates.fts_scores,
+            exact_id: candidates.exact_id.as_deref(),
+            include_superseded,
+            as_of_utc: as_of_utc.as_deref(),
+        },
     )?;
 
     graph_expansion::append_graph_expansion(

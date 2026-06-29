@@ -7,6 +7,9 @@ use crate::manifest::DbEntry;
 
 use super::DbContext;
 
+type RuleSummaryKey = (&'static str, &'static str);
+type RuleSummaryAgg = (usize, usize, usize, std::collections::BTreeSet<String>);
+
 #[derive(Debug, Serialize, Clone)]
 pub struct Finding {
     pub kind: String,
@@ -300,10 +303,8 @@ fn maintenance_status(
 }
 
 fn findings_by_rule(rule_reports: &[RuleReport]) -> Vec<serde_json::Value> {
-    let mut by_rule: std::collections::BTreeMap<
-        (&'static str, &'static str),
-        (usize, usize, usize, std::collections::BTreeSet<String>),
-    > = std::collections::BTreeMap::new();
+    let mut by_rule: std::collections::BTreeMap<RuleSummaryKey, RuleSummaryAgg> =
+        std::collections::BTreeMap::new();
     for report in rule_reports {
         let entry = by_rule
             .entry((report.rule_id, report.rule_name))

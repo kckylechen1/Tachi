@@ -47,7 +47,6 @@ export type MemoryEntry = {
 export type BridgeConfig = {
   globalDbPath: string;
   dbPath: string;
-  shadowStorePath: string; // Keep for migration only
   auditLogPath: string;
   topK: number;
   exposeExperimentalTachiTools: boolean;
@@ -70,10 +69,6 @@ export const defaultConfig: BridgeConfig = {
   dbPath: configuredProjectDbPath
     ? resolveUserPath(configuredProjectDbPath)
     : defaultDbPath,
-  shadowStorePath: path.resolve(
-    pluginDataDir,
-    "shadow-store.jsonl",
-  ),
   auditLogPath: path.resolve(pluginDataDir, "audit-log.jsonl"),
   topK: 6,
   exposeExperimentalTachiTools:

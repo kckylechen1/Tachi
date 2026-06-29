@@ -13,29 +13,6 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
-///
-/// Use this from server code that knows the manifest role/project name and
-/// canonical DB path. Falls back to a no-op data-migration sentinel for
-/// callers that pass `None` paths.
-pub fn init_schema_with_label(
-    conn: &Connection,
-    db_label: &str,
-    current_db_path: Option<&Path>,
-) -> Result<Option<crate::db::migrations::MigrationReport>, MemoryError> {
-    init_schema_inner(conn)?;
-    if let Some(path) = current_db_path {
-        // Migrations need a mutable connection for transactions. We can build
-        // one from the existing connection's handle by re-borrowing through
-        // an `unchecked_transaction` route inside the migration itself. To
-        // avoid changing the public signature into `&mut Connection`, we
-        // accept the limitation that callers needing migrations should use
-        // the `_mut` variant below.
-        let _ = (path, db_label);
-    }
-    Ok(None)
-}
-
-/// Mutable variant: runs schema init AND data migrations.
 pub fn init_schema_with_label_mut(
     conn: &mut Connection,
     db_label: &str,

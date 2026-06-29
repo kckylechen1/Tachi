@@ -16,17 +16,31 @@ use super::{
     recall_config, resolve_weights, SearchOptions,
 };
 
+pub(super) struct CandidateRanking<'a> {
+    pub(super) query: &'a str,
+    pub(super) opts: &'a SearchOptions,
+    pub(super) entries_map: HashMap<String, MemoryEntry>,
+    pub(super) vec_scores: &'a HashMap<String, f64>,
+    pub(super) fts_scores: &'a HashMap<String, f64>,
+    pub(super) exact_id: Option<&'a str>,
+    pub(super) include_superseded: bool,
+    pub(super) as_of_utc: Option<&'a str>,
+}
+
 pub(super) fn rank_candidate_entries(
     conn: &Connection,
-    query: &str,
-    opts: &SearchOptions,
-    entries_map: HashMap<String, MemoryEntry>,
-    vec_scores: &HashMap<String, f64>,
-    fts_scores: &HashMap<String, f64>,
-    exact_id: Option<&String>,
-    include_superseded: bool,
-    as_of_utc: Option<&str>,
+    ranking: CandidateRanking<'_>,
 ) -> Result<Vec<SearchResult>, MemoryError> {
+    let CandidateRanking {
+        query,
+        opts,
+        entries_map,
+        vec_scores,
+        fts_scores,
+        exact_id,
+        include_superseded,
+        as_of_utc,
+    } = ranking;
     let symbolic_scores = symbolic_scores(query, &entries_map);
     let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
     let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;
@@ -77,7 +91,7 @@ pub(super) fn rank_candidate_entries(
     );
     if let Some(exact_id) = exact_id.filter(|id| entries_ref.contains_key(*id)) {
         scores.insert(
-            exact_id.clone(),
+            exact_id.to_string(),
             HybridScore {
                 vector: 1.0,
                 fts: 1.0,

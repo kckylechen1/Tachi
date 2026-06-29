@@ -25,14 +25,14 @@ brew tap kckylechen1/tachi && brew install tachi
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.6/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 ### Verify Installation
 
 ```bash
 tachi --version
-# Expected: tachi 1.5.6 (or later)
+# Expected: tachi 1.6.0 (or later)
 ```
 
 If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
@@ -322,7 +322,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.6/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.0/scripts/install.sh)"
 ```
 
 This will:
@@ -524,6 +524,11 @@ TACHI_PROFILE=claude-code tachi
 ```
 
 If no profile is specified, Tachi defaults to `standard`. Set `TACHI_PROFILE=admin` only for maintenance sessions that need the full low-level catalog.
+
+For source-tree MCP debugging, `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio
+process to serve locally instead of forwarding to a compatible running daemon.
+`TACHI_DISABLE_AUTO_DAEMON=1` only prevents daemon spawn/replacement; it does
+not by itself disable reuse of an existing compatible daemon.
 
 ---
 

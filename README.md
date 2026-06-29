@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer (also installs the OpenClaw plugin when detected):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.6/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.0/scripts/install.sh)"
 ```
 
 Verify:
@@ -286,6 +286,11 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 Host aliases are resolved automatically: `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`.
 
 If no profile is set, Tachi defaults to `standard` (since v1.0.1).
+
+For MCP host debugging, set `TACHI_DISABLE_STDIO_PROXY=1` to force the stdio
+process to serve locally instead of forwarding to an already-running daemon.
+`TACHI_DISABLE_AUTO_DAEMON=1` only disables daemon spawn/replacement; it may
+still reuse a compatible daemon unless stdio proxying is also disabled.
 
 ---
 

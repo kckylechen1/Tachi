@@ -4,6 +4,18 @@
   "description": "Advanced structured memory with LLM extraction and hybrid retrieval",
   "kind": "memory",
   "entry": "./index.js",
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_get",
+      "memory_save",
+      "memory_graph",
+      "memory_runtime_info",
+      "todo_write",
+      "todo_read",
+      "todo_spawn_summary"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": true,

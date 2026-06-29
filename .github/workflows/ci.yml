@@ -26,6 +26,9 @@ jobs:
       - name: Setup Rust
         uses: ./.github/actions/setup-rust
 
+      - name: Check release version sync
+        run: python3 scripts/check_release_versions.py
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
