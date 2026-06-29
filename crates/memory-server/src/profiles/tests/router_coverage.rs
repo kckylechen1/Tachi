@@ -85,6 +85,18 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "update_card",
 ];
 
+const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    "cyberbrain_write",
+    "cyberbrain_search",
+    "section9_review",
+    "section9_audit_log",
+    "shell_set_policy",
+    "shell_get_policy",
+    "shell_list_policies",
+    "shell_exec_audit",
+    "tachi_plan",
+];
+
 use std::collections::BTreeSet;
 
 #[test]
@@ -165,4 +177,32 @@ fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
 
     assert!(!tool_matches_bundle("tachi_complete", ToolBundle::Observe));
     assert!(tool_matches_bundle("tachi_complete", ToolBundle::Remember));
+}
+
+#[test]
+fn retired_native_aliases_stay_retired() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    let cacheable: BTreeSet<&str> = crate::server_state::CACHEABLE_TOOLS
+        .iter()
+        .copied()
+        .collect();
+    let invalidating: BTreeSet<&str> = crate::server_state::CACHE_INVALIDATING_TOOLS
+        .iter()
+        .copied()
+        .collect();
+
+    for alias in RETIRED_NATIVE_ALIASES {
+        assert!(
+            !route_names.contains(*alias),
+            "retired native alias '{alias}' must not be reintroduced to the tool router"
+        );
+        assert!(
+            bundle_count(alias) == 0,
+            "retired native alias '{alias}' must not be included in tool profile bundles"
+        );
+        assert!(
+            !cacheable.contains(alias) && !invalidating.contains(alias),
+            "retired native alias '{alias}' must not remain in cache policy lists"
+        );
+    }
 }

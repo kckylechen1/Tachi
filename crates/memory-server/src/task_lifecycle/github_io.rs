@@ -9,20 +9,10 @@ pub(super) async fn read_issue_snapshot(
         server,
         TachiGhParams {
             action: "issue_read".to_string(),
-            repo: target.repo.clone(),
+            repo: Some(target.repo.clone()),
             number: Some(target.number),
-            title: None,
-            body: None,
-            labels: Vec::new(),
-            state: None,
-            limit: None,
-            merge_strategy: None,
             dry_run: Some(true),
-            confirm: false,
-            flow_id: None,
-            merge_policy: None,
-            author_filter: None,
-            write_digest: None,
+            ..Default::default()
         },
     )
     .await?;
@@ -109,20 +99,10 @@ pub(super) async fn read_pr_snapshot(
         server,
         TachiGhParams {
             action: "pr_read".to_string(),
-            repo: target.repo.clone(),
+            repo: Some(target.repo.clone()),
             number: Some(target.number),
-            title: None,
-            body: None,
-            labels: Vec::new(),
-            state: None,
-            limit: None,
-            merge_strategy: None,
             dry_run: Some(true),
-            confirm: false,
-            flow_id: None,
-            merge_policy: None,
-            author_filter: None,
-            write_digest: None,
+            ..Default::default()
         },
     )
     .await?;

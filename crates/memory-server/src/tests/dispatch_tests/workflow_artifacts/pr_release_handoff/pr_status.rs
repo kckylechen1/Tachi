@@ -61,7 +61,7 @@ fn tachi_task_pr_status_builds_safe_merge_preview_params() {
     let gh_params =
         crate::tools::build_task_pr_status_gh_params(&params).expect("pr_status params");
     assert_eq!(gh_params.action, "safe_merge");
-    assert_eq!(gh_params.repo, "kckylechen1/tachi");
+    assert_eq!(gh_params.repo.as_deref(), Some("kckylechen1/tachi"));
     assert_eq!(gh_params.number, Some(228));
     assert_eq!(gh_params.dry_run, Some(true));
     assert!(!gh_params.confirm);

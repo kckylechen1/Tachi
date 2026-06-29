@@ -113,3 +113,18 @@ fn tachi_task_action_schema_declares_feature_briefing() {
     assert!(values.contains(&json!("build_references")));
     assert!(values.contains(&json!("close_loop")));
 }
+
+#[test]
+fn tachi_gh_action_schema_mentions_lifecycle_actions() {
+    let schema = rmcp::schemars::schema_for!(crate::tool_params::TachiGhParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let action = &value["properties"]["action"];
+    let description = action["description"].as_str().expect("action description");
+
+    for expected in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+        assert!(
+            description.contains(expected),
+            "tachi_gh action schema should mention {expected}: {description}"
+        );
+    }
+}

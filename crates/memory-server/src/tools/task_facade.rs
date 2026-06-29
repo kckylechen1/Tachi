@@ -210,19 +210,12 @@ pub(crate) fn build_task_pr_status_gh_params(
     let (repo, number) = resolve_task_pr_status_target(params)?;
     Ok(TachiGhParams {
         action: "safe_merge".to_string(),
-        repo,
+        repo: Some(repo),
         number: Some(number),
-        title: None,
-        body: None,
-        labels: Vec::new(),
-        state: None,
-        limit: None,
-        merge_strategy: None,
         dry_run: Some(true),
         confirm: false,
         flow_id: params.flow_id.clone(),
         merge_policy: params.merge_policy.clone(),
-        author_filter: None,
-        write_digest: None,
+        ..Default::default()
     })
 }
