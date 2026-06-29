@@ -30,10 +30,40 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
 - **Workflow control plane** — `tachi_dispatch`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+- **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
+- **Lifecycle closure** — GitHub issues/PRs, docs/specs, wiki, memory, verification, and release notes in one loop
 
 All state lives in embedded SQLite. **Zero external database dependencies.**
 
 Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through shared memory.
+
+### Current Release
+
+Current release: `v1.6.0`.
+
+This line makes Tachi's project-cycle direction explicit:
+
+- Continuity memory is now typed: session captures, memory writes, outcome
+  labels, projections, and active patterns can be stored and queried as durable
+  project context.
+- `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
+  cycle plan, verification status, PR handoff, release notes, reference
+  building, and close-loop writes back to memory/wiki/docs.
+- Recall behavior is tunable and reviewable through simulation, rerank replay,
+  and scored proposals instead of one-off hard-coded ranking changes.
+- Superpowers and Waza are tracked as governed skill sources with pinned
+  metadata and reviewed sync planning.
+- Runtime routing is stricter: repo-local project DBs are primary, global
+  `--no-project-db` serves are isolated from project launch context, and
+  `TACHI_DISABLE_STDIO_PROXY=1` lets source-tree MCP debug sessions avoid
+  reusing an existing daemon.
+- OpenClaw remains a thin MCP facade. It owns hook timing and OpenClaw-facing
+  tool exposure; Tachi owns database writes, embedding, rerank, distill, graph
+  maintenance, Foundry jobs, and continuity projection.
+- Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata are
+  checked by `scripts/check_release_versions.py` and CI before release.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 ---
 
@@ -84,6 +114,12 @@ Verify:
 ```bash
 tachi --version
 ```
+
+OpenClaw users should use the full installer above to refresh both the Tachi
+binary and the `tachi` OpenClaw plugin. The plugin is a thin MCP facade: it
+starts or connects to the Tachi runtime over stdio, exposes OpenClaw-facing
+memory tools, and does not maintain its own shadow store or SQLite index. Older
+local installs may still have stale plugin metadata until reinstalled.
 
 ### 2. Configure your agent
 
@@ -256,7 +292,33 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (`post_card`, `check_inbox`, `update_card`).
 - **Handoff tokens** — structured context transfer between agent sessions (`handoff_leave`, `handoff_check`).
 
-### 8. Workflow Control Plane
+### 8. Continuity & Project Lifecycle Memory
+Continuity is the layer above raw recall. Tachi records typed project events,
+projects repeated behavior into reusable pattern memories, and exposes
+read-only context so future agents can continue the same project cycle without
+reconstructing it from chat history.
+
+Key surfaces:
+
+- **Continuity events** — append/query/project neutral project events from
+  session captures, memory saves, task outcomes, and repo-specific adapters.
+- **Projection memories** — convert repeated or high-signal continuity events
+  into durable pattern/timeline entries under project memory.
+- **Outcome labels** — record whether prior agent actions helped, failed,
+  drifted, or required user correction.
+- **Project-cycle context** — brief future agents with active patterns,
+  lifecycle state, verification evidence, and unresolved closure debt.
+- **Lifecycle references** — link issues, PRs, docs/specs, wiki pages, memory
+  fragments, and run artifacts so the project history stays navigable.
+
+Relevant design docs:
+
+- [`docs/engineering/architecture/tachi-continuity-memory-architecture.md`](docs/engineering/architecture/tachi-continuity-memory-architecture.md)
+- [`docs/engineering/architecture/project-cycle-memory-spine.md`](docs/engineering/architecture/project-cycle-memory-spine.md)
+- [`docs/engineering/architecture/pattern-timeline-bonding-memory.md`](docs/engineering/architecture/pattern-timeline-bonding-memory.md)
+- [`docs/engineering/examples/session-to-pattern-extraction-example.md`](docs/engineering/examples/session-to-pattern-extraction-example.md)
+
+### 9. Workflow Control Plane
 Tachi is not only a memory store; it is becoming the durable control plane for agent engineering:
 
 - **`tachi_dispatch`** — spawn bounded worker agents with a permission profile and required evidence.
@@ -264,8 +326,13 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 - **`tachi_verify`** — record background verification evidence (tests, type checks, safe-merge gates) under `.tachi/runs/<flow_id>/verification.json`.
 - **`tachi_agent_eval`** — live performance matrix and scorecards that feed future routing decisions.
 - **`tachi_complete`** — record task outcomes with `subagents`, `tests_run`, `evidence_refs`, latency, token, and cost fields.
+- **`tachi_task`** — orchestrate project work from issue intake through
+  doc/spec indexing, cycle planning, dispatch recommendation, PR handoff,
+  release-note synthesis, and close-loop memory/wiki/doc updates.
+- **`tachi_gh`** — read issues/PRs, post comments, digest review state, and
+  run safe-merge checks with lifecycle/verification evidence.
 
-### 9. Neural Foundry & Wiki
+### 10. Neural Foundry & Wiki
 - **Foundry** — server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
 - **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`.
 

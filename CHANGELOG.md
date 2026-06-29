@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.6.0](#160---2026-06-29) — continuity memory, lifecycle routing, and runtime hardening
 - [1.5.x](#156---2026-06-15) — repair and tidy cleanup UX
 - [1.4.x](#140---2026-06-01) — Plan C project DB, SFT factory, and facade contracts
 - [1.3.x](#130---2026-05-30) — search quality, memory lifecycle, and audit hardening
@@ -35,6 +36,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.6.0] - 2026-06-29 — Continuity memory, lifecycle routing, and runtime hardening
+
+Major release for turning Tachi from a memory + workflow backend into a project-cycle continuity layer. This line adds typed continuity events, project lifecycle read models, issue/PR/doc closure flows, recall tuning loops, skill-source governance, stronger project DB routing, and a cleaner OpenClaw MCP-only adapter. It also makes the 1.6 release boundary explicit: Cargo, npm, docs, installer URLs, and OpenClaw plugin metadata are now checked together.
+
+### Added
+
+- **Continuity event substrate**: typed continuity events, storage, metrics, projection, context building, outcome labeling, and optional distill/labeler pipeline hooks.
+- **Continuity projections**: session captures can project into pattern/timeline memory entries with maturity metadata, active-pattern context, and read-only status exposure.
+- **Project-cycle memory spine**: new architecture docs and examples for moving from session events to reusable patterns, bonding memory, and issue/doc/wiki closure.
+- **Lifecycle task actions**: `tachi_task` now covers `doc_index`, `cycle_status`, `cycle_plan`, `pr_status`, `release_note`, `build_references`, and `close_loop` so issues, PRs, docs/specs, memory, wiki, verification, and release notes can be treated as one project loop.
+- **GitHub lifecycle wiring**: issue intake, PR linking/status, review digest routing, linked issue checks, and close-loop comments are wired into the task lifecycle surfaces.
+- **Agent profile projection**: Tachi can render host-facing agent/profile guidance, including continuity context and OpenClaw-oriented `AGENTS.md` / `SOUL.md` / `IDENTITY.md` / `USER.md` / `TOOLS.md` style surfaces.
+- **Recall tuning loop**: recall simulations can compare config variants, replay rerank policy, generate reviewed scoring proposals, and keep default behavior stable until proposals are accepted.
+- **Configurable recall scoring**: recall weights and text/graph precision helpers moved behind explicit config modules instead of hard-coded scorer behavior.
+- **Skill-source governance**: built-in Superpowers and Waza skill manifests now carry source metadata; `skill-surface sources` and reviewed sync planning expose pinned upstream status and drift before sync.
+- **Built-in workflow skills**: Superpowers and Waza gates are embedded as first-class skill capabilities for planning, execution, review, verification, release, audit, research, and writing workflows.
+- **Poke smoke suites**: `tachi poke` adds isolated local product probes for memory, dispatch, skill, shell, and verification paths.
+- **Vault onboarding**: setup can funnel provider keys into the encrypted vault, and the TypeScript onboarding UI supports masked/skippable API-key entry.
+- **Release version gate**: `scripts/check_release_versions.py` verifies that Cargo package versions, Cargo.lock entries, npm package files, package-lock files, installer URLs, OpenClaw metadata, and `docs/current-state.agent.yaml` agree with the `memory-server` version.
+- CI now runs the release version sync check before clippy.
+- `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio MCP process to serve locally instead of forwarding to an already-running compatible daemon.
+- OpenClaw plugin metadata now declares its expected tool contract (`memory_search`, `memory_get`, `memory_save`, `memory_graph`, `memory_runtime_info`, `todo_write`, `todo_read`, `todo_spawn_summary`).
+
+### Changed
+
+- `memory-core`, `memory-node`, `memory-server`, `memory-server-params`, the OpenClaw plugin, and npm package metadata are aligned to `1.6.0`.
+- Installer URLs across README, install docs, scripts, and OpenClaw docs now point at the `v1.6.0` release tag.
+- **Project DB routing is repo-local first**: source-tree MCP launches, daemon facades, and embedded adapters now prefer the active project store instead of relying on Plan C symlink behavior.
+- **No-project/global serve isolation**: `--no-project-db serve` runs from a neutral runtime directory and skips project `.env` loading so global/OpenClaw/desktop launches do not inherit unrelated project paths.
+- **Stdio proxy self-healing**: stdio proxy forwarding detects dead or stale daemons, checks version/project-scope compatibility, and avoids forwarding writes across project DB boundaries.
+- **Status and health are product-facing**: `tachi status` reports real health scores, clearer deductions, compact default surfaces, provider probe context, namespace drift, continuity metrics, and self-explanatory remediation hints.
+- **Foundry failure handling**: failed jobs retry with backoff, terminal failures become visible, stale failure markers can be repaired, and health scoring only penalizes exhausted failures.
+- **Daily/background work covers named projects**: distill and WAL checkpoint routines now cover named/project DBs instead of only the currently bound store.
+- **OpenClaw stays a thin facade**: the plugin owns hook timing, tool exposure, and MCP calls; embedding, rerank, distill, graph maintenance, Foundry work, and database writes stay in Tachi.
+- **Generic routing is domain-agnostic**: finance/A-share scoring logic was lifted out of shared generic recall paths and kept behind configuration rather than hard-coded into the base product.
+- **Tool/router maintainability**: the large MCP tool router, facade params, memory CRUD, migrations, search, wiki, vault, arena, verify, status, setup, tidy, and OpenClaw/bootstrap surfaces were split into focused modules.
+- **Test maintainability and speed**: monolithic test files were split by behavior, avoidable sleeps were removed, vault crypto tests were bounded, and fast Tachikoma verification scripts were added.
+- **Node/CLI lifecycle**: `tachi-cli` derives version from package metadata, delegates daemon lifecycle to the real `tachi` binary, and avoids leaking i18n keys in UI output.
+- README and install docs now document the difference between `TACHI_DISABLE_STDIO_PROXY` and `TACHI_DISABLE_AUTO_DAEMON` for MCP host debugging.
+- OpenClaw plugin configuration is kept MCP-only; model work, embedding, rerank, distill, graph maintenance, and Foundry lifecycle stay owned by the Tachi runtime.
+
+### Fixed
+
+- Plan C project DB split-brain detection, repair, and repo-local addressing.
+- Project-scoped MCP routing for agent hosts after global/no-project serve isolation.
+- Stale daemon/process reuse, cache-hit stalls, and embedded MCP adapter scope drift.
+- Namespace hygiene warnings that were too noisy or hid real drift.
+- Recall scoping, exact-id/path slug recall, partial-term FTS coverage, rerank replay fidelity, and dogfood recall probe anchoring.
+- Point-in-time memory recovery: contradicted or auto-linked superseded facts now close `valid_until`, preserving historical `as_of` recall.
+- `kind="wiki"` save facade consistency so wiki saves work through the memory facade.
+- Briefing quality issues: stale arena cards are kept out, real health score is shown, and reads stay on the daemon authority.
+- OpenClaw `<think>` capture leakage and MCP runtime identity/DB routing checks.
+- WAL growth under daemon use through periodic checkpointing across global and named project DBs.
+- Dispatch classification for research/exploration work, route recommendation penalty bounds, stale non-terminal kanban cards, and closure debt actions.
+- Credential/vault drift handling, provider key materialization, API-key pool health, and setup flow edge cases.
+- Strict clippy failures around hybrid-search ranking argument count and repair-report type complexity.
+- Removed a misleading `init_schema_with_label` API that initialized schema but never ran data migrations.
+
+### Removed
+
+- Nine legacy tool aliases (`cyberbrain_*`, `section9_*`, `shell_*`, `tachi_plan`) that duplicated current facade surfaces.
+- Disabled durable recall-cache jobs no longer enqueue background work.
+- Legacy OpenClaw shadow-store, benchmark, backfill, and ad hoc test scripts that were no longer part of the MCP-only runtime package surface.
+- Hardcoded local `memory-node` migration/import helper scripts that were not part of the release path.
 
 ## [1.5.6] - 2026-06-15 — Repair and tidy cleanup UX
 
