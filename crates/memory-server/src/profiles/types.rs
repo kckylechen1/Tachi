@@ -13,7 +13,7 @@ pub(crate) struct ToolProfile {
     pub(crate) coordinate: bool,
     pub(crate) operate: bool,
     pub(crate) admin: bool,
-    /// Standard profile: curated 10-tool allow-list for IDE + CLI agents.
+    /// Standard profile: curated daily allow-list for IDE + CLI agents.
     /// When set, only patterns in STANDARD_MINIMAL_TOOL_PATTERNS pass.
     pub(crate) standard_minimal: bool,
     /// Delegate profile: curated 6-tool allow-list for worker agents.
@@ -85,7 +85,7 @@ impl ToolProfile {
 
     /// Standard profile for IDE + CLI agents (Windsurf, Cursor, Antigravity,
     /// Trae, Codex standalone, Claude Code standalone). Enables all bundles but
-    /// intersects with a curated 12-tool allow-list to keep the tool tray small.
+    /// intersects with a curated daily facade allow-list to keep the tool tray small.
     pub(crate) const fn standard() -> Self {
         Self {
             observe: true,

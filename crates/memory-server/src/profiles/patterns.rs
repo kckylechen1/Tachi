@@ -113,8 +113,8 @@ pub(crate) const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "vault_status",
 ];
 
-/// Standard profile allow-list. Intersected with all bundles
-/// so the IDE/CLI tool tray stays small and focused.
+/// Standard profile allow-list. Intersected with all bundles so the IDE/CLI
+/// tool tray stays small and focused on daily facade entrypoints.
 pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Active tool discovery for the current profile
     "tachi_tools",
@@ -124,25 +124,18 @@ pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_status",
     // Task facade (plan / dispatch / board / merge)
     "tachi_task",
-    // Tachi Arena - focused tracked worker/advisor mission ledger for leaders.
+    // Tracked subagent/advisor mission ledger for main-agent delegation.
     "tachi_arena",
     // Background verification evidence ledger for runners and safe_merge.
     "tachi_verify",
-    // Live eval/performance matrix for routing-policy feedback.
-    "tachi_agent_eval",
     // Unified memory facade (search / save / extract_facts)
     "tachi_memory",
-    // Append/query continuity events for typed projectors
-    "tachi_event",
-    // Import repo-specific continuity shapes into neutral projections
-    "tachi_domain_adapter",
-    // Render/import canonical agent profile projections (read-only dry-run)
-    "tachi_profile",
     // Zero-param session-start briefing (calls tachi_memory(action='briefing') internally)
     "tachi_briefing",
     // Direct notepad/conclusion saver facade (high-frequency)
     "tachi_save",
-    // Live web search
+    // Live web search. Keep in standard because some agents lack host search,
+    // and future wiki/research ledger flows need one canonical search intake.
     "tachi_web_search",
     // Wiki facade (search / browse / write)
     "tachi_wiki",

@@ -101,9 +101,16 @@ fn standard_profile_restricts_to_allow_list() {
     let filtered = filter_tool_defs(
         vec![
             test_tool("tachi_tools"),
+            test_tool("runtime_info"),
+            test_tool("tachi_status"),
             test_tool("tachi_task"),
             test_tool("tachi_arena"),
+            test_tool("tachi_verify"),
+            test_tool("tachi_agent_eval"),
             test_tool("tachi_memory"),
+            test_tool("tachi_event"),
+            test_tool("tachi_domain_adapter"),
+            test_tool("tachi_profile"),
             test_tool("tachi_briefing"),
             test_tool("tachi_save"),
             test_tool("tachi_web_search"),
@@ -145,8 +152,11 @@ fn standard_profile_restricts_to_allow_list() {
         names,
         vec![
             "tachi_tools".to_string(),
+            "runtime_info".to_string(),
+            "tachi_status".to_string(),
             "tachi_task".to_string(),
             "tachi_arena".to_string(),
+            "tachi_verify".to_string(),
             "tachi_memory".to_string(),
             "tachi_briefing".to_string(),
             "tachi_save".to_string(),
