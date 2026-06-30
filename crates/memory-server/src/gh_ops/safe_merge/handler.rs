@@ -24,6 +24,9 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         .pr_view(repo, pr_number)
         .await
         .map_err(|e| format!("pr_view failed: {e}"))?;
+    if matches!(pr.state, PrLifecycleState::Merged) {
+        return handle_already_merged_pr(repo, pr_number, &pr, dry_run, flow_id, policy).await;
+    }
     let mut verification_gate = match evaluate_verification_gate(flow_id, &pr.head_sha) {
         Ok(gate) => gate,
         Err(err) if flow_id.is_some() => Some(json!({
@@ -157,10 +160,16 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
     } else {
         merge_state
     };
+    let pr_state = if merged_sha.is_some() {
+        "MERGED"
+    } else {
+        pr_lifecycle_state_label(pr.state)
+    };
 
     let status_patch = json!({
         "repo": repo,
         "pr_number": pr_number,
+        "pr_state": pr_state,
         "merge_state": effective_state,
         "head_sha": pr.head_sha,
         "policy": policy.mode.as_str(),
@@ -257,4 +266,131 @@ pub(crate) async fn handle_github_safe_merge<C: GhClient + ?Sized>(
         },
     }))
     .map_err(|e| format!("serialize: {e}"))
+}
+
+async fn handle_already_merged_pr(
+    repo: &str,
+    pr_number: u64,
+    pr: &PrState,
+    dry_run: bool,
+    flow_id: Option<&str>,
+    policy: MergeGatePolicy,
+) -> Result<String, String> {
+    let flow_run_dir = match flow_id {
+        Some(fid) => Some(run_dir_for_flow_id(fid)?),
+        None => None,
+    };
+    let requested_mode = if dry_run {
+        "preview"
+    } else {
+        "merge_requested"
+    };
+    let status_patch = json!({
+        "repo": repo,
+        "pr_number": pr_number,
+        "pr_state": "MERGED",
+        "merge_state": "merged",
+        "head_sha": pr.head_sha,
+        "policy": policy.mode.as_str(),
+        "dry_run": dry_run,
+        "will_merge": false,
+        "requested_mode": requested_mode,
+        "merge_attempted": false,
+        "merge_executed": false,
+        "already_merged": true,
+        "head_consistency": {
+            "head_sha": pr.head_sha,
+            "checks_head_sha": null,
+            "review_decision_head_sha": null,
+            "head_consistent": true,
+            "state": "not_required_for_merged_pr",
+            "requirement": policy.require_head_consistency,
+            "source": "github_pr_state",
+            "note": "PR is already merged, so safe_merge records the terminal state without re-running pre-merge head consistency gates",
+        },
+        "checks": {
+            "state": match pr.checks {
+                ChecksState::None => "none",
+                ChecksState::Pending => "pending",
+                ChecksState::Skipped => "skipped",
+                ChecksState::Success => "success",
+                ChecksState::Failure => "failure",
+            },
+            "required": policy.require_checks,
+            "allow_missing": policy.allow_missing_checks,
+            "source": "gh_pr_checks",
+            "head_consistent": true,
+            "head_consistency_state": "not_required_for_merged_pr",
+        },
+        "review": {
+            "state": match pr.review_decision {
+                Some(ReviewDecision::Approved) => "approved",
+                Some(ReviewDecision::ChangesRequested) => "changes_requested",
+                Some(ReviewDecision::ReviewRequired) => "review_required",
+                None if policy.require_review_approval => "unknown",
+                None => "not_required",
+            },
+            "required": policy.require_review_approval,
+            "allow_missing_decision": policy.allow_missing_review_decision,
+        },
+        "flow": {
+            "flow_id": flow_id,
+            "linked_issue_refs": pr.linked_issue_refs,
+            "has_linked_issue": !pr.linked_issue_refs.is_empty(),
+            "required": policy.require_linked_issue_or_flow,
+        },
+        "verification": null,
+    });
+    let event_payload = json!({
+        "repo": repo,
+        "pr_number": pr_number,
+        "head_sha": pr.head_sha,
+        "requested_mode": requested_mode,
+        "merge_attempted": false,
+        "merge_executed": false,
+        "dry_run": dry_run,
+        "already_merged": true,
+    });
+
+    let mut persisted = false;
+    if let (Some(fid), Some(run_dir)) = (flow_id, flow_run_dir.as_ref()) {
+        tokio::fs::create_dir_all(run_dir)
+            .await
+            .map_err(|e| format!("create run dir: {e}"))?;
+        merge_github_status(run_dir, status_patch.clone())?;
+        append_github_event(run_dir, fid, "github_pr_merged", event_payload.clone())?;
+        persisted = true;
+    }
+
+    serde_json::to_string(&json!({
+        "tool": "tachi_gh_safe_merge",
+        "repo": repo,
+        "pr_number": pr_number,
+        "decision": {"decision": "already_merged"},
+        "merge_state": "merged",
+        "mode": policy.mode.as_str(),
+        "merged_sha": null,
+        "dry_run": dry_run,
+        "will_merge": false,
+        "requested_mode": requested_mode,
+        "merge_attempted": false,
+        "merge_executed": false,
+        "already_merged": true,
+        "flow_id": flow_id,
+        "persisted": persisted,
+        "status_patch": status_patch,
+        "event": {
+            "kind": "github_pr_merged",
+            "payload": event_payload,
+        },
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+fn pr_lifecycle_state_label(state: PrLifecycleState) -> &'static str {
+    match state {
+        PrLifecycleState::Open => "OPEN",
+        PrLifecycleState::Closed => "CLOSED",
+        PrLifecycleState::Merged => "MERGED",
+    }
 }

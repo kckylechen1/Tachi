@@ -477,7 +477,7 @@ LONGPORT_APP_SECRET=vault:longbridge.1.secret
 GOOGLE_API_KEY=vault:google.1.api_key
 ```
 
-When `tachi_dispatch` runs with `cwd` inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
+When dispatch runs through `tachi_task(action='dispatch')` with `cwd` inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
 
 #### Project env CLI (`tachi env`)
 
@@ -515,7 +515,7 @@ Add `.tachi/env.generated` to `.gitignore`. Keep only `.tachi/vault.env` (vault 
 #### DLQ and dispatch safety
 
 - **`dlq_list` / `dlq_retry`**: DLQ replay skips mutating tools by default. Only idempotent read/search-style failures are safe to retry automatically.
-- **Bare dispatch dedupe**: repeated identical `tachi_dispatch` tasks without a `flow_id` coalesce via fingerprint locks under `~/.tachi/runs/.dispatch-dedupe/`.
+- **Bare dispatch dedupe**: repeated identical `tachi_task(action='dispatch')` tasks without a `flow_id` coalesce via fingerprint locks under `~/.tachi/runs/.dispatch-dedupe/`.
 - **Crash recovery**: restarting the daemon reconciles orphaned dispatch runs left by abrupt process exit.
 
 See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineering/architecture/safety-hardening-2026-06.md).
@@ -530,13 +530,13 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Facade & Delegation
 
-`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_unstick`, `tachi_browse`, `tachi_dispatch`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_unstick`, `tachi_browse`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
 
-*(Aliases for real tools: `tachi_task_brief`, `tachi_progress_check`)*
+*(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 
 ### Wiki System
 
-`wiki_lint`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_search`, `wiki_browse`
+`wiki_lint`, `tachi_wiki`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_search`, `tachi_browse`
 
 ### Utilities
 
@@ -551,9 +551,9 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 | Profile | Exposed surface | Best for |
 |---|---|---|
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents (Claude, Cursor, Codex, Windsurf, Trae, Antigravity). |
-| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `tachi_dispatch`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`. | Leader/orchestrator agents. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `agent_register`, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters and OpenClaw. |
-| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_dispatch`. |
+| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. |
 | `admin` | Full catalog. | Maintenance and development. |
 
 Host aliases:

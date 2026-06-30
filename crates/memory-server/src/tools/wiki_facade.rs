@@ -68,17 +68,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Browse wiki entries by category. Without a category, returns category stats (counts per path). With a category, lists entries under that path. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
-    )]
-    pub(crate) async fn wiki_browse(
-        &self,
-        Parameters(params): Parameters<WikiBrowseParams>,
-    ) -> Result<String, String> {
-        handle_wiki_browse(self, params)
-    }
-
-    #[tool(
-        description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc. (Alias: wiki_browse)"
+        description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
     )]
     pub(crate) async fn tachi_browse(
         &self,

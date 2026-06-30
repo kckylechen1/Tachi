@@ -300,7 +300,7 @@ pub(super) fn build_tool_plan(intent: &str) -> Vec<Value> {
         })),
         "fix_request" | "test_request" => plan.push(json!({
             "step": "progress_check",
-            "tool": "tachi_progress_check",
+            "tool": "tachi_unstick",
             "action": "check",
             "when": "after repeated failed attempts or unclear root cause",
         })),

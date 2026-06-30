@@ -126,8 +126,7 @@ for raw in sys.stdin:
     first.cwd = Some(project.path().to_string_lossy().to_string());
     first.timeout_secs = 5;
 
-    let first_response = server
-        .tachi_dispatch(Parameters(first.clone()))
+    let first_response = crate::dispatch_ops::handle_tachi_dispatch(&server, first.clone())
         .await
         .expect("native ACP dispatch should start");
     let first_parsed: Value = serde_json::from_str(&first_response).expect("dispatch JSON");
@@ -161,8 +160,7 @@ for raw in sys.stdin:
 
     let mut second = first;
     second.task = "Run through native ACP second".to_string();
-    let second_response = server
-        .tachi_dispatch(Parameters(second))
+    let second_response = crate::dispatch_ops::handle_tachi_dispatch(&server, second)
         .await
         .expect("second native ACP dispatch should start");
     let second_parsed: Value = serde_json::from_str(&second_response).expect("dispatch JSON");

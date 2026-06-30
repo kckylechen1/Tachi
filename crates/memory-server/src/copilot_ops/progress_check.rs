@@ -99,7 +99,7 @@ pub(crate) async fn handle_tachi_progress_check(
         "next_actions": if stuck {
             json!(["search wiki hits", "write a failing boundary test", "ask another agent with ask_codex_prompt", "only then edit code"])
         } else {
-            json!(["continue one narrow validation", "record the result", "call tachi_progress_check again after another failed attempt"])
+            json!(["continue one narrow validation", "record the result", "call tachi_unstick again after another failed attempt"])
         },
     }))
     .map_err(|e| format!("serialize progress_check: {e}"))

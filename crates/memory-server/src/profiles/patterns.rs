@@ -1,7 +1,6 @@
 pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "tachi_task_brief",
-    "tachi_progress_check",
     "tachi_wiki_search",
     "recommend_capability",
     "recommend_skill",
@@ -9,7 +8,6 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "prepare_capability_bundle",
     "hub_discover",
     "search_memory",
-    "get_memory",
     "memory_graph",
     "list_memories",
     "memory_stats",
@@ -18,13 +16,11 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_doctor_scan",
     "get_edges",
     "wiki_search",
-    "wiki_browse",
     // Facade read tools
     "tachi_search",
     "tachi_web_search",
     "tachi_unstick",
     "tachi_browse",
-    "tachi_board",
     "tachi_agent_eval",
     "tachi_wiki",
     "tachi_skill",
@@ -72,7 +68,6 @@ pub(crate) const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_workflow",
     "tachi_orchestrator",
     "tachi_agents",
-    "tachi_dispatch",
     "approve_merge",
     // GitHub tools (bundle membership for classification; visibility gated by vault token)
     "tachi_gh",

@@ -184,7 +184,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 ### `observe`
 
 - `search_memory`
-- `get_memory`
+- `tachi_memory(action="get")`; native `get_memory` is admin/backcompat only
 - `memory_graph`
 - `list_memories`
 - `memory_stats`

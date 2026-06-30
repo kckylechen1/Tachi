@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeMap;
 
 #[test]
 fn facade_response_defaults_to_json_and_preserves_markdown_opt_in() {
@@ -199,4 +200,183 @@ fn local_skill_discovery_expands_common_chinese_queries() {
             .any(|cap| cap.get("name").and_then(Value::as_str) == Some("gh-fix-ci")),
         "expected Chinese query aliases to find gh-fix-ci: {found:?}"
     );
+}
+
+#[test]
+fn native_tool_methods_do_not_accumulate_byte_identical_alias_bodies() {
+    let mut bodies: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, source) in native_tool_sources() {
+        for (name, body) in tool_method_bodies(path, source) {
+            bodies.entry(body).or_default().push(name);
+        }
+    }
+
+    let duplicates = bodies
+        .values()
+        .filter(|names| names.len() > 1)
+        .map(|names| names.join(", "))
+        .collect::<Vec<_>>();
+    assert!(
+        duplicates.is_empty(),
+        "new #[tool] methods must not be byte-identical aliases; route through a facade action or share a handler instead: {duplicates:?}"
+    );
+}
+
+fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("src/tools.rs", include_str!("../tools.rs")),
+        (
+            "src/tools/agent_profile_facade.rs",
+            include_str!("agent_profile_facade.rs"),
+        ),
+        (
+            "src/tools/continuity_facade.rs",
+            include_str!("continuity_facade.rs"),
+        ),
+        (
+            "src/tools/copilot_facade.rs",
+            include_str!("copilot_facade.rs"),
+        ),
+        (
+            "src/tools/dispatch_facade.rs",
+            include_str!("dispatch_facade.rs"),
+        ),
+        (
+            "src/tools/domain_facade.rs",
+            include_str!("domain_facade.rs"),
+        ),
+        (
+            "src/tools/graph_state_facade.rs",
+            include_str!("graph_state_facade.rs"),
+        ),
+        (
+            "src/tools/handoff_facade.rs",
+            include_str!("handoff_facade.rs"),
+        ),
+        ("src/tools/hub_facade.rs", include_str!("hub_facade.rs")),
+        (
+            "src/tools/kanban_facade.rs",
+            include_str!("kanban_facade.rs"),
+        ),
+        (
+            "src/tools/memory_facade.rs",
+            include_str!("memory_facade.rs"),
+        ),
+        ("src/tools/pack_facade.rs", include_str!("pack_facade.rs")),
+        (
+            "src/tools/pipeline_facade.rs",
+            include_str!("pipeline_facade.rs"),
+        ),
+        (
+            "src/tools/runtime_context_facade.rs",
+            include_str!("runtime_context_facade.rs"),
+        ),
+        (
+            "src/tools/sandbox_facade.rs",
+            include_str!("sandbox_facade.rs"),
+        ),
+        ("src/tools/vault_facade.rs", include_str!("vault_facade.rs")),
+        ("src/tools/wiki_facade.rs", include_str!("wiki_facade.rs")),
+        (
+            "src/tools/workflow_facade.rs",
+            include_str!("workflow_facade.rs"),
+        ),
+    ]
+}
+
+fn tool_method_bodies(path: &str, source: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative) = source[offset..].find("pub(crate) async fn ") {
+        let fn_start = offset + relative;
+        let preceding = &source[..fn_start];
+        let recent = &preceding[preceding.len().saturating_sub(512)..];
+        if !recent.contains("#[tool") {
+            offset = fn_start + "pub(crate) async fn ".len();
+            continue;
+        }
+
+        let name_start = fn_start + "pub(crate) async fn ".len();
+        let name_end = source[name_start..]
+            .find('(')
+            .map(|idx| name_start + idx)
+            .unwrap_or(source.len());
+        let name = &source[name_start..name_end];
+        let Some(body_start) = source[name_end..].find('{').map(|idx| name_end + idx) else {
+            offset = name_end;
+            continue;
+        };
+        let Some(body_end) = matching_brace_end(source, body_start) else {
+            panic!("failed to parse tool method body for {path}::{name}");
+        };
+        let body = source[body_start..=body_end].trim().to_string();
+        out.push((format!("{path}::{name}"), body));
+        offset = body_end + 1;
+    }
+    out
+}
+
+fn matching_brace_end(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut idx = open;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        let next = bytes.get(idx + 1).copied();
+        if in_line_comment {
+            in_line_comment = b != b'\n';
+            idx += 1;
+            continue;
+        }
+        if in_block_comment {
+            if b == b'*' && next == Some(b'/') {
+                in_block_comment = false;
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        if b == b'/' && next == Some(b'/') {
+            in_line_comment = true;
+            idx += 2;
+            continue;
+        }
+        if b == b'/' && next == Some(b'*') {
+            in_block_comment = true;
+            idx += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+            idx += 1;
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
 }

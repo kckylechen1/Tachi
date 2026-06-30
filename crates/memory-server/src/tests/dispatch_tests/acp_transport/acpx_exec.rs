@@ -36,8 +36,7 @@ print(json.dumps({"event": "end_turn", "final_response": "acpx done"}))
     params.cwd = Some(temp_home.path().to_string_lossy().to_string());
     params.timeout_secs = 5;
 
-    let response = server
-        .tachi_dispatch(Parameters(params))
+    let response = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
         .expect("acpx dispatch should start");
     let parsed: Value = serde_json::from_str(&response).expect("dispatch JSON");

@@ -9,6 +9,7 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "dlq_list",
     "dlq_retry",
     "get_domain",
+    "get_memory",
     "get_state",
     "hub_export_skills",
     "hub_feedback",
@@ -39,6 +40,8 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "set_state",
     "skill_evolve",
     "tachi_audit_log",
+    "tachi_board",
+    "tachi_dispatch",
     "tachi_init_project_db",
     "tachi_wiki_organize",
     "vault_get",
@@ -95,7 +98,11 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "shell_list_policies",
     "shell_exec_audit",
     "tachi_plan",
+    "tachi_progress_check",
+    "wiki_browse",
 ];
+
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory", "tachi_board", "tachi_dispatch"];
 
 use std::collections::BTreeSet;
 
@@ -203,6 +210,27 @@ fn retired_native_aliases_stay_retired() {
         assert!(
             !cacheable.contains(alias) && !invalidating.contains(alias),
             "retired native alias '{alias}' must not remain in cache policy lists"
+        );
+    }
+}
+
+#[test]
+fn folded_native_compat_tools_stay_admin_only() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+
+    for tool_name in FOLDED_NATIVE_COMPAT_TOOLS {
+        assert!(
+            route_names.contains(*tool_name),
+            "folded compatibility tool '{tool_name}' should remain routable for admin/backcompat"
+        );
+        assert!(
+            bundle_count(tool_name) == 0,
+            "folded compatibility tool '{tool_name}' must not re-enter non-admin profile bundles"
+        );
+        assert!(
+            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
+                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
+            "folded compatibility tool '{tool_name}' must not be exposed through minimal profiles"
         );
     }
 }

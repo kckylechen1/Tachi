@@ -51,8 +51,8 @@ async fn stuck_detection_emits_warning_from_third_call_through_seventh() {
             "warning should report current count {upcoming}, got: {msg}"
         );
         assert!(
-            msg.contains("tachi_progress_check"),
-            "warning should suggest tachi_progress_check, got: {msg}"
+            msg.contains("tachi_unstick"),
+            "warning should suggest tachi_unstick, got: {msg}"
         );
     }
 }

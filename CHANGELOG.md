@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Changed
+
+- Fold `get_memory`, `tachi_board`, and `tachi_dispatch` out of daily agent profiles in favor of `tachi_memory(action="get")` and `tachi_task(action="board"|"dispatch")`, while keeping the native routes admin/backcompat-only.
+- Retire the old `tachi_progress_check` and `wiki_browse` observe aliases; agents should use `tachi_unstick` and `tachi_browse`.
+
+### Fixed
+
+- `tachi_gh safe_merge` now records already-merged pull requests as `merge_state="merged"` instead of overwriting lifecycle state with a blocked merge attempt.
+
 ## [1.6.1] - 2026-06-29 — Homebrew daemon startup and tap automation
 
 Patch release for making the Homebrew install path safer on macOS launchd and restoring tag-driven tap updates.

@@ -37,7 +37,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "list_domains",
     "get_domain",
     "wiki_search",
-    "wiki_browse",
     // Facade tools (read-only)
     "tachi_search",
     "tachi_web_search",
@@ -84,7 +83,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "register_domain",
     "delete_domain",
     "distill_trajectory",
-    "tachi_progress_check",
     "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",

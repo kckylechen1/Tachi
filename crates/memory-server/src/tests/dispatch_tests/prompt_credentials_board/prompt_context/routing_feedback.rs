@@ -13,7 +13,7 @@ async fn dispatch_prompt_includes_task_route_overlay() {
     assert!(prompt.contains("intent: test_request"), "{prompt}");
     assert!(prompt.contains("skill:coding-test-strategy"), "{prompt}");
     assert!(prompt.contains("## Required skill invocation"), "{prompt}");
-    assert!(prompt.contains("tachi_progress_check(check)"), "{prompt}");
+    assert!(prompt.contains("tachi_unstick(check)"), "{prompt}");
 }
 
 #[tokio::test]
