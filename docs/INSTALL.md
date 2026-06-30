@@ -422,6 +422,9 @@ Once connected, Tachi exposes a profile-filtered MCP surface. The full `admin` c
 
 `save_memory`, `search_memory`, `get_memory`, `list_memories`, `delete_memory`, `archive_memory`, `memory_stats`, `memory_gc`, `remember`, `find_similar_memory`
 
+`get_memory` remains available in the full admin/backcompat catalog. Daily
+agent profiles should use `tachi_memory(action="get")` instead.
+
 ### Knowledge Graph & Domains
 
 `add_edge`, `get_edges`, `memory_graph`

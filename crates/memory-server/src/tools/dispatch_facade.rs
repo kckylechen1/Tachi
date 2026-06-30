@@ -13,7 +13,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Dispatch a task to a delegate CLI agent or typed host adapter (claude, codex, grok, kimi, opencode, or custom). Assembles prompt with context from memory/wiki + injected skills, spawns agent subprocess, returns structured result. Call tachi_complete afterwards to record the eval."
+        description = "Admin/backcompat route for direct dispatch to a delegate CLI agent or typed host adapter. Daily agents should prefer tachi_task(action='dispatch'), then call tachi_complete afterwards to record the eval."
     )]
     pub(crate) async fn tachi_dispatch(
         &self,
@@ -33,7 +33,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "View the task board (kanban) showing all dispatched background tasks and their statuses. Returns a list of tasks with their A2A state (WORKING, COMPLETED, FAILED, etc)."
+        description = "Admin/backcompat route for viewing the dispatch task board. Daily agents should prefer tachi_task(action='board'). Returns tasks with their A2A state (WORKING, COMPLETED, FAILED, etc)."
     )]
     pub(crate) async fn tachi_board(
         &self,
@@ -43,7 +43,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Merge a git worktree branch back to the main branch and optionally remove the worktree. Use after reviewing tachi_dispatch results."
+        description = "Merge a git worktree branch back to the main branch and optionally remove the worktree. Use after reviewing tachi_task(action='dispatch') results."
     )]
     pub(crate) async fn approve_merge(
         &self,
