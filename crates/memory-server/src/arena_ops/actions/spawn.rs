@@ -168,7 +168,7 @@ pub(super) async fn handle_spawn(
                     }))
                 }
                 Err(err) => {
-                    update_mission_status(
+                    let status = update_mission_status(
                         arena_id,
                         &mission_id,
                         json!({
@@ -178,7 +178,15 @@ pub(super) async fn handle_spawn(
                             "launch_error": err,
                         }),
                     )?;
-                    return Err(err);
+                    Some(json!({
+                        "status": "failed",
+                        "error": status
+                            .get("launch_error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("launch failed"),
+                        "recoverable": true,
+                        "message": "Mission documents were created; inspect prompt_path/status_path, fix the launcher, then respawn or run tracked_prompt manually.",
+                    }))
                 }
             }
         } else {

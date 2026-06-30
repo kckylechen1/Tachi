@@ -29,7 +29,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
-- **工作流控制平面**：`tachi_dispatch`、`tachi_arena`、`tachi_verify`、`tachi_agent_eval`
+- **工作流控制平面**：`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_gh`
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/install.sh)"
 ```
 
 验证：
@@ -127,10 +127,11 @@ tachi --version
   }
 }
 
-// tachi_search —— 混合检索
+// tachi_memory —— 混合检索
 {
-  "tool": "tachi_search",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "search",
     "query": "前端构建策略是什么？",
     "path_prefix": "/project",
     "top_k": 6,
@@ -138,13 +139,26 @@ tachi --version
   }
 }
 
-// set_state —— 确定性 KV（无嵌入）
+// tachi_arena —— 开启一个可跟踪工作 arena
 {
-  "tool": "set_state",
+  "tool": "tachi_arena",
   "arguments": {
-    "namespace": "trading",
-    "key": "watchlist",
-    "value": ["600089", "688256"]
+    "action": "open",
+    "title": "API 边界审阅",
+    "objective": "编辑 API 前先收集外部审阅证据。"
+  }
+}
+
+// tachi_arena —— 派发一个可跟踪 subagent / 顾问任务
+{
+  "tool": "tachi_arena",
+  "arguments": {
+    "action": "spawn",
+    "arena_id": "<open 返回的 arena_id>",
+    "role": "critic",
+    "harness": "manual",
+    "launch": false,
+    "prompt": "审阅 API 边界，并把发现写入 result.md。"
   }
 }
 ```
@@ -250,11 +264,10 @@ graph TD
 ### 8. 工作流控制平面
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：
 
-- **`tachi_dispatch`** —— 按权限 profile 派发有界工作 Agent，并要求提交证据。
+- **`tachi_task`** —— 贯通 issue intake、docs/spec、派发建议、PR handoff、release note 和 close-loop 写回。
 - **`tachi_arena`** —— 可审计的工作/顾问任务账本，记录运行状态。
 - **`tachi_verify`** —— 记录后台验证证据（测试、类型检查、safe-merge gate）到 `.tachi/runs/<flow_id>/verification.json`。
-- **`tachi_agent_eval`** —— 实时性能矩阵与 scorecard，反哺未来路由决策。
-- **`tachi_complete`** —— 记录任务结果，支持 `subagents`、`tests_run`、`evidence_refs`、latency、token、cost 字段。
+- **`tachi_gh`** —— 读取 issue/PR，写评论，汇总 review 状态，并用 lifecycle/verification 证据运行 safe-merge 检查。
 
 ### 9. 神经熔炉与 Wiki
 - **Foundry** —— 服务端上下文生命周期：`recall_context`、`capture_session`、`compact_context`、`section_build`、`compact_rollup`、`compact_session_memory`，以及 Agent 进化提案。
@@ -268,7 +281,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 精选 12 工具门面：`tachi_search`、`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_agent_eval`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
+| `standard` | 日常门面：`tachi_save`、`tachi_memory`、`tachi_task`、`tachi_arena`、`tachi_verify`、`tachi_web_search`、`tachi_wiki`、`tachi_skill`、`tachi_gh`、`vault_status`，以及 `runtime_info`、`tachi_status`、`tachi_briefing` 和 `tachi_tools`。 | IDE Agent：Claude、Cursor、Codex、Windsurf、Trae、Antigravity。 |
 | `coordinate` | `remember` + `coordinate` bundles：增加 `handoff_*`、`post_card`、`check_inbox`、`update_card`、`tachi_dispatch`、`approve_merge`、`tachi_handoff`、`tachi_workflow`、`tachi_orchestrator`。 | 主控/编排 Agent，负责派发任务并协调多 Agent。 |
 | `operate` | `remember` + `operate` bundles：增加 Foundry 生命周期、`agent_register`、`hub_call`、`vault_unlock`/`lock`/`status`、`wiki_lint`。 | 运行时适配器、OpenClaw、运维自动化。 |
 | `delegate` | 精选 7 工具门面：`tachi_tools`、`runtime_info`、`tachi_memory`、`tachi_web_search`、`tachi_browse`、`tachi_unstick`、`tachi_complete`、`run_skill`。 | `tachi_dispatch` 派生的工作 Agent。无派发、无交接。 |

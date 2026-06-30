@@ -270,7 +270,7 @@ pub struct TachiMemoryParams {
     pub query: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", or \"sft\"."
+        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\"."
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]

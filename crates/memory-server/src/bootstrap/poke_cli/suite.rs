@@ -5,8 +5,8 @@ use std::path::Path;
 
 use super::env::PokeEnvGuard;
 use super::probes::{
-    probe_dispatch_mock, probe_memory_basic, probe_shell_artifact, probe_skill_surface,
-    probe_verify_ledger,
+    probe_arena_lifecycle, probe_dispatch_mock, probe_memory_basic, probe_shell_artifact,
+    probe_skill_surface, probe_verify_ledger,
 };
 use super::report::{render_poke_report_markdown, write_text_file};
 
@@ -70,6 +70,12 @@ pub(super) async fn run_poke_smoke_suite(app_home: &Path) -> Result<Value, Strin
                 &sandbox_project,
                 &sandbox_home,
             ))
+        })
+        .await,
+    );
+    probes.push(
+        run_probe("arena_lifecycle", &probes_dir, || {
+            Box::pin(probe_arena_lifecycle(&server))
         })
         .await,
     );

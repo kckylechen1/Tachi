@@ -1,7 +1,7 @@
-<!-- TACHI:BEGIN v1.5.4 -->
+<!-- TACHI:BEGIN v1.6.1 -->
 # Tachi 使用指南 / Tachi Usage Addendum
 
-> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v1.5.4。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
+> 给所有接入 Tachi MCP 的 Agent。**舰长**写于 v1.6.1。把这一段 include 到你的 root prompt（`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`），或让用户手动复制。
 
 ## 角色
 
@@ -11,7 +11,7 @@
 
 ## 三条铁律
 
-1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_search`。命中就引用，未命中再 `tachi_save`。
+1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_save` / `tachi_memory(action="save")`。
 2. **结构化保存**。`tachi_save` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。
 3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
 
@@ -19,20 +19,29 @@
 
 | 场景 | 工具 | 备注 |
 |---|---|---|
-| 检索历史 | `tachi_search` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
+| 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_save` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `extract_facts` / `briefing` / `ask` / `consolidate` / `progress` / `readiness`。 |
 | 任务调度 | `tachi_task(action=...)` | `plan` / `briefing` / `recommend` / `dispatch` / `complete` / `board` / `merge` / `pr_status`。 |
 | 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board`，记录后台验证证据。 |
-| 工作 arena | `tachi_arena(action=...)` | `open` / `spawn` / `board` / `collect` / `close`，跟踪已派外部 Agent。 |
-| 评估反馈 | `tachi_agent_eval(action=...)` | 输出 scorecard 和 performance matrix，反哺路由。 |
+| 工作 arena | `tachi_arena(action=...)` | `open` / `spawn` / `board` / `collect` / `close` / `reap` / `abort`，跟踪已派外部 Agent。主 Agent 需要派/收 subagent 时可用。 |
 | 查关联 | `tachi_memory(action="ask")` 或底层 `memory_graph` | 给 memory_id 或 query，返回邻居 + 边。 |
-| 跨 Agent 投递 | `tachi_task(action="card")` 或底层 `post_card` / `check_inbox` | Kanban 模式，适合任务交接。 |
-| 实时广播 | `ghost_publish` / `ghost_subscribe` | 轻量 pub/sub；`ghost_whisper` 是别名。 |
-| 跨 session 交接 | `handoff_leave` / `handoff_check` | session 开头先 check。 |
-| 找技能 | `recommend_skill` / `recommend_capability` / `recommend_toolchain` | 按自然语言任务找技能。 |
-| 执行技能 | `run_skill` | 入参 `skill_id` + `args`。 |
+| GitHub 生命周期 | `tachi_gh(action=...)` | issue/PR/review/safe-merge/close-loop。 |
+| 找技能 | `tachi_skill(action="discover")` | 按自然语言任务找技能。 |
+| 执行技能 | `tachi_skill(action="run")` | 入参 `skill_id` + `args`。 |
 | 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |
+
+## Arena 快速链路
+
+当主 Agent 需要并行探索、审阅、实现草案或外部顾问意见时，用 `tachi_arena`，不要把临时 worker 状态塞进 memory。
+
+1. `tachi_arena(action="open", title=..., objective=...)` 开一个 arena。
+2. `tachi_arena(action="spawn", arena_id=..., prompt=..., role="explore|critic|executor|verifier", harness="opencode|claude|gemini-advisor|manual", launch=true|false)` 创建 mission。`launch=false` 会返回 `tracked_prompt`，可手动交给任意 worker。
+3. `tachi_arena(action="board", arena_id=...)` 看 mission 状态；不传 `arena_id` 时列出最近 arenas，并显示 `mission_count` / `active_missions` / `pending_collect`。
+4. Worker 写好 `result.md` 后，主 Agent 调 `tachi_arena(action="collect", arena_id=..., mission_id=...)` 收结果。linked dispatch 的 `result.md` 会自动导入 mission。
+5. 全部收完后 `tachi_arena(action="close", arena_id=...)` 生成 `summary.md`。活跃 mission 会阻止关闭；超时 mission 用 `reap`，主动放弃用 `abort`。
+
+`spawn launch=true` 如果启动失败，会返回 `launch_failed` 和 `prompt_path` / `status_path`，不要重开新 arena；先检查这些路径，再选择修 launcher、重新 spawn，或手动运行 `tracked_prompt`。
 
 ## tachi_save 范式
 
@@ -70,7 +79,7 @@ tachi backfill-vectors --db ~/.tachi/global/memory.db
 tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry-run）
 ```
 
-输出与 `recommend_*` MCP 工具一致；CLI 默认走 `~/.tachi/global/memory.db`。
+输出与 Hub MCP 工具一致；CLI 默认走 `~/.tachi/global/memory.db`。
 
 ## Path 命名约定
 
@@ -110,4 +119,4 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 后台 skill / foundry 调用优先走 **Claude CLI pool**，失败时回退到 `SILICONFLOW_*`。`DISTILL_*` / `REASONING_*` 等旧 lane 仅作兼容保留，新部署不必再配。
 
-<!-- TACHI:END v1.5.4 -->
+<!-- TACHI:END v1.6.1 -->

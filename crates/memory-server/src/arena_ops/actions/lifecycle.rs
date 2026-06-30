@@ -1,5 +1,38 @@
 use super::*;
 
+const DEFAULT_REAP_STALE_SECS: i64 = 3600;
+
+fn status_age_secs(status: &Value) -> Option<i64> {
+    let timestamp = status
+        .get("created_at")
+        .and_then(Value::as_str)
+        .or_else(|| status.get("updated_at").and_then(Value::as_str))?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .with_timezone(&Utc);
+    Some((Utc::now() - parsed).num_seconds())
+}
+
+fn reap_stale_reason(status: &Value) -> Option<String> {
+    let state = status.get("state").and_then(Value::as_str).unwrap_or("");
+    if !active_state(state) {
+        return None;
+    }
+    let threshold = status
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .map(|secs| secs.max(1) as i64)
+        .unwrap_or(DEFAULT_REAP_STALE_SECS);
+    let age = status_age_secs(status)?;
+    if age >= threshold {
+        Some(format!(
+            "active mission exceeded reap threshold ({age}s >= {threshold}s)"
+        ))
+    } else {
+        None
+    }
+}
+
 pub(super) fn handle_abort(params: TachiArenaParams) -> Result<String, String> {
     let arena_id = params
         .arena_id
@@ -63,10 +96,10 @@ pub(super) fn handle_reap(params: TachiArenaParams) -> Result<String, String> {
     for arena_id in arenas {
         let mut changed = false;
         for status in mission_statuses(&arena_id)? {
-            let state = status.get("state").and_then(Value::as_str).unwrap_or("");
-            if !active_state(state) {
+            let Some(stale_reason) = reap_stale_reason(&status) else {
                 continue;
-            }
+            };
+            let state = status.get("state").and_then(Value::as_str).unwrap_or("");
             let Some(mission_id) = status.get("mission_id").and_then(Value::as_str) else {
                 continue;
             };
@@ -74,6 +107,7 @@ pub(super) fn handle_reap(params: TachiArenaParams) -> Result<String, String> {
                 "arena_id": arena_id,
                 "mission_id": mission_id,
                 "state": state,
+                "reason": stale_reason,
             }));
             if !dry_run {
                 update_mission_status(
@@ -82,7 +116,7 @@ pub(super) fn handle_reap(params: TachiArenaParams) -> Result<String, String> {
                     json!({
                         "state": "reaped",
                         "completed_at": Utc::now().to_rfc3339(),
-                        "reap_reason": params.reason.as_deref().unwrap_or("arena reap"),
+                        "reap_reason": params.reason.as_deref().unwrap_or(&stale_reason),
                     }),
                 )?;
                 changed = true;

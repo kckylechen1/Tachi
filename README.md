@@ -29,7 +29,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Encrypted local vault** for API keys and secrets
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
-- **Workflow control plane** — `tachi_dispatch`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+- **Workflow control plane** — `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_gh`
 - **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
 - **Lifecycle closure** — GitHub issues/PRs, docs/specs, wiki, memory, verification, and release notes in one loop
 
@@ -46,8 +46,8 @@ This line makes Tachi's project-cycle direction explicit:
 - Continuity memory is now typed: session captures, memory writes, outcome
   labels, projections, and active patterns can be stored and queried as durable
   project context.
-- Pattern memory now has an explicit feedback loop: `tachi_search`
-  `scope="patterns"` records `seen`, while `tachi_memory`
+- Pattern memory now has an explicit feedback loop: `tachi_memory`
+  `action="search" scope="patterns"` records `seen`, while `tachi_memory`
   `action="pattern_feedback"` records reviewed `hit`, `miss`, and `stale`
   signals without promoting anything into skills automatically.
 - `tachi_task` can guide a full issue/PR/doc lifecycle: intake, doc index,
@@ -178,10 +178,11 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// tachi_search — hybrid recall
+// tachi_memory — hybrid recall
 {
-  "tool": "tachi_search",
+  "tool": "tachi_memory",
   "arguments": {
+    "action": "search",
     "query": "What is the frontend build policy?",
     "path_prefix": "/project",
     "top_k": 6,
@@ -189,13 +190,26 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// set_state — deterministic KV (no embeddings)
+// tachi_arena — open a tracked work arena
 {
-  "tool": "set_state",
+  "tool": "tachi_arena",
   "arguments": {
-    "namespace": "trading",
-    "key": "watchlist",
-    "value": ["600089", "688256"]
+    "action": "open",
+    "title": "API boundary review",
+    "objective": "Collect external review evidence before editing the API."
+  }
+}
+
+// tachi_arena — spawn a tracked subagent/advisor mission
+{
+  "tool": "tachi_arena",
+  "arguments": {
+    "action": "spawn",
+    "arena_id": "<arena_id returned by open>",
+    "role": "critic",
+    "harness": "manual",
+    "launch": false,
+    "prompt": "Review the API boundary and write result.md with findings."
   }
 }
 ```
@@ -336,14 +350,10 @@ Relevant design docs:
 ### 9. Workflow Control Plane
 Tachi is not only a memory store; it is becoming the durable control plane for agent engineering:
 
-- **`tachi_dispatch`** — spawn bounded worker agents with a permission profile and required evidence.
+- **`tachi_task`** — guide work from issue intake through docs/specs,
+  dispatch recommendations, PR handoff, release notes, and close-loop writes.
 - **`tachi_arena`** — tracked worker/advisor mission ledger with auditable run state.
 - **`tachi_verify`** — record background verification evidence (tests, type checks, safe-merge gates) under `.tachi/runs/<flow_id>/verification.json`.
-- **`tachi_agent_eval`** — live performance matrix and scorecards that feed future routing decisions.
-- **`tachi_complete`** — record task outcomes with `subagents`, `tests_run`, `evidence_refs`, latency, token, and cost fields.
-- **`tachi_task`** — orchestrate project work from issue intake through
-  doc/spec indexing, cycle planning, dispatch recommendation, PR handoff,
-  release-note synthesis, and close-loop memory/wiki/doc updates.
 - **`tachi_gh`** — read issues/PRs, post comments, digest review state, and
   run safe-merge checks with lifecycle/verification evidence.
 

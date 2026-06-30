@@ -1,4 +1,5 @@
 use super::*;
+use crate::arena_ops::state::mission_dir;
 
 #[tokio::test]
 async fn arena_open_spawn_collect_close_writes_tracked_documents() {
@@ -90,6 +91,17 @@ async fn arena_board_refreshes_external_plan_and_result_writes() {
     let mission = &board["result"]["missions"][0];
     assert_eq!(mission["plan_written"], true);
     assert_eq!(mission["result_written"], true);
+
+    let board: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, params("board")).await.unwrap()).unwrap();
+    let arena = &board["arenas"][0];
+    assert_eq!(arena["mission_count"], json!(1));
+    assert_eq!(arena["active_missions"], json!(1));
+    assert_eq!(arena["pending_collect"], json!(1));
+    assert!(arena["board_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("board.json"));
 }
 
 #[tokio::test]
@@ -151,13 +163,29 @@ async fn arena_close_blocks_active_missions_until_reaped_or_aborted() {
     let mut spawn = params("spawn");
     spawn.arena_id = Some(arena_id.clone());
     spawn.prompt = Some("stay active".into());
-    handle_tachi_arena(&server, spawn).await.unwrap();
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+    let mission_id = spawned["mission_id"].as_str().unwrap().to_string();
 
     let mut close = params("close");
     close.arena_id = Some(arena_id.clone());
     let blocked: Value =
         serde_json::from_str(&handle_tachi_arena(&server, close).await.unwrap()).unwrap();
     assert_eq!(blocked["state"], "blocked");
+
+    let mut reap = params("reap");
+    reap.arena_id = Some(arena_id.clone());
+    reap.dry_run = Some(false);
+    let reaped: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, reap).await.unwrap()).unwrap();
+    assert_eq!(reaped["stale_missions"].as_array().unwrap().len(), 0);
+
+    let mission_dir = mission_dir(&arena_id, &mission_id).unwrap();
+    let status_path = mission_dir.join("status.json");
+    let mut status: Value =
+        serde_json::from_str(&std::fs::read_to_string(&status_path).unwrap()).unwrap();
+    status["created_at"] = json!((chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339());
+    crate::utils::write_json_file_owner_only(&status_path, &status).unwrap();
 
     let mut reap = params("reap");
     reap.arena_id = Some(arena_id.clone());
@@ -171,4 +199,35 @@ async fn arena_close_blocks_active_missions_until_reaped_or_aborted() {
     let closed: Value =
         serde_json::from_str(&handle_tachi_arena(&server, close).await.unwrap()).unwrap();
     assert_eq!(closed["state"], "closed");
+}
+
+#[tokio::test]
+async fn arena_spawn_launch_failure_returns_recoverable_mission_status() {
+    let _root = temp_arena_root();
+    let server = server();
+    let mut open = params("open");
+    open.objective = Some("recover failed launch".into());
+    let opened: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, open).await.unwrap()).unwrap();
+    let arena_id = opened["arena_id"].as_str().unwrap().to_string();
+
+    let mut spawn = params("spawn");
+    spawn.arena_id = Some(arena_id);
+    spawn.prompt = Some("launch with bad profile".into());
+    spawn.harness = Some("opencode".into());
+    spawn.profile = Some("missing_dispatch_profile".into());
+    spawn.launch = true;
+    let spawned: Value =
+        serde_json::from_str(&handle_tachi_arena(&server, spawn).await.unwrap()).unwrap();
+
+    assert_eq!(spawned["state"], json!("launch_failed"));
+    assert_eq!(spawned["launch"]["status"], json!("failed"));
+    assert_eq!(spawned["launch"]["recoverable"], json!(true));
+    assert_eq!(spawned["status"]["state"], json!("launch_failed"));
+    assert!(spawned["status"]["launch_error"]
+        .as_str()
+        .unwrap()
+        .contains("missing_dispatch_profile"));
+    assert!(PathBuf::from(spawned["prompt_path"].as_str().unwrap()).exists());
+    assert!(PathBuf::from(spawned["status_path"].as_str().unwrap()).exists());
 }

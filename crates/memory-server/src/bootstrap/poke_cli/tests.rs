@@ -13,7 +13,7 @@ async fn poke_smoke_suite_writes_report_and_probe_artifacts() {
         .await
         .expect("poke smoke should pass");
     assert_eq!(report["status"], json!("passed"));
-    assert_eq!(report["summary"]["total"], json!(5));
+    assert_eq!(report["summary"]["total"], json!(6));
     let run_dir = PathBuf::from(report["run_dir"].as_str().expect("run_dir"));
     assert!(run_dir.join("report.json").exists());
     assert!(run_dir.join("report.md").exists());
@@ -22,6 +22,7 @@ async fn poke_smoke_suite_writes_report_and_probe_artifacts() {
         "skill_surface",
         "shell_artifact",
         "dispatch_mock",
+        "arena_lifecycle",
         "verify_ledger",
     ] {
         assert!(run_dir.join("probes").join(format!("{name}.json")).exists());
