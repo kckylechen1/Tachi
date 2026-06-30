@@ -214,6 +214,16 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         parsed["host_lifecycle"]["schema"]["name"],
         json!("HostContinuityLifecycle")
     );
+    assert_eq!(parsed["host_lifecycle"]["status"], json!("v1_contract"));
+    assert!(parsed["host_lifecycle"]["steps"]
+        .as_array()
+        .expect("lifecycle steps")
+        .iter()
+        .any(|step| step["phase"] == json!("before_stop")));
+    assert_eq!(
+        parsed["host_lifecycle"]["event_envelope"]["event_type_prefix"],
+        json!("host.")
+    );
     assert_eq!(parsed["feedback"]["saved_count"], json!(2));
     assert_eq!(
         parsed["guardrails"]["a2a"],

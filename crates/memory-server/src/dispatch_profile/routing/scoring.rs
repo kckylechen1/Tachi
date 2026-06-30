@@ -149,7 +149,7 @@ pub(in crate::dispatch_profile) fn score_profile_candidate(
     }
     for sub in subagent_scores {
         let role_match = profile_role_matches(profile, &sub.role);
-        let agent_match = sub.agent == profile.backend;
+        let agent_match = profile_matches_agent(profile, &sub.agent);
         let task_match = sub.task_type == risk.task_type;
         if role_match && agent_match && task_match {
             live_samples += sub.samples;
@@ -272,10 +272,9 @@ pub(super) fn build_profile_fallback_chain(
         if out.len() >= 5 {
             break;
         }
-        if let Some(profile) = DISPATCH_PROFILES
-            .iter()
-            .find(|profile| profile.backend == *agent && !out.iter().any(|p| p == profile.name))
-        {
+        if let Some(profile) = DISPATCH_PROFILES.iter().find(|profile| {
+            profile_matches_agent(profile, agent) && !out.iter().any(|p| p == profile.name)
+        }) {
             out.push(profile.name.to_string());
         }
     }

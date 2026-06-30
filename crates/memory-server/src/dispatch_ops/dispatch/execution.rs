@@ -36,6 +36,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) feedback_rules_trace: Value,
     pub(super) harness_transport: String,
     pub(super) harness_server_url: Option<String>,
+    pub(super) host_adapter: Option<String>,
     pub(super) execution_backend_metadata: Option<Value>,
     pub(super) execution: DispatchExecution,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
@@ -59,6 +60,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let feedback_rules_trace_for_spawn = ctx.feedback_rules_trace;
     let harness_transport_for_spawn = ctx.harness_transport;
     let harness_server_url_for_spawn = ctx.harness_server_url;
+    let host_adapter_for_spawn = ctx.host_adapter;
     let execution_backend_metadata_for_spawn = ctx.execution_backend_metadata;
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
@@ -80,6 +82,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "v2": v2_for_spawn,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
+                "host_adapter": host_adapter_for_spawn.clone(),
                 "timestamp": execute_started_at.to_rfc3339(),
             }),
         );
@@ -391,6 +394,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "result_written": true,
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
+                "host_adapter": host_adapter_for_spawn.clone(),
                 "execution_backend": if is_acpx_transport(&harness_transport_for_spawn) {
                     Some("acpx")
                 } else if is_native_acp_transport(&harness_transport_for_spawn) {

@@ -73,7 +73,9 @@ fn credentialed_dispatch_profile_applies_default_credential_profiles() {
     params.profile = Some("opencode_builder".to_string());
     params.issue_ref = None;
     let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
-    assert_eq!(params.agent.as_deref(), Some("custom"));
+    assert_eq!(params.agent.as_deref(), Some("opencode"));
+    assert_eq!(resolved.agent, "opencode");
+    assert_eq!(resolved.host_adapter.as_deref(), Some("opencode"));
     assert_eq!(params.stage.as_deref(), Some("execute"));
     assert_eq!(params.credential_profiles, vec!["opencode_shared"]);
     assert_eq!(
@@ -85,6 +87,10 @@ fn credentialed_dispatch_profile_applies_default_credential_profiles() {
             [0],
         json!("opencode_shared")
     );
+    let profile = profile_json(resolve_dispatch_profile("opencode_builder").unwrap());
+    assert_eq!(profile["backend"], json!("opencode"));
+    assert_eq!(profile["host_adapter"], json!("opencode"));
+    assert_eq!(params.harness_transport.as_deref(), Some("opencode_cli"));
 }
 
 #[test]
@@ -165,7 +171,7 @@ fn custom_profile_populates_opencode_command() {
     assert!(resolved
         .route_explanation
         .iter()
-        .any(|line| line.contains("opencode custom command")));
+        .any(|line| line.contains("OpenCode CLI transport")));
 }
 
 #[test]

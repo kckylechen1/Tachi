@@ -52,6 +52,7 @@ pub(super) fn profile_json_with_loadout_and_evidence_contract(
         "name": profile.name,
         "display_name": profile.display_name,
         "backend": profile.backend,
+        "host_adapter": profile_host_adapter(profile),
         "role": profile.role,
         "stage": profile.stage,
         "card_archetype": archetype,

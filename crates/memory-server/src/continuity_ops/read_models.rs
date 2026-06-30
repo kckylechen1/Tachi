@@ -546,39 +546,62 @@ pub(super) fn a2a_context_bundle(
 pub(super) fn host_lifecycle_contract() -> Value {
     json!({
         "schema": schema_marker("HostContinuityLifecycle", Vec::new()),
-        "status": "ready",
+        "status": "v1_contract",
         "hosts": ["codex", "claude", "gemini", "cursor", "openclaw", "opencode"],
+        "source_of_truth": {
+            "memory": "tachi_events + memory DB",
+            "project_cycle": ".tachi/runs/<flow_id>/",
+            "verification": ".tachi/runs/<flow_id>/verification.json",
+            "host_state": "adapter-local only; not authoritative"
+        },
+        "event_envelope": {
+            "required": ["event_id", "event_type", "host", "adapter", "project", "created_at"],
+            "recommended": ["cwd", "flow_id", "session_id", "turn_id", "refs", "payload"],
+            "event_type_prefix": "host."
+        },
         "steps": [
             {
-                "phase": "startup_preload",
+                "phase": "before_session",
                 "tool": "tachi_status + tachi_memory.briefing or tachi_event.context",
-                "writes": false
+                "writes": false,
+                "purpose": "load runtime identity, project briefing, active flow hints, and profile guidance"
             },
             {
-                "phase": "in_session_buffer",
-                "tool": "host-local notes / run ledger",
-                "writes": false
+                "phase": "before_prompt",
+                "tool": "tachi_event.context + tachi_task.cycle_plan when flow_id/issue_ref/pr_ref exists",
+                "writes": false,
+                "purpose": "attach compact memory, linked docs/specs, unresolved criteria, and host instruction packet"
             },
             {
-                "phase": "pattern_feedback",
-                "tool": "pattern seen/hit/miss continuity events",
-                "writes": true
+                "phase": "after_tool",
+                "tool": "host-local tool summary + optional tachi_event emit",
+                "writes": "conditional",
+                "purpose": "record safe tool facts and run post-edit feedback providers without writing ordinary memory by default"
             },
             {
-                "phase": "session_end_capture",
-                "tool": "capture_session / memory.saved / session.outcome",
-                "writes": true
+                "phase": "after_compact",
+                "tool": "checkpoint / compact session record",
+                "writes": "conditional",
+                "purpose": "preserve active flow, dispatch refs, open criteria, and next-step directive after host compaction"
             },
             {
-                "phase": "profile_refresh",
-                "tool": "tachi_profile render/context; host file writes require review",
-                "writes": false
+                "phase": "before_stop",
+                "tool": "cycle_plan + verification ledger read model",
+                "writes": false,
+                "purpose": "allow stop or return one bounded continuation directive when required criteria remain"
+            },
+            {
+                "phase": "after_session",
+                "tool": "capture_session / memory.saved / session.outcome / close_loop",
+                "writes": "conditional",
+                "purpose": "capture outcome, verification refs, issue/PR/docs refs, memory/wiki candidates, and subagent eval rows"
             }
         ],
         "guardrails": {
             "subagents": "suppress private user_model unless explicitly allowed",
             "a2a": "share evidence and open questions; do not ingest conclusions",
-            "agent_md": "static startup alignment only; fresh recall stays in MCP"
+            "agent_md": "static startup alignment only; fresh recall stays in MCP",
+            "control_plane": "Tachi owns memory, project-cycle state, evidence, dispatch, and profile projection; hosts execute"
         }
     })
 }
