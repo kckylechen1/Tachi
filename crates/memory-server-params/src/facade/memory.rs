@@ -87,6 +87,11 @@ pub struct TachiSearchParams {
     #[serde(default)]
     pub context_symbols: Vec<String>,
 
+    /// Optional agent role for sandbox filtering. When set, memory/wiki rows
+    /// denied by global sandbox rules are omitted from results.
+    #[serde(default)]
+    pub agent_role: Option<String>,
+
     /// Wiki category filter (only used when scope includes wiki)
     #[serde(default)]
     pub category: Option<String>,
@@ -322,6 +327,11 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "[action=ask|consolidate] Optional model override for synthesis.")]
     pub model: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=search|ask] Optional agent role for sandbox filtering. Denied memory/wiki rows are omitted."
+    )]
+    pub agent_role: Option<String>,
 
     // --- save fields ---
     #[serde(default)]

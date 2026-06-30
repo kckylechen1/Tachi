@@ -29,6 +29,7 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: None,
             title: None,
             summary: None,

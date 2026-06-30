@@ -22,6 +22,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: Some("Implemented status diagnostics; next run cargo test.".to_string()),
             title: Some("Status diagnostics".to_string()),
             summary: Some("Status diagnostics checkpoint".to_string()),

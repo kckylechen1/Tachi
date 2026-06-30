@@ -146,6 +146,7 @@ async fn direct_tachi_search_caps_large_top_k() {
         file_context: None,
         error_context: None,
         context_symbols: Vec::new(),
+        agent_role: None,
         category: None,
         include_archived: false,
         include_training: false,

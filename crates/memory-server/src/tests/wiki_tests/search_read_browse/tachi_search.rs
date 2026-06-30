@@ -21,6 +21,7 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
             file_context: None,
             error_context: None,
             context_symbols: Vec::new(),
+            agent_role: None,
             category: None,
             include_archived: false,
             include_training: false,

@@ -23,6 +23,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: Some("Refactored MCP save path for coding agents.".to_string()),
             title: None,
             summary: Some("MCP agent fields".to_string()),

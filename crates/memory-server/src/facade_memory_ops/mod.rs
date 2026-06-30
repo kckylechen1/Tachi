@@ -52,6 +52,7 @@ pub(crate) async fn handle_tachi_memory(
                 file_context: params.file_context.clone(),
                 error_context: params.error_context.clone(),
                 context_symbols: Vec::new(),
+                agent_role: params.agent_role.clone(),
                 category: params.category.clone(),
                 include_archived: params.include_archived,
                 include_training: params.include_training,

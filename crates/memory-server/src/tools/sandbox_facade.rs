@@ -24,7 +24,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration)."
+        description = "Check if an agent role can access a given memory path for a read/write operation. The same global sandbox rules are enforced by role-aware memory/wiki search surfaces when agent_role is supplied."
     )]
     pub(crate) async fn sandbox_check(
         &self,

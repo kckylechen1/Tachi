@@ -117,10 +117,10 @@ fn validate_timeline(timeline: Option<&Value>) -> Vec<String> {
     if !has_evidence {
         issues.push("no timeline evidence arrays populated".to_string());
     }
-    if !map
+    if map
         .get("latest_event_id")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         issues.push("missing latest_event_id".to_string());
     }
@@ -132,10 +132,10 @@ fn validate_lexicon(lexicon: Option<&Value>) -> Vec<String> {
         return vec!["missing lexicon metadata".to_string()];
     };
     let mut issues = Vec::new();
-    if !map
+    if map
         .get("meaning")
         .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty())
+        .is_none_or(|value| value.trim().is_empty())
     {
         issues.push("missing meaning".to_string());
     }

@@ -1,7 +1,7 @@
-use super::{make_mcp_capability, make_server, shell_params};
+use super::{make_entry, make_mcp_capability, make_server, shell_params};
 use crate::tool_params::{
     SandboxCheckParams, SandboxGetPolicyParams, SandboxListPoliciesParams, SandboxSetPolicyParams,
-    SandboxSetRuleParams,
+    SandboxSetRuleParams, SearchMemoryParams, TachiSearchParams,
 };
 use memory_core::HubCapability;
 use rmcp::handler::server::wrapper::Parameters;

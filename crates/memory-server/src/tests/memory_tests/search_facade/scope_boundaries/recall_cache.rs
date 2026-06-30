@@ -33,6 +33,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             file_context: None,
             error_context: None,
             context_symbols: Vec::new(),
+            agent_role: None,
             category: None,
             include_archived: false,
             include_training: false,

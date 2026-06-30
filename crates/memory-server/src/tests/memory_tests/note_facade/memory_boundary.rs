@@ -21,6 +21,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: Some("A one-line memory fact with a title should not become wiki.".to_string()),
             title: Some("Memory title only".to_string()),
             summary: Some("Memory title only".to_string()),

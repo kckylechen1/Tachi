@@ -27,6 +27,7 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         as_of: None,
         synthesize: false,
         model: None,
+        agent_role: None,
         text: None,
         title: None,
         summary: None,

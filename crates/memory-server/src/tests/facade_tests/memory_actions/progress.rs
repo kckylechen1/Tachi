@@ -26,6 +26,7 @@ async fn tachi_memory_progress_writes_append_only_jsonl() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: Some("step completed with api_key=test-secret-value-1234567890".to_string()),
             title: Some("Progress step".to_string()),
             summary: Some("one step done".to_string()),

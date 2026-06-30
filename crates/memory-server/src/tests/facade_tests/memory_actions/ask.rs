@@ -22,6 +22,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             as_of: None,
             synthesize: false,
             model: None,
+            agent_role: None,
             text: None,
             title: None,
             summary: None,

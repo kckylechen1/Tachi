@@ -19,6 +19,26 @@ use crate::{DbScope, MemoryServer};
 
 const MAX_CONTEXT_SYMBOLS: usize = 32;
 
+fn sandbox_role(params: &SearchMemoryParams) -> Option<&str> {
+    params
+        .agent_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+}
+
+fn sandbox_allows_read(
+    server: &MemoryServer,
+    role: &str,
+    path: &str,
+) -> Result<(bool, Option<String>), String> {
+    server.with_global_store_read(|store| {
+        store.check_sandbox_access(role, path, "read").map_err(|e| {
+            format!("sandbox access check failed for role '{role}' path '{path}': {e}")
+        })
+    })
+}
+
 pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]) -> String {
     if context_symbols.is_empty() || memory_core::scorer::is_id_like_exact_query(query) {
         return query.to_string();
@@ -336,36 +356,26 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
     normalize_search_relevance(&mut deduped_results);
 
-    // Sandbox filtering: if agent_role is specified, filter out denied entries
-    if let Some(ref role) = params.agent_role {
-        deduped_results.retain(|(result, db_scope)| {
-            let allowed = match db_scope {
-                DbScope::Global => server.with_global_store_read(|store| {
-                    store
-                        .check_sandbox_access(role, &result.entry.path, "read")
-                        .map(|(allowed, _)| allowed)
-                        .map_err(|e| format!("{e}"))
-                }),
-                DbScope::Project => {
-                    if let Some(ref p) = params.project {
-                        server.with_named_project_store_read(p, |store| {
-                            store
-                                .check_sandbox_access(role, &result.entry.path, "read")
-                                .map(|(allowed, _)| allowed)
-                                .map_err(|e| format!("{e}"))
-                        })
-                    } else {
-                        server.with_project_store_read(|store| {
-                            store
-                                .check_sandbox_access(role, &result.entry.path, "read")
-                                .map(|(allowed, _)| allowed)
-                                .map_err(|e| format!("{e}"))
-                        })
-                    }
-                }
-            };
-            allowed.unwrap_or(true)
-        });
+    // Sandbox enforcement: rules are stored in the global policy DB and apply
+    // to rows from every searched DB. This keeps repo/project memories from
+    // bypassing role rules just because the result came from another store.
+    if let Some(role) = sandbox_role(&params) {
+        let mut allowed_results = Vec::with_capacity(deduped_results.len());
+        for (result, db_scope) in deduped_results {
+            let (allowed, matching_rule) = sandbox_allows_read(server, role, &result.entry.path)?;
+            if allowed {
+                allowed_results.push((result, db_scope));
+            } else {
+                tracing::debug!(
+                    role,
+                    path = %result.entry.path,
+                    db_scope = db_scope.as_str(),
+                    matching_rule = ?matching_rule,
+                    "sandbox denied memory search row"
+                );
+            }
+        }
+        deduped_results = allowed_results;
     }
 
     let mut output: Vec<serde_json::Value> = deduped_results

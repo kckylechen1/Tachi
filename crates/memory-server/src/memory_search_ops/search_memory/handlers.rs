@@ -31,8 +31,13 @@ pub(crate) async fn handle_search_memory_with_access(
     // the global DB so cross-DB merged results have a single home. A cache hit
     // intentionally does not bump per-memory access_count (skipping the search
     // is the whole point); hit_count on the cache row carries the telemetry.
+    let sandboxed_search = params
+        .agent_role
+        .as_deref()
+        .is_some_and(|role| !role.trim().is_empty());
     let cache_key = (recall_cache_read_enabled()
         && params.query_vec.is_none()
+        && !sandboxed_search
         && !memory_core::should_skip_query(&params.query))
     .then(|| recall_cache_key(&params, top_k, project_only));
 

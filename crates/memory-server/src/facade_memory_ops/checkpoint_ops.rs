@@ -142,6 +142,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         enable_rerank: false,
         synthesize: false,
         model: None,
+        agent_role: None,
         text: Some(summary),
         title: Some("Claude JSONL passive checkpoint".to_string()),
         summary: Some("Passive checkpoint from latest Claude JSONL transcript".to_string()),
