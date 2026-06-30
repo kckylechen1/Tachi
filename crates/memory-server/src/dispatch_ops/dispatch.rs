@@ -14,7 +14,8 @@ use super::subprocess::{
     build_kimi_command,
 };
 use crate::agent_registry::{
-    dispatch_agent_help_list, mcp_inject_supported, resolve_dispatch_agent,
+    dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
+    resolve_dispatch_agent,
 };
 use crate::credential_profile::{
     apply_credential_materialization, credential_materialize_report_json, default_credentials_dir,

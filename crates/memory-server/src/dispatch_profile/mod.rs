@@ -6,7 +6,7 @@ use crate::agent_eval::{
     aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,
     AgentPerformanceMatrixRow, CompletionStatus, EvalRow,
 };
-use crate::agent_registry::{fallback_chain, resolve_dispatch_agent};
+use crate::agent_registry::{fallback_chain, normalize_dispatch_agent_name};
 use crate::skill_policy::{
     CODING_ARCHITECTURE_DECISION, CODING_REFACTOR_CHECKLIST, CODING_TEST_STRATEGY,
     SUPERPOWER_EXECUTING_PLANS, SUPERPOWER_REQUESTING_CODE_REVIEW,

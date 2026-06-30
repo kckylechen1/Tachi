@@ -24,12 +24,8 @@ pub(super) fn resolve_dispatch_start(
     let mut agent_norm = resolved_profile.agent.clone();
     let dispatch_id = new_dispatch_id(now, &agent_norm);
 
-    agent_norm = if agent_norm.eq_ignore_ascii_case("custom") {
-        "custom".to_string()
-    } else if agent_norm.eq_ignore_ascii_case("opencode") {
-        "opencode".to_string()
-    } else if let Some(def) = resolve_dispatch_agent(&agent_norm) {
-        def.name.to_string()
+    agent_norm = if let Some(agent) = normalize_dispatch_agent_name(&agent_norm) {
+        agent
     } else {
         let agent = params.agent.as_deref().unwrap_or("");
         return Err(format!(

@@ -140,15 +140,7 @@ fn resolve_and_apply_dispatch_profile_inner(
         .clone()
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
-    let agent_norm = if agent.eq_ignore_ascii_case("custom") {
-        "custom".to_string()
-    } else if agent.eq_ignore_ascii_case("opencode") {
-        "opencode".to_string()
-    } else if let Some(def) = resolve_dispatch_agent(&agent) {
-        def.name.to_string()
-    } else {
-        agent
-    };
+    let agent_norm = normalize_dispatch_agent_name(&agent).unwrap_or(agent);
     let mcp_access = params
         .mcp_access
         .get_or_insert_with(|| DispatchMcpAccessParams {

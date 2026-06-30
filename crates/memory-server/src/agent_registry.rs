@@ -76,6 +76,19 @@ pub(crate) fn dispatch_agent_help_list() -> String {
     )
 }
 
+pub(crate) fn normalize_dispatch_agent_name(raw: &str) -> Option<String> {
+    let norm = raw.trim();
+    if norm.is_empty() {
+        None
+    } else if norm.eq_ignore_ascii_case("custom") {
+        Some("custom".to_string())
+    } else if norm.eq_ignore_ascii_case("opencode") {
+        Some("opencode".to_string())
+    } else {
+        resolve_dispatch_agent(norm).map(|def| def.name.to_string())
+    }
+}
+
 pub(crate) fn mcp_inject_supported(def: &DispatchAgentDef) -> bool {
     matches!(def.mcp, DispatchMcpSupport::JsonFile)
 }
@@ -188,6 +201,24 @@ mod tests {
         assert_eq!(resolve_dispatch_agent("grok-cli").unwrap().name, "grok");
         assert_eq!(resolve_dispatch_agent("moonshot").unwrap().name, "kimi");
         assert!(resolve_dispatch_agent("gemini").is_none());
+    }
+
+    #[test]
+    fn normalize_dispatch_agent_name_handles_adapters_and_registered_agents() {
+        assert_eq!(
+            normalize_dispatch_agent_name(" claude-code ").as_deref(),
+            Some("claude")
+        );
+        assert_eq!(
+            normalize_dispatch_agent_name("OPENCODE").as_deref(),
+            Some("opencode")
+        );
+        assert_eq!(
+            normalize_dispatch_agent_name("custom").as_deref(),
+            Some("custom")
+        );
+        assert!(normalize_dispatch_agent_name("gemini").is_none());
+        assert!(normalize_dispatch_agent_name(" ").is_none());
     }
 
     #[test]
