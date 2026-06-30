@@ -1,7 +1,7 @@
 # SFT 数据战略：从 1,654 条高质量样本到 Tachi 全系统提升
 
 **Status:** Historical research plan; superseded for production gating by
-[`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md)
+[`model-training-eval-gate.md`](model-training-eval-gate.md)
 **Date:** 2026-06-03
 **Boundary update:** 2026-06-09
 **Source:** `/Volumes/Storage/agent_logs/sft/redistilled_v4_all_engineering.jsonl` (1,654 entries)
@@ -21,7 +21,7 @@ Current production rule:
   reviewed route-policy/profile-card overlays are the production routing layer.
 - Qwen/LoRA/fine-tune work is deferred until the eval target and artifact
   promotion gate in
-  [`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md)
+  [`model-training-eval-gate.md`](model-training-eval-gate.md)
   is satisfied.
 - Model-training artifacts stay under run-scoped `foundry-runs` paths and never
   become production memory/wiki/docs by default.
@@ -112,7 +112,7 @@ isolated fixture before it can affect production routing.
 - 输出：`{"intent", "agent", "stage", "skills"}` JSON
 - 预期准确率：>85%（基于 7 类意图）
 - production gate: see
-  [`model-training-eval-gate.md`](engineering/architecture/model-training-eval-gate.md);
+  [`model-training-eval-gate.md`](model-training-eval-gate.md);
   no trained classifier may directly replace route recommendation without a
   reviewed promotion proposal.
 

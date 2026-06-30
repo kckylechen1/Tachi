@@ -637,7 +637,7 @@ tachi dispatch codex "Design the auth module" --task-type design
 
 For a comprehensive analysis of how Superpowers, Waza, Codex, and Amp define agent envelopes — including XML tag taxonomy, prompt-model joint routing, subagent architectures, compaction/TODO/handoff comparison, and a cross-platform comparison matrix — see:
 
-**📄 `docs/agent-envelope-ecosystem.md`**
+**📄 `docs/engineering/architecture/agent-envelope-ecosystem.md`**
 
 That document covers:
 - **Superpowers** 5-stage workflow envelope (brainstorm → plan → execute → review → ship)
@@ -841,7 +841,7 @@ pub fn default_role_config(role: DispatchRole) -> RoleConfig {
 - `tachi_dispatch` → pre-flight cost heuristic, post-flight format normalization
 - Kanban → auto-suggest label/priority from card title/body
 
-See `docs/wiki-references-spec.md` §10 for the `qwen_secretary::ref_extractor` design.
+See `docs/engineering/architecture/wiki-references-spec.md` §10 for the `qwen_secretary::ref_extractor` design.
 
 ---
 

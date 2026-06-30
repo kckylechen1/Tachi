@@ -1,6 +1,6 @@
 //! Static registry for `tachi_dispatch` CLI workers (Phase 1 fleet).
 //!
-//! Canonical policy: `docs/agent-fleet.md`.
+//! Canonical policy: `docs/engineering/architecture/agent-fleet.md`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DispatchMcpSupport {
@@ -138,7 +138,7 @@ pub(crate) fn registry_json(server: &crate::MemoryServer) -> Result<serde_json::
             .get("dispatch_profiles")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([])),
-        "fleet_policy": "docs/agent-fleet.md",
+        "fleet_policy": "docs/engineering/architecture/agent-fleet.md",
     }))
 }
 

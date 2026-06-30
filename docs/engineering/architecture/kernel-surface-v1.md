@@ -87,6 +87,8 @@ Examples:
 - `recall_context`
 - `capture_session`
 - `compact_context`
+- host lifecycle hooks (`before_session`, `before_prompt`, `after_tool`,
+  `after_compact`, `before_stop`, `after_session`)
 
 Runtime primitives are called by:
 
@@ -96,6 +98,8 @@ Runtime primitives are called by:
 - other host lifecycle hooks
 
 This layer is where OpenClaw and other adapters talk to Tachi during a live turn.
+The neutral lifecycle contract is defined in
+[`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md).
 
 ## Layer 4: Workflow
 

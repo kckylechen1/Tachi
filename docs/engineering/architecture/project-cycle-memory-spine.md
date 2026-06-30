@@ -5,6 +5,7 @@
 **Related docs:**
 - [`tachi-continuity-memory-architecture.md`](./tachi-continuity-memory-architecture.md)
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md)
+- [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md)
 
 ## Intent
 
@@ -29,6 +30,11 @@ It is not a new workflow engine. The existing surfaces remain the write paths:
 `tachi_task(action="cycle_plan")` is the read-only agent navigation layer on top of
 that projection: it turns the same evidence into an ordered checklist, current
 blockers, readiness flags, and concrete next command suggestions.
+
+Host adapters should consume this read model rather than inventing host-specific
+project state. In particular, `before_prompt` should use `cycle_plan` to attach
+the current lifecycle checklist, and `before_stop` should use the same evidence
+to decide whether the host can stop or needs a bounded continuation directive.
 
 ## Authority Order
 

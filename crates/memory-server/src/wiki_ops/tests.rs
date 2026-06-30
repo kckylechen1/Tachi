@@ -16,7 +16,7 @@ mod reference_validation_tests {
             "#69",
             "repo#69",
             "owner/repo#69",
-            "docs/wiki-references-spec.md",
+            "docs/engineering/architecture/wiki-references-spec.md",
         ] {
             assert!(validate_reference_format(ok).is_ok(), "expected ok: {ok}");
         }

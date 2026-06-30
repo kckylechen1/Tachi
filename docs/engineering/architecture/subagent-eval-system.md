@@ -161,6 +161,12 @@ This follows the useful parts of the observed external systems:
   enables it, and treat child-idle/TODO completion as liveness rather than
   quality proof.
 
+The typed adapter boundary is expanded in
+[`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md): host systems
+may provide lifecycle hooks, post-edit feedback, continuation gates, and
+execution transports, but Tachi remains the source of truth for project-cycle
+state, verification evidence, memory, and profile projection.
+
 ## Current Routing Hypothesis
 
 This is a starting hypothesis, not a leaderboard:

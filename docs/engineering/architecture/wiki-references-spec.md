@@ -294,7 +294,7 @@ fn test_invalid_references() {
 
 ### 10.1 Problem
 
-Agents often mention issues, docs, and wiki paths in natural language (e.g. "see #149 for the spec" or "as discussed in docs/agent-router-spec.md"), but don't explicitly populate `references`. Manual copy-paste is error-prone.
+Agents often mention issues, docs, and wiki paths in natural language (e.g. "see #149 for the spec" or "as discussed in docs/engineering/architecture/agent-router-spec.md"), but don't explicitly populate `references`. Manual copy-paste is error-prone.
 
 ### 10.2 Solution: `qwen_secretary::ref_extractor`
 

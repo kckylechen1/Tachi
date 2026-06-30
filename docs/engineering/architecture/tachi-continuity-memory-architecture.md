@@ -6,6 +6,7 @@
 **Related docs:**
 - [`pattern-timeline-bonding-memory.md`](./pattern-timeline-bonding-memory.md) — original design + cold review
 - [`../../wiki/agent/tachi/Tachi-图书馆架构设计.md`](../../wiki/agent/tachi/Tachi-图书馆架构设计.md) — Karpathy LLM Wiki mapping
+- [`host-adapter-lifecycle-v1.md`](./host-adapter-lifecycle-v1.md) — host runtime event contract
 
 ---
 
@@ -33,6 +34,9 @@ This means:
 - Affect/emotion projections can influence tone/reminder style only; they must not mutate facts, scores, routing, trading decisions, or execution.
 - Pattern and bonding memory are not obedience knobs. They can compress communication and surface learned judgment structures, but cold-seat review and label calibration remain mandatory.
 - A2A transport should share evidence, open questions, and provenance across agents; it should not force agents to inherit conclusions.
+- Host lifecycle events are evidence inputs, not a second control plane. Host
+  adapters can emit session, prompt, tool, compact, stop, and end events, but
+  project-cycle state and durable memory remain Tachi-owned.
 
 ---
 

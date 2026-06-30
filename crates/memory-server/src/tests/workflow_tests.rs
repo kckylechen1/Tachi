@@ -11,7 +11,7 @@ async fn workflow_close_loop_writes_wiki_with_references() {
             action: "close_loop".to_string(),
             issue_ref: Some("kckylechen1/tachi#150".to_string()),
             pr_ref: None,
-            doc_paths: vec!["docs/wiki-references-spec.md".to_string()],
+            doc_paths: vec!["docs/engineering/architecture/wiki-references-spec.md".to_string()],
             spec_paths: vec![],
             related_issues: vec!["#149".to_string()],
             // Keep the smoke test offline: do not attempt a real gh comment.
@@ -72,7 +72,7 @@ async fn workflow_close_loop_writes_wiki_with_references() {
         refs,
         vec![
             "kckylechen1/tachi#150".to_string(),
-            "docs/wiki-references-spec.md".to_string(),
+            "docs/engineering/architecture/wiki-references-spec.md".to_string(),
             "#149".to_string(),
         ]
     );
@@ -100,7 +100,7 @@ async fn workflow_close_loop_writes_wiki_with_references() {
         entry["metadata"]["promotion"]["source_refs"],
         json!([
             "kckylechen1/tachi#150",
-            "docs/wiki-references-spec.md",
+            "docs/engineering/architecture/wiki-references-spec.md",
             "#149"
         ])
     );
