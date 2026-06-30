@@ -18,6 +18,13 @@ fn ready_pr() -> PrState {
     }
 }
 
+fn already_merged_pr() -> PrState {
+    PrState {
+        state: PrLifecycleState::Merged,
+        ..ready_pr()
+    }
+}
+
 fn blocked_draft_pr() -> PrState {
     PrState {
         is_draft: true,

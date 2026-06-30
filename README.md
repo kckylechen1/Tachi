@@ -359,7 +359,7 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 
 ### 10. Neural Foundry & Wiki
 - **Foundry** — server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
-- **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki_write`, `tachi_wiki_search`, `wiki_browse`, `wiki_lint`.
+- **Wiki** — durable knowledge pages maintained by agents: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`.
 
 ---
 
@@ -370,9 +370,9 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
 | `standard` | Daily facade surface: `tachi_save`, `tachi_memory`, `tachi_task`, `tachi_arena`, `tachi_verify`, `tachi_web_search`, `tachi_wiki`, `tachi_skill`, `tachi_gh`, `vault_status`, plus `runtime_info`, `tachi_status`, `tachi_briefing`, and `tachi_tools`. | IDE agents: Claude, Cursor, Codex, Windsurf, Trae, Antigravity. |
-| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `tachi_dispatch`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
+| `coordinate` | `remember` + `coordinate` bundles: adds `handoff_*`, `post_card`, `check_inbox`, `update_card`, `approve_merge`, `tachi_handoff`, `tachi_workflow`, `tachi_orchestrator`; dispatch runs through `tachi_task(action='dispatch')`. | Leader/orchestrator agents that dispatch work and coordinate across agents. |
 | `operate` | `remember` + `operate` bundles: adds Foundry lifecycle, `agent_register`, `hub_call`, `vault_unlock`/`lock`/`status`, `wiki_lint`. | Runtime adapters, OpenClaw, ops automation. |
-| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_dispatch`. No dispatch, no handoff. |
+| `delegate` | Curated 7-tool surface: `tachi_tools`, `runtime_info`, `tachi_memory`, `tachi_web_search`, `tachi_browse`, `tachi_unstick`, `tachi_complete`, `run_skill`. | Worker subagents spawned by `tachi_task(action='dispatch')`. No dispatch, no handoff. |
 | `admin` | Full catalog. | Maintenance, development, and governance. |
 
 Host aliases are resolved automatically: `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`.

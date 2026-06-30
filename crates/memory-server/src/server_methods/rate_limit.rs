@@ -135,7 +135,7 @@ impl MemoryServer {
                     rmcp::model::ErrorCode::INVALID_REQUEST,
                     format!(
                         "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
-                         Stop before retrying the same path. Call tachi_progress_check with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
+                         Stop before retrying the same path. Call tachi_unstick with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
                         tool_name,
                         stamps.len() + 1,
                         RATE_LIMIT_BURST_WINDOW.as_secs(),
@@ -152,7 +152,7 @@ impl MemoryServer {
             if upcoming_count >= STUCK_SOFT_WARN_THRESHOLD && upcoming_count < effective_burst {
                 soft_warning = Some(format!(
                     "⚠️ stuck-detection: tool '{}' has been called {} times with identical arguments within {}s. \
-                     Hard block triggers at {} repeats. Consider calling tachi_progress_check with the current task / attempts / latest error, \
+                     Hard block triggers at {} repeats. Consider calling tachi_unstick with the current task / attempts / latest error, \
                      or searching prior solutions via tachi_wiki_search / tachi_task_brief before retrying the same path.",
                     tool_name,
                     upcoming_count,

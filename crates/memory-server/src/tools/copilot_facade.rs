@@ -18,17 +18,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append a progress_check event to .tachi/runs/<flow_id>/progress.jsonl."
-    )]
-    pub(crate) async fn tachi_progress_check(
-        &self,
-        Parameters(params): Parameters<ProgressCheckParams>,
-    ) -> Result<String, String> {
-        handle_tachi_progress_check(self, params).await
-    }
-
-    #[tool(
-        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl. (Alias: tachi_progress_check)"
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl."
     )]
     pub(crate) async fn tachi_unstick(
         &self,

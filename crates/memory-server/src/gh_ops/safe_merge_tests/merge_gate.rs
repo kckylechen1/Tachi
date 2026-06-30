@@ -80,6 +80,44 @@ async fn safe_merge_ready_executes_merge_when_not_dry_run() {
 }
 
 #[tokio::test]
+async fn safe_merge_observes_already_merged_pr_without_blocking() {
+    let client = MockGhClient::new()
+        .with_pr("o/r", already_merged_pr())
+        .with_checks("o/r", 42, vec![]);
+    let out = handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        None,
+        MergeGatePolicy::strict(),
+    )
+    .await
+    .expect("ok");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["merge_state"], "merged");
+    assert_eq!(v["decision"]["decision"], "already_merged");
+    assert_eq!(v["already_merged"], true);
+    assert_eq!(v["will_merge"], false);
+    assert_eq!(v["merge_attempted"], false);
+    assert_eq!(v["merge_executed"], false);
+    assert_eq!(v["status_patch"]["pr_state"], "MERGED");
+    assert_eq!(v["status_patch"]["merge_state"], "merged");
+    assert_eq!(
+        v["status_patch"]["head_consistency"]["state"],
+        "not_required_for_merged_pr"
+    );
+    assert_eq!(
+        v["status_patch"]["head_consistency"]["head_consistent"],
+        true
+    );
+    assert_eq!(v["event"]["kind"], "github_pr_merged");
+    assert_eq!(v["event"]["payload"]["already_merged"], true);
+    assert!(client.merge_calls().is_empty());
+}
+
+#[tokio::test]
 async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
     let client = MockGhClient::new().with_pr("o/r", ready_pr());
     let out = handle_github_safe_merge(

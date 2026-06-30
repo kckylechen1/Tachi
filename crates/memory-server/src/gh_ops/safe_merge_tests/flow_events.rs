@@ -153,6 +153,53 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let client = MockGhClient::new()
+        .with_pr("o/r", already_merged_pr())
+        .with_checks("o/r", 42, vec![]);
+    let flow = "flow_observed-merged-safe-merge";
+    handle_github_safe_merge(
+        &client,
+        "o/r",
+        42,
+        MergeStrategy::Squash,
+        true,
+        Some(flow),
+        MergeGatePolicy::strict(),
+    )
+    .await
+    .expect("observed merged ok");
+    let run_dir = tmp.path().join(flow);
+    let status: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
+            .unwrap();
+    assert_eq!(status["github"]["pr_state"], "MERGED");
+    assert_eq!(status["github"]["merge_state"], "merged");
+    assert_eq!(status["github"]["already_merged"], true);
+    assert_eq!(status["github"]["merge_attempted"], false);
+    assert_eq!(status["github"]["merge_executed"], false);
+    assert_eq!(status["github"]["requested_mode"], "preview");
+    assert!(std::fs::read_to_string(run_dir.join("events.jsonl"))
+        .unwrap()
+        .contains("\"already_merged\":true"));
+    assert!(client.merge_calls().is_empty());
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
 #[tokio::test]
 async fn safe_merge_rejects_invalid_flow_id() {
     let client = MockGhClient::new()

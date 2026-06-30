@@ -1,6 +1,5 @@
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
-use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -12,8 +11,9 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
     cwd: &Path,
     sandbox_home: &Path,
 ) -> Result<Value, String> {
-    let raw = server
-        .tachi_dispatch(Parameters(TachiDispatchParams {
+    let raw = crate::dispatch_ops::handle_tachi_dispatch(
+        server,
+        TachiDispatchParams {
             agent: Some("custom".to_string()),
             profile: None,
             task: "Poke no-op mock dispatch".to_string(),
@@ -45,8 +45,9 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             auto_capability_bundle: Some(true),
             mcp_access: None,
             allowed_mcp_servers: Vec::new(),
-        }))
-        .await?;
+        },
+    )
+    .await?;
     let response: Value =
         serde_json::from_str(&raw).map_err(|e| format!("parse dispatch response: {e}"))?;
     let dispatch_id = response
@@ -92,7 +93,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             "artifacts": required,
         },
         "repro_steps": [
-            "tachi_dispatch agent=custom command='python3 -c ...'",
+            "tachi_task(action='dispatch', agent='custom', command=['python3','-c',...])",
             "wait for result.md",
             "verify prompt/context/capability_bundle/trajectory/status artifacts"
         ],

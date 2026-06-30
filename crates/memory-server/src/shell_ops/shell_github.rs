@@ -61,7 +61,7 @@ pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
 /// - `pending`  — PR exists, gates still resolving (CI / review / mergeable)
 /// - `blocked`  — at least one gate is red or a bot review requested changes
 /// - `ready`    — all gates green, safe to merge (no automated merge yet)
-/// - `merged`   — `gh pr merge` (any strategy) succeeded
+/// - `merged`   — PR is merged, either by this process or observed from GitHub
 pub(crate) const GITHUB_MERGE_STATES: &[&str] = &["pending", "blocked", "ready", "merged"];
 
 /// Recursively merge `patch` into `target` in-place. Object values are merged
