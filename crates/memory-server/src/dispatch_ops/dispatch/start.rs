@@ -10,6 +10,7 @@ pub(super) struct DispatchStart {
     pub(super) inject_tachi: bool,
     pub(super) inject_hub: bool,
     pub(super) workspace_dir: PathBuf,
+    pub(super) host_adapter: Option<String>,
 }
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
@@ -25,6 +26,8 @@ pub(super) fn resolve_dispatch_start(
 
     agent_norm = if agent_norm.eq_ignore_ascii_case("custom") {
         "custom".to_string()
+    } else if agent_norm.eq_ignore_ascii_case("opencode") {
+        "opencode".to_string()
     } else if let Some(def) = resolve_dispatch_agent(&agent_norm) {
         def.name.to_string()
     } else {
@@ -47,9 +50,9 @@ pub(super) fn resolve_dispatch_start(
     // Validate backend/MCP compatibility before creating the run ledger. A
     // rejected dispatch should not leave an empty run directory with no status.
     if inject_tachi || inject_hub {
-        if agent_norm == "custom" {
+        if matches!(agent_norm.as_str(), "custom" | "opencode") {
             return Err(
-                "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend."
+                "inject_tachi_mcp / inject_hub_mcps are not supported for custom/opencode subprocess backends."
                     .to_string(),
             );
         }
@@ -68,6 +71,7 @@ pub(super) fn resolve_dispatch_start(
     }
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
+    let host_adapter = resolved_profile.host_adapter.clone();
 
     Ok(DispatchStart {
         dispatch_id,
@@ -79,5 +83,6 @@ pub(super) fn resolve_dispatch_start(
         inject_tachi,
         inject_hub,
         workspace_dir,
+        host_adapter,
     })
 }

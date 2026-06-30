@@ -17,7 +17,7 @@ pub(crate) fn profile_eval_feedback_json(
         .iter()
         .filter(|row| {
             row.profile.is_none()
-                && (row.agent == profile.backend
+                && (profile_matches_agent(profile, &row.agent)
                     || row
                         .role
                         .as_deref()

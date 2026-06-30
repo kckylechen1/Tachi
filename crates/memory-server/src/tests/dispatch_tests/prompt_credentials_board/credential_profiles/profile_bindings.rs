@@ -81,6 +81,16 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
         "dispatch response must not leak secret value: {raw}"
     );
     let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
+    assert_eq!(response["agent"], serde_json::json!("opencode"));
+    assert_eq!(response["host_adapter"], serde_json::json!("opencode"));
+    assert_eq!(
+        response["profile"]["host_adapter"],
+        serde_json::json!("opencode")
+    );
+    assert_eq!(
+        response["profile"]["selected_profile"],
+        serde_json::json!("opencode_builder")
+    );
     assert_eq!(
         response["profile"]["credential_profiles"][0],
         serde_json::json!("opencode_shared")
@@ -100,6 +110,11 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
         result.contains("profile-config-present"),
         "subprocess should receive profile-declared credential config; result={result}"
     );
+    let status: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("read dispatch status"),
+    )
+    .expect("status JSON");
+    assert_eq!(status["host_adapter"], serde_json::json!("opencode"));
 }
 
 #[tokio::test]

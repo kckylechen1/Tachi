@@ -115,7 +115,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
     DispatchProfileDef {
         name: "opencode_builder",
         display_name: "OpenCode Credentialed Builder",
-        backend: "custom",
+        backend: "opencode",
         role: "executor",
         stage: Some("execute"),
         model: Some("zhipuai-coding-plan/glm-5.1"),
@@ -308,6 +308,7 @@ pub(crate) struct ResolvedDispatchProfile {
     pub fallback_chain: Vec<String>,
     pub credential_profiles: Vec<String>,
     pub route_explanation: Vec<String>,
+    pub host_adapter: Option<String>,
     pub mbit_card: Option<Value>,
 }
 
@@ -316,6 +317,28 @@ pub(crate) fn resolve_dispatch_profile(raw: &str) -> Option<&'static DispatchPro
     DISPATCH_PROFILES
         .iter()
         .find(|profile| profile.name == norm)
+}
+
+pub(crate) fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str> {
+    match profile.backend {
+        "opencode" => Some("opencode"),
+        // Compatibility path: older custom profiles with a model but no command
+        // are still materialized as OpenCode CLI/serve commands by routing.
+        "custom" if profile.model.is_some() => Some("opencode"),
+        _ => None,
+    }
+}
+
+pub(crate) fn profile_uses_opencode_adapter(profile: &DispatchProfileDef) -> bool {
+    profile_host_adapter(profile) == Some("opencode")
+}
+
+pub(crate) fn profile_matches_agent(profile: &DispatchProfileDef, agent: &str) -> bool {
+    profile.backend == agent
+        || matches!(
+            (profile_host_adapter(profile), agent),
+            (Some("opencode"), "custom" | "opencode")
+        )
 }
 
 pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result<Value, String> {

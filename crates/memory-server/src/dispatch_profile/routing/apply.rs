@@ -56,76 +56,8 @@ fn resolve_and_apply_dispatch_profile_inner(
         if params.model.is_none() {
             params.model = profile.model.map(str::to_string);
         }
-        if profile.backend == "custom" && params.command.is_empty() {
-            if let Some(model) = profile.model {
-                let transport = params
-                    .harness_transport
-                    .clone()
-                    .or_else(|| std::env::var("TACHI_OPENCODE_TRANSPORT").ok())
-                    .unwrap_or_else(|| "cli".to_string())
-                    .to_ascii_lowercase();
-                if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
-                    let server_url = params
-                        .harness_server_url
-                        .clone()
-                        .or_else(|| std::env::var("TACHI_OPENCODE_SERVER_URL").ok())
-                        .unwrap_or_else(|| "http://127.0.0.1:4321".to_string());
-                    if crate::dispatch_ops::harness_server_attach_ready(&server_url) {
-                        let directory = params
-                            .cwd
-                            .clone()
-                            .or_else(|| {
-                                std::env::current_dir()
-                                    .ok()
-                                    .map(|path| path.to_string_lossy().to_string())
-                            })
-                            .unwrap_or_else(|| ".".to_string());
-                        params.harness_transport = Some("opencode_serve".to_string());
-                        params.harness_server_url = Some(server_url.clone());
-                        params.command = vec![
-                            "opencode".to_string(),
-                            "run".to_string(),
-                            "--attach".to_string(),
-                            server_url,
-                            "--dir".to_string(),
-                            directory,
-                            "--agent".to_string(),
-                            profile.role.to_string(),
-                            "--model".to_string(),
-                            model.to_string(),
-                        ];
-                        route_explanation.push(format!(
-                            "profile selected opencode serve transport for model '{}'",
-                            model
-                        ));
-                    } else {
-                        params.harness_transport = Some("opencode_cli".to_string());
-                        params.harness_server_url = Some(server_url.clone());
-                        params.command = vec![
-                            "opencode".to_string(),
-                            "--pure".to_string(),
-                            "run".to_string(),
-                            "--model".to_string(),
-                            model.to_string(),
-                        ];
-                        route_explanation.push(format!(
-                            "requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"
-                        ));
-                    }
-                } else {
-                    params.command = vec![
-                        "opencode".to_string(),
-                        "--pure".to_string(),
-                        "run".to_string(),
-                        "--model".to_string(),
-                        model.to_string(),
-                    ];
-                    route_explanation.push(format!(
-                        "profile selected opencode custom command for model '{}'",
-                        model
-                    ));
-                }
-            }
+        if profile_uses_opencode_adapter(profile) && params.command.is_empty() {
+            apply_opencode_profile_command(params, profile, &mut route_explanation)?;
         }
         if params.tool_profile.is_none() {
             params.tool_profile = Some(profile.tool_profile.to_string());
@@ -210,6 +142,8 @@ fn resolve_and_apply_dispatch_profile_inner(
         .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
     let agent_norm = if agent.eq_ignore_ascii_case("custom") {
         "custom".to_string()
+    } else if agent.eq_ignore_ascii_case("opencode") {
+        "opencode".to_string()
     } else if let Some(def) = resolve_dispatch_agent(&agent) {
         def.name.to_string()
     } else {
@@ -260,6 +194,7 @@ fn resolve_and_apply_dispatch_profile_inner(
         fallback_chain,
         credential_profiles,
         route_explanation,
+        host_adapter: profile.and_then(profile_host_adapter).map(str::to_string),
         mbit_card: profile
             .map(|profile| match server {
                 Some(server) => profile_json_for_server(server, profile),
@@ -267,4 +202,83 @@ fn resolve_and_apply_dispatch_profile_inner(
             })
             .transpose()?,
     })
+}
+
+fn apply_opencode_profile_command(
+    params: &mut TachiDispatchParams,
+    profile: &DispatchProfileDef,
+    route_explanation: &mut Vec<String>,
+) -> Result<(), String> {
+    let model = profile
+        .model
+        .ok_or_else(|| format!("profile '{}' uses OpenCode but has no model", profile.name))?;
+    let transport = params
+        .harness_transport
+        .clone()
+        .or_else(|| std::env::var("TACHI_OPENCODE_TRANSPORT").ok())
+        .unwrap_or_else(|| "cli".to_string())
+        .to_ascii_lowercase();
+    if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
+        let server_url = params
+            .harness_server_url
+            .clone()
+            .or_else(|| std::env::var("TACHI_OPENCODE_SERVER_URL").ok())
+            .unwrap_or_else(|| "http://127.0.0.1:4321".to_string());
+        if crate::dispatch_ops::harness_server_attach_ready(&server_url) {
+            let directory = params
+                .cwd
+                .clone()
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| ".".to_string());
+            params.harness_transport = Some("opencode_serve".to_string());
+            params.harness_server_url = Some(server_url.clone());
+            params.command = vec![
+                "opencode".to_string(),
+                "run".to_string(),
+                "--attach".to_string(),
+                server_url,
+                "--dir".to_string(),
+                directory,
+                "--agent".to_string(),
+                profile.role.to_string(),
+                "--model".to_string(),
+                model.to_string(),
+            ];
+            route_explanation.push(format!(
+                "profile selected typed OpenCode serve transport for model '{}'",
+                model
+            ));
+        } else {
+            params.harness_transport = Some("opencode_cli".to_string());
+            params.harness_server_url = Some(server_url.clone());
+            params.command = vec![
+                "opencode".to_string(),
+                "--pure".to_string(),
+                "run".to_string(),
+                "--model".to_string(),
+                model.to_string(),
+            ];
+            route_explanation.push(format!(
+                "requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"
+            ));
+        }
+    } else {
+        params.harness_transport = Some("opencode_cli".to_string());
+        params.command = vec![
+            "opencode".to_string(),
+            "--pure".to_string(),
+            "run".to_string(),
+            "--model".to_string(),
+            model.to_string(),
+        ];
+        route_explanation.push(format!(
+            "profile selected typed OpenCode CLI transport for model '{}'",
+            model
+        ));
+    }
+    Ok(())
 }

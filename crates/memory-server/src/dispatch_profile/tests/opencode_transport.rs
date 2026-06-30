@@ -123,7 +123,29 @@ fn custom_profile_can_attach_to_opencode_serve() {
     assert!(resolved
         .route_explanation
         .iter()
-        .any(|line| line.contains("opencode serve transport")));
+        .any(|line| line.contains("OpenCode serve transport")));
+}
+
+#[test]
+fn opencode_builder_profile_uses_typed_opencode_backend() {
+    let mut params = params();
+    params.profile = Some("opencode_builder".to_string());
+    let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
+
+    assert_eq!(resolved.agent, "opencode");
+    assert_eq!(resolved.host_adapter.as_deref(), Some("opencode"));
+    assert_eq!(params.agent.as_deref(), Some("opencode"));
+    assert_eq!(params.harness_transport.as_deref(), Some("opencode_cli"));
+    assert_eq!(
+        params.command,
+        vec![
+            "opencode".to_string(),
+            "--pure".to_string(),
+            "run".to_string(),
+            "--model".to_string(),
+            "zhipuai-coding-plan/glm-5.1".to_string()
+        ]
+    );
 }
 
 #[test]

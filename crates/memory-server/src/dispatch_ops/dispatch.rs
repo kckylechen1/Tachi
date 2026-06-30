@@ -84,6 +84,7 @@ pub(crate) async fn handle_tachi_dispatch(
         inject_tachi,
         inject_hub,
         workspace_dir,
+        host_adapter,
     } = resolve_dispatch_start(server, &mut params, now)?;
 
     // 1. Create isolated workspace directory
@@ -180,6 +181,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "result_written": false,
             "harness_transport": harness_transport.clone(),
             "harness_server_url": harness_server_url.clone(),
+            "host_adapter": host_adapter.clone(),
             "capability_bundle": capability_bundle_card.clone(),
             "feedback_rules": feedback_rules_trace.clone(),
             "timeout_secs": timeout_secs_for_status,
@@ -488,6 +490,7 @@ pub(crate) async fn handle_tachi_dispatch(
                     "result_written": false,
                     "harness_transport": harness_transport.clone(),
                     "harness_server_url": harness_server_url.clone(),
+                    "host_adapter": host_adapter.clone(),
                     "execution_backend": execution_backend_name,
                     "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
                     "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
@@ -552,6 +555,7 @@ pub(crate) async fn handle_tachi_dispatch(
         feedback_rules_trace: feedback_rules_trace.clone(),
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
+        host_adapter: host_adapter.clone(),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
         flow_dispatch_slot,
@@ -582,6 +586,7 @@ pub(crate) async fn handle_tachi_dispatch(
         "feedback_rules": feedback_rules_trace,
         "harness_transport": harness_transport,
         "harness_server_url": harness_server_url,
+        "host_adapter": host_adapter,
         "execution_backend": execution_backend_name,
         "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
         "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },

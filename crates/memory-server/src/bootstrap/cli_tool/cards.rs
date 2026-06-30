@@ -134,6 +134,7 @@ fn compact_card_json(profile: &Value) -> Value {
         "role": first_json_value(&[profile.get("role")]),
         "stage": first_json_value(&[profile.get("stage")]),
         "backend": first_json_value(&[profile.get("backend")]),
+        "host_adapter": first_json_value(&[profile.get("host_adapter")]),
         "tool_profile": first_json_value(&[profile.get("tool_profile")]),
         "authority": first_json_value(&[card.and_then(|card| card.get("authority"))]),
         "guidance": first_json_value(&[card.and_then(|card| card.get("guidance"))]),
@@ -352,5 +353,26 @@ mod tests {
             rendered["card"]["evidence_contract"]["required"][0],
             json!("findings")
         );
+    }
+
+    #[test]
+    fn compact_card_json_preserves_host_adapter() {
+        let profile = json!({
+            "name": "opencode_builder",
+            "display_name": "OpenCode Credentialed Builder",
+            "backend": "opencode",
+            "host_adapter": "opencode",
+            "role": "executor",
+            "stage": "execute",
+            "mbit_card": {
+                "archetype": "scv",
+                "authority": {"write_code": true}
+            }
+        });
+
+        let rendered = compact_card_json(&profile);
+
+        assert_eq!(rendered["backend"], json!("opencode"));
+        assert_eq!(rendered["host_adapter"], json!("opencode"));
     }
 }

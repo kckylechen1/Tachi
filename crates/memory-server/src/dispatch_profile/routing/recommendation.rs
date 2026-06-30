@@ -90,7 +90,7 @@ pub(crate) fn handle_dispatch_recommendation(
 pub(in crate::dispatch_profile) fn recommended_transport_for_profile(
     profile: &DispatchProfileDef,
 ) -> (String, Value) {
-    if profile.backend != "custom" {
+    if !profile_uses_opencode_adapter(profile) {
         return (
             "native_cli".to_string(),
             json!({ "requested": "native_cli", "readiness": "not_applicable" }),

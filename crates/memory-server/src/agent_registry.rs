@@ -70,7 +70,10 @@ pub(crate) fn resolve_dispatch_agent(raw: &str) -> Option<&'static DispatchAgent
 
 pub(crate) fn dispatch_agent_help_list() -> String {
     let names: Vec<_> = DISPATCH_AGENTS.iter().map(|a| a.name).collect();
-    format!("{}. Use 'custom' for ad-hoc commands.", names.join(", "))
+    format!(
+        "{}. Use 'opencode' for typed OpenCode profiles or 'custom' for ad-hoc commands.",
+        names.join(", ")
+    )
 }
 
 pub(crate) fn mcp_inject_supported(def: &DispatchAgentDef) -> bool {

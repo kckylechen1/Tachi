@@ -116,6 +116,7 @@ pub(super) fn prepare_dispatch_backend(
             "grok" => build_grok_command(ctx.params, ctx.prompt, ctx.mcp_config_path)?,
             "kimi" => build_kimi_command(ctx.params, ctx.prompt)?,
             "custom" => build_custom_command(ctx.params, ctx.prompt)?,
+            "opencode" => build_custom_command(ctx.params, ctx.prompt)?,
             other => {
                 return Err(format!(
                     "Internal error: unhandled dispatch agent '{}'. {}",
