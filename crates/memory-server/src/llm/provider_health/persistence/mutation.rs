@@ -183,6 +183,37 @@ impl super::super::super::LlmClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn expire_provider_key_auth_failure_for_tests(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) {
+        let now = Self::now_utc();
+        let stale = now - chrono::Duration::seconds(AUTH_FAILED_RETRY_TTL_SECS + 1);
+        let persisted = {
+            let mut state = self
+                .provider_state
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let health = state.get_or_insert_health(logical_name, key_id);
+            health.status = HEALTH_AUTH_FAILED.to_string();
+            health.auth_failed = true;
+            health.disabled = false;
+            health.cooldown_until = None;
+            health.last_error = Some("forced stale auth failure".to_string());
+            health.updated_at = stale.to_rfc3339();
+            let persisted = health.clone();
+            state.set_health_snapshot(
+                logical_name,
+                key_id,
+                ProviderHealthSnapshot::from_health_parts(&persisted, Some(stale), None),
+            );
+            persisted
+        };
+        self.persist_key_health_now(&persisted);
+    }
+
     pub(crate) fn record_provider_key_result(
         &self,
         logical_name: &str,

@@ -21,7 +21,9 @@ pub(crate) use dispatch::handle_tachi_dispatch;
 #[cfg(test)]
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
-pub(crate) use harness::{harness_server_attach_ready, probe_harness_server_status};
+pub(crate) use harness::{
+    harness_server_attach_ready, probe_harness_server_status, probe_harness_server_status_with_env,
+};
 #[cfg(test)]
 pub(crate) use kanban_helpers::should_cleanup_run;
 pub(crate) use kanban_helpers::update_kanban_state;

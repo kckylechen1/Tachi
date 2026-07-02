@@ -8,7 +8,7 @@ use super::vault::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyRotationMemberStatus;
 
 pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> ProviderProbeReport {
-    let llm = match crate::llm::LlmClient::new() {
+    let llm = match probe_llm_client(global_db_path) {
         Ok(client) => client,
         Err(err) => {
             return ProviderProbeReport {
@@ -110,6 +110,17 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         probes: out,
         rotation_groups: run_rotation_group_probes(global_db_path).await,
     }
+}
+
+fn probe_llm_client(global_db_path: &Path) -> Result<crate::llm::LlmClient, String> {
+    crate::llm::LlmClient::new_with_vault_db(Some(global_db_path))
+}
+
+#[cfg(test)]
+pub(crate) fn probe_llm_client_for_tests(
+    global_db_path: &Path,
+) -> Result<crate::llm::LlmClient, String> {
+    probe_llm_client(global_db_path)
 }
 
 pub(crate) async fn run_provider_probes(global_db_path: &Path) -> Vec<ProviderProbeResult> {

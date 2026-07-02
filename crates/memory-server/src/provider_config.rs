@@ -80,7 +80,52 @@ fn resolve_vault_pools(
             }
         }
     }
-    vault_api_key_pools_from_keychain(global_db_path)
+    let pools = vault_api_key_pools_from_keychain(global_db_path);
+    if !pools.is_empty() || vault_config_exists(global_db_path) {
+        return pools;
+    }
+
+    let default_global = default_global_db_path();
+    if paths_equal(global_db_path, &default_global) {
+        return pools;
+    }
+
+    let fallback = vault_api_key_pools_from_keychain(&default_global);
+    if !fallback.is_empty() {
+        tracing::warn!(
+            "[provider] global DB {} has no initialized Vault; using default Vault DB {} for provider key materialization",
+            global_db_path.display(),
+            default_global.display()
+        );
+    }
+    fallback
+}
+
+fn default_global_db_path() -> std::path::PathBuf {
+    crate::status_ops::resolve_app_home()
+        .join("global")
+        .join("memory.db")
+}
+
+fn vault_config_exists(global_db_path: &Path) -> bool {
+    let Some(path) = global_db_path.to_str() else {
+        return false;
+    };
+    let Ok(store) = memory_core::MemoryStore::open_read_only(path) else {
+        return false;
+    };
+    store.vault_get_config().ok().flatten().is_some()
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .map(|(left, right)| left == right)
+        .unwrap_or(false)
 }
 
 fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {

@@ -56,6 +56,59 @@ async fn search_memory_boosts_guide_rows_by_context() {
 }
 
 #[tokio::test]
+async fn search_memory_reports_recall_quality_when_vectors_are_sparse() {
+    let server = make_server();
+    let mut query_vec = vec![0.0; 1024];
+    query_vec[0] = 1.0;
+    server
+        .with_global_store(|store| {
+            for idx in 0..3 {
+                let mut memory = make_entry(&format!("sparse-recall-row-{idx}"));
+                memory.path = format!("/facts/sparse-recall/{idx}");
+                memory.text = format!("SparseRecallQualityNeedle memory row {idx}.");
+                memory.summary = format!("Sparse recall row {idx}");
+                store.upsert(&memory).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed sparse recall entries");
+
+    let response = server
+        .search_memory(Parameters(SearchMemoryParams {
+            query: "SparseRecallQualityNeedle".to_string(),
+            query_vec: Some(query_vec),
+            top_k: 3,
+            path_prefix: None,
+            include_training: false,
+            include_archived: false,
+            candidates_per_channel: 20,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+            weights: None,
+            context_symbols: Vec::new(),
+            agent_role: None,
+            project: None,
+            domain: None,
+            file_context: None,
+            error_context: None,
+            enable_rerank: false,
+            as_of: None,
+            include_metadata: false,
+        }))
+        .await
+        .expect("search should succeed");
+
+    let rows: Vec<Value> = serde_json::from_str(&response).expect("search JSON");
+    let recall_quality = rows
+        .iter()
+        .find_map(|row| row.get("recall_quality"))
+        .expect("sparse vector coverage should be surfaced on search rows");
+    assert_eq!(recall_quality["status"], json!("degraded"));
+    assert_eq!(recall_quality["vector_missing"], json!(3));
+}
+
+#[tokio::test]
 async fn search_memory_context_symbols_participate_in_plain_query_recall() {
     let server = make_server();
 

@@ -50,6 +50,7 @@ fn daemon_mismatch_detects_foreign_version() {
         port: Some(6888),
         version: Some("1.3.0".to_string()),
         global_db: Some(global.display().to_string()),
+        project_db: None,
     };
     let reason = daemon_mismatch_reason(42, Some(&info), &global)
         .expect("foreign version should be reported");
@@ -65,6 +66,7 @@ fn daemon_mismatch_detects_pid_file_lock_pid_disagreement() {
         port: Some(6919),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         global_db: Some(global.display().to_string()),
+        project_db: None,
     };
     let reason = daemon_mismatch_reason(42, Some(&info), &global)
         .expect("pid disagreement should be reported");
@@ -80,6 +82,7 @@ fn daemon_mismatch_accepts_matching_daemon_pid_file() {
         port: Some(6919),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         global_db: Some(global.display().to_string()),
+        project_db: None,
     };
     assert!(daemon_mismatch_reason(42, Some(&info), &global).is_none());
 }

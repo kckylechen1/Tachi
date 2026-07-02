@@ -27,6 +27,18 @@ fn db_status_label_skips_unknown_scope_hint_and_uses_project_name() {
 }
 
 #[test]
+fn db_status_label_skips_tachi_other_and_names_run_project_db() {
+    let path = std::path::PathBuf::from(
+        "/tmp/home/.tachi/runs/poke_20260628T103218Z_d0c2cbbd/sandbox/.tachi/project/memory.db",
+    );
+    let label = db_status_label_for_tests(
+        &entry(DbRole::Unknown, "tachi-other", path.to_str().unwrap()),
+        &path,
+    );
+    assert_eq!(label, "run:poke_20260628T103218Z_d0c2cbbd:project");
+}
+
+#[test]
 fn db_status_label_keeps_global_role() {
     let path = std::path::PathBuf::from("/tmp/home/global/memory.db");
     let label = db_status_label_for_tests(

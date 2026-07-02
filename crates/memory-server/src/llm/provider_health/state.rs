@@ -69,6 +69,14 @@ impl ProviderHealthSnapshot {
         &self,
         now: DateTime<Utc>,
     ) -> (KeyAvailability, Option<i64>) {
+        if self.availability == KeyAvailability::AuthFailed {
+            if let Some(updated_at) = self.updated_at {
+                if (now - updated_at).num_seconds() >= AUTH_FAILED_RETRY_TTL_SECS {
+                    return (KeyAvailability::Available, None);
+                }
+            }
+        }
+
         if self.availability == KeyAvailability::Cooldown {
             if let Some(until) = self.cooldown_until {
                 let remaining_seconds = (until - now).num_seconds().max(0);

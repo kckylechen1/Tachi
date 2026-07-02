@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
@@ -68,15 +69,20 @@ fn parse_local_http_port(url: &str) -> Option<u16> {
         .and_then(|raw| raw.parse::<u16>().ok())
 }
 
-fn opencode_basic_auth_header() -> Option<String> {
-    let password = std::env::var("OPENCODE_SERVER_PASSWORD")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())?;
-    let username = std::env::var("OPENCODE_SERVER_USERNAME")
-        .ok()
+fn opencode_env_value(
+    name: &str,
+    env_override: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    env_override
+        .and_then(|env| env.get(name).cloned())
+        .or_else(|| std::env::var(name).ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn opencode_basic_auth_header(env_override: Option<&HashMap<String, String>>) -> Option<String> {
+    let password = opencode_env_value("OPENCODE_SERVER_PASSWORD", env_override)?;
+    let username = opencode_env_value("OPENCODE_SERVER_USERNAME", env_override)
         .unwrap_or_else(|| "opencode".to_string());
     Some(format!(
         "Authorization: Basic {}\r\n",
@@ -88,6 +94,7 @@ fn read_http_response(
     mut stream: TcpStream,
     port: u16,
     path: &str,
+    env_override: Option<&HashMap<String, String>>,
 ) -> Result<HttpProbeResponse, String> {
     stream
         .set_read_timeout(Some(HARNESS_PROBE_TIMEOUT))
@@ -95,7 +102,7 @@ fn read_http_response(
     stream
         .set_write_timeout(Some(HARNESS_PROBE_TIMEOUT))
         .map_err(|e| format!("set write timeout: {e}"))?;
-    let auth_header = opencode_basic_auth_header().unwrap_or_default();
+    let auth_header = opencode_basic_auth_header(env_override).unwrap_or_default();
     let request = format!(
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n{auth_header}Accept: application/json,text/plain,*/*\r\n\r\n"
     );
@@ -147,11 +154,15 @@ fn read_http_response(
     })
 }
 
-fn http_get_path(port: u16, path: &str) -> Result<HttpProbeResponse, String> {
+fn http_get_path(
+    port: u16,
+    path: &str,
+    env_override: Option<&HashMap<String, String>>,
+) -> Result<HttpProbeResponse, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let stream = TcpStream::connect_timeout(&addr, HARNESS_PROBE_TIMEOUT)
         .map_err(|e| format!("connect HTTP probe {path}: {e}"))?;
-    read_http_response(stream, port, path)
+    read_http_response(stream, port, path, env_override)
 }
 
 fn has_openapi_route(doc: &Value, path: &str, method: &str) -> bool {
@@ -163,8 +174,11 @@ fn has_openapi_route(doc: &Value, path: &str, method: &str) -> bool {
         .is_some()
 }
 
-fn probe_opencode_doc(port: u16) -> Result<Value, String> {
-    let doc = http_get_path(port, "/doc")?;
+fn probe_opencode_doc(
+    port: u16,
+    env_override: Option<&HashMap<String, String>>,
+) -> Result<Value, String> {
+    let doc = http_get_path(port, "/doc", env_override)?;
     if !(200..300).contains(&doc.status_code) {
         return Err(format!("OpenCode /doc returned HTTP {}", doc.status_code));
     }
@@ -208,13 +222,17 @@ fn probe_opencode_doc(port: u16) -> Result<Value, String> {
     }))
 }
 
-fn http_probe(stream: TcpStream, port: u16) -> Result<Value, String> {
-    let response = read_http_response(stream, port, "/")?;
+fn http_probe(
+    stream: TcpStream,
+    port: u16,
+    env_override: Option<&HashMap<String, String>>,
+) -> Result<Value, String> {
+    let response = read_http_response(stream, port, "/", env_override)?;
     let body_prefix_len = response.body.len().min(8192);
     let body_prefix = String::from_utf8_lossy(&response.body[..body_prefix_len]);
     let opencode_hint = body_prefix.to_ascii_lowercase().contains("opencode");
-    let password_configured = opencode_basic_auth_header().is_some();
-    let doc_probe = probe_opencode_doc(port);
+    let password_configured = opencode_basic_auth_header(env_override).is_some();
+    let doc_probe = probe_opencode_doc(port, env_override);
     let mut api_version_layer = if opencode_hint { "hinted" } else { "unknown" };
     let mut session_layer = "not_run";
     let mut api_capabilities = Value::Null;
@@ -294,6 +312,13 @@ fn http_probe(stream: TcpStream, port: u16) -> Result<Value, String> {
 }
 
 pub(crate) fn probe_harness_server_status(url: Option<&str>) -> Value {
+    probe_harness_server_status_with_env(url, None)
+}
+
+pub(crate) fn probe_harness_server_status_with_env(
+    url: Option<&str>,
+    env_override: Option<&HashMap<String, String>>,
+) -> Value {
     let Some(url) = url.map(str::trim).filter(|url| !url.is_empty()) else {
         return Value::Null;
     };
@@ -306,7 +331,7 @@ pub(crate) fn probe_harness_server_status(url: Option<&str>) -> Value {
         Ok(stream) => stream,
         Err(err) => return tcp_only_status(port, false, Some(err.to_string())),
     };
-    match http_probe(stream, port) {
+    match http_probe(stream, port, env_override) {
         Ok(status) => status,
         Err(err) => tcp_only_status(port, true, Some(err)),
     }

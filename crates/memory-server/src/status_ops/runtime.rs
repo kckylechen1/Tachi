@@ -431,6 +431,29 @@ async fn handle_tachi_status_detail(
     // the provider detail there, so the arrays don't need repeating).
     let runtime = runtime_observability_json(server, &app_home, Some(&snapshot.daemon), full);
     let mut warnings = build_status_warnings(&snapshot, &daemon_state);
+    let running_daemons = snapshot
+        .daemon_inventory
+        .iter()
+        .filter(|daemon| daemon.process_running)
+        .count();
+    if running_daemons > 1 {
+        let scopes = snapshot
+            .daemon_inventory
+            .iter()
+            .filter(|daemon| daemon.process_running)
+            .map(|daemon| {
+                daemon
+                    .global_db
+                    .as_deref()
+                    .unwrap_or(daemon.scope.as_str())
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        warnings.push(format!(
+            "{running_daemons} tachi daemon scopes are running concurrently: {}",
+            scopes.join(", ")
+        ));
+    }
     if runtime["daemon"]["running"].as_bool().unwrap_or(false)
         && !runtime["daemon"]["matches_current_process"]
             .as_bool()
@@ -445,6 +468,7 @@ async fn handle_tachi_status_detail(
     if full {
         serde_json::to_string(&json!({
             "daemon": daemon_state,
+            "daemon_inventory": snapshot.daemon_inventory,
             "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,
@@ -509,6 +533,7 @@ async fn handle_tachi_status_detail(
         serde_json::to_string(&json!({
             "detail": "agent",
             "daemon": daemon_state,
+            "daemon_inventory": snapshot.daemon_inventory,
             "runtime": runtime,
             "version": env!("CARGO_PKG_VERSION"),
             "health_score": snapshot.health_score,

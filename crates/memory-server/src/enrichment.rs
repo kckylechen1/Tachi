@@ -398,6 +398,14 @@ fn record_enrichment_failure(
     stage: &str,
     error: &str,
 ) {
+    if should_defer_enrichment_failure(stage, error) {
+        tracing::warn!(
+            "[enrichment-batcher] deferring transient enrichment failure for {} at stage={stage}: {error}",
+            item.id
+        );
+        return;
+    }
+
     let action = |store: &mut MemoryStore| {
         store
             .record_enrichment_failure(&item.id, stage, error)
@@ -416,6 +424,19 @@ fn record_enrichment_failure(
             item.id
         );
     }
+}
+
+fn should_defer_enrichment_failure(stage: &str, error: &str) -> bool {
+    if stage == "db_update" {
+        return false;
+    }
+
+    let lower = error.to_ascii_lowercase();
+    lower.contains("vault is locked")
+        || lower.contains("secret materialization failed")
+        || lower.contains("temporarily unavailable")
+        || lower.contains("retry after")
+        || lower.contains("missing api key")
 }
 
 /// Look up the saved memory's `path` and return its parent directory as a
@@ -450,5 +471,42 @@ fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<St
         Some("/".to_string())
     } else {
         Some(parent.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_defer_enrichment_failure;
+
+    #[test]
+    fn transient_provider_enrichment_errors_are_deferred() {
+        assert!(should_defer_enrichment_failure(
+            "embedding",
+            "Missing API key. Add one to Tachi Vault or set the appropriate env var."
+        ));
+        assert!(should_defer_enrichment_failure(
+            "summary",
+            "secret materialization failed: Vault is locked"
+        ));
+        assert!(should_defer_enrichment_failure(
+            "metadata",
+            "API key unavailable: all configured provider keys are temporarily unavailable; retry after about 30s"
+        ));
+    }
+
+    #[test]
+    fn durable_enrichment_failures_are_recorded() {
+        assert!(!should_defer_enrichment_failure(
+            "embedding",
+            "Voyage batch auth failure 401 Unauthorized"
+        ));
+        assert!(!should_defer_enrichment_failure(
+            "embedding",
+            "API key unavailable for [VOYAGE_API_KEY]: all configured provider keys are unusable (auth_failed: 2)"
+        ));
+        assert!(!should_defer_enrichment_failure(
+            "db_update",
+            "retry after lock contention"
+        ));
     }
 }
