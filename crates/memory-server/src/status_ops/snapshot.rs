@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{DbEntry, DbRole};
 
 pub(crate) fn collect_snapshot(
     app_home: &Path,
@@ -30,14 +31,7 @@ fn collect_snapshot_inner(
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(manifest.dbs.len());
     for entry in &manifest.dbs {
         let path = PathBuf::from(&entry.path);
-        let label = if entry.scope_hint.is_empty() {
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?.db")
-                .to_string()
-        } else {
-            entry.scope_hint.clone()
-        };
+        let label = db_status_label(entry, &path);
         let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
         if !path.exists() {
             dbs.push(DbStatus {
@@ -310,4 +304,43 @@ pub(super) fn paths_equal(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
     }
+}
+
+fn db_status_label(entry: &DbEntry, path: &Path) -> String {
+    if matches!(entry.role, DbRole::Global) {
+        return "global".to_string();
+    }
+    let scope_hint = entry.scope_hint.trim();
+    if !scope_hint.is_empty() && !scope_hint.eq_ignore_ascii_case("unknown") {
+        return scope_hint.to_string();
+    }
+    if let Some(name) = crate::path_utils::named_project_for_db_path(path) {
+        return format!("project:{name}");
+    }
+    if matches!(entry.role, DbRole::Project) {
+        return path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| format!("project:{name}"))
+            .unwrap_or_else(|| "project".to_string());
+    }
+    if !entry.owner.trim().is_empty() && entry.owner != "tachi" {
+        return entry.owner.clone();
+    }
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("memory.db");
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("?");
+    format!("{parent}/{file}")
+}
+
+#[cfg(test)]
+pub(crate) fn db_status_label_for_tests(entry: &DbEntry, path: &Path) -> String {
+    db_status_label(entry, path)
 }

@@ -15,5 +15,23 @@ pub(crate) fn tachi_home() -> PathBuf {
             }
         }
     }
+    if let Some(workspace_home) = workspace_data_tachi_home() {
+        return workspace_home;
+    }
     home.join(".tachi")
+}
+
+fn workspace_data_tachi_home() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    for ancestor in cwd.ancestors() {
+        let candidate = ancestor.join("data").join("tachi");
+        if is_tachi_home_layout(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_tachi_home_layout(path: &std::path::Path) -> bool {
+    path.join("global").join("memory.db").exists() || path.join("projects").is_dir()
 }

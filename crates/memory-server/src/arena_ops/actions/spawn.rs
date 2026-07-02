@@ -207,6 +207,7 @@ pub(super) async fn handle_spawn(
         None
     };
     let final_status = read_json_file(&status_path)?;
+    let compact_status = compact_mission_status(&final_status);
 
     serde_json::to_string(&json!({
         "tool": "tachi_arena",
@@ -233,7 +234,7 @@ pub(super) async fn handle_spawn(
         "result_path": result_path,
         "status_path": status_path,
         "tracked_prompt": tracked_prompt,
-        "status": final_status,
+        "status": compact_status,
     }))
     .map_err(|e| format!("serialize arena spawn: {e}"))
 }

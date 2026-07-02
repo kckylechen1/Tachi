@@ -63,7 +63,10 @@ fn arena_board_summary(arena_id: &str, mut manifest: Value) -> Value {
 
 pub(super) fn refresh_board(arena_id: &str) -> Result<Value, String> {
     let dir = arena_dir(arena_id)?;
-    let missions = mission_statuses(arena_id)?;
+    let missions = mission_statuses(arena_id)?
+        .into_iter()
+        .map(|status| compact_mission_status(&status))
+        .collect::<Vec<_>>();
     let board = json!({
         "arena_id": arena_id,
         "state": read_json_file(&dir.join("manifest.json"))

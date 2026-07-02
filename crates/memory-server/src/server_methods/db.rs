@@ -372,6 +372,38 @@ mod resolve_named_project_tests {
         }
     }
 
+    #[test]
+    fn resolve_named_project_uses_workspace_data_tachi_home() {
+        with_env_lock(|| {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let saved_cwd = std::env::current_dir().expect("cwd");
+            let saved_home = std::env::var_os("TACHI_HOME");
+            let saved_sigil = std::env::var_os("SIGIL_HOME");
+            let saved_app = std::env::var_os("TACHI_APP_HOME");
+            std::env::remove_var("TACHI_HOME");
+            std::env::remove_var("SIGIL_HOME");
+            std::env::remove_var("TACHI_APP_HOME");
+
+            let repo = tmp.path().join("Quant_Analyzer_2026");
+            let nested = repo.join("engine/v8");
+            let named_db = repo.join("data/tachi/projects/hyperion/memory.db");
+            std::fs::create_dir_all(&nested).expect("nested");
+            std::fs::create_dir_all(named_db.parent().unwrap()).expect("named parent");
+            std::fs::write(&named_db, b"").expect("named db placeholder");
+
+            std::env::set_current_dir(&nested).expect("set cwd");
+            let named_db = std::fs::canonicalize(named_db).expect("canonical named db");
+            let resolved =
+                MemoryServer::resolve_named_project_db_path("hyperion").expect("resolve");
+            assert_eq!(resolved, named_db);
+
+            std::env::set_current_dir(saved_cwd).expect("restore cwd");
+            restore_env("TACHI_HOME", saved_home);
+            restore_env("SIGIL_HOME", saved_sigil);
+            restore_env("TACHI_APP_HOME", saved_app);
+        });
+    }
+
     /// Change #2: named-project resolution prefers the manifest-recorded
     /// repo-local DB and does NOT depend on the Plan C symlink existing.
     #[test]

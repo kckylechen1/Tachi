@@ -24,5 +24,6 @@ fn daemon_running() -> serde_json::Value {
 mod daemon_manifest;
 mod dispatch_eval;
 mod markers_errors;
+mod snapshot_labels;
 mod vector_namespace;
 mod warnings_score;

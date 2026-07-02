@@ -5,6 +5,7 @@ use crate::{MemoryServer, TachiArenaParams};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+mod completion_draft;
 mod facade;
 mod feedback_rules;
 mod harness;

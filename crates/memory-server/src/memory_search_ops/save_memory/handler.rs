@@ -1,9 +1,10 @@
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
-    lookup_existing_revision, spawn_save_contradiction_detection, upsert_save_entry,
+    find_exact_path_text_duplicate, lookup_existing_revision, spawn_save_contradiction_detection,
+    upsert_save_entry,
 };
-use super::response::build_save_response;
+use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
 use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
@@ -44,6 +45,19 @@ pub(crate) async fn handle_save_memory(
     } else {
         server.resolve_write_scope(&requested_scope)
     };
+    if !params.force && params.id.is_none() {
+        if let Some(existing_id) = find_exact_path_text_duplicate(
+            server,
+            &params.path,
+            &safe_text,
+            target_db,
+            named_project.as_deref(),
+        )? {
+            let response = build_duplicate_save_response(&existing_id, &params.path, target_db);
+            return serde_json::to_string(&serde_json::Value::Object(response))
+                .map_err(|e| format!("Failed to serialize response: {}", e));
+        }
+    }
     let existing_revision = lookup_existing_revision(
         server,
         &id,

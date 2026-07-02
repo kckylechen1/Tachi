@@ -294,7 +294,7 @@ pub(super) fn build_complete_eval_record(
         auto_link: true,
         project: params.project.clone(),
         retention_policy: None,
-        domain: None,
+        domain: Some("eval".to_string()),
         timestamp: None,
         valid_from: None,
         valid_until: None,

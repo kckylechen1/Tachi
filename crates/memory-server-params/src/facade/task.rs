@@ -204,7 +204,9 @@ pub struct TachiTaskParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
-    #[schemars(description = "[action=dispatch] Timeout in seconds for the spawned agent.")]
+    #[schemars(
+        description = "[action=dispatch|wait] Timeout in seconds for the spawned agent (dispatch) or terminal poll loop (wait)."
+    )]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     #[schemars(
@@ -298,7 +300,7 @@ pub struct TachiTaskParams {
         description = "Tachi flow id for feature-scoped artifacts, also linking a dispatch/complete back to its flow (briefing/intake/link_pr/pr_handoff/release_note/ux_matrix/close_loop/status/wait/dispatch/complete)."
     )]
     pub flow_id: Option<String>,
-    /// [action=complete] Dispatch id linked to this completion.
+    /// [action=complete|wait|status|cancel] Dispatch id linked to this task lifecycle event.
     #[serde(default)]
     pub dispatch_id: Option<String>,
     #[serde(default)]

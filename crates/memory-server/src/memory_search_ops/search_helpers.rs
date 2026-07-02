@@ -2,7 +2,6 @@ use crate::DbScope;
 use memory_core::MemoryEntry;
 use serde_json::{json, Value};
 use std::collections::{hash_map::Entry, HashMap};
-use std::path::PathBuf;
 
 pub(crate) fn normalize_search_relevance(results: &mut [(memory_core::SearchResult, DbScope)]) {
     let max_score = results
@@ -218,17 +217,7 @@ pub(crate) fn round_score(value: f64) -> f64 {
 }
 
 pub(crate) fn list_available_named_projects() -> Vec<String> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let app_home = std::env::var("TACHI_HOME")
-        .map(|v| {
-            if v.starts_with("~/") {
-                home.join(&v[2..])
-            } else {
-                PathBuf::from(v)
-            }
-        })
-        .unwrap_or_else(|_| home.join(".tachi"));
-    let projects_dir = app_home.join("projects");
+    let projects_dir = crate::path_utils::tachi_home().join("projects");
     let Ok(read_dir) = std::fs::read_dir(projects_dir) else {
         return Vec::new();
     };
@@ -266,6 +255,35 @@ pub(crate) fn named_project_from_db_path(path: &std::path::Path) -> Option<Strin
 pub(crate) fn resolve_workspace_named_project() -> Option<String> {
     let git_root = crate::utils::find_project_git_root()?;
     crate::path_utils::plan_c_dir_name_from_root(&git_root)
+}
+
+/// Resolve the named project DB to use when the caller omitted `project` but
+/// requested project-scoped behavior.
+///
+/// READ-ONLY surfaces only (briefing/recall). Never use this for writes
+/// (save/complete/eval): workspace detection depends on machine state and would
+/// silently reroute writes away from the server's own bound stores.
+pub(crate) fn resolve_effective_named_project(
+    server: &crate::MemoryServer,
+    explicit: Option<&str>,
+) -> Option<String> {
+    if let Some(name) = explicit.map(str::trim).filter(|name| !name.is_empty()) {
+        if named_project_db_exists(name) {
+            return Some(name.to_string());
+        }
+    }
+    if server.has_project_db() {
+        return server
+            .project_db_path_buf()
+            .and_then(|path| named_project_from_db_path(path.as_path()))
+            .filter(|name| named_project_db_exists(name));
+    }
+    if let Some(name) =
+        resolve_workspace_named_project().filter(|name| named_project_db_exists(name))
+    {
+        return Some(name);
+    }
+    None
 }
 
 pub(crate) fn infer_search_project(query: &str, domain: Option<&str>) -> Option<String> {
@@ -343,6 +361,36 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let original = std::env::var_os(key);
+            // SAFETY: tests that use this helper hold global_test_lock.
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests that use this helper hold global_test_lock.
+            unsafe {
+                if let Some(value) = self.original.as_ref() {
+                    std::env::set_var(self.key, value);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
 
     fn test_entry(id: &str, text: &str) -> MemoryEntry {
         MemoryEntry {
@@ -374,6 +422,24 @@ mod tests {
             query_diversity: 0,
             tier: "raw".to_string(),
         }
+    }
+
+    #[test]
+    fn resolve_effective_named_project_does_not_pick_single_available_project() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let temp_home = tempfile::tempdir().expect("temp tachi home");
+        let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
+        let lonely_project = temp_home.path().join("projects").join("lonely");
+        std::fs::create_dir_all(&lonely_project).expect("project dir");
+        std::fs::write(lonely_project.join("memory.db"), b"").expect("project db marker");
+
+        let db_path = temp_home.path().join("global.sqlite");
+        let server = crate::MemoryServer::new(PathBuf::from(&db_path), None).expect("server");
+
+        assert_eq!(list_available_named_projects(), vec!["lonely".to_string()]);
+        assert_eq!(resolve_effective_named_project(&server, None), None);
     }
 
     #[test]

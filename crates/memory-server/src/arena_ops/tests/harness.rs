@@ -131,22 +131,43 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         .expect("linked dispatch id")
         .to_string();
     let run_dir = PathBuf::from(
-        spawned["status"]["run_dir"]
+        spawned["launch"]["run_dir"]
             .as_str()
             .expect("linked run dir"),
     );
     let spawned_status = spawned["status"]
         .as_object()
         .expect("spawned status object");
+    assert_eq!(spawned["status"]["dispatch_agent"], json!("opencode"));
+    assert!(
+        spawned_status.get("task").is_none(),
+        "compact status should expose task_preview, not the full prompt: {spawned_status:#?}"
+    );
+    assert!(
+        spawned_status.get("prompt_path").is_none()
+            && spawned_status.get("result_path").is_none()
+            && spawned_status.get("status_path").is_none()
+            && spawned_status.get("run_dir").is_none(),
+        "compact status should not duplicate artifact or run paths: {spawned_status:#?}"
+    );
+    assert_eq!(
+        spawned["status"]["task_preview"],
+        json!("run a fake worker")
+    );
     assert!(
         !spawned_status.contains_key("dispatch_response"),
         "arena status must not persist full dispatch response: {spawned_status:#?}"
+    );
+    assert_eq!(
+        spawned["status"]["dispatch_link"]["agent"],
+        json!("opencode")
     );
     assert_eq!(spawned["status"]["dispatch_link"]["redacted"], json!(true));
     assert_eq!(
         spawned["status"]["dispatch_link"]["source"],
         json!("dispatch_response_summary")
     );
+    assert!(spawned["status"]["dispatch_link"].get("run_dir").is_none());
     let dispatch_result = wait_for_nonempty_file(&run_dir.join("result.md")).await;
     assert!(dispatch_result.contains("fake opencode completed"));
 
@@ -156,6 +177,12 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         serde_json::from_str(&handle_tachi_arena(&server, board).await.unwrap()).unwrap();
     let mission = &board["result"]["missions"][0];
     assert_eq!(mission["dispatch_id"], json!(dispatch_id));
+    assert_eq!(mission["dispatch_agent"], json!("opencode"));
+    assert!(mission.get("task").is_none(), "{mission:#}");
+    assert!(mission.get("prompt_path").is_none(), "{mission:#}");
+    assert!(mission.get("result_path").is_none(), "{mission:#}");
+    assert!(mission.get("run_dir").is_none(), "{mission:#}");
+    assert_eq!(mission["linked_dispatch"]["agent"], json!("opencode"));
     assert_eq!(mission["linked_dispatch"]["redacted"], json!(true));
     assert_eq!(
         mission["linked_dispatch"]["source"],
@@ -165,6 +192,7 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         mission["linked_dispatch"].get("status").is_none(),
         "linked dispatch must be a redacted summary: {mission:#}"
     );
+    assert!(mission["linked_dispatch"].get("run_dir").is_none());
     assert_eq!(
         mission["collection_state"],
         json!("pending_collect_from_dispatch")
@@ -184,6 +212,18 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         collected["missions"][0]["status"]["result_source"],
         json!("linked_dispatch_result")
     );
+    assert_eq!(
+        collected["missions"][0]["status"]["dispatch_agent"],
+        json!("opencode")
+    );
+    assert!(collected["missions"][0]["status"].get("task").is_none());
+    assert!(collected["missions"][0]["status"]
+        .get("prompt_path")
+        .is_none());
+    assert!(collected["missions"][0]["status"]
+        .get("result_path")
+        .is_none());
+    assert!(collected["missions"][0]["status"].get("run_dir").is_none());
     assert!(collected["missions"][0]["result"]
         .as_str()
         .unwrap()
@@ -191,5 +231,9 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
     assert_eq!(
         collected["missions"][0]["completion_draft"]["arguments"]["action"],
         json!("complete")
+    );
+    assert_eq!(
+        collected["missions"][0]["completion_draft"]["arguments"]["agent"],
+        json!("opencode")
     );
 }
