@@ -2,13 +2,77 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::server_state::{DbScope, MemoryServer};
-use memory_core::{MemoryEntry, MemoryStore};
+use memory_core::{MemoryEdge, MemoryEntry, MemoryStore};
 
 use crate::foundry_runtime_ops::helpers::dedup_strings;
 use crate::foundry_runtime_ops::maintenance::{build_distill_edges, build_foundry_distill_root};
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 
 use super::types::{CandidateGroup, GroupPayload};
+
+const DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING: f64 = 0.85;
+
+fn should_archive_distilled_source(entry: &MemoryEntry) -> bool {
+    if entry.archived
+        || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
+        || !entry.tier.eq_ignore_ascii_case("raw")
+        || entry.access_count > 0
+        || entry.recall_count > 0
+    {
+        return false;
+    }
+
+    if entry
+        .retention_policy
+        .as_deref()
+        .is_some_and(|policy| matches!(policy, "pinned" | "permanent"))
+    {
+        return false;
+    }
+
+    entry.importance < DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING
+}
+
+fn archive_distilled_sources(
+    store: &mut MemoryStore,
+    distill_entry: &MemoryEntry,
+    source_entries: &[MemoryEntry],
+    batch_run_id: &str,
+) -> Result<usize, String> {
+    let mut archived_count = 0;
+    for source in source_entries
+        .iter()
+        .filter(|entry| should_archive_distilled_source(entry))
+    {
+        let edge = MemoryEdge {
+            source_id: distill_entry.id.clone(),
+            target_id: source.id.clone(),
+            relation: "supersedes".to_string(),
+            weight: 1.0,
+            metadata: json!({
+                "source": "foundry_distill",
+                "batch_run_id": batch_run_id,
+                "reason": "distilled_source_archived",
+            }),
+            created_at: distill_entry.timestamp.clone(),
+            valid_from: distill_entry.timestamp.clone(),
+            valid_to: None,
+        };
+        store
+            .add_edge(&edge)
+            .map_err(|e| format!("add supersedes edge: {e}"))?;
+        store
+            .supersede_memory(&source.id, &distill_entry.id)
+            .map_err(|e| format!("mark distilled source superseded: {e}"))?;
+        if store
+            .archive_memory(&source.id)
+            .map_err(|e| format!("archive distilled source: {e}"))?
+        {
+            archived_count += 1;
+        }
+    }
+    Ok(archived_count)
+}
 
 /// Write a single distilled memory + its provenance edges to the target store
 /// (bound project or a named project), independent of which DB it targets.
@@ -17,6 +81,7 @@ fn write_distill_entry(
     entry: &MemoryEntry,
     source_entries: &[MemoryEntry],
     derived_id: &str,
+    batch_run_id: &str,
 ) -> Result<(), String> {
     store
         .upsert(entry)
@@ -38,6 +103,7 @@ fn write_distill_entry(
             &entry.metadata,
         )
         .map_err(|e| format!("save derived distill item: {e}"))?;
+    archive_distilled_sources(store, entry, source_entries, batch_run_id)?;
     Ok(())
 }
 
@@ -140,10 +206,10 @@ pub(crate) fn persist_distill_memory(
     let derived_id = format!("derived:{memory_id}");
     match project {
         Some(name) => server.with_named_project_store(name, |store| {
-            write_distill_entry(store, &entry, &group.entries, &derived_id)
+            write_distill_entry(store, &entry, &group.entries, &derived_id, batch_run_id)
         }),
         None => server.with_project_store(|store| {
-            write_distill_entry(store, &entry, &group.entries, &derived_id)
+            write_distill_entry(store, &entry, &group.entries, &derived_id, batch_run_id)
         }),
     }?;
 

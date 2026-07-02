@@ -225,6 +225,22 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
                     |row| row.get(0),
                 )
                 .map_err(|e| e.to_string())?;
+            let archived_sources: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories
+                     WHERE id LIKE 'candidate-%' AND archived=1 AND superseded_by=?1",
+                    rusqlite::params![&memory_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            let supersedes_edges: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_edges
+                     WHERE source_id=?1 AND relation='supersedes'",
+                    rusqlite::params![&memory_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
 
             assert_eq!(retention.as_deref(), Some("permanent"));
             assert_eq!(domain.as_deref(), Some("foundry"));
@@ -233,9 +249,100 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
                 "expected at least one distill edge per source, got {edge_count}"
             );
             assert_eq!(derived_count, 1);
+            assert_eq!(archived_sources, 3);
+            assert_eq!(supersedes_edges, 3);
             Ok(())
         })
         .expect("verify distill graph and derived rows");
+}
+
+#[test]
+fn persist_distill_memory_preserves_used_or_protected_raw_sources() {
+    let temp = tempfile::tempdir().expect("temp daily distill guarded source db");
+    let server = crate::MemoryServer::new(
+        temp.path().join("global.db"),
+        Some(temp.path().join("project.db")),
+    )
+    .expect("server");
+    let mut entries = (0..5).map(candidate_entry).collect::<Vec<_>>();
+    entries[1].access_count = 1;
+    entries[2].recall_count = 1;
+    entries[3].retention_policy = Some("pinned".to_string());
+    entries[4].importance = 0.95;
+
+    server
+        .with_project_store(|store| {
+            for entry in &entries {
+                store.upsert(entry).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect("seed source memories");
+
+    let group = CandidateGroup {
+        group_id: "guarded_sources".to_string(),
+        path_prefix: "/project/bounded".to_string(),
+        coherence_key: "bounded-scan".to_string(),
+        entries,
+    };
+    let payload = GroupPayload {
+        summary: "distilled guarded summary".to_string(),
+        text: "distilled guarded memory with durable lesson".to_string(),
+        keywords: vec!["guarded".to_string()],
+        skip_reason: None,
+    };
+
+    let memory_id = persist_distill_memory(
+        &server,
+        &group,
+        &payload,
+        "batch-guarded",
+        "raw_api",
+        false,
+        None,
+    )
+    .expect("persist distill");
+
+    server
+        .with_project_store_read(|store| {
+            let conn = store.connection();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, archived, superseded_by
+                     FROM memories
+                     WHERE id LIKE 'candidate-%'
+                     ORDER BY id",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
+            let states = rows
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            assert_eq!(states.len(), 5);
+            assert_eq!(
+                states[0],
+                ("candidate-0".to_string(), true, Some(memory_id.clone()))
+            );
+            for (id, archived, superseded_by) in states.iter().skip(1) {
+                assert!(!archived, "{id} should stay active");
+                assert_eq!(
+                    superseded_by.as_deref(),
+                    None,
+                    "{id} should not be superseded"
+                );
+            }
+            Ok(())
+        })
+        .expect("verify guarded sources");
 }
 
 fn candidate_entry(idx: usize) -> MemoryEntry {
