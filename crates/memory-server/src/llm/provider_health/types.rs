@@ -58,6 +58,17 @@ pub(in crate::llm) enum ChatLane {
     Summary,
 }
 
+impl ChatLane {
+    pub(in crate::llm) fn as_str(self) -> &'static str {
+        match self {
+            Self::Extract => "extract",
+            Self::Distill => "distill",
+            Self::Reasoning => "reasoning",
+            Self::Summary => "summary",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::llm) enum KeyAvailability {
     Available,

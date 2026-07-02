@@ -146,6 +146,191 @@ async fn chat_lane_waits_for_temporarily_unavailable_pool_key() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+async fn chat_lane_records_success_usage_to_vault_db() {
+    use axum::{routing::post, Json, Router};
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            Json(serde_json::json!({
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "usage recorded"
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 10
+                }
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let db = tempfile::NamedTempFile::new().expect("usage db");
+    let _base_guard = EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        format!("http://127.0.0.1:{port}/chat/completions"),
+    );
+    let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-usage-model");
+    let _key_guard = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+    let client = LlmClient::new_with_vault_db(Some(db.path())).expect("client should initialize");
+    let out = client
+        .call_extract_llm("system", "user payload", None, 0.0, 16)
+        .await
+        .expect("mock provider should succeed");
+    assert_eq!(out, "usage recorded");
+
+    let mut row = None;
+    for _ in 0..40 {
+        let conn = rusqlite::Connection::open(db.path()).expect("open usage db");
+        let table_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'llm_usage'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query sqlite_master");
+        if table_exists > 0 {
+            let result = conn.query_row(
+                "SELECT lane, model, provider_host, provider_logical_name, provider_key_id,
+                        prompt_tokens, completion_tokens, total_tokens, max_tokens,
+                        request_chars, response_chars
+                 FROM llm_usage
+                 ORDER BY id DESC
+                 LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, Option<i64>>(5)?,
+                        r.get::<_, Option<i64>>(6)?,
+                        r.get::<_, Option<i64>>(7)?,
+                        r.get::<_, i64>(8)?,
+                        r.get::<_, i64>(9)?,
+                        r.get::<_, i64>(10)?,
+                    ))
+                },
+            );
+            if let Ok(value) = result {
+                row = Some(value);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let (
+        lane,
+        model,
+        provider_host,
+        provider_logical_name,
+        provider_key_id,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        max_tokens,
+        request_chars,
+        response_chars,
+    ) = row.expect("usage row should be persisted");
+    assert_eq!(lane, "extract");
+    assert_eq!(model, "mock-usage-model");
+    assert_eq!(provider_host, "127.0.0.1");
+    assert_eq!(provider_logical_name, "EXTRACT_API_KEY");
+    assert_eq!(provider_key_id, "EXTRACT_API_KEY");
+    assert_eq!(prompt_tokens, Some(7));
+    assert_eq!(completion_tokens, Some(3));
+    assert_eq!(total_tokens, Some(10));
+    assert_eq!(max_tokens, 16);
+    assert_eq!(request_chars, "user payload".chars().count() as i64);
+    assert_eq!(response_chars, "usage recorded".chars().count() as i64);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn chat_lane_treats_insufficient_balance_as_retryable() {
+    use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _persist_guard = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+    let app = Router::new().route(
+        "/chat/completions",
+        post(|| async {
+            (
+                StatusCode::FORBIDDEN,
+                r#"{"message":"account balance is insufficient"}"#,
+            )
+                .into_response()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider");
+    let port = listener.local_addr().expect("mock provider addr").port();
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("mock provider");
+    });
+
+    let _base_guard = EnvRestore::set(
+        "EXTRACT_BASE_URL",
+        format!("http://127.0.0.1:{port}/chat/completions"),
+    );
+    let _model_guard = EnvRestore::set("EXTRACT_MODEL", "mock-model");
+    let client = LlmClient::new().expect("client should initialize");
+    client.set_provider_secret_pool(
+        "EXTRACT_API_KEY",
+        vec![ProviderSecret {
+            key_id: "EXTRACT_API_KEY_1".to_string(),
+            value: "pool-secret-one".to_string(),
+        }],
+    );
+
+    let err = client
+        .call_extract_llm("system", "user", None, 0.0, 16)
+        .await
+        .expect_err("insufficient balance should still fail this call");
+    assert!(err.contains("balance is insufficient"), "got: {err}");
+
+    let status = client
+        .provider_pool_statuses()
+        .into_iter()
+        .find(|status| status.logical_name == "EXTRACT_API_KEY")
+        .expect("provider pool status should include extract key");
+    assert_eq!(status.available_keys, 0);
+    assert_eq!(status.rate_limited_keys.len(), 1);
+    assert_eq!(status.rate_limited_keys[0].key_id, "EXTRACT_API_KEY_1");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn chat_lane_retries_with_next_pool_key_after_429() {
     use axum::{
         extract::State,
