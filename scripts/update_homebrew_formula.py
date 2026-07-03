@@ -157,7 +157,7 @@ def normalize_blank_lines(text: str) -> str:
 def ensure_service_block(text: str) -> str:
     """Formula service runs a global/background daemon, not a cwd-bound project daemon."""
     service_block = """  service do
-    run [opt_bin/"tachi", "--daemon", "--port", "0", "--no-project-db"]
+    run [opt_bin/"tachi", "--daemon", "--port", "6919", "--no-project-db"]
     environment_variables PATH:                           std_service_path_env,
                           TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
                           TACHI_PROFILE:                  "standard"
