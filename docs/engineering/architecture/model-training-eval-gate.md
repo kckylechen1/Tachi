@@ -1,7 +1,7 @@
 # Model Training Eval Gate
 
 Status: active architecture record
-Updated: 2026-06-09
+Updated: 2026-07-04
 Related: GitHub issue #262, `sft-memory-eval-playbook.md`,
 `subagent-eval-system.md`, `dispatch-policy-learning-spec.md`
 
@@ -18,9 +18,11 @@ passed.
 
 Allowed today:
 
-- SFT factory exports candidate JSONL under `~/.tachi/foundry-runs/sft/`.
-- `/sft/...` rows may be used as style-only prompt exemplars when explicitly
-  requested by the dispatch prompt assembler.
+- Historical SFT JSONL under `~/.tachi/foundry-runs/sft/` may be reused as
+  candidate-only fixture input. The daily SFT factory that created it was
+  retired in PR #474; no live pipeline exports fresh SFT rows.
+- Existing `/sft/...` rows may be used as style-only prompt exemplars when
+  explicitly requested by the dispatch prompt assembler.
 - Fixture JSONL may be used by `tachi_agent_eval(action="aggregate",
   fixture_path=...)` only for local replay with
   `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.

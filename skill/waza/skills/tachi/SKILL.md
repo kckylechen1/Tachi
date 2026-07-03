@@ -85,7 +85,7 @@ tachi_memory(action='briefing', query='当前任务关键词')
 ```
 tachi_memory(
   action='checkpoint',
-  summary='完成了 Phase 1-3，Phase 4 SFT factory 还没写。下一步：实现 sft_factory.rs，注意...',
+  summary='完成了 Phase 1-3，下一步：实现 durable distill 回写，注意...',
   path='/code-review/sigil/phase4-handoff'
 )
 ```
