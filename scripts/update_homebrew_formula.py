@@ -161,7 +161,6 @@ def ensure_service_block(text: str) -> str:
     environment_variables PATH:                           std_service_path_env,
                           TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
                           TACHI_PROFILE:                  "standard"
-    keep_alive true
     log_path var/"log/tachi.log"
     error_log_path var/"log/tachi.err.log"
   end"""

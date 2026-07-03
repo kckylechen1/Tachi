@@ -65,8 +65,8 @@ This line makes Tachi's project-cycle direction explicit:
   by itself; concrete problems such as stale distill, provider failures,
   vector gaps, or failed Foundry jobs still lower the score.
 - The shell installer now installs a user LaunchAgent for the global Tachi
-  daemon on macOS, with idle shutdown disabled so background projection,
-  vector sweep, and Foundry work keep running after the installing shell exits.
+  daemon on macOS, with idle shutdown disabled and launchd `KeepAlive` omitted
+  so background work keeps running without duplicate singleton-lock restarts.
 - OpenClaw remains a thin MCP facade. It owns hook timing and OpenClaw-facing
   tool exposure; Tachi owns database writes, embedding, rerank, distill, graph
   maintenance, Foundry jobs, and continuity projection.
