@@ -194,7 +194,7 @@ impl super::super::LlmClient {
     ) -> Result<ChatLaneConfig, String> {
         let selected_api_key = Self::first_env_key(api_key_envs);
         let selected_provider_default = provider_default
-            .filter(|default| selected_api_key.as_deref() == Some(default.api_key_env));
+            .filter(|default| selected_api_key == Some(default.api_key_env));
         let base_url = if let Some(default) = selected_provider_default {
             Self::first_env(default.base_url_envs).unwrap_or_else(|| default.base_url.to_string())
         } else {
