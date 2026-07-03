@@ -95,6 +95,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert_eq!(trajectory_def["retention_policy"], "permanent");
     assert_eq!(coding_def["retention_policy"], "permanent");
     assert_eq!(trading_def["retention_policy"], "ephemeral");
+    assert_eq!(superpowers_execute_def["execution"], "document");
     assert_eq!(superpowers_execute_def["retention_policy"], "permanent");
     assert_eq!(
         superpowers_execute_def["policy"]["visibility"],
@@ -109,6 +110,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert!(verification_def["content"]
         .as_str()
         .is_some_and(|content| content.contains("Verification Before Completion")));
+    assert_eq!(waza_check_def["execution"], "document");
     assert_eq!(waza_check_def["retention_policy"], "permanent");
     assert_eq!(waza_check_def["policy"]["visibility"], "discoverable");
     assert!(waza_check_def["content"]

@@ -94,6 +94,50 @@ fn credentialed_dispatch_profile_applies_default_credential_profiles() {
 }
 
 #[test]
+fn review_stage_profiles_disable_capability_bundle_by_default() {
+    const EXPLANATION: &str = "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override";
+
+    let mut review_params = params();
+    review_params.profile = Some("codex_55_review".to_string());
+    review_params.stage = None;
+    review_params.auto_capability_bundle = None;
+    let resolved_review = resolve_and_apply_dispatch_profile(&mut review_params).unwrap();
+    assert_eq!(review_params.auto_capability_bundle, Some(false));
+    assert!(!resolved_review.auto_capability_bundle);
+    assert!(resolved_review
+        .route_explanation
+        .iter()
+        .any(|line| line == EXPLANATION));
+    assert!(
+        !resolve_dispatch_profile("codex_55_review")
+            .expect("codex review profile")
+            .auto_capability_bundle
+    );
+
+    let mut explicit_review_params = params();
+    explicit_review_params.profile = Some("codex_55_review".to_string());
+    explicit_review_params.auto_capability_bundle = Some(true);
+    let resolved_explicit =
+        resolve_and_apply_dispatch_profile(&mut explicit_review_params).unwrap();
+    assert_eq!(explicit_review_params.auto_capability_bundle, Some(true));
+    assert!(resolved_explicit.auto_capability_bundle);
+
+    let mut execute_params = params();
+    execute_params.profile = Some("glm_51_impl".to_string());
+    execute_params.stage = None;
+    execute_params.auto_capability_bundle = None;
+    let resolved_execute = resolve_and_apply_dispatch_profile(&mut execute_params).unwrap();
+    assert_eq!(execute_params.auto_capability_bundle, Some(true));
+    assert!(resolved_execute.auto_capability_bundle);
+
+    assert!(
+        !resolve_dispatch_profile("kimi_ux")
+            .expect("kimi ux profile")
+            .auto_capability_bundle
+    );
+}
+
+#[test]
 fn dispatch_profile_merges_default_and_explicit_credential_profiles() {
     let mut params = params();
     params.profile = Some("opencode_builder".to_string());

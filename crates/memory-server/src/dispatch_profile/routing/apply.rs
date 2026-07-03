@@ -69,7 +69,16 @@ fn resolve_and_apply_dispatch_profile_inner(
             params.inject_hub_mcps = Some(profile.inject_hub_mcps);
         }
         if params.auto_capability_bundle.is_none() {
-            params.auto_capability_bundle = Some(profile.auto_capability_bundle);
+            let effective_stage = params.stage.as_deref().or(profile.stage);
+            if matches!(effective_stage, Some("review" | "review_light")) {
+                params.auto_capability_bundle = Some(false);
+                route_explanation.push(
+                    "auto_capability_bundle disabled by default for review-stage dispatch (#457); pass auto_capability_bundle=true to override"
+                        .to_string(),
+                );
+            } else {
+                params.auto_capability_bundle = Some(profile.auto_capability_bundle);
+            }
         }
         if params.skills.is_empty() {
             params.skills = match server {
