@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Unified GitHub facade — one tool for all GitHub operations.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 pub struct TachiGhParams {
-    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "link_pr", "pr_status", "pr_handoff", "release_note"
+    /// Action to perform: "repo_view", "issue_list", "issue_read", "issue_create", "issue_comment", "pr_list", "pr_read", "pr_comments", "pr_comment", "pr_review_digest", "safe_merge", "ship", "link_pr", "pr_status", "pr_handoff", "release_note"
     pub action: String,
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
@@ -79,6 +79,27 @@ pub struct TachiGhParams {
     /// Write pr_review_digest artifacts under .tachi/reviews. Defaults to true.
     #[serde(default)]
     pub write_digest: Option<bool>,
+    /// Exact file list to stage for action="ship". Required non-empty at runtime.
+    #[serde(default)]
+    pub files: Vec<String>,
+    /// Commit message for action="ship". Required at runtime and used byte-verbatim.
+    #[serde(default)]
+    pub commit_message: Option<String>,
+    /// Pull request title for action="ship". PR creation runs only when pr_title and pr_body are both supplied.
+    #[serde(default)]
+    pub pr_title: Option<String>,
+    /// Pull request body for action="ship". Used byte-verbatim; never drafted.
+    #[serde(default)]
+    pub pr_body: Option<String>,
+    /// Pull request base branch for action="ship". Defaults to "main".
+    #[serde(default)]
+    pub pr_base: Option<String>,
+    /// Expected current branch guard for action="ship".
+    #[serde(default)]
+    pub expect_branch: Option<String>,
+    /// Repository root override for action="ship". Defaults to current process cwd.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Parameters for reading a GitHub issue

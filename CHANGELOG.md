@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `tachi_gh(action="ship")` now provides a deterministic ship primitive that stages an exact file list, commits caller-authored messages verbatim, refuses protected branches and unchanged/missing files, pushes feature branches when `origin` exists, and optionally opens/links a PR without drafting text.
 - `tachi_skill(action="run")`, native `run_skill`, direct skill tools, and skill DLQ retry now return a JSON simulation envelope instead of bare skill text for LLM/mock skill runs. Simulated outputs are prefixed with an explicit marker warning that no commands, files, or tests were executed; `chain_skills` preserves raw step-to-step piping while adding chain-level simulated/warning provenance. This is a breaking response-shape change for consumers that parsed raw text.
 - Built-in Superpowers and Waza workflow skills now run in document mode, returning the workflow document for the caller to follow with their own tools instead of asking the LLM to fabricate execution results.
 - Review-stage dispatch profiles default `auto_capability_bundle` off unless the caller explicitly passes `auto_capability_bundle=true`.

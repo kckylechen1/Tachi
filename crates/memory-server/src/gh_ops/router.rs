@@ -161,6 +161,7 @@ pub(crate) async fn handle_tachi_gh(
             )
             .await
         }
+        "ship" => handle_github_ship(server, &params).await,
         "link_pr" => {
             let task_params = lifecycle_task_params(&params)?;
             Box::pin(crate::task_lifecycle::handle_task_link_pr(
@@ -201,7 +202,7 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         other => Err(format!(
-            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, link_pr, pr_status, pr_handoff, release_note",
+            "Unknown action '{}'. Expected: repo_view, issue_list, issue_read, issue_create, issue_comment, pr_list, pr_read, pr_comments, pr_comment, pr_review_digest, safe_merge, ship, link_pr, pr_status, pr_handoff, release_note",
             other
         )),
     }?;
