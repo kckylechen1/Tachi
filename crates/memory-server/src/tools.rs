@@ -20,6 +20,13 @@ use crate::copilot_ops::{
 use crate::event_ops::handle_tachi_event;
 use crate::gh_ops::handle_tachi_gh;
 use crate::hub_ops::{handle_hub_discover, handle_run_skill, handle_skill_from_pattern};
+use crate::kanban::{
+    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
+    UpdateCardParams,
+};
+use crate::memory_ops::{
+    handle_delete_domain, handle_get_domain, handle_list_domains, handle_register_domain,
+};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
 use crate::wiki_ops::{
@@ -33,15 +40,12 @@ const TASK_WAIT_MAX_POLL_DELAY: StdDuration = StdDuration::from_secs(2);
 
 mod agent_profile_facade;
 mod continuity_facade;
-mod copilot_facade;
 mod dispatch_complete_defaults;
 mod dispatch_facade;
-mod domain_facade;
 mod formatting;
 mod graph_state_facade;
 mod handoff_facade;
 mod hub_facade;
-mod kanban_facade;
 mod memory_facade;
 mod pack_facade;
 mod pipeline_facade;
@@ -68,3 +72,90 @@ use self::task_router::*;
 pub(crate) use self::task_facade::build_task_pr_status_gh_params;
 #[cfg(test)]
 pub(crate) use self::task_facade::resolve_task_pr_status_target;
+
+#[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
+impl MemoryServer {
+    #[tool(
+        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, intent, selected_sops, tool_plan, lightweight skill suggestions, and debugging checklist."
+    )]
+    pub(crate) async fn tachi_task_brief(
+        &self,
+        Parameters(params): Parameters<TaskBriefParams>,
+    ) -> Result<String, String> {
+        crate::copilot_ops::handle_tachi_task_brief(self, params).await
+    }
+
+    #[tool(
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl."
+    )]
+    pub(crate) async fn tachi_unstick(
+        &self,
+        Parameters(params): Parameters<ProgressCheckParams>,
+    ) -> Result<String, String> {
+        crate::copilot_ops::handle_tachi_progress_check(self, params).await
+    }
+}
+
+#[tool_router(router = kanban_tool_router, vis = "pub(crate)")]
+impl MemoryServer {
+    #[tool(description = "Post a kanban card from one agent to another.")]
+    pub(crate) async fn post_card(
+        &self,
+        Parameters(params): Parameters<PostCardParams>,
+    ) -> Result<String, String> {
+        handle_post_card(self, params).await
+    }
+
+    #[tool(description = "Check kanban inbox for a target agent.")]
+    pub(crate) async fn check_inbox(
+        &self,
+        Parameters(params): Parameters<CheckInboxParams>,
+    ) -> Result<String, String> {
+        handle_check_inbox(self, params).await
+    }
+
+    #[tool(description = "Update status of a kanban card.")]
+    pub(crate) async fn update_card(
+        &self,
+        Parameters(params): Parameters<UpdateCardParams>,
+    ) -> Result<String, String> {
+        handle_update_card(self, params).await
+    }
+}
+
+#[tool_router(router = domain_tool_router, vis = "pub(crate)")]
+impl MemoryServer {
+    #[tool(
+        description = "Register a domain configuration for memory routing, GC thresholds, and default retention policies."
+    )]
+    pub(crate) async fn register_domain(
+        &self,
+        Parameters(params): Parameters<RegisterDomainParams>,
+    ) -> Result<String, String> {
+        handle_register_domain(self, params).await
+    }
+
+    #[tool(description = "Get a domain configuration by name.")]
+    pub(crate) async fn get_domain(
+        &self,
+        Parameters(params): Parameters<GetDomainParams>,
+    ) -> Result<String, String> {
+        handle_get_domain(self, params).await
+    }
+
+    #[tool(description = "List all registered domain configurations.")]
+    pub(crate) async fn list_domains(
+        &self,
+        Parameters(_params): Parameters<ListDomainsParams>,
+    ) -> Result<String, String> {
+        handle_list_domains(self).await
+    }
+
+    #[tool(description = "Delete a domain configuration by name.")]
+    pub(crate) async fn delete_domain(
+        &self,
+        Parameters(params): Parameters<DeleteDomainParams>,
+    ) -> Result<String, String> {
+        handle_delete_domain(self, params).await
+    }
+}
