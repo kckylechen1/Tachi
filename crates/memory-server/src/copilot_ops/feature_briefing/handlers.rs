@@ -9,6 +9,36 @@ use super::docs::{
 use super::markdown::format_feature_briefing_markdown;
 use super::stage::{feature_next_action, infer_feature_stage};
 
+fn doc_index_item_ids(doc_index: &Value) -> std::collections::HashSet<String> {
+    doc_index
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            group
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+fn filter_wiki_hits_not_in_doc_index(wiki_hits: &[Value], doc_index: &Value) -> Vec<Value> {
+    let indexed_ids = doc_index_item_ids(doc_index);
+    wiki_hits
+        .iter()
+        .filter(|hit| {
+            hit.get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !indexed_ids.contains(id))
+        })
+        .cloned()
+        .collect()
+}
+
 pub(crate) async fn handle_tachi_task_brief(
     server: &MemoryServer,
     params: TaskBriefParams,
@@ -260,12 +290,13 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &eval_evidence,
         &run_artifacts,
     );
+    let top_level_wiki_hits = filter_wiki_hits_not_in_doc_index(&wiki_hits, &doc_index);
     let kind = if params.action.eq_ignore_ascii_case("doc_index") {
         "doc_index"
     } else {
         "feature_briefing"
     };
-    let response = json!({
+    let mut response = json!({
         "status": "ok",
         "kind": kind,
         "objective": params.task.clone().unwrap_or_else(|| query.clone()),
@@ -292,7 +323,6 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "relevant_profiles": relevant_profiles,
         "suggested_dispatch": suggested_dispatch,
         "guide_hits": guide_hits,
-        "wiki_hits": wiki_hits,
         "feedback_rules": feedback_rules_trace,
         "memory_fragments": memory_fragments,
         "eval_evidence": eval_evidence,
@@ -310,6 +340,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
             "principle": "Project facts first. Global playbook second. Feedback rules and eval pitfalls as behavior patches."
         },
     });
+    if !top_level_wiki_hits.is_empty() {
+        response
+            .as_object_mut()
+            .expect("feature briefing response object")
+            .insert("wiki_hits".to_string(), json!(top_level_wiki_hits));
+    }
 
     if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
         serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))

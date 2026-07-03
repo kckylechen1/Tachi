@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Review-stage dispatch profiles default `auto_capability_bundle` off unless the caller explicitly passes `auto_capability_bundle=true`.
 - Fold `get_memory`, `tachi_board`, and `tachi_dispatch` out of daily agent profiles in favor of `tachi_memory(action="get")` and `tachi_task(action="board"|"dispatch")`, while keeping the native routes admin/backcompat-only.
 - Retire the old `tachi_progress_check` and `wiki_browse` observe aliases; agents should use `tachi_unstick` and `tachi_browse`.
+- Compact briefing responses now use real `tachi_status` warnings, omit doctrine/limit metadata, skip empty sections, and apply a 0.25 relevance floor; `tachi_status` now uses a verdict-first healthy provider shape, and feature briefings deduplicate top-level wiki hits already present in `doc_index`. This is a response-shape change for consumers that relied on `layer_authority`/`limits` in compact briefing or full provider timestamps when healthy.
 
 ### Fixed
 

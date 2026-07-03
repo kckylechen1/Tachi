@@ -162,13 +162,6 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             task["dispatch_id"] == json!("dispatch-feature-briefing")
                 && task["state"] == json!("TASK_STATE_WORKING")
         })));
-    assert!(briefing["wiki_hits"]
-        .as_array()
-        .is_some_and(|hits| hits.iter().any(|hit| {
-            hit["path"] == json!("/wiki/agent/tachi/feature-briefing")
-                && hit["layer"] == json!("wiki")
-                && hit["authority"] == json!("advisory")
-        })));
     assert!(briefing["guide_hits"]
         .as_array()
         .is_some_and(|hits| hits.iter().any(|hit| {
@@ -176,10 +169,11 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
                 && hit["authority"] == json!("playbook")
                 && hit["applies_to"]["profiles"] == json!(["codex_55_review"])
         })));
-    assert!(briefing["wiki_hits"].as_array().is_some_and(|hits| {
-        hits.iter()
-            .all(|hit| hit["path"] != json!("/guide/global/workflows/agent-review"))
-    }));
+    if let Some(hits) = briefing.get("wiki_hits").and_then(Value::as_array) {
+        assert!(hits
+            .iter()
+            .all(|hit| hit["path"] != json!("/guide/global/workflows/agent-review")));
+    }
     assert!(briefing["feedback_rules"]["rules"]
         .as_array()
         .is_some_and(|rules| rules.iter().any(|rule| {
@@ -190,6 +184,47 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     let groups = briefing["doc_index"]["groups"]
         .as_array()
         .expect("doc index groups");
+    let project_wiki_group = groups
+        .iter()
+        .find(|group| group["name"] == json!("project_wiki"))
+        .expect("project wiki group");
+    assert!(
+        project_wiki_group["items"]
+            .as_array()
+            .is_some_and(|hits| hits.iter().any(|hit| {
+                hit["path"] == json!("/wiki/agent/tachi/feature-briefing")
+                    && hit["layer"] == json!("wiki")
+                    && hit["authority"] == json!("advisory")
+            })),
+        "project wiki rows should stay in doc_index: {briefing:#}"
+    );
+    assert!(
+        !briefing
+            .as_object()
+            .expect("feature briefing object")
+            .contains_key("wiki_hits"),
+        "top-level wiki_hits should be omitted when doc_index already carries every wiki hit: {briefing:#}"
+    );
+    let doc_index_ids = groups
+        .iter()
+        .flat_map(|group| {
+            group["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item["id"].as_str())
+        })
+        .collect::<std::collections::HashSet<_>>();
+    if let Some(wiki_hits) = briefing.get("wiki_hits").and_then(Value::as_array) {
+        for hit in wiki_hits {
+            if let Some(id) = hit["id"].as_str() {
+                assert!(
+                    !doc_index_ids.contains(id),
+                    "wiki id {id} appears in both top-level wiki_hits and doc_index: {briefing:#}"
+                );
+            }
+        }
+    }
     for expected in [
         "project_work_record",
         "canonical_docs",

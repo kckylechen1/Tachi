@@ -15,7 +15,74 @@ use crate::memory_search_ops::{
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
-use serde_json::json;
+use serde_json::{json, Map, Value};
+
+const BRIEFING_COMPACT_RELEVANCE_FLOOR: f64 = 0.25;
+
+fn compact_row_relevance(row: &Value) -> Option<f64> {
+    row.get("relevance")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            row.get("score")
+                .and_then(|score| score.get("final"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| row.get("score").and_then(Value::as_f64))
+}
+
+fn meets_compact_relevance_floor(row: &Value) -> bool {
+    compact_row_relevance(row).is_none_or(|score| score >= BRIEFING_COMPACT_RELEVANCE_FLOOR)
+}
+
+fn apply_compact_relevance_floor(value: Value) -> Value {
+    match value {
+        Value::Array(rows) => Value::Array(
+            rows.into_iter()
+                .filter(meets_compact_relevance_floor)
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn compact_section_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Array(rows) => rows.is_empty(),
+        Value::Object(map) => {
+            map.is_empty()
+                || map
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count == 0)
+                || map
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tasks| tasks.is_empty())
+        }
+        _ => false,
+    }
+}
+
+fn insert_non_empty_compact_section(map: &mut Map<String, Value>, key: &str, value: Value) {
+    if !compact_section_is_empty(&value) {
+        map.insert(key.to_string(), value);
+    }
+}
+
+async fn compact_health_summary(server: &MemoryServer, wiki_counts: Value) -> Value {
+    let status = crate::status_ops::handle_tachi_status_agent(server)
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "health_score": status.get("health_score").cloned().unwrap_or_else(|| json!(0)),
+        "warnings": status.get("warnings").cloned().unwrap_or_else(|| json!([])),
+        "wiki": wiki_counts,
+        "compact": true,
+    })
+}
 
 fn default_briefing_query(named_project: Option<&str>) -> String {
     match named_project {
@@ -130,11 +197,21 @@ pub(crate) async fn handle_memory_briefing(
         async { crate::handoff_ops::list_pending_handoffs_for_briefing(server, cross_project_cap) },
     );
 
-    let memories = slim_memory_rows(parse_evidence_array(memories_result?));
+    let memory_rows = parse_evidence_array(memories_result?);
+    let memories = slim_memory_rows(if compact {
+        apply_compact_relevance_floor(memory_rows)
+    } else {
+        memory_rows
+    });
     let wiki = if include_wiki {
         let mut rows = wiki_result?;
         crate::wiki_ops::filter_user_facing_wiki_rows(&mut rows);
-        slim_memory_rows(serde_json::Value::Array(rows))
+        let wiki_rows = Value::Array(rows);
+        slim_memory_rows(if compact {
+            apply_compact_relevance_floor(wiki_rows)
+        } else {
+            wiki_rows
+        })
     } else {
         json!([])
     };
@@ -173,24 +250,24 @@ pub(crate) async fn handle_memory_briefing(
     let board = slim_kanban(parse_json_or_empty(board_res?));
     let checkpoints = json!(checkpoints_res);
     let verification = crate::verify_ops::recent_verification_summaries(verification_cap);
-    let wiki_counts: serde_json::Value = wiki_counts_res?;
-    // Report the REAL health score — the same value tachi_status computes —
-    // instead of a placeholder, so the briefing and status surfaces never
-    // disagree (this used to hardcode 95/85 and diverged from the actual score).
-    // collect_snapshot does blocking SQLite I/O, so run it off the async
-    // executor via spawn_blocking.
-    let app_home = crate::status_ops::resolve_app_home();
-    let global_db = server.global_db_path_buf();
-    let project_db = server.project_db_path_buf();
-    let health_score = tokio::task::spawn_blocking(move || {
-        crate::status_ops::collect_snapshot(&app_home, &global_db, project_db.as_deref())
-            .health_score
-    })
-    .await
-    .unwrap_or(0);
+    let wiki_counts: Value = wiki_counts_res?;
     let health_summary = if compact {
-        json!({"health_score": health_score, "warnings": [], "wiki": wiki_counts, "compact": true})
+        compact_health_summary(server, wiki_counts).await
     } else {
+        // Report the REAL health score — the same value tachi_status computes —
+        // instead of a placeholder, so the briefing and status surfaces never
+        // disagree (this used to hardcode 95/85 and diverged from the actual score).
+        // collect_snapshot does blocking SQLite I/O, so run it off the async
+        // executor via spawn_blocking.
+        let app_home = crate::status_ops::resolve_app_home();
+        let global_db = server.global_db_path_buf();
+        let project_db = server.project_db_path_buf();
+        let health_score = tokio::task::spawn_blocking(move || {
+            crate::status_ops::collect_snapshot(&app_home, &global_db, project_db.as_deref())
+                .health_score
+        })
+        .await
+        .unwrap_or(0);
         json!({
             "health_score": health_score,
             "warnings": warnings.iter().take(6).cloned().collect::<Vec<_>>(),
@@ -204,6 +281,23 @@ pub(crate) async fn handle_memory_briefing(
     let open_loops = crate::shell_ops::scan_open_loops(8);
 
     if wants_json(params.format.as_deref()) {
+        if compact {
+            let mut response = Map::new();
+            response.insert("status".to_string(), json!("completed"));
+            response.insert("query".to_string(), json!(query));
+            response.insert("project".to_string(), json!(named_project));
+            response.insert("available_projects".to_string(), json!(available_projects));
+            response.insert("health".to_string(), health_summary);
+            insert_non_empty_compact_section(&mut response, "memories", memories);
+            insert_non_empty_compact_section(&mut response, "wiki", wiki);
+            insert_non_empty_compact_section(&mut response, "cross_project", cross_project);
+            insert_non_empty_compact_section(&mut response, "verification", json!(verification));
+            insert_non_empty_compact_section(&mut response, "kanban", board);
+            insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
+            insert_non_empty_compact_section(&mut response, "recent_checkpoints", checkpoints);
+            response.insert("compact".to_string(), json!(true));
+            return json_string(&Value::Object(response));
+        }
         return json_string(&json!({
             "status": "completed",
             "query": query,
@@ -250,4 +344,41 @@ pub(crate) async fn handle_memory_briefing(
         &open_loops,
         compact,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_relevance_floor_drops_low_scores_and_keeps_unscored_rows() {
+        let rows = json!([
+            {"id": "low", "relevance": 0.24},
+            {"id": "floor", "relevance": BRIEFING_COMPACT_RELEVANCE_FLOOR},
+            {"id": "score-low", "score": {"final": 0.10}},
+            {"id": "score-high", "score": 0.80},
+            {"id": "unscored", "summary": "no relevance"}
+        ]);
+
+        let filtered = apply_compact_relevance_floor(rows);
+        let ids = filtered
+            .as_array()
+            .expect("filtered rows")
+            .iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["floor", "score-high", "unscored"]);
+    }
+
+    #[test]
+    fn compact_sections_treat_null_as_empty() {
+        let mut response = Map::new();
+
+        insert_non_empty_compact_section(&mut response, "empty_null", Value::Null);
+        insert_non_empty_compact_section(&mut response, "non_empty", json!({"count": 1}));
+
+        assert!(!response.contains_key("empty_null"));
+        assert!(response.contains_key("non_empty"));
+    }
 }
