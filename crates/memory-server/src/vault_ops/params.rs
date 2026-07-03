@@ -36,6 +36,8 @@ impl Drop for VaultUnlockParams {
 pub(crate) struct VaultSetParams {
     pub name: String,
     pub value: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(default = "default_secret_type")]
     pub secret_type: String,
     #[serde(default)]
@@ -66,12 +68,16 @@ pub(crate) struct VaultListParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VaultRemoveParams {
     pub name: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct VaultSetupRotationParams {
     pub prefix: String,
     pub total_keys: i64,
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(default = "default_rotation_strategy")]
     pub strategy: String,
 }
@@ -82,6 +88,8 @@ pub(crate) struct VaultSetApiKeyPoolParams {
     pub prefix: String,
     /// Concrete key values. Stored as PREFIX_1, PREFIX_2, ...
     pub values: Vec<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(default = "default_rotation_strategy")]
     pub strategy: String,
     #[serde(default)]

@@ -15,6 +15,7 @@ async fn vault_lock_preserves_env_provider_fallback() {
         .vault_set(Parameters(VaultSetParams {
             name: "TACHI_ENV_FALLBACK_API_KEY".to_string(),
             value: "vault-secret".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "env fallback test".to_string(),
             allowed_agents: None,

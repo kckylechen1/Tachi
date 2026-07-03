@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::access::{
-    ensure_agent_allowed, load_unlocked_api_key_secret_pool, record_successful_vault_access,
-    select_vault_entry,
+    authorize_vault_mutation, authorize_vault_pool_mutation, ensure_agent_allowed,
+    load_unlocked_api_key_secret_pool, record_successful_vault_access, select_vault_entry,
 };
 use super::audit::{record_vault_audit, result_with_vault_audit_warning};
 use super::env::attach_provider_refresh_warning;
@@ -25,9 +25,8 @@ use super::rotation::{
     collect_rotation_entries, normalize_allowed_agents, normalize_rotation_strategy,
 };
 use super::session::{
-    clear_cached_vault_state, ensure_vault_unlock_allowed, ensure_vault_unlocked,
-    is_vault_initialized, maybe_auto_lock_vault, read_unlock_password_fifo,
-    record_vault_unlock_failure, with_vault_key,
+    clear_cached_vault_state, ensure_vault_unlock_allowed, is_vault_initialized,
+    maybe_auto_lock_vault, read_unlock_password_fifo, record_vault_unlock_failure, with_vault_key,
 };
 
 mod health;

@@ -29,6 +29,7 @@ async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_prof
         .vault_set(Parameters(VaultSetParams {
             name: "LEGACY_DISPATCH_SECRET".to_string(),
             value: "legacy-dispatch-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "legacy dispatch env test".to_string(),
             allowed_agents: None,

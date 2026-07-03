@@ -15,6 +15,7 @@ async fn vault_operations_record_audit_entries() {
         .vault_set(Parameters(VaultSetParams {
             name: "AUDIT_SECRET".to_string(),
             value: "audit-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "audit trail secret".to_string(),
             allowed_agents: None,
@@ -58,6 +59,7 @@ async fn vault_operations_record_audit_entries() {
     server
         .vault_remove(Parameters(VaultRemoveParams {
             name: "AUDIT_SECRET".to_string(),
+            agent_id: None,
         }))
         .await
         .expect("vault_remove should succeed");

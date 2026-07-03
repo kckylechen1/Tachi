@@ -19,6 +19,7 @@ async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated tavily key".to_string(),
                 allowed_agents: None,
@@ -32,6 +33,7 @@ async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
     server
         .vault_setup_rotation(Parameters(VaultSetupRotationParams {
             prefix: "TAVILY_API_KEY".to_string(),
+            agent_id: None,
             total_keys: 2,
             strategy: "round_robin".to_string(),
         }))

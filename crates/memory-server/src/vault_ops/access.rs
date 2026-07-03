@@ -1,13 +1,15 @@
 use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
 use chrono::Utc;
-use memory_core::vault::{VaultEntry, VaultKeyHealth, VaultKeyRotation, SECRET_TYPE_API_KEY};
+use memory_core::vault::{
+    api_key_pool_member_index, VaultEntry, VaultKeyHealth, VaultKeyRotation, SECRET_TYPE_API_KEY,
+};
 use memory_core::MemoryStore;
 use std::collections::{HashMap, HashSet};
 
 use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
-use super::session::with_vault_key;
+use super::session::{ensure_vault_unlocked, with_vault_key};
 
 pub(super) fn ensure_agent_allowed(
     entry: &VaultEntry,
@@ -32,6 +34,51 @@ pub(super) fn ensure_agent_allowed(
             agent_id, entry.name
         ))
     }
+}
+
+/// The single authorization gate every Vault mutation must pass before writing.
+/// Order: unlock gate -> resolve existing entry -> agent ACL gate.
+pub(super) fn authorize_vault_mutation(
+    server: &MemoryServer,
+    target_name: &str,
+    agent_id: Option<&str>,
+) -> Result<(), String> {
+    ensure_vault_unlocked(server)?;
+    let existing = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_entry(target_name)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| format!("Failed to resolve secret for authorization: {e}"))?;
+    if let Some(entry) = existing {
+        ensure_agent_allowed(&entry, agent_id)?;
+    }
+    Ok(())
+}
+
+/// Authorize overwriting an API-key pool by checking every existing pool member.
+/// Membership is resolved with `api_key_pool_member_index` — the SAME predicate
+/// `vault_replace_api_key_pool` uses to decide which entries it overwrites/deletes —
+/// so the gate covers exactly what the write clobbers. (Using the rotation-side
+/// `collect_rotation_entries` here instead would parse suffixes as `u32` and let a
+/// restricted member with a > u32::MAX suffix escape the gate while still being
+/// clobbered by the `usize`-based write path: a fail-open.)
+pub(super) fn authorize_vault_pool_mutation(
+    server: &MemoryServer,
+    prefix: &str,
+    agent_id: Option<&str>,
+) -> Result<(), String> {
+    ensure_vault_unlocked(server)?;
+    let entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list entries for authorization: {e}"))?;
+    for entry in entries {
+        if api_key_pool_member_index(&entry.name, prefix).is_some() {
+            ensure_agent_allowed(&entry, agent_id)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) struct SelectedVaultEntry {

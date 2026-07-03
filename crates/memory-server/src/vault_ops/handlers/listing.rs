@@ -48,7 +48,7 @@ pub(crate) async fn handle_vault_remove(
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
     let result = (|| {
-        ensure_vault_unlocked(server)?;
+        authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())?;
         let removed = server
             .with_global_store(|store| {
                 store

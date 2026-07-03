@@ -55,6 +55,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
         .vault_set(Parameters(VaultSetParams {
             name: "OPENCODE_SHARED_TEST_SECRET".to_string(),
             value: secret_value.to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch profile credential binding test".to_string(),
             allowed_agents: None,
@@ -155,6 +156,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
         .vault_set(Parameters(VaultSetParams {
             name: "OPENCODE_SHARED_DENIED_SECRET".to_string(),
             value: "denied-profile-secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch profile allowlist denial test".to_string(),
             allowed_agents: None,
@@ -219,6 +221,7 @@ async fn dispatch_profile_credentials_can_allow_backend_agent_name() {
         .vault_set(Parameters(VaultSetParams {
             name: "BACKEND_AGENT_SECRET".to_string(),
             value: "backend-agent-secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "backend agent allowlist test".to_string(),
             allowed_agents: Some(vec!["custom".to_string()]),

@@ -55,6 +55,7 @@ async fn dispatch_credential_profile_injects_config_overlay_env_without_response
         .vault_set(Parameters(VaultSetParams {
             name: "OPENCODE_ROUTER_SECRET".to_string(),
             value: secret_value.to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch config credential test".to_string(),
             allowed_agents: None,
