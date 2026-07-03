@@ -182,10 +182,18 @@ fn slim_provider_health_value(value: serde_json::Value) -> serde_json::Value {
         "status": "ok",
         "last_success_age_secs": value
             .get("last_success_age_secs")
-            .or_else(|| value.get("persist_last_success_age_secs"))
             .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("persist_last_success_age_secs")
+                    .and_then(serde_json::Value::as_u64)
+            })
             .unwrap_or(0),
-        "source_of_truth": value.get("source_of_truth").cloned().unwrap_or_else(|| json!("unknown")),
+        "source_of_truth": value
+            .get("source_of_truth")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!("unknown")),
     })
 }
 
@@ -624,5 +632,22 @@ mod tests {
         assert_eq!(slimmed["last_error"], json!("forced auth failure"));
         assert_eq!(slimmed["reload_ttl_secs"], json!(300));
         assert!(slimmed.get("status").is_none());
+    }
+
+    #[test]
+    fn slim_provider_health_value_uses_persisted_fallback_when_primary_is_null() {
+        let value = json!({
+            "source_of_truth": null,
+            "last_success_age_secs": null,
+            "last_error": null,
+            "persist_last_success_age_secs": 42,
+            "persist_last_error": null
+        });
+
+        let slimmed = slim_provider_health_value(value);
+
+        assert_eq!(slimmed["status"], json!("ok"));
+        assert_eq!(slimmed["last_success_age_secs"], json!(42));
+        assert_eq!(slimmed["source_of_truth"], json!("unknown"));
     }
 }

@@ -47,6 +47,7 @@ fn apply_compact_relevance_floor(value: Value) -> Value {
 
 fn compact_section_is_empty(value: &Value) -> bool {
     match value {
+        Value::Null => true,
         Value::Array(rows) => rows.is_empty(),
         Value::Object(map) => {
             map.is_empty()
@@ -368,5 +369,16 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec!["floor", "score-high", "unscored"]);
+    }
+
+    #[test]
+    fn compact_sections_treat_null_as_empty() {
+        let mut response = Map::new();
+
+        insert_non_empty_compact_section(&mut response, "empty_null", Value::Null);
+        insert_non_empty_compact_section(&mut response, "non_empty", json!({"count": 1}));
+
+        assert!(!response.contains_key("empty_null"));
+        assert!(response.contains_key("non_empty"));
     }
 }

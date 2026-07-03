@@ -9,7 +9,7 @@ use super::docs::{
 use super::markdown::format_feature_briefing_markdown;
 use super::stage::{feature_next_action, infer_feature_stage};
 
-fn doc_index_item_ids(doc_index: &Value) -> HashSet<String> {
+fn doc_index_item_ids(doc_index: &Value) -> std::collections::HashSet<String> {
     doc_index
         .get("groups")
         .and_then(Value::as_array)
