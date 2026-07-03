@@ -1233,28 +1233,28 @@ export const memoryHybridBridgePlugin = {
       },
     });
 
-    api.on("before_agent_start", async (event: EventLike, context: AgentLikeContext) => {
+    api.on("before_prompt_build", async (event: EventLike, context: AgentLikeContext) => {
       const query = event.prompt;
       const scope = resolveScope(context, event);
       const agentId = resolveAgentId(context?.agentId);
       const key = `${agentId}:${scope}`;
       agentRuns.set(key, { startedAt: Date.now(), prompt: query });
       await appendRunAudit(scope, {
-        type: "agent_start",
+        type: "before_prompt_build",
         agentId,
         sessionKey: context?.sessionKey || null,
         sessionId: context?.sessionId || null,
         prompt: typeof query === "string" ? query.slice(0, 400) : null,
       });
       await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, agentId), {
-        eventType: "host.agent_start",
+        eventType: "host.prompt_build",
         actor: agentId,
         sessionId: context?.sessionId || context?.sessionKey || null,
         runId: event?.runId || null,
         role: resolveHostRole(agentId),
         status: "working",
         goal: typeof query === "string" ? query.slice(0, 240) : null,
-        currentStep: "agent_start",
+        currentStep: "before_prompt_build",
         nextAction: "run_turn",
         payload: {
           session_key: context?.sessionKey || null,
@@ -1332,20 +1332,6 @@ export const memoryHybridBridgePlugin = {
         compactedTextLength:
           typeof event?.compacted_text === "string" ? event.compacted_text.length : null,
         estimatedTokens: event?.estimated_tokens ?? null,
-      });
-    });
-
-    runtimeApi.on("tool_result_persist", async (event: EventLike & { toolName?: string; message?: string }, context: AgentLikeContext) => {
-      if (event?.toolName !== "compact_context") {
-        return;
-      }
-      const scope = resolveScope(context, event);
-      await appendCompaction(scope, {
-        type: "tool_result_persist",
-        agentId: resolveAgentId(context?.agentId),
-        sessionKey: context?.sessionKey || null,
-        toolName: event?.toolName,
-        message: event?.message || null,
       });
     });
 

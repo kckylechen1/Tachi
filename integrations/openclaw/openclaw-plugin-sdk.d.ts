@@ -3,14 +3,13 @@
  * Replace with the official SDK types when available.
  */
 declare module "openclaw/plugin-sdk" {
-  type CoreAgentHookEvent = "before_agent_start" | "agent_end";
+  type CoreAgentHookEvent = "before_prompt_build" | "agent_end";
   type RuntimeHookEvent =
     | "llm_input"
     | "llm_output"
     | "after_tool_call"
     | "before_compaction"
     | "after_compaction"
-    | "tool_result_persist"
     | "subagent_spawned"
     | "subagent_ended"
     | "session_end";

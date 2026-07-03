@@ -99,11 +99,10 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/in
 
 | Hook | 说明 |
 |------|------|
-| `before_agent_start` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文 |
+| `before_prompt_build` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文，并避开 legacy `before_agent_start` compatibility path |
 | `llm_input` / `llm_output` | 记录模型输入输出与 usage 审计，用于后续分析与 memory 维护 |
 | `after_tool_call` | 记录工具调用结果，并统计 subagent / spawn 相关行为 |
 | `before_compaction` / `after_compaction` | 记录 compact 前后的窗口与摘要信息，供后续 memory/compaction 分析 |
-| `tool_result_persist` | 对 `compact_context` 的持久化结果做补充审计 |
 | `subagent_spawned` / `subagent_ended` | 记录子代理生命周期与耗时 |
 | `session_end` | 记录会话结束事件，用于 run audit 闭环 |
 | `agent_end` | 自动捕获：会话窗口提交到 Tachi，后续维护由 Foundry worker 异步处理 |
