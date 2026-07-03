@@ -67,6 +67,7 @@ pub(super) fn builtin_waza_skills() -> Result<Vec<HubCapability>, String> {
                 &format!("waza/{name}"),
                 description,
                 json!({
+                    "execution": "document",
                     "system": "You are applying a Waza workflow skill. Follow the embedded SKILL.md contract and keep the output grounded in the current task evidence.",
                     "prompt": "Apply the Waza skill `waza/{{skill_name}}` to the task below.\n\nTask:\n{{task}}\n\nContext:\n{{context}}\n\nReturn the skill-guided result without restating the full skill document.",
                     "content": content,

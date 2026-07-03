@@ -89,6 +89,7 @@ Do not say the task is complete if required verification is missing, failed, or 
                 &format!("superpowers/{name}"),
                 description,
                 json!({
+                    "execution": "document",
                     "system": "You are applying a Superpowers workflow gate. Follow the embedded SKILL.md contract, respect hard gates, and keep stage transitions explicit.",
                     "prompt": "Apply the Superpowers workflow skill `superpowers/{{skill_name}}` to the task below.\n\nTask:\n{{task}}\n\nContext:\n{{context}}\n\nReturn the stage-appropriate result and name the next workflow gate when applicable.",
                     "content": content,

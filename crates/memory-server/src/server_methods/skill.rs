@@ -1,10 +1,11 @@
 use crate::hub_helpers::{build_skill_tool_from_cap, make_text_tool_result};
+use crate::hub_ops::{build_skill_execution_envelope, execute_registered_skill_prompt};
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::server_state::MemoryServer;
 use crate::shared_defs::dlq_mutation_is_unsafe;
-use crate::utils::{lock_or_recover, render_skill_prompt_template};
+use crate::utils::lock_or_recover;
 use memory_core::HubCapability;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 impl MemoryServer {
     pub(crate) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
@@ -52,50 +53,16 @@ impl MemoryServer {
                 )
             })?;
 
-        let cap = self.get_capability(&skill_id)?;
-        let def: Value = serde_json::from_str(&cap.definition).map_err(|e| {
-            rmcp::ErrorData::invalid_params(format!("Invalid skill definition JSON: {e}"), None)
-        })?;
+        let args = Value::Object(arguments.unwrap_or_default().into_iter().collect());
+        let execution = execute_registered_skill_prompt(self, &skill_id, &args)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
-        let args = arguments.unwrap_or_default();
-        let prompt_template = def
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .or_else(|| def.get("template").and_then(|v| v.as_str()))
-            .unwrap_or("{{args_json}}");
-        let prompt = render_skill_prompt_template(prompt_template, &args)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("serialize args: {e}"), None))?;
-
-        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str())
-        {
-            mock_response.to_string()
-        } else {
-            let system = def
-                .get("system")
-                .and_then(|v| v.as_str())
-                .unwrap_or("You are executing a reusable skill. Follow the instruction and produce the result.");
-            let model = def.get("model").and_then(|v| v.as_str());
-            let temperature = def
-                .get("temperature")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.2) as f32;
-            let max_tokens = def
-                .get("max_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1200) as u32;
-            self.llm
-                .call_extract_llm(system, &prompt, model, temperature, max_tokens)
-                .await
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("skill execution failed: {e}"), None)
-                })?
-        };
-
-        make_text_tool_result(&json!({
-            "skill_id": skill_id,
-            "tool_name": tool_name,
-            "output": output
-        }))
+        make_text_tool_result(&build_skill_execution_envelope(
+            &skill_id,
+            execution,
+            Some(tool_name),
+        ))
     }
 
     pub(crate) async fn retry_dispatch(
