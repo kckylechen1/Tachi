@@ -27,16 +27,20 @@ mod repo;
 mod review_digest;
 mod router;
 mod safe_merge;
+mod ship;
 mod transport;
 
 #[cfg(test)]
 mod safe_merge_tests;
+#[cfg(test)]
+mod ship_tests;
 
 use self::issues::*;
 use self::prs::*;
 use self::repo::*;
 use self::review_digest::*;
 use self::safe_merge::*;
+use self::ship::*;
 use self::transport::*;
 
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};

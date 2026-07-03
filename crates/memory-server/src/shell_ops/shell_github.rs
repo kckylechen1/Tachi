@@ -53,6 +53,7 @@ pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
     "github_review_gate_passed",
     "github_merge_blocked",
     "github_pr_merged",
+    "github_ship_completed",
 ];
 
 /// Allow-list of `merge_state` values surfaced in `status.github.merge_state`.
