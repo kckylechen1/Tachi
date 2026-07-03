@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Added
+
+- `tachi vault intake discover` now reports redacted, read-only credential candidates from env-family files and Codex auth metadata without unlocking or mutating Vault.
+
 ### Changed
 
 - `tachi_gh(action="ship")` now provides a deterministic ship primitive that stages an exact file list, commits caller-authored messages verbatim, refuses protected branches and unchanged/missing files, pushes feature branches when `origin` exists, and optionally opens/links a PR without drafting text.
