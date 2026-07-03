@@ -210,6 +210,35 @@ Provider calls should feed back:
 This can reuse the existing Vault key health path for API keys and add account
 health for OAuth/session blobs.
 
+### 7. Runtime Availability
+
+Agent hosts must not have to know whether the in-process Vault key is currently
+cached, expired, or recoverable from a local secure store. All agent-facing
+credential reads should go through a resolver that has one consistent sequence:
+
+1. check the cached unlocked Vault key;
+2. if the key is missing or expired, attempt local secure-store auto-unlock once
+   (macOS Keychain today);
+3. retry the Vault read after successful auto-unlock;
+4. fall back only to explicitly allowed provider/env caches;
+5. return a machine-readable locked/unavailable error when no authorized secret
+   can be materialized.
+
+This matters for long-running agents. A daemon can keep provider keys cached
+while `vault_status` reports `locked`, and a stdio adapter can forward memory
+reads while direct Vault reads fail. Broker health should therefore report these
+states separately:
+
+- Vault storage initialized/uninitialized;
+- session key cached/unlocked;
+- secure-store auto-unlock configured and last attempt status;
+- provider cache populated from Vault versus env fallback;
+- last credential resolver failure by host and provider.
+
+OpenClaw, Hermes, OpenCode, Codex, and background dispatch lanes should call
+the same resolver path. Host adapters should not each implement their own
+locked-Vault fallback semantics.
+
 ## CLI/API Shape
 
 Proposed operator commands:

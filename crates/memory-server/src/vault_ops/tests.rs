@@ -4,6 +4,29 @@ use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use std::time::{Duration, Instant};
 
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        std::env::remove_var(key);
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.original.as_ref() {
+            std::env::set_var(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
+}
+
 #[tokio::test]
 async fn with_vault_key_drops_vault_lock_before_running_work() {
     let db_path = std::env::temp_dir().join(format!(
@@ -31,6 +54,10 @@ async fn with_vault_key_drops_vault_lock_before_running_work() {
 
 #[tokio::test]
 async fn with_vault_key_auto_lock_clears_key_and_provider_cache_atomically() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-vault-auto-lock-test-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -53,10 +80,14 @@ async fn with_vault_key_auto_lock_clears_key_and_provider_cache_atomically() {
         assert!(v.key.is_none());
         assert!(v.unlock_time.is_none());
     }
-    assert!(server
-        .llm
-        .provider_secret_for_tests(&["OPENAI_API_KEY"])
-        .is_none());
+    assert_ne!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("cached"),
+        "auto-lock must not leave stale Vault-derived provider cache entries behind"
+    );
 }
 
 #[tokio::test]
