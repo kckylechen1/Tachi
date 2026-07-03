@@ -801,6 +801,7 @@ export class MemoryMcpClient {
   }
 
   async tachiEvent(params: Record<string, unknown>): Promise<unknown> {
+    await this.getClient();
     if (!this.availableTools.has("tachi_event")) {
       throw new Error("tachi_event tool is unavailable");
     }

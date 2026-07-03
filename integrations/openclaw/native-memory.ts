@@ -118,6 +118,11 @@ class TachiMemorySearchManager implements MemorySearchManager {
 
   async sync(): Promise<void> {
     const client = await this.ensureClient(this.agentId);
+    try {
+      await client.getRuntimeInfo();
+    } catch {
+      // sync is opportunistic; later memory calls will surface connection errors.
+    }
     if (client.hasTool("tachi_event")) {
       await client.tachiEvent({
         action: "metrics",
