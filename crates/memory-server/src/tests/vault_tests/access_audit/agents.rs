@@ -351,6 +351,73 @@ async fn vault_setup_rotation_records_success_audit_row() {
 }
 
 #[tokio::test]
+async fn vault_setup_rotation_denies_restricted_pool_member_when_agent_not_allowed() {
+    let server = init_agent_acl_vault("golden-g9-password").await;
+
+    for (name, value, allowed_agents) in [
+        (
+            "G9_POOL_1",
+            "alice-pool-value",
+            Some(vec!["alice".to_string()]),
+        ),
+        ("G9_POOL_2", "shared-pool-value", None),
+    ] {
+        server
+            .vault_set(Parameters(VaultSetParams {
+                name: name.to_string(),
+                value: value.to_string(),
+                agent_id: None,
+                secret_type: "api_key".to_string(),
+                description: "G9 pool member".to_string(),
+                allowed_agents,
+                enable_rotation: false,
+                rotation_strategy: None,
+            }))
+            .await
+            .expect("G9 seed pool member should succeed");
+    }
+
+    let denied = server
+        .vault_setup_rotation(Parameters(VaultSetupRotationParams {
+            prefix: "G9_POOL".to_string(),
+            agent_id: Some("bob".to_string()),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+        }))
+        .await
+        .expect_err("G9 setup_rotation by bob should be denied");
+    assert!(
+        denied.contains("Access denied"),
+        "G9 expected access denied error, got: {denied}"
+    );
+
+    let rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("G9_POOL")
+                .map_err(|e| format!("query G9 rotation failed: {e}"))
+        })
+        .expect("G9 rotation query should succeed");
+    assert!(
+        rotation.is_none(),
+        "G9 denied setup_rotation must not write rotation config"
+    );
+
+    let still_present = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "G9_POOL_1".to_string(),
+            agent_id: Some("alice".to_string()),
+            auto_rotate: false,
+        }))
+        .await
+        .expect("G9 restricted member should remain readable by alice");
+    let still_present_json: serde_json::Value =
+        serde_json::from_str(&still_present).expect("G9 get JSON");
+    assert_eq!(still_present_json["value"], json!("alice-pool-value"));
+    assert_eq!(still_present_json["allowed_agents"], json!(["alice"]));
+}
+
+#[tokio::test]
 async fn vault_set_api_key_pool_denies_clobbering_restricted_member() {
     let server = init_agent_acl_vault("golden-g8-password").await;
 

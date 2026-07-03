@@ -6,7 +6,7 @@ pub(crate) async fn handle_vault_setup_rotation(
 ) -> Result<String, String> {
     let rotation_prefix = params.prefix.clone();
     let result = (|| {
-        authorize_vault_mutation(server, &params.prefix, params.agent_id.as_deref())?;
+        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())?;
 
         if params.total_keys < 2 {
             return Err("Rotation requires at least 2 keys".into());
