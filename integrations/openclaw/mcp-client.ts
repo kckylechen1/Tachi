@@ -796,6 +796,17 @@ export class MemoryMcpClient {
     return await this.callJson<unknown>("memory_stats", {});
   }
 
+  hasTool(toolName: string): boolean {
+    return this.availableTools.has(toolName);
+  }
+
+  async tachiEvent(params: Record<string, unknown>): Promise<unknown> {
+    if (!this.availableTools.has("tachi_event")) {
+      throw new Error("tachi_event tool is unavailable");
+    }
+    return await this.callJson<unknown>("tachi_event", params);
+  }
+
   async runtimeInfoPayload(): Promise<RuntimeInfoPayload> {
     return await this.callJson<RuntimeInfoPayload>("runtime_info", {});
   }

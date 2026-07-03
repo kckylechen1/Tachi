@@ -13,6 +13,14 @@
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["index.ts", "config.ts", "constants.ts", "store.ts", "mcp-client.ts", "openclaw-plugin-sdk.d.ts"],
+  "include": [
+    "index.ts",
+    "config.ts",
+    "constants.ts",
+    "host-continuity.ts",
+    "native-memory.ts",
+    "mcp-client.ts",
+    "openclaw-plugin-sdk.d.ts"
+  ],
   "exclude": ["node_modules", "*.test.ts", "test-*.ts", "benchmark_*.ts"]
 }

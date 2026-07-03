@@ -15,6 +15,90 @@ declare module "openclaw/plugin-sdk" {
     | "subagent_ended"
     | "session_end";
 
+  export type MemorySearchResult = {
+    path: string;
+    score: number;
+    snippet: string;
+    title?: string;
+    kind?: string;
+    id?: string;
+    startLine?: number;
+    endLine?: number;
+    source?: string;
+    provenanceLabel?: string;
+    sourceType?: string;
+    sourcePath?: string;
+    updatedAt?: string;
+  };
+
+  export type MemoryReadResult = {
+    path: string;
+    content: string;
+    fromLine: number;
+    lineCount: number;
+    title?: string;
+    kind?: string;
+    id?: string;
+    provenanceLabel?: string;
+    sourceType?: string;
+    sourcePath?: string;
+    updatedAt?: string;
+  };
+
+  export type MemoryProviderStatus = {
+    ok: boolean;
+    provider: string;
+    message?: string;
+    details?: Record<string, unknown>;
+  };
+
+  export interface MemorySearchManager {
+    search(
+      query: string,
+      opts?: {
+        maxResults?: number;
+        minScore?: number;
+        sessionKey?: string;
+        signal?: AbortSignal;
+      },
+    ): Promise<MemorySearchResult[]>;
+    readFile(params: { relPath: string; from?: number; lines?: number }): Promise<MemoryReadResult>;
+    status(): MemoryProviderStatus;
+    sync?(params?: { reason?: string; force?: boolean; sessionFiles?: string[] }): Promise<void>;
+    probeEmbeddingAvailability?(): Promise<{ ok: boolean; message?: string }>;
+    probeVectorAvailability?(): Promise<boolean>;
+    close?(): Promise<void>;
+  }
+
+  export type MemoryPluginRuntime = {
+    getMemorySearchManager(params: {
+      cfg: unknown;
+      agentId: string;
+      purpose?: "default" | "status" | "cli";
+    }): Promise<{ manager: MemorySearchManager | null; error?: string }>;
+    resolveMemoryBackendConfig(params: { cfg: unknown; agentId: string }): { backend: "builtin" | "qmd"; qmd?: unknown };
+    closeMemorySearchManager?(params: { cfg: unknown; agentId: string }): Promise<void>;
+    closeAllMemorySearchManagers?(): Promise<void>;
+  };
+
+  export type MemoryPluginCapability = {
+    promptBuilder?: (params: { availableTools: Set<string>; citationsMode?: string }) => string[];
+    flushPlanResolver?: (params: { cfg?: unknown; nowMs?: number }) => unknown | null;
+    runtime?: MemoryPluginRuntime;
+    publicArtifacts?: {
+      listArtifacts(params: { cfg: unknown }): Promise<
+        Array<{
+          kind: string;
+          workspaceDir: string;
+          relativePath: string;
+          absolutePath: string;
+          agentIds: string[];
+          contentType: "markdown" | "json" | "text";
+        }>
+      >;
+    };
+  };
+
   export interface OpenClawPluginApi {
     pluginConfig: unknown;
     logger: {
@@ -43,6 +127,7 @@ declare module "openclaw/plugin-sdk" {
       event: CoreAgentHookEvent | RuntimeHookEvent,
       handler: (event: any, ctx: any) => Promise<any>,
     ): void;
+    registerMemoryCapability?(capability: MemoryPluginCapability): void;
     registerService(service: {
       id: string;
       start: () => void;

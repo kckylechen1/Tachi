@@ -11,6 +11,7 @@
       "memory_save",
       "memory_graph",
       "memory_runtime_info",
+      "continuity_board",
       "todo_write",
       "todo_read",
       "todo_spawn_summary"
