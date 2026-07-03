@@ -215,6 +215,12 @@ health for OAuth/session blobs.
 Proposed operator commands:
 
 ```bash
+tachi vault intake discover --host openclaw
+tachi vault intake plan --host openclaw --output plan.json
+tachi vault intake apply --from plan.json
+tachi vault intake probe --provider all
+tachi vault intake consolidate --dry-run
+
 tachi vault auth discover --host grokcli
 tachi vault auth import --host grokcli --account default
 tachi vault auth list
@@ -232,10 +238,104 @@ Proposed MCP tools:
 - `vault_auth_resolve`
 - `vault_auth_record_result`
 - `vault_auth_probe`
+- `vault_intake_discover`
+- `vault_intake_plan`
+- `vault_intake_apply`
+- `vault_intake_probe`
+- `vault_intake_consolidate`
 
 Responses must be machine-readable and redacted by default. Raw secret values
 are returned only by explicit resolve/lease calls after policy approval, and
 only to the requesting trusted adapter.
+
+## Intake Workflow
+
+The missing operational entrypoint is a Vault intake lane. Existing commands
+cover only narrow cases:
+
+- `tachi vault setup-keys` prompts through a fixed provider-key list;
+- `tachi vault set` stores one value;
+- `tachi vault set-pool` stores one rotation pool from stdin;
+- credential profiles materialize known Vault entries but do not discover,
+  import, probe, or consolidate them.
+
+P0 intake must make Vault manageable when keys are duplicated, stale, or spread
+across host configs.
+
+### Intake Sources
+
+Initial sources should be read-only discoverers:
+
+- env files: `~/.secrets/master.env`, `~/.tachi/config.env`, project
+  `.env`/`.tachi/vault.env`;
+- OpenClaw: plaintext fields currently reported by `openclaw doctor`;
+- OpenCode: provider `apiKey` config and MCP env maps;
+- Hermes: `.env`, credential pools, OAuth/session pool metadata;
+- Codex and grokcli: auth/session files, imported as `json_blob` only after an
+  explicit apply step;
+- current Tachi Vault metadata and key-health rows.
+
+Discovery output must redact values and include only:
+
+- source path;
+- logical provider/key name;
+- secret type;
+- fingerprint;
+- current Vault match status;
+- health/probe status if known;
+- suggested action.
+
+### Intake Actions
+
+The intake planner should classify each candidate:
+
+- `skip_existing_same_fingerprint`
+- `import_new`
+- `replace_stale`
+- `merge_alias`
+- `promote_to_pool`
+- `mark_auth_failed`
+- `remove_or_archive_orphan`
+
+It should also detect semantic duplicates. Examples from the current Vault:
+
+- `KIMI_API_KEY` and `MOONSHOT_API_KEY` may represent the same Moonshot/Kimi
+  credential family but different downstream env names;
+- `GOOGLE_API_KEY`, `GEMINI_API_KEY`, and `GOOGLE_SEARCH_API_KEY` may share an
+  account but serve different APIs;
+- `SUMMARY_*`, `EXTRACT_*`, `REASONING_*`, and `DISTILL_*` are lane configs,
+  not all independent API keys;
+- LongPort/LongBridge entries are broker/data credentials and should not be
+  mixed with LLM provider pools.
+
+The planner should never merge by name alone. It should use exact fingerprint
+matches when the Vault is unlocked, and provider-specific alias rules when it is
+locked.
+
+### Probe And Health
+
+Intake should make stale keys visible:
+
+- API-key providers get lightweight provider probes when supported;
+- OAuth/session blobs get expiry/refresh metadata extraction where possible;
+- 401/403 should mark auth failed;
+- 429 should mark only the concrete key member as cooling down;
+- unknown probe surfaces remain `unprobed`, not `ok`.
+
+Probe results should feed existing `vault_key_health` for API-key entries and
+future auth-account health for OAuth/session entries.
+
+### Apply Safety
+
+`tachi vault intake apply` should be explicit and reversible:
+
+- dry-run by default;
+- requires unlock/password only when importing or comparing fingerprints;
+- writes a redacted plan artifact;
+- creates backups before patching host configs;
+- stores raw secrets only in Vault;
+- for replaced/archived entries, records old entry metadata and fingerprint, not
+  plaintext values.
 
 ## Migration Plan
 
