@@ -12,6 +12,7 @@ This document tree is automatically maintained by Tachi. Do not edit manually.
 - [Agent Router Spec](<engineering/architecture/agent-router-spec.md>)
 - [Credential Adapters Cleanup](<engineering/architecture/credential-adapters-cleanup.md>)
 - [Credentialed Dispatch Profiles](<engineering/architecture/credentialed-dispatch-profiles.md>)
+- [Vault Auth Broker For Agent Hosts](<engineering/architecture/vault-auth-broker.md>)
 - [Dispatch Policy Learning Spec](<engineering/architecture/dispatch-policy-learning-spec.md>)
 - [Host Adapter Lifecycle V1](<engineering/architecture/host-adapter-lifecycle-v1.md>)
 - [Kernel Surface V1 Specification](<engineering/architecture/kernel-surface-v1.md>) - Defines the 5-layer API contract and exposure model for the Tachi kernel.
