@@ -234,16 +234,8 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
             include_str!("continuity_facade.rs"),
         ),
         (
-            "src/tools/copilot_facade.rs",
-            include_str!("copilot_facade.rs"),
-        ),
-        (
             "src/tools/dispatch_facade.rs",
             include_str!("dispatch_facade.rs"),
-        ),
-        (
-            "src/tools/domain_facade.rs",
-            include_str!("domain_facade.rs"),
         ),
         (
             "src/tools/graph_state_facade.rs",
@@ -254,10 +246,6 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
             include_str!("handoff_facade.rs"),
         ),
         ("src/tools/hub_facade.rs", include_str!("hub_facade.rs")),
-        (
-            "src/tools/kanban_facade.rs",
-            include_str!("kanban_facade.rs"),
-        ),
         (
             "src/tools/memory_facade.rs",
             include_str!("memory_facade.rs"),
