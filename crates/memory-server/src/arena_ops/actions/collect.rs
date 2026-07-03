@@ -93,6 +93,7 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
                 },
             }),
         )?;
+        let compact_status = compact_mission_status(&status);
         collected.push(json!({
             "mission_id": mission_id,
             "state": state,
@@ -105,7 +106,7 @@ pub(super) fn handle_collect(params: TachiArenaParams) -> Result<String, String>
             "artifact_read_error": artifact_read_error,
             "artifact_read_errors": artifact_read_errors,
             "completion_draft": status.get("completion_draft").cloned().unwrap_or(Value::Null),
-            "status": status,
+            "status": compact_status,
         }));
     }
     refresh_board(arena_id)?;

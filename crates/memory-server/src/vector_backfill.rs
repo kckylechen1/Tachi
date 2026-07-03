@@ -11,7 +11,14 @@ const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
 fn embedding_input(text: &str, summary: &str) -> String {
     let t = text.trim();
-    let s = if t.len() < 10 { summary } else { t };
+    let summary = summary.trim();
+    let s = if t.chars().count() > 500 && !summary.is_empty() {
+        summary
+    } else if t.len() < 10 && !summary.is_empty() {
+        summary
+    } else {
+        t
+    };
     if s.len() > 8000 {
         s.chars().take(8000).collect()
     } else {
@@ -98,4 +105,32 @@ pub(crate) async fn sweep_db_vectors(
         }
     }
     Ok((done, todo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::embedding_input;
+
+    #[test]
+    fn embedding_input_prefers_summary_for_long_text() {
+        let long_text = "runtime details ".repeat(60);
+        assert!(long_text.chars().count() > 500);
+
+        assert_eq!(
+            embedding_input(&long_text, "compact incident summary"),
+            "compact incident summary"
+        );
+    }
+
+    #[test]
+    fn embedding_input_keeps_short_text_without_summary() {
+        assert_eq!(
+            embedding_input("short exact marker", ""),
+            "short exact marker"
+        );
+        assert_eq!(
+            embedding_input("tiny", "fallback summary"),
+            "fallback summary"
+        );
+    }
 }

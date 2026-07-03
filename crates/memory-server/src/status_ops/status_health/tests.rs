@@ -14,6 +14,25 @@ fn restore_env(name: &str, original: Option<std::ffi::OsString>) {
     }
 }
 
+struct EnvGuard {
+    name: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        restore_env(self.name, self.original.take());
+    }
+}
+
 #[test]
 fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
     let _guard = crate::utils::global_test_lock()
@@ -117,12 +136,12 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
     let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
     assert!(reasoning.deprecated);
-    assert_eq!(reasoning.canonical_name, "SILICONFLOW_API_KEY");
+    assert_eq!(reasoning.canonical_name, "DEEPSEEK_API_KEY");
     assert_eq!(reasoning.status, "configured");
     assert!(reasoning
         .cleanup_hint
         .as_deref()
-        .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
+        .is_some_and(|hint| hint.contains("migrate this secret to DEEPSEEK_API_KEY")));
 
     restore_env("REASONING_API_KEY", original);
 }
@@ -280,8 +299,11 @@ fn rotation_members_configure_their_logical_provider_key() {
 #[test]
 fn provider_probe_cache_round_trips() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let global_db = dir.path().join("global").join("memory.db");
+    let other_global_db = dir.path().join("other").join("memory.db");
     let cache = write_provider_probe_cache_report(
         dir.path(),
+        &global_db,
         ProviderProbeReport {
             probes: vec![ProviderProbeResult {
                 name: "voyage_embed".to_string(),
@@ -317,7 +339,11 @@ fn provider_probe_cache_round_trips() {
     )
     .expect("write cache");
 
-    let loaded = read_provider_probe_cache(dir.path()).expect("read cache");
+    assert!(
+        read_provider_probe_cache(dir.path(), &other_global_db).is_none(),
+        "probe cache must be scoped by global DB"
+    );
+    let loaded = read_provider_probe_cache(dir.path(), &global_db).expect("read cache");
     assert_eq!(loaded.last_probe_at, cache.last_probe_at);
     assert_eq!(loaded.ttl_seconds, 24 * 60 * 60);
     assert!(!loaded.is_stale());
@@ -328,4 +354,42 @@ fn provider_probe_cache_round_trips() {
     assert_eq!(loaded.rotation_groups[0].healthy_keys, 1);
     assert_eq!(loaded.rotation_groups[0].rate_limited_keys, 1);
     assert_eq!(loaded.rotation_groups[0].keys[1].status, "rate_limited");
+}
+
+#[test]
+fn provider_probe_client_loads_target_db_key_health() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _persist = EnvGuard::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp vault db");
+    let db_path = temp.path().join("global.db");
+    const KEY: &str = "TACHI_TEST_ONLY_API_KEY_PROBE_HEALTH";
+
+    let writer = crate::llm::LlmClient::new_with_vault_db(Some(&db_path))
+        .expect("writer client should initialize");
+    writer.record_provider_key_result_blocking(
+        KEY,
+        KEY,
+        Some(401),
+        None,
+        None,
+        Some("forced auth failure"),
+    );
+
+    let probe = super::probes::probe_llm_client_for_tests(&db_path)
+        .expect("probe client should initialize");
+    probe.set_provider_secret_pool(
+        KEY,
+        vec![crate::llm::ProviderSecret {
+            key_id: KEY.to_string(),
+            value: "secret".to_string(),
+        }],
+    );
+
+    assert_eq!(
+        probe.provider_key_id_for_tests(&[KEY]),
+        None,
+        "provider probes must honor fresh auth_failed health from the target global DB"
+    );
 }

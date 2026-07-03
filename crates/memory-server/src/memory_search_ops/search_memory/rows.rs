@@ -16,6 +16,7 @@ use crate::shared_defs::{slim_l0_rule, slim_search_result};
 use crate::tool_params::SearchMemoryParams;
 use crate::utils::{is_active_global_rule, parse_env_bool};
 use crate::{DbScope, MemoryServer};
+use serde_json::json;
 
 const MAX_CONTEXT_SYMBOLS: usize = 32;
 
@@ -37,6 +38,49 @@ fn sandbox_allows_read(
             format!("sandbox access check failed for role '{role}' path '{path}': {e}")
         })
     })
+}
+
+fn recall_quality_from_store(store: &memory_core::MemoryStore) -> Option<serde_json::Value> {
+    let vector = crate::status_ops::vector_health(store.connection()).ok()?;
+    if vector.total == 0 || vector.coverage >= 0.9 {
+        return None;
+    }
+    Some(json!({
+        "status": "degraded",
+        "reason": "vector coverage below 90%; lexical/FTS recall still runs, but semantic recall may miss relevant rows",
+        "vector_coverage": (vector.coverage * 1000.0).round() / 1000.0,
+        "vector_missing": vector.missing,
+        "pending_enrichment": vector.pending_enrichment,
+        "memory_total": vector.total,
+    }))
+}
+
+fn recall_quality_for_global(server: &MemoryServer) -> Option<serde_json::Value> {
+    server
+        .with_global_store_read(|store| Ok(recall_quality_from_store(store)))
+        .ok()
+        .flatten()
+}
+
+fn recall_quality_for_project(
+    server: &MemoryServer,
+    params: &SearchMemoryParams,
+) -> Option<serde_json::Value> {
+    if let Some(project_name) = params.project.as_deref() {
+        return server
+            .with_named_project_store_read(project_name, |store| {
+                Ok(recall_quality_from_store(store))
+            })
+            .ok()
+            .flatten();
+    }
+    if !server.has_project_db() {
+        return None;
+    }
+    server
+        .with_project_store_read(|store| Ok(recall_quality_from_store(store)))
+        .ok()
+        .flatten()
 }
 
 pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]) -> String {
@@ -378,10 +422,30 @@ pub(crate) async fn search_memory_rows_with_recall_config(
         deduped_results = allowed_results;
     }
 
+    let global_recall_quality = deduped_results
+        .iter()
+        .any(|(_, db_scope)| *db_scope == DbScope::Global)
+        .then(|| recall_quality_for_global(server))
+        .flatten();
+    let project_recall_quality = deduped_results
+        .iter()
+        .any(|(_, db_scope)| *db_scope == DbScope::Project)
+        .then(|| recall_quality_for_project(server, &params))
+        .flatten();
+
     let mut output: Vec<serde_json::Value> = deduped_results
         .iter()
         .map(|(r, db_scope)| {
             let mut row = slim_search_result(r, *db_scope, params.include_metadata);
+            let recall_quality = match db_scope {
+                DbScope::Global => global_recall_quality.as_ref(),
+                DbScope::Project => project_recall_quality.as_ref(),
+            };
+            if let Some(recall_quality) = recall_quality {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("recall_quality".to_string(), recall_quality.clone());
+                }
+            }
             if memory_core::scorer::is_id_like_exact_query(&params.query)
                 && memory_core::scorer::entry_has_exact_query_token(&r.entry, &params.query)
             {

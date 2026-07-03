@@ -19,9 +19,12 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
 #[test]
 fn tachi_home_defaults_to_dot_tachi_under_user_home() {
     with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let saved_cwd = std::env::current_dir().expect("cwd");
         let saved_home = std::env::var_os("TACHI_HOME");
         let saved_sigil = std::env::var_os("SIGIL_HOME");
         let saved_app = std::env::var_os("TACHI_APP_HOME");
+        std::env::set_current_dir(tmp.path()).expect("set cwd");
         std::env::remove_var("TACHI_HOME");
         std::env::remove_var("SIGIL_HOME");
         std::env::remove_var("TACHI_APP_HOME");
@@ -29,6 +32,7 @@ fn tachi_home_defaults_to_dot_tachi_under_user_home() {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         assert_eq!(tachi_home(), home.join(".tachi"));
 
+        std::env::set_current_dir(saved_cwd).expect("restore cwd");
         restore_env("TACHI_HOME", saved_home);
         restore_env("SIGIL_HOME", saved_sigil);
         restore_env("TACHI_APP_HOME", saved_app);
@@ -67,6 +71,41 @@ fn tachi_home_falls_back_to_tachi_app_home() {
 
         assert_eq!(tachi_home(), PathBuf::from("/tmp/legacy-app-home"));
 
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    });
+}
+
+#[test]
+fn tachi_home_detects_workspace_data_tachi_layout() {
+    with_env_lock(|| {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let saved_cwd = std::env::current_dir().expect("cwd");
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+        std::env::remove_var("TACHI_HOME");
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+
+        let repo = tmp.path().join("Quant_Analyzer_2026");
+        let nested = repo.join("engine/v8");
+        let local_home = repo.join("data/tachi");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::create_dir_all(local_home.join("global")).expect("global parent");
+        std::fs::write(local_home.join("global/memory.db"), b"").expect("global db");
+
+        std::env::set_current_dir(&nested).expect("set cwd");
+        let local_home = std::fs::canonicalize(local_home).expect("canonical local home");
+        let repo = std::fs::canonicalize(repo).expect("canonical repo");
+        assert_eq!(tachi_home(), local_home);
+        assert_eq!(
+            plan_c_global_db_path("hyperion"),
+            repo.join("data/tachi/projects/hyperion/memory.db")
+        );
+
+        std::env::set_current_dir(saved_cwd).expect("restore cwd");
         restore_env("TACHI_HOME", saved_home);
         restore_env("SIGIL_HOME", saved_sigil);
         restore_env("TACHI_APP_HOME", saved_app);

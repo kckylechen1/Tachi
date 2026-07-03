@@ -13,6 +13,7 @@ use super::integrity::IntegrityCheck;
 use super::inventory::select_dbs;
 use super::jobs::JobsPurge;
 use super::junk::JunkCleanup;
+use super::memory_hygiene::MemoryHygiene;
 use super::plan_c::PlanCRepair;
 use super::quarantine::QuarantineSweep;
 use super::retention::RetentionBackfill;
@@ -78,6 +79,7 @@ fn insert_memory(
 
 mod domain;
 mod fts_inventory;
+mod memory_hygiene;
 mod plan_c_restore;
 mod quarantine_jobs_integrity;
 mod refs_enrichment;

@@ -37,6 +37,10 @@ pub(crate) async fn handle_tachi_complete(
         mem_params,
     } = build_complete_eval_record(&params, &date, &ts);
 
+    // Writes never auto-select a named project from machine state (workspace
+    // detection / "single project on disk"): that silently reroutes eval rows
+    // away from the server's own stores. Callers must pass `project` (or the
+    // server must have a bound project DB) for project-scoped persistence.
     let save_result = handle_save_memory(server, mem_params).await?;
     let save_json: serde_json::Value = serde_json::from_str(&save_result)
         .unwrap_or_else(|_| serde_json::json!({"raw": save_result}));
@@ -268,55 +272,72 @@ pub(crate) async fn handle_tachi_complete(
         }
     }
 
-    let dispatch_completion_link = match (
-        params.flow_id.as_deref().filter(|flow| !flow.is_empty()),
-        params
+    let dispatch_completion_link = {
+        let dispatch_id = params
             .dispatch_id
             .as_deref()
-            .filter(|dispatch_id| !dispatch_id.is_empty()),
-    ) {
-        (Some(flow_id), Some(dispatch_id)) => {
-            let completion_payload = json!({
-                "task_id": task_id.clone(),
-                "task": safe_task.clone(),
-                "agent": safe_agent.clone(),
-                "outcome": outcome_norm.clone(),
-                "profile": params.profile.clone(),
-                "risk": params.risk.clone(),
-                "eval_memory_id": eval_memory_id.clone(),
-                "eval_path": path.clone(),
-                "verification_present": verification_present,
-                "diff_present": diff_present,
-                "evidence_refs": safe_evidence_refs.clone(),
-                "tests_run": safe_tests_run.clone(),
-                "subagent_count": params.subagents.len(),
-                "feedback_rules_applied": safe_feedback_rules.clone(),
-                "skills_used": safe_skills_used.clone(),
-                "issue_ref": params.issue_ref.clone(),
-                "pr_ref": params.pr_ref.clone(),
-                "duration_ms": params.duration_ms,
-                "cost_tokens": params.cost_tokens,
-                "cost_usd": params.cost_usd,
-                "quality_score": params.quality_score,
-            });
-            match crate::task_lifecycle::mark_task_dispatch_completion(
-                flow_id,
+            .filter(|dispatch_id| !dispatch_id.is_empty());
+        let flow_id = dispatch_id.and_then(|dispatch_id| {
+            super::flow_link::resolve_flow_id_for_dispatch(
+                server,
                 dispatch_id,
-                completion_payload,
-            ) {
-                Ok(value) => value,
-                Err(error) => json!({
-                    "recorded": false,
-                    "flow_id": flow_id,
-                    "dispatch_id": dispatch_id,
-                    "error": error,
-                }),
+                params.flow_id.as_deref(),
+            )
+        });
+        match (flow_id.as_deref(), dispatch_id) {
+            (Some(flow_id), Some(dispatch_id)) => {
+                let completion_payload = json!({
+                    "task_id": task_id.clone(),
+                    "task": safe_task.clone(),
+                    "agent": safe_agent.clone(),
+                    "outcome": outcome_norm.clone(),
+                    "profile": params.profile.clone(),
+                    "risk": params.risk.clone(),
+                    "eval_memory_id": eval_memory_id.clone(),
+                    "eval_path": path.clone(),
+                    "verification_present": verification_present,
+                    "diff_present": diff_present,
+                    "evidence_refs": safe_evidence_refs.clone(),
+                    "tests_run": safe_tests_run.clone(),
+                    "subagent_count": params.subagents.len(),
+                    "feedback_rules_applied": safe_feedback_rules.clone(),
+                    "skills_used": safe_skills_used.clone(),
+                    "issue_ref": params.issue_ref.clone(),
+                    "pr_ref": params.pr_ref.clone(),
+                    "duration_ms": params.duration_ms,
+                    "cost_tokens": params.cost_tokens,
+                    "cost_usd": params.cost_usd,
+                    "quality_score": params.quality_score,
+                });
+                match crate::task_lifecycle::mark_task_dispatch_completion(
+                    flow_id,
+                    dispatch_id,
+                    completion_payload,
+                ) {
+                    Ok(value) => value,
+                    Err(error) => json!({
+                        "recorded": false,
+                        "flow_id": flow_id,
+                        "dispatch_id": dispatch_id,
+                        "error": error,
+                    }),
+                }
             }
+            (None, Some(dispatch_id)) => json!({
+                "recorded": false,
+                "dispatch_id": dispatch_id,
+                "reason": "missing flow_id (not found on kanban card or dispatch run ledger)",
+            }),
+            (Some(flow_id), None) => json!({
+                "recorded": false,
+                "flow_id": flow_id,
+                "reason": "missing dispatch_id",
+            }),
+            _ => json!({
+                "recorded": false,
+                "reason": "missing dispatch_id",
+            }),
         }
-        _ => json!({
-            "recorded": false,
-            "reason": "missing flow_id or dispatch_id",
-        }),
     };
     pipeline_status["dispatch_completion_link"] = dispatch_completion_link;
 

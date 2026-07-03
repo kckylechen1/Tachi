@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 fn current_git_root() -> Option<PathBuf> {
@@ -58,6 +58,88 @@ pub(super) fn dispatch_response_summary(response: &Value) -> Value {
         "source": "dispatch_response_summary",
         "redacted": true,
     })
+}
+
+fn insert_present(map: &mut Map<String, Value>, source: &Value, key: &str) {
+    if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
+        map.insert(key.to_string(), value.clone());
+    }
+}
+
+fn compact_dispatch_status(source: &Value) -> Value {
+    let mut out = Map::new();
+    for key in [
+        "dispatch_id",
+        "state",
+        "agent",
+        "profile",
+        "selected_profile",
+        "harness_transport",
+        "harness_server_url",
+        "exit_code",
+        "result_written",
+        "source",
+        "redacted",
+    ] {
+        insert_present(&mut out, source, key);
+    }
+    Value::Object(out)
+}
+
+pub(super) fn compact_mission_status(status: &Value) -> Value {
+    let mut out = Map::new();
+    for key in [
+        "arena_id",
+        "mission_id",
+        "state",
+        "harness",
+        "requested_harness",
+        "role",
+        "launch_mode",
+        "launch_status",
+        "launch_requested",
+        "launched",
+        "launch_error",
+        "dispatch_id",
+        "dispatch_agent",
+        "dispatch_profile_name",
+        "profile",
+        "model",
+        "project",
+        "flow_id",
+        "issue_ref",
+        "pr_ref",
+        "collection_state",
+        "plan_written",
+        "result_written",
+        "result_source",
+        "artifact_read_error",
+        "timeout_secs",
+        "created_at",
+        "updated_at",
+        "collected_at",
+        "completed_at",
+        "abort_reason",
+        "reap_reason",
+    ] {
+        insert_present(&mut out, status, key);
+    }
+    if let Some(task) = status.get("task").and_then(Value::as_str) {
+        out.insert(
+            "task_preview".to_string(),
+            json!(crate::utils::compact_text_line(task, 180)),
+        );
+    }
+    if let Some(link) = status.get("dispatch_link") {
+        out.insert("dispatch_link".to_string(), compact_dispatch_status(link));
+    }
+    if let Some(linked) = status.get("linked_dispatch") {
+        out.insert(
+            "linked_dispatch".to_string(),
+            compact_dispatch_status(linked),
+        );
+    }
+    Value::Object(out)
 }
 
 fn read_linked_dispatch_status(dispatch_id: &str, run_dir_hint: Option<&str>) -> Option<Value> {

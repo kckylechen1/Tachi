@@ -33,20 +33,18 @@ pub(crate) use tidy::{
     update_manifest_after_migration, MigrationConfig,
 };
 
-// Phase 2 (LLM 3-layer consolidation): only `SILICONFLOW_API_KEY` +
-// `VOYAGE_API_KEY` are required going forward. Background skill/foundry
-// lanes now go through the Claude CLI pool with SiliconFlow/Qwen as the
-// raw-API fallback, so `MINIMAX_*`, `DISTILL_*` and `REASONING_*` env vars
-// are deprecated. We keep them recognised here (with a `deprecated` flag)
-// so `tachi setup` surfaces a soft warning instead of silently ignoring
-// existing user configs.
+// Phase 2 (LLM 3-layer consolidation): Voyage covers vectors, SiliconFlow
+// covers front-line extraction, and DeepSeek is the preferred low-friction
+// foundry distill/reasoning lane. Legacy `MINIMAX_*`, `DISTILL_*` and
+// `REASONING_*` env vars remain recognised so `tachi setup` surfaces a soft
+// warning instead of silently ignoring existing user configs.
 pub(super) struct SetupApiKey {
     pub key: &'static str,
     pub label: &'static str,
     pub deprecated: bool,
 }
 
-pub(super) const SETUP_API_KEYS: [SetupApiKey; 5] = [
+pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     SetupApiKey {
         key: "VOYAGE_API_KEY",
         label: "Voyage embeddings (voyage-4)",
@@ -59,7 +57,12 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 5] = [
     },
     SetupApiKey {
         key: "SILICONFLOW_API_KEY",
-        label: "SiliconFlow extraction (raw_api fallback for all background lanes)",
+        label: "SiliconFlow extraction (front-line extract/summary)",
+        deprecated: false,
+    },
+    SetupApiKey {
+        key: "DEEPSEEK_API_KEY",
+        label: "DeepSeek distill/reasoning (optional foundry lane)",
         deprecated: false,
     },
     SetupApiKey {

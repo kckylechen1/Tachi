@@ -42,6 +42,7 @@ pub(crate) struct ApiKeyStatus {
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct StatusSnapshot {
     pub(crate) daemon: DaemonStatus,
+    pub(crate) daemon_inventory: Vec<DaemonInventoryEntry>,
     pub(crate) dbs: Vec<DbStatus>,
     pub(crate) manifest_path: String,
     pub(crate) dispatches: Vec<DispatchStatus>,
@@ -103,6 +104,23 @@ pub(crate) struct DaemonPidInfo {
     pub(crate) port: Option<u16>,
     pub(crate) version: Option<String>,
     pub(crate) global_db: Option<String>,
+    pub(crate) project_db: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct DaemonInventoryEntry {
+    pub(crate) scope: String,
+    pub(crate) pid: Option<i32>,
+    pub(crate) process_running: bool,
+    pub(crate) authoritative_for_current_global: bool,
+    pub(crate) state: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) lock_path: String,
+    pub(crate) pid_path: String,
+    pub(crate) version: Option<String>,
+    pub(crate) port: Option<u16>,
+    pub(crate) global_db: Option<String>,
+    pub(crate) project_db: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]

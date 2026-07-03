@@ -37,6 +37,7 @@ fn db_status(label: &str, failed: usize, stuck: usize, coverage: f64) -> DbStatu
 fn empty_snapshot(dbs: Vec<DbStatus>) -> StatusSnapshot {
     StatusSnapshot {
         daemon: DaemonStatus::None,
+        daemon_inventory: Vec::new(),
         dbs,
         manifest_path: String::new(),
         dispatches: Vec::new(),

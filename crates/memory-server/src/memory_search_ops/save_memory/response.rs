@@ -47,3 +47,21 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
     }
     response
 }
+
+pub(in crate::memory_search_ops::save_memory) fn build_duplicate_save_response(
+    existing_id: &str,
+    path: &str,
+    target_db: DbScope,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut response = serde_json::Map::new();
+    response.insert("saved".into(), json!(false));
+    response.insert("status".into(), json!("duplicate"));
+    response.insert("id".into(), json!(existing_id));
+    response.insert("path".into(), json!(path));
+    response.insert("db".into(), json!(target_db.as_str()));
+    response.insert(
+        "hint".into(),
+        json!("Identical text already saved at this path. Pass force=true to write anyway."),
+    );
+    response
+}

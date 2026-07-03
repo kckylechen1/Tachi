@@ -4,6 +4,7 @@
 //! `handle_tachi_complete` directly without going through the MCP tool layer.
 
 mod eval_record;
+mod flow_link;
 mod handler;
 mod kanban;
 mod lessons;

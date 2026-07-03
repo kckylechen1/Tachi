@@ -41,7 +41,7 @@ impl MemoryServer {
     // ─── Tachi Arena: tracked worker mission document ledger ────────────────
 
     #[tool(
-        description = "Tracked worker mission ledger. action='open' creates .tachi/arena/<arena_id>/; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt, or launch=true bridges supported harnesses through tachi_task dispatch; action='board' lists arenas/missions plus linked dispatch state; action='collect' reads worker result.md or linked dispatch result.md and returns a completion draft; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
+        description = "Tracked worker mission ledger. action='open' creates an arena under the configured arena root; action='spawn' writes mission prompt.md/status.json and returns a tracked prompt, or launch=true bridges supported harnesses through tachi_task dispatch; action='board' lists compact arena/mission state plus linked dispatch summaries; action='collect' reads worker result.md or linked dispatch result.md and returns a completion draft; action='abort' marks a mission stopped; action='reap' marks stale ready/running missions using timeout_secs when supplied; action='close' closes and summarizes the arena. Arena owns run documents; memory owns distilled knowledge."
     )]
     pub(crate) async fn tachi_arena(
         &self,

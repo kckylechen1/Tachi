@@ -39,12 +39,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         required: true,
         deprecated: false,
         canonical_key: "SILICONFLOW_API_KEY",
-        aliases: &[
-            "EXTRACT_API_KEY",
-            "SUMMARY_API_KEY",
-            "DISTILL_API_KEY",
-            "REASONING_API_KEY",
-        ],
+        aliases: &["EXTRACT_API_KEY", "SUMMARY_API_KEY"],
     },
     ApiKeyDef {
         key: "DEEPSEEK_API_KEY",
@@ -52,7 +47,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         required: false,
         deprecated: false,
         canonical_key: "DEEPSEEK_API_KEY",
-        aliases: &[],
+        aliases: &["DISTILL_API_KEY", "REASONING_API_KEY"],
     },
     ApiKeyDef {
         key: "ZAI_API_KEY",
@@ -107,7 +102,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "MiniMax legacy distill",
         required: false,
         deprecated: true,
-        canonical_key: "SILICONFLOW_API_KEY",
+        canonical_key: "DEEPSEEK_API_KEY",
         aliases: &[],
     },
     ApiKeyDef {
@@ -115,7 +110,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
         label: "Legacy reasoning lane",
         required: false,
         deprecated: true,
-        canonical_key: "SILICONFLOW_API_KEY",
+        canonical_key: "DEEPSEEK_API_KEY",
         aliases: &["ZAI_API_KEY", "BIGMODEL_API_KEY"],
     },
 ];

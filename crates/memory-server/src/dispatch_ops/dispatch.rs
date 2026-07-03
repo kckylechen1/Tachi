@@ -36,6 +36,61 @@ use std::time::Duration;
 
 const DISPATCH_DEDUPE_STALE_LOCK_SECS: i64 = 300;
 
+fn is_opencode_serve_transport(transport: &str) -> bool {
+    matches!(
+        transport.trim().to_ascii_lowercase().as_str(),
+        "serve" | "opencode_serve" | "server"
+    )
+}
+
+fn infer_harness_server_url(
+    params: &TachiDispatchParams,
+    harness_transport: &str,
+) -> Option<String> {
+    params.harness_server_url.clone().or_else(|| {
+        if !is_opencode_serve_transport(harness_transport) {
+            return None;
+        }
+        params
+            .command
+            .windows(2)
+            .find(|pair| pair.first().is_some_and(|arg| arg == "--attach"))
+            .and_then(|pair| pair.get(1))
+            .cloned()
+    })
+}
+
+fn opencode_serve_preflight_error(status: &Value, server_url: Option<&str>) -> String {
+    let location = server_url.unwrap_or("missing harness_server_url");
+    let server_auth = status
+        .pointer("/layers/server_auth")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let password_configured = status
+        .get("server_password_configured")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let doc_error = status.get("doc_error").and_then(Value::as_str);
+    let reason = if !password_configured
+        && server_auth == "failed"
+        && doc_error.is_some_and(|err| err.contains("HTTP 401"))
+    {
+        "daemon env lacks OPENCODE_SERVER_PASSWORD (probe got HTTP 401 on /doc)".to_string()
+    } else if let Some(doc_error) = doc_error {
+        doc_error.to_string()
+    } else if let Some(readiness) = status.get("readiness").and_then(Value::as_str) {
+        format!("readiness={readiness}")
+    } else if status.is_null() {
+        "harness_server_url is required for opencode_serve readiness checks".to_string()
+    } else {
+        "attach_ready=false".to_string()
+    };
+
+    format!(
+        "opencode_serve attach not ready for {location}: {reason}. Set OPENCODE_SERVER_PASSWORD and restart the Tachi daemon, or pass OPENCODE_SERVER_PASSWORD via a credential profile for this dispatch."
+    )
+}
+
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
@@ -159,7 +214,7 @@ pub(crate) async fn handle_tachi_dispatch(
             "cli".to_string()
         }
     });
-    let harness_server_url = params.harness_server_url.clone();
+    let harness_server_url = infer_harness_server_url(&params, &harness_transport);
 
     // Seed status.json so external pollers see something immediately.
     write_status_json(
@@ -535,6 +590,71 @@ pub(crate) async fn handle_tachi_dispatch(
         .iter()
         .map(credential_materialize_report_json)
         .collect::<Vec<_>>();
+
+    if is_opencode_serve_transport(&harness_transport) {
+        let harness_status = crate::dispatch_ops::probe_harness_server_status_with_env(
+            harness_server_url.as_deref(),
+            Some(&dispatch_credentials.env),
+        );
+        let attach_ready = harness_status
+            .get("attach_ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !attach_ready {
+            let err =
+                opencode_serve_preflight_error(&harness_status, harness_server_url.as_deref());
+            append_trajectory_event(
+                &trajectory_path,
+                json!({
+                    "event": "harness_preflight_failed",
+                    "dispatch_id": dispatch_id,
+                    "agent": agent_norm.clone(),
+                    "harness_transport": harness_transport.clone(),
+                    "harness_server_url": harness_server_url.clone(),
+                    "harness_server_status": harness_status.clone(),
+                    "error": err.clone(),
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            let result_written = crate::utils::write_owner_only_file_atomic(
+                &workspace_dir.join("result.md"),
+                err.as_bytes(),
+            )
+            .is_ok();
+            write_status_json(
+                &workspace_dir,
+                &dispatch_id,
+                v2,
+                plan_generated_at.as_deref(),
+                None,
+                if v2 { "approved" } else { "n/a" },
+                Some(1),
+                plan_duration_ms,
+                None,
+                plan_duration_ms,
+                Some(json!({
+                    "agent": agent_norm.clone(),
+                    "task": params.task.clone(),
+                    "state": "TASK_STATE_FAILED",
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "run_dir": workspace_dir.to_string_lossy(),
+                    "result_written": result_written,
+                    "harness_transport": harness_transport.clone(),
+                    "harness_server_url": harness_server_url.clone(),
+                    "harness_server_status": harness_status,
+                    "host_adapter": host_adapter.clone(),
+                    "execution_backend": execution_backend_name,
+                    "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
+                    "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
+                    "capability_bundle": capability_bundle_card.clone(),
+                    "timeout_secs": timeout_secs_for_status,
+                    "error": err.clone(),
+                })),
+            );
+            return Err(err);
+        }
+    }
+
     let flow_dispatch_slot =
         reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
 

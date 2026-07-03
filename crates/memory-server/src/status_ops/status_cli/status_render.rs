@@ -63,8 +63,11 @@ async fn render_one(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let provider_probe_report = if probe_keys {
         let report = status_health::run_provider_probe_report(global_db_path).await;
-        if let Err(err) = status_health::write_provider_probe_cache_report(app_home, report.clone())
-        {
+        if let Err(err) = status_health::write_provider_probe_cache_report(
+            app_home,
+            global_db_path,
+            report.clone(),
+        ) {
             eprintln!("[!] provider probe cache write failed: {err}");
         }
         report
@@ -138,6 +141,26 @@ async fn render_one(
         crate::status_ops::DaemonStatus::None => {
             println!(
                 "  [!] no daemon running (single-process/stdio mode; background tasks paused)"
+            );
+        }
+    }
+    let other_running_daemons: Vec<_> = snapshot
+        .daemon_inventory
+        .iter()
+        .filter(|daemon| daemon.process_running && !daemon.authoritative_for_current_global)
+        .collect();
+    if !other_running_daemons.is_empty() {
+        println!("  [i] other daemon scopes running:");
+        for daemon in other_running_daemons {
+            println!(
+                "      pid={} state={} global_db={} project_db={}",
+                daemon
+                    .pid
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                daemon.state,
+                daemon.global_db.as_deref().unwrap_or("unknown"),
+                daemon.project_db.as_deref().unwrap_or("none"),
             );
         }
     }

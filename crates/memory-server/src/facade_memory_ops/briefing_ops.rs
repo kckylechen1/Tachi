@@ -9,9 +9,9 @@ use super::evidence_format::{
     wants_json,
 };
 use crate::agent_markdown;
-use crate::memory_search_ops::{handle_search_memory, search_memory_rows};
 use crate::memory_search_ops::{
-    named_project_db_exists, named_project_from_db_path, resolve_workspace_named_project,
+    handle_search_memory, list_available_named_projects, resolve_effective_named_project,
+    search_memory_rows,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -31,13 +31,12 @@ pub(crate) async fn handle_memory_briefing(
     let named_project = params
         .project
         .clone()
-        .or_else(|| resolve_workspace_named_project().filter(|name| named_project_db_exists(name)))
-        .or_else(|| {
-            server
-                .project_db_path_buf()
-                .and_then(|path| named_project_from_db_path(path.as_path()))
-                .filter(|name| named_project_db_exists(name))
-        });
+        .or_else(|| resolve_effective_named_project(server, None));
+    let available_projects = if named_project.is_none() {
+        list_available_named_projects()
+    } else {
+        Vec::new()
+    };
     let query = params
         .query
         .clone()
@@ -209,6 +208,7 @@ pub(crate) async fn handle_memory_briefing(
             "status": "completed",
             "query": query,
             "project": named_project,
+            "available_projects": available_projects,
             "memories": memories,
             "wiki": wiki,
             "cross_project": cross_project,

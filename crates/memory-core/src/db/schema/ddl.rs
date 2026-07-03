@@ -198,6 +198,30 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id);
         CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at DESC);
 
+        -- LLM usage ledger for provider spend attribution. This stores only
+        -- provider/model/token metadata, never prompts, responses, or secrets.
+        CREATE TABLE IF NOT EXISTS llm_usage (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp             TEXT NOT NULL,
+            lane                  TEXT NOT NULL,
+            model                 TEXT NOT NULL,
+            provider_host         TEXT NOT NULL DEFAULT '',
+            provider_logical_name TEXT NOT NULL DEFAULT '',
+            provider_key_id       TEXT NOT NULL DEFAULT '',
+            prompt_tokens         INTEGER,
+            completion_tokens     INTEGER,
+            total_tokens          INTEGER,
+            max_tokens            INTEGER NOT NULL DEFAULT 0,
+            request_chars         INTEGER NOT NULL DEFAULT 0,
+            response_chars        INTEGER NOT NULL DEFAULT 0,
+            duration_ms           INTEGER NOT NULL DEFAULT 0,
+            success               INTEGER NOT NULL DEFAULT 1,
+            created_at            TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_timestamp ON llm_usage(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_lane ON llm_usage(lane, timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_provider_key ON llm_usage(provider_logical_name, provider_key_id, timestamp DESC);
+
         -- Agent known state for context diffing (incremental memory sync)
         CREATE TABLE IF NOT EXISTS agent_known_state (
             agent_id   TEXT NOT NULL,

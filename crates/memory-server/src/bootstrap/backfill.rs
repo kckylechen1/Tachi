@@ -109,6 +109,7 @@ pub(super) async fn run_backfill_vectors(
 /// Backfill missing summaries for a given DB.
 pub(super) async fn run_backfill_summaries(
     db_path: &PathBuf,
+    vault_db_path: &PathBuf,
     dry_run: bool,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
@@ -139,7 +140,9 @@ pub(super) async fn run_backfill_summaries(
         return Ok(());
     }
 
-    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
+        .map_err(|e| format!("LLM client init failed: {e}"))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
     let concurrency = backfill_llm_concurrency();
 
     println!("\nBackfilling {missing} entries (concurrency={concurrency})...\n");
@@ -202,6 +205,7 @@ pub(super) async fn run_backfill_summaries(
 /// Backfill missing recall keywords using the configured extract LLM.
 pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
+    vault_db_path: &PathBuf,
     dry_run: bool,
 ) -> Result<(), Box<dyn Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
@@ -231,7 +235,9 @@ pub(super) async fn run_backfill_metadata(
         return Ok(());
     }
 
-    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    let llm = LlmClient::new_with_vault_db(Some(vault_db_path))
+        .map_err(|e| format!("LLM client init failed: {e}"))?;
+    materialize_standalone(&llm, vault_db_path).map_err(|e| IoError::new(ErrorKind::Other, e))?;
     let concurrency = backfill_llm_concurrency();
 
     println!("\nBackfilling metadata for {missing} entries (concurrency={concurrency})...\n");

@@ -26,12 +26,25 @@ pub(in crate::memory_search_ops::save_memory) fn validate_save_text(
     // Capture gate (Branch #4): validate domain, path bucket, min-chars, and
     // markdown-dump heuristic. Default mode = Warn (annotate response, write
     // proceeds). TACHI_CAPTURE_GATE=enforce switches to hard rejection.
+    let effective_domain = params
+        .domain
+        .as_deref()
+        .filter(|domain| !domain.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            crate::repair::domain::repair_target(
+                params.domain.as_deref(),
+                &params.path,
+                &params.category,
+                "mcp",
+            )
+        });
     let gate_mode = crate::capture_gate::GateMode::from_env();
     let gate_decision = crate::capture_gate::evaluate(
         &crate::capture_gate::GateInput::new(
             safe_text,
             &params.path,
-            params.domain.as_deref(),
+            effective_domain.as_deref(),
             params.force,
         ),
         gate_mode,

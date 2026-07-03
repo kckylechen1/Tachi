@@ -28,7 +28,7 @@ pub(super) fn dispatch_params_for_mission(
     tracked_prompt: &str,
 ) -> Option<TachiDispatchParams> {
     let agent = match lane.id {
-        "opencode" => "custom",
+        "opencode" => "opencode",
         "claude" => "claude",
         _ => return None,
     };
@@ -88,21 +88,66 @@ pub(super) fn completion_draft_for_mission(status: &Value, result_path: &Path) -
         .and_then(Value::as_str)
         .or_else(|| status.get("harness").and_then(Value::as_str))
         .unwrap_or("arena-worker");
-    json!({
-        "tool": "tachi_task",
-        "arguments": {
-            "action": "complete",
-            "dispatch_id": status.get("dispatch_id").cloned().unwrap_or(Value::Null),
-            "task": task,
-            "agent": agent,
-            "outcome": "success|failure|partial|aborted",
-            "profile": status.get("dispatch_profile_name").cloned().unwrap_or(Value::Null),
-            "flow_id": status.get("flow_id").cloned().unwrap_or(Value::Null),
-            "issue_ref": status.get("issue_ref").cloned().unwrap_or(Value::Null),
-            "pr_ref": status.get("pr_ref").cloned().unwrap_or(Value::Null),
-            "evidence_refs": [result_path.to_string_lossy().to_string()],
-            "tests_run": [],
-            "diff_present": null,
-        }
-    })
+    let inferred_outcome = infer_completion_outcome(result_path);
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("action".into(), json!("complete"));
+    arguments.insert(
+        "dispatch_id".into(),
+        status.get("dispatch_id").cloned().unwrap_or(Value::Null),
+    );
+    arguments.insert("task".into(), json!(task));
+    arguments.insert("agent".into(), json!(agent));
+    if let Some(outcome) = inferred_outcome {
+        arguments.insert("outcome".into(), json!(outcome));
+    } else {
+        arguments.insert("outcome".into(), Value::Null);
+    }
+    arguments.insert(
+        "profile".into(),
+        status
+            .get("dispatch_profile_name")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    arguments.insert(
+        "flow_id".into(),
+        status.get("flow_id").cloned().unwrap_or(Value::Null),
+    );
+    arguments.insert(
+        "issue_ref".into(),
+        status.get("issue_ref").cloned().unwrap_or(Value::Null),
+    );
+    arguments.insert(
+        "pr_ref".into(),
+        status.get("pr_ref").cloned().unwrap_or(Value::Null),
+    );
+    arguments.insert(
+        "evidence_refs".into(),
+        json!([result_path.to_string_lossy().to_string()]),
+    );
+    arguments.insert("tests_run".into(), json!([]));
+    arguments.insert("diff_present".into(), Value::Null);
+    let mut draft = serde_json::Map::new();
+    draft.insert("tool".into(), json!("tachi_task"));
+    draft.insert("arguments".into(), Value::Object(arguments));
+    if inferred_outcome.is_none() {
+        draft.insert("required_edits".into(), json!(["outcome"]));
+    }
+    Value::Object(draft)
+}
+
+pub(super) fn infer_completion_outcome(result_path: &Path) -> Option<&'static str> {
+    let raw = std::fs::read_to_string(result_path).ok()?;
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("exit_code: 0") || lower.contains("status: success") {
+        Some("success")
+    } else if lower.contains("exit_code:") && !lower.contains("exit_code: 0") {
+        Some("failure")
+    } else if lower.contains("aborted") {
+        Some("aborted")
+    } else if lower.contains("partial") {
+        Some("partial")
+    } else {
+        None
+    }
 }

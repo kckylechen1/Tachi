@@ -1,4 +1,5 @@
 use super::*;
+use crate::manifest::{DbEntry, DbRole};
 
 pub(crate) fn collect_snapshot(
     app_home: &Path,
@@ -23,6 +24,7 @@ fn collect_snapshot_inner(
     compare_provider_values: bool,
 ) -> StatusSnapshot {
     let daemon = collect_daemon_status(app_home, global_db_path);
+    let daemon_inventory = collect_daemon_inventory(app_home, global_db_path);
     let manifest_path = app_home.join("manifest.json");
 
     let manifest = Manifest::load(&manifest_path).unwrap_or_else(|_| Manifest::empty());
@@ -30,14 +32,7 @@ fn collect_snapshot_inner(
     let mut dbs: Vec<DbStatus> = Vec::with_capacity(manifest.dbs.len());
     for entry in &manifest.dbs {
         let path = PathBuf::from(&entry.path);
-        let label = if entry.scope_hint.is_empty() {
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("?.db")
-                .to_string()
-        } else {
-            entry.scope_hint.clone()
-        };
+        let label = db_status_label(entry, &path);
         let orphan = is_orphan_entry(entry, &path, global_db_path, project_db_path);
         if !path.exists() {
             dbs.push(DbStatus {
@@ -153,7 +148,7 @@ fn collect_snapshot_inner(
     let recent_evals = collect_recent_evals(global_db_path, project_db_path);
     let last_daily_report = find_last_daily_report(app_home);
     let distill_marker = read_distill_marker(app_home);
-    let provider_probe_cache = status_health::read_provider_probe_cache(app_home);
+    let provider_probe_cache = status_health::read_provider_probe_cache(app_home, global_db_path);
     let fresh_provider_probe_cache = provider_probe_cache
         .as_ref()
         .filter(|cache| !cache.is_stale());
@@ -196,6 +191,7 @@ fn collect_snapshot_inner(
 
     StatusSnapshot {
         daemon,
+        daemon_inventory,
         dbs,
         manifest_path: manifest_path.display().to_string(),
         dispatches,
@@ -310,4 +306,71 @@ pub(super) fn paths_equal(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
     }
+}
+
+fn db_status_label(entry: &DbEntry, path: &Path) -> String {
+    if matches!(entry.role, DbRole::Global) {
+        return "global".to_string();
+    }
+    let scope_hint = entry.scope_hint.trim();
+    if !is_placeholder_scope_hint(scope_hint) {
+        return scope_hint.to_string();
+    }
+    if let Some(label) = label_for_tachi_run_db(path) {
+        return label;
+    }
+    if let Some(name) = crate::path_utils::named_project_for_db_path(path) {
+        return format!("project:{name}");
+    }
+    if matches!(entry.role, DbRole::Project) {
+        return path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(|name| format!("project:{name}"))
+            .unwrap_or_else(|| "project".to_string());
+    }
+    if !entry.owner.trim().is_empty() && entry.owner != "tachi" {
+        return entry.owner.clone();
+    }
+    let file = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("memory.db");
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("?");
+    format!("{parent}/{file}")
+}
+
+fn is_placeholder_scope_hint(scope_hint: &str) -> bool {
+    scope_hint.is_empty()
+        || scope_hint.eq_ignore_ascii_case("unknown")
+        || scope_hint.eq_ignore_ascii_case("tachi-other")
+}
+
+fn label_for_tachi_run_db(path: &Path) -> Option<String> {
+    let components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let run_idx = components
+        .iter()
+        .position(|component| component == "runs")?;
+    let run_name = components.get(run_idx + 1)?;
+    let db_role = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())?;
+    if db_role != "project" && db_role != "global" {
+        return None;
+    }
+    Some(format!("run:{run_name}:{db_role}"))
+}
+
+#[cfg(test)]
+pub(crate) fn db_status_label_for_tests(entry: &DbEntry, path: &Path) -> String {
+    db_status_label(entry, path)
 }

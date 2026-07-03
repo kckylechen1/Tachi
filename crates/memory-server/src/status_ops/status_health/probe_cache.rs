@@ -10,16 +10,20 @@ pub(crate) async fn refresh_provider_probe_cache(
     global_db_path: &Path,
 ) -> Result<ProviderProbeCache, String> {
     let report = run_provider_probe_report(global_db_path).await;
-    write_provider_probe_cache_report(app_home, report)
+    write_provider_probe_cache_report(app_home, global_db_path, report)
 }
 
-pub(crate) fn read_provider_probe_cache(app_home: &Path) -> Option<ProviderProbeCache> {
-    let raw = std::fs::read_to_string(provider_probe_cache_path(app_home)).ok()?;
+pub(crate) fn read_provider_probe_cache(
+    app_home: &Path,
+    global_db_path: &Path,
+) -> Option<ProviderProbeCache> {
+    let raw = std::fs::read_to_string(provider_probe_cache_path(app_home, global_db_path)).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
 pub(crate) fn write_provider_probe_cache_report(
     app_home: &Path,
+    global_db_path: &Path,
     report: ProviderProbeReport,
 ) -> Result<ProviderProbeCache, String> {
     let cache = ProviderProbeCache {
@@ -28,7 +32,7 @@ pub(crate) fn write_provider_probe_cache_report(
         probes: report.probes,
         rotation_groups: report.rotation_groups,
     };
-    let path = provider_probe_cache_path(app_home);
+    let path = provider_probe_cache_path(app_home, global_db_path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create probe cache dir: {e}"))?;
     }
@@ -38,6 +42,9 @@ pub(crate) fn write_provider_probe_cache_report(
     Ok(cache)
 }
 
-fn provider_probe_cache_path(app_home: &Path) -> std::path::PathBuf {
-    app_home.join("status").join("provider-probes.json")
+fn provider_probe_cache_path(app_home: &Path, global_db_path: &Path) -> std::path::PathBuf {
+    app_home.join("status").join(format!(
+        "provider-probes-{}.json",
+        crate::daemon_lock::daemon_scope_id(global_db_path)
+    ))
 }

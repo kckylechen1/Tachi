@@ -98,7 +98,8 @@ pub struct TachiArenaParams {
     #[serde(default)]
     pub role: Option<String>,
 
-    /// Working directory hint for a future harness adapter.
+    /// Working directory passed to launched dispatches when launch=true; stored
+    /// as mission metadata for document-only lanes.
     #[serde(default)]
     pub cwd: Option<String>,
 
@@ -114,7 +115,8 @@ pub struct TachiArenaParams {
     #[serde(default)]
     pub permissions: Vec<String>,
 
-    /// Mission timeout hint for a future harness adapter.
+    /// Mission timeout in seconds. For launch=true this is the dispatch timeout;
+    /// for active arena missions it is also the reap threshold when supplied.
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"

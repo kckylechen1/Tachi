@@ -45,7 +45,8 @@ pub(super) async fn run_if_backfill_command(
                 .as_ref()
                 .map(|p| expand_user_path(home, p.to_string_lossy().as_ref()))
                 .unwrap_or_else(|| global_db_path.clone());
-            super::super::backfill::run_backfill_summaries(&target_path, *dry_run).await?;
+            super::super::backfill::run_backfill_summaries(&target_path, global_db_path, *dry_run)
+                .await?;
             Ok(true)
         }
         Commands::BackfillMetadata { db, dry_run } => {
@@ -53,7 +54,8 @@ pub(super) async fn run_if_backfill_command(
                 .as_ref()
                 .map(|p| expand_user_path(home, p.to_string_lossy().as_ref()))
                 .unwrap_or_else(|| global_db_path.clone());
-            super::super::backfill::run_backfill_metadata(&target_path, *dry_run).await?;
+            super::super::backfill::run_backfill_metadata(&target_path, global_db_path, *dry_run)
+                .await?;
             Ok(true)
         }
         Commands::BackfillFts { db, full, dry_run } => {

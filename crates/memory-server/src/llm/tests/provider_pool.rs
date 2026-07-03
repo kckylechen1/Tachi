@@ -159,6 +159,33 @@ fn all_pool_keys_auth_failed_returns_none() {
 }
 
 #[test]
+fn stale_auth_failed_pool_key_is_retryable() {
+    const KEY: &str = "TACHI_TEST_ONLY_API_KEY_STALE_AUTH_FAILURE";
+    let client = LlmClient::new().expect("client should initialize");
+    let key_id = format!("{KEY}_1");
+    client.set_provider_secret_pool(
+        KEY,
+        vec![ProviderSecret {
+            key_id: key_id.clone(),
+            value: "secret-one".to_string(),
+        }],
+    );
+    client.mark_provider_key_auth_failed_for_tests(KEY, &key_id);
+    assert_eq!(
+        client.provider_key_id_for_tests(&[KEY]),
+        None,
+        "fresh auth failures must still block provider selection"
+    );
+
+    client.expire_provider_key_auth_failure_for_tests(KEY, &key_id);
+    assert_eq!(
+        client.provider_key_id_for_tests(&[KEY]).as_deref(),
+        Some(key_id.as_str()),
+        "stale auth failures should be eligible for a live retry"
+    );
+}
+
+#[test]
 fn expired_cooldown_reinstates_pool_key() {
     const KEY: &str = "TACHI_TEST_ONLY_API_KEY_EXPIRED_COOLDOWN";
     let client = LlmClient::new().expect("client should initialize");
