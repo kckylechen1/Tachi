@@ -24,7 +24,6 @@ This document tree is automatically maintained by Tachi. Do not edit manually.
 - [SFT Memory Eval Playbook](<engineering/architecture/sft-memory-eval-playbook.md>)
 - [Subagent Eval System](<engineering/architecture/subagent-eval-system.md>)
 - [Tachi Continuity Memory Architecture](<engineering/architecture/tachi-continuity-memory-architecture.md>)
-- [Tachi Desktop Electron Frontend Design](<engineering/architecture/tachi-desktop-decision.md>) - Architecture and roadmap for the Tachi Desktop Electron management UI.
 - [Tachi Dispatch Goal System Design](<engineering/architecture/tachi-dispatch-goal-design-report.md>) - Design report mapping Codex goal system to Tachi dispatch for better tracking.
 - [Tachikoma Deck/Card Move Vocabulary](<engineering/architecture/tachikoma-deck-card-move-vocabulary.md>)
 - [Tachikoma Remaining Work Plan](<engineering/architecture/tachikoma-remaining-work-plan.md>)

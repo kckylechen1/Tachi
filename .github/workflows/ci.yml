@@ -45,7 +45,6 @@ jobs:
       matrix:
         package:
           - packages/tachi-cli
-          - apps/tachi-desktop
           - integrations/openclaw
 
     steps:

@@ -174,8 +174,8 @@ graph TD
     subgraph Clients["客户端"]
         CLI["tachi CLI"]
         RMCP["MCP 服务器 (Rust 二进制)"]
-        Desktop["tachi-desktop"]
         Node["@chaoxlabs/tachi-node"]
+        Hosts["宿主 MCP 客户端"]
     end
 
     subgraph Cloud["可选 API"]
@@ -208,7 +208,7 @@ graph TD
     RMCP --> VOYAGE
     RMCP --> SILICON
     CLI --> RMCP
-    Desktop --> RMCP
+    Hosts --> RMCP
     Node --> Core
     Workers --> RMCP
 ```
@@ -223,7 +223,6 @@ graph TD
 | `crates/memory-server` | MCP/CLI 二进制、Profile 过滤、Hub 路由、派发/工作流工具、Wiki、Vault 加密、守护锁、Foundry 后台任务。 |
 | `crates/memory-node` | Node.js 原生绑定（`@chaoxlabs/tachi-node`）。 |
 | `packages/tachi-cli` | TypeScript CLI 与 npm 封装。 |
-| `apps/tachi-desktop` | Vite/React 桌面应用。 |
 | `tools/cleaner` | `tachi-clean` 清理工具，用于安全的 target / worktree / temp 清理。 |
 | `skill/` | 内置技能包：`amp`、`codex`、`superpowers`、`waza`。 |
 | `integrations/openclaw` | OpenClaw 插件。 |

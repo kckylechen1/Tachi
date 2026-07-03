@@ -225,8 +225,8 @@ graph TD
     subgraph Clients["Clients"]
         CLI["tachi CLI"]
         RMCP["MCP Server (Rust binary)"]
-        Desktop["tachi-desktop"]
         Node["@chaoxlabs/tachi-node"]
+        Hosts["Host MCP clients"]
     end
 
     subgraph Cloud["Optional APIs"]
@@ -259,7 +259,7 @@ graph TD
     RMCP --> VOYAGE
     RMCP --> SILICON
     CLI --> RMCP
-    Desktop --> RMCP
+    Hosts --> RMCP
     Node --> Core
     Workers --> RMCP
 ```
@@ -274,7 +274,6 @@ graph TD
 | `crates/memory-server` | MCP/CLI binary, profile filtering, Hub routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `packages/tachi-cli` | TypeScript CLI and npm wrapper. |
-| `apps/tachi-desktop` | Vite/React desktop UI. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
 | `skill/` | Built-in skill packs: `amp`, `codex`, `superpowers`, `waza`. |
 | `integrations/openclaw` | OpenClaw plugin. |

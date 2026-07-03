@@ -207,11 +207,10 @@ fn classify(entry: &MemoryEntry) -> Target {
         return Target::Project("sigil");
     }
 
-    if starts_with_any(&path, &["/tachi", "/tachi-desktop", "/project/tachi"])
+    if starts_with_any(&path, &["/tachi", "/project/tachi"])
         || contains_any(
             &blob,
             &[
-                "tachi desktop",
                 "tachi daemon",
                 "tachi hub",
                 "ghost whispers",
