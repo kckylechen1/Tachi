@@ -6,7 +6,13 @@ import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { bridgeConfigSchema, type MemoryEntry } from "./config.js";
+import {
+  emitHostContinuityEvent,
+  loadContinuityBoard,
+  resolveHostRole,
+} from "./host-continuity.js";
 import { MemoryMcpClient } from "./mcp-client.js";
+import { registerNativeTachiMemoryCapability } from "./native-memory.js";
 
 // ---------------------------------------------------------------------------
 // Branch #7 — Tachi manifest-aware DB routing
@@ -540,6 +546,7 @@ export const memoryHybridBridgePlugin = {
     const agentRuns = new Map<string, RunAuditRecord>();
     const subagentRuns = new Map<string, RunAuditRecord>();
     const spawnCounts = new Map<string, number>();
+    let nativeMemoryCapabilityRegistered = false;
 
     function resolveAgentId(agentId?: string): string {
       return (agentId || "main").trim().toLowerCase() || "main";
@@ -639,6 +646,15 @@ export const memoryHybridBridgePlugin = {
         api.logger.warn(`tachi: ${operation} unavailable: ${String(error)}`);
         return { ok: false, error };
       }
+    }
+
+    async function emitTachiEvent(params: Record<string, unknown>, agentId?: string): Promise<unknown | null> {
+      const result = await runWithClient(
+        "tachi_event",
+        async (client) => await client.tachiEvent(params),
+        agentId,
+      );
+      return result.ok ? result.value : null;
     }
 
     async function performSearch(
@@ -755,6 +771,12 @@ export const memoryHybridBridgePlugin = {
     }
 
     api.logger.info("tachi: registered (MCP compatibility mode)");
+    nativeMemoryCapabilityRegistered = registerNativeTachiMemoryCapability({
+      api,
+      topK: config.topK,
+      ensureClient,
+      resolveAgentId,
+    });
 
     // ========================================================================
     // Tools — compatibility wrappers that forward directly to Tachi MCP.
@@ -864,8 +886,51 @@ export const memoryHybridBridgePlugin = {
           agentId,
         );
         return result.ok
-          ? formatJsonTextResult(result.value)
+          ? formatJsonTextResult({
+              ...result.value,
+              openclaw_bridge: {
+                version: "1.6.1",
+                adapter: "openclaw",
+                native_memory_capability: nativeMemoryCapabilityRegistered,
+                continuity_board: true,
+                role: resolveHostRole(agentId),
+                memory_agent_id: resolveMemoryAgentId(agentId),
+                agent_db_path: resolveAgentDbPath(agentId),
+              },
+            })
           : textResult("Tachi MCP client unavailable.");
+      },
+    });
+
+    api.registerTool({
+      name: "continuity_board",
+      label: "Continuity Board",
+      description:
+        "Read the Tachi continuity board for current parallel work lanes, owners, blockers, artifacts, and handoff context.",
+      parameters: Type.Object({
+        project: Type.Optional(Type.String({ description: "Named Tachi project DB selector" })),
+        sessionId: Type.Optional(Type.String({ description: "Optional session/run filter" })),
+        limit: Type.Optional(Type.Number({ description: "Maximum projected rows/events to return" })),
+        writeFeedback: Type.Optional(Type.Boolean({ description: "Record pattern-seen feedback (default false)" })),
+      }),
+      async execute(_toolCallId, params, _signal, context) {
+        const agentId = resolveAgentId((context as AgentLikeContext | undefined)?.agentId);
+        const payload = params as {
+          project?: string;
+          sessionId?: string;
+          limit?: number;
+          writeFeedback?: boolean;
+        };
+        const board = await loadContinuityBoard(
+          (eventParams) => emitTachiEvent(eventParams, agentId),
+          {
+            project: payload.project,
+            sessionId: payload.sessionId,
+            limit: payload.limit,
+            readOnly: payload.writeFeedback !== true,
+          },
+        );
+        return formatJsonTextResult(board);
       },
     });
 
@@ -1168,18 +1233,33 @@ export const memoryHybridBridgePlugin = {
       },
     });
 
-    api.on("before_agent_start", async (event: EventLike, context: AgentLikeContext) => {
+    api.on("before_prompt_build", async (event: EventLike, context: AgentLikeContext) => {
       const query = event.prompt;
       const scope = resolveScope(context, event);
       const agentId = resolveAgentId(context?.agentId);
       const key = `${agentId}:${scope}`;
       agentRuns.set(key, { startedAt: Date.now(), prompt: query });
       await appendRunAudit(scope, {
-        type: "agent_start",
+        type: "before_prompt_build",
         agentId,
         sessionKey: context?.sessionKey || null,
         sessionId: context?.sessionId || null,
         prompt: typeof query === "string" ? query.slice(0, 400) : null,
+      });
+      await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, agentId), {
+        eventType: "host.prompt_build",
+        actor: agentId,
+        sessionId: context?.sessionId || context?.sessionKey || null,
+        runId: event?.runId || null,
+        role: resolveHostRole(agentId),
+        status: "working",
+        goal: typeof query === "string" ? query.slice(0, 240) : null,
+        currentStep: "before_prompt_build",
+        nextAction: "run_turn",
+        payload: {
+          session_key: context?.sessionKey || null,
+          prompt_chars: typeof query === "string" ? query.length : null,
+        },
       });
       if (!query || query.length < 5) {
         return;
@@ -1255,20 +1335,6 @@ export const memoryHybridBridgePlugin = {
       });
     });
 
-    runtimeApi.on("tool_result_persist", async (event: EventLike & { toolName?: string; message?: string }, context: AgentLikeContext) => {
-      if (event?.toolName !== "compact_context") {
-        return;
-      }
-      const scope = resolveScope(context, event);
-      await appendCompaction(scope, {
-        type: "tool_result_persist",
-        agentId: resolveAgentId(context?.agentId),
-        sessionKey: context?.sessionKey || null,
-        toolName: event?.toolName,
-        message: event?.message || null,
-      });
-    });
-
     runtimeApi.on("subagent_spawned", async (event: EventLike & { childSessionKey?: string; id?: string; label?: string }, context: AgentLikeContext) => {
       const scope = resolveScope(context, event);
       const childKey = String(event?.childSessionKey || event?.sessionKey || event?.id || Date.now());
@@ -1280,6 +1346,20 @@ export const memoryHybridBridgePlugin = {
         childSessionKey: childKey,
         label: event?.label || null,
         sessionKey: context?.sessionKey || null,
+      });
+      await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, resolveAgentId(context?.agentId)), {
+        eventType: "host.subagent_spawned",
+        actor: resolveAgentId(context?.agentId),
+        sessionId: context?.sessionId || context?.sessionKey || null,
+        runId: event?.runId || null,
+        role: resolveHostRole(resolveAgentId(context?.agentId)),
+        status: "working",
+        currentStep: "subagent_spawned",
+        nextAction: "monitor_subagent",
+        payload: {
+          child_session_key: childKey,
+          label: event?.label || null,
+        },
       });
     });
 
@@ -1297,6 +1377,22 @@ export const memoryHybridBridgePlugin = {
         durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
         outcome: event?.outcome || null,
         sessionKey: context?.sessionKey || null,
+      });
+      await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, resolveAgentId(context?.agentId)), {
+        eventType: "host.subagent_ended",
+        actor: resolveAgentId(context?.agentId),
+        sessionId: context?.sessionId || context?.sessionKey || null,
+        runId: event?.runId || null,
+        role: resolveHostRole(resolveAgentId(context?.agentId)),
+        status: event?.outcome === "success" ? "done" : "waiting",
+        currentStep: "subagent_ended",
+        nextAction: "review_subagent_evidence",
+        summary: event?.outcome || null,
+        payload: {
+          child_session_key: childKey || null,
+          duration_ms: started ? Math.max(0, Date.now() - started.startedAt) : null,
+          outcome: event?.outcome || null,
+        },
       });
     });
 
@@ -1317,6 +1413,21 @@ export const memoryHybridBridgePlugin = {
         success,
         durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
         captured,
+      });
+      await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, agentId), {
+        eventType: "host.agent_end",
+        actor: agentId,
+        sessionId: context?.sessionId || context?.sessionKey || null,
+        role: resolveHostRole(agentId),
+        status: success ? "done" : "blocked",
+        currentStep: "agent_end",
+        nextAction: success ? "review_or_dispatch_next_lane" : "inspect_failure",
+        blocker: success ? null : "agent_end reported unsuccessful run",
+        payload: {
+          success,
+          duration_ms: started ? Math.max(0, Date.now() - started.startedAt) : null,
+          captured,
+        },
       });
     }
 
@@ -1449,6 +1560,20 @@ export const memoryHybridBridgePlugin = {
         agentId: resolveAgentId(context?.agentId),
         sessionKey: context?.sessionKey || null,
         sessionId: context?.sessionId || null,
+      });
+      const agentId = resolveAgentId(context?.agentId);
+      await emitHostContinuityEvent(api, (params) => emitTachiEvent(params, agentId), {
+        eventType: "host.session_end",
+        actor: agentId,
+        sessionId: context?.sessionId || context?.sessionKey || event?.sessionId || null,
+        runId: event?.runId || null,
+        role: resolveHostRole(agentId),
+        status: "waiting",
+        currentStep: "session_end",
+        nextAction: "handoff_if_unfinished",
+        payload: {
+          session_key: context?.sessionKey || null,
+        },
       });
     });
 

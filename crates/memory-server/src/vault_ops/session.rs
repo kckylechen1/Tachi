@@ -41,9 +41,23 @@ pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
         expired
     };
     if locked {
+        server.llm.clear_provider_secrets();
         crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
     }
     locked
+}
+
+fn try_keychain_auto_unlock_after_locked_access(server: &MemoryServer, reason: &str) -> bool {
+    match crate::provider_config::auto_unlock_vault_from_keychain(server) {
+        Ok(true) => true,
+        Ok(false) => false,
+        Err(err) => {
+            tracing::debug!(
+                "[vault] keychain auto-unlock after locked access skipped ({reason}): {err}"
+            );
+            false
+        }
+    }
 }
 
 /// Check if vault is unlocked and run work with a borrowed cached key.
@@ -51,26 +65,51 @@ pub(super) fn with_vault_key<T>(
     server: &MemoryServer,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
-    let mut key_bytes = {
-        let mut v = server.vault_write();
-        let Some(unlock_time) = v.unlock_time else {
-            return Err("Vault is locked. Call vault_unlock first.".to_string());
+    let mut attempted_auto_unlock = false;
+
+    let key_bytes = loop {
+        let key_result: Result<[u8; 32], String> = {
+            let mut v = server.vault_write();
+            match v.unlock_time {
+                None => Err("Vault is locked. Call vault_unlock first.".to_string()),
+                Some(unlock_time)
+                    if unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs) =>
+                {
+                    clear_cached_vault_state_locked(&mut v);
+                    Err("Vault auto-locked. Call vault_unlock first.".to_string())
+                }
+                Some(_) => v
+                    .key
+                    .as_ref()
+                    .map(|key| *key.bytes())
+                    .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string()),
+            }
         };
 
-        if unlock_time.elapsed() > Duration::from_secs(v.auto_lock_after_secs) {
-            clear_cached_vault_state_locked(&mut v);
-            drop(v);
-            crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
-            return Err("Vault auto-locked. Call vault_unlock first.".into());
+        match key_result {
+            Ok(key) => break Ok(key),
+            Err(reason) if !attempted_auto_unlock => {
+                attempted_auto_unlock = true;
+                if try_keychain_auto_unlock_after_locked_access(server, &reason) {
+                    continue;
+                }
+                if reason.starts_with("Vault auto-locked") {
+                    server.llm.clear_provider_secrets();
+                    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
+                }
+                break Err(reason);
+            }
+            Err(reason) => {
+                if reason.starts_with("Vault auto-locked") {
+                    server.llm.clear_provider_secrets();
+                    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(server);
+                }
+                break Err(reason);
+            }
         }
-
-        let key = v
-            .key
-            .as_ref()
-            .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())?;
-        *key.bytes()
     };
 
+    let mut key_bytes = key_bytes?;
     let result = f(&key_bytes);
     crypto::zero_key(&mut key_bytes);
     result

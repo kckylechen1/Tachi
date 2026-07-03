@@ -1,6 +1,6 @@
 # tachi (OpenClaw Plugin)
 
-OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 runtime facade，负责 agent-facing 的记忆工具面、生命周期 hooks，以及上下文注入。
+OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 host adapter，负责 agent-facing 的记忆工具面、continuity board、生命周期 hooks，以及上下文注入。
 
 ## 架构
 
@@ -8,12 +8,15 @@ OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 runtime facade，�
 OpenClaw Gateway (Node.js)
   └─ tachi plugin (this package)
        └─ MCP client ──→ tachi / memory-server (Rust binary, stdio transport)
+             ├─ continuity event ledger / work graph projections
              └─ SQLite + sqlite-vec (memory.db)
 ```
 
 **MCP-only**：插件默认通过 MCP stdio 协议调用 Tachi 二进制，记忆提炼、embedding、rerank、distill、graph maintenance 都在 Tachi 侧完成。
 
-**当前运行时拓扑**：OpenClaw 插件不再维护本地 shadow store、SQLite FTS 或 capture spool；它只负责 hook timing、tool exposure 和调用 Tachi runtime APIs。
+**当前运行时拓扑**：OpenClaw 插件不再维护本地 shadow store、SQLite FTS 或 capture spool；它只负责 hook timing、tool exposure、native memory capability 注册，以及调用 Tachi runtime APIs。
+
+**Host role**：OpenClaw 在 Tachi agent-host substrate 中是 foreground broker。它负责看 cron/readout/外部信号、创建和监督 work lanes；Codex/Claude/OpenCode/Hermes 等 background workers 通过 Tachi ACP/MCP 接任务并回写 evidence。
 
 ## 安装
 
@@ -40,7 +43,9 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/in
 
 | 文件 | 职责 |
 |------|------|
-| `index.ts` | 插件入口：仅暴露 `memory_search / memory_save / memory_get / memory_graph`，并在 hooks 中调用 Tachi runtime APIs |
+| `index.ts` | 插件入口：注册 tools、native memory capability、hooks，并把 OpenClaw lifecycle 转成 Tachi continuity events |
+| `host-continuity.ts` | OpenClaw host adapter 语义：host role、event 参数、continuity board 读取 |
+| `native-memory.ts` | OpenClaw native memory capability runtime adapter |
 | `mcp-client.ts` | MCP stdio client — 多候选启动、连接恢复、JSON 解析 |
 | `config.ts` | 类型定义 + 默认配置（从环境变量读取） |
 | `constants.ts` | 环境加载：`.env` + 运行时环境变量 |
@@ -74,21 +79,35 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/in
 | `memory_save` | 显式写入 durable memory |
 | `memory_get` | 按 ID 获取单条记忆 |
 | `memory_graph` | 只读查看记忆图谱邻域 |
+| `memory_runtime_info` | 查看 Tachi runtime、DB routing、OpenClaw bridge capability 状态 |
+| `continuity_board` | 读取 Tachi continuity board / A2A handoff bundle |
+| `todo_write` / `todo_read` / `todo_spawn_summary` | 当前 session 的轻量 todo 与 spawn 计数 |
 
-实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `memory_delete`、`compact_context`、`tachi_kanban_*`、`tachi_ghost_*`、`tachi_vault_*` 等高阶 passthrough。
+实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `memory_delete`、`compact_context`、`tachi_kanban_*`、`tachi_vault_*` 等高阶 passthrough。
+
+## Native Memory Capability
+
+在支持 `api.registerMemoryCapability(...)` 的 OpenClaw 版本中，插件会注册 Tachi-backed memory runtime：
+
+- `getMemorySearchManager` 通过 Tachi MCP 执行 `search_memory` / `get_memory`
+- `promptBuilder` 注入 continuity board / broker-worker 分工提醒
+- `memory_runtime_info` 会报告 `openclaw_bridge.native_memory_capability`
+
+旧版 OpenClaw 若没有 native capability API，插件会自动回退到 tool/hook compatibility mode。
 
 ## 注册的 Hooks
 
 | Hook | 说明 |
 |------|------|
-| `before_agent_start` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文 |
+| `before_prompt_build` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文，并避开 legacy `before_agent_start` compatibility path |
 | `llm_input` / `llm_output` | 记录模型输入输出与 usage 审计，用于后续分析与 memory 维护 |
 | `after_tool_call` | 记录工具调用结果，并统计 subagent / spawn 相关行为 |
 | `before_compaction` / `after_compaction` | 记录 compact 前后的窗口与摘要信息，供后续 memory/compaction 分析 |
-| `tool_result_persist` | 对 `compact_context` 的持久化结果做补充审计 |
 | `subagent_spawned` / `subagent_ended` | 记录子代理生命周期与耗时 |
 | `session_end` | 记录会话结束事件，用于 run audit 闭环 |
 | `agent_end` | 自动捕获：会话窗口提交到 Tachi，后续维护由 Foundry worker 异步处理 |
+
+这些 hooks 也会发出轻量 `host.*` continuity events。事件只包含状态、role、summary、blocker、evidence/artifact refs 等结构化信息，不把完整 transcript 当作长期记忆写入。
 
 `compact_context`、`section.build`、`compact.rollup`、`compact.session_memory` 已经在 Tachi 侧可用；当前插件也已经接入 OpenClaw runtime hooks（包括 compaction / subagent / session audit），这里只保留 MCP-only memory runtime，不再维护本地 shadow store。
 

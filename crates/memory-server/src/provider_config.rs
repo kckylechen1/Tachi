@@ -280,6 +280,10 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
     if !cfg!(target_os = "macos") {
         return Ok(false);
     }
+    #[cfg(test)]
+    if std::env::var_os("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK").is_none() {
+        return Ok(false);
+    }
 
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
