@@ -11,8 +11,9 @@ mod virtual_cap;
 
 // Re-export all pub(crate) handler functions so main.rs can import them
 pub(crate) use call::{
-    handle_distill_trajectory, handle_hub_call, handle_hub_disconnect, handle_run_skill,
-    handle_tachi_audit_log,
+    build_skill_execution_envelope, execute_registered_skill_prompt, handle_distill_trajectory,
+    handle_hub_call, handle_hub_disconnect, handle_run_skill, handle_tachi_audit_log,
+    SkillExecutionMode, SIMULATED_SKILL_OUTPUT_MARKER, SIMULATED_SKILL_OUTPUT_WARNING,
 };
 pub(crate) use discover::{
     handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_stats,

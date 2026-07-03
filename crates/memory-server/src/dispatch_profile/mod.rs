@@ -152,7 +152,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
+        auto_capability_bundle: false,
         allowed_facades: &[
             "tachi_briefing",
             "tachi_memory",
@@ -262,7 +262,7 @@ pub(crate) const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
-        auto_capability_bundle: true,
+        auto_capability_bundle: false,
         allowed_facades: &[
             "tachi_briefing",
             "tachi_memory",
