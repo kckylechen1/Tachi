@@ -1,7 +1,7 @@
 # LLM 三层模型重构计划
 
 > 日期: 2026-05-03
-> 状态: Phase 1 完成（tachi-helper），Phase 2 待开始（Rust 后端）
+> 状态: Go `tachi-helper` 已退休；当前配置入口由 Rust `tachi setup --interactive` 与 Vault/setup CLI 承接。
 
 ## 目标
 
@@ -70,12 +70,12 @@ Foundry LLM 选型参考 `~/.openclaw/agents/yaya/harness/eval/`：
 
 ## 实施步骤
 
-### Phase 1: tachi-helper 前端 ✅
+### Phase 1: Setup 配置入口 ✅
 
-- [x] step_foundry.go: 4 lane → Embedding / Rerank / 前台 LLM / Foundry LLM
-- [x] step_done.go: summary 展示前台 + Foundry 选择
-- [x] config.env 写入: 前台 → EXTRACT_* + SUMMARY_*，Foundry → DISTILL_* + REASONING_*
-- [x] 编译测试通过
+- [x] Rust `tachi setup --interactive` 成为当前 onboarding/config 入口
+- [x] `tachi vault setup-keys` 与 setup wizard 复用 provider key 定义
+- [x] config.env 继续兼容: 前台 → EXTRACT_* + SUMMARY_*，Foundry → DISTILL_* + REASONING_*
+- [x] Go `tools/tachi-helper` 已不再作为产品入口维护
 
 ### Phase 2: Rust llm.rs 后端迁移
 
@@ -106,13 +106,13 @@ Foundry LLM 选型参考 `~/.openclaw/agents/yaya/harness/eval/`：
 ## 兼容性
 
 - 现有 per-lane env vars (EXTRACT_*, DISTILL_* 等) 继续生效
-- tachi-helper wizard 写入对应 env var，新用户开箱即用
+- Rust setup wizard / vault setup 命令写入或导入对应 env var，新用户开箱即用
 - 不引入新的 env var 命名（不搞 LOCAL_LLM / CLOUD_LLM）
 
 ## 验证
 
 - [ ] 全部 251+ tests 通过
 - [ ] config.env 兼容性：旧配置不 break
-- [ ] tachi-helper wizard 正确写入 EXTRACT_*/SUMMARY_* 和 DISTILL_*/REASONING_*
+- [ ] Rust setup wizard 正确写入 EXTRACT_*/SUMMARY_* 和 DISTILL_*/REASONING_*
 - [ ] hub_call / security_scan / skill_analysis 走前台 LLM
 - [ ] distill / evolve / trajectory_distill 走 Foundry LLM

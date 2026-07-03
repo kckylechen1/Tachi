@@ -74,7 +74,7 @@ pub fn classify(row: &SourceRow) -> RescueAssignment {
     }
 
     // --- 6. Tachi (own infrastructure notes). ---
-    if p.starts_with("/tachi/") || p == "/tachi" || p.starts_with("/tachi-desktop") {
+    if p.starts_with("/tachi/") || p == "/tachi" {
         return RescueAssignment {
             source_id: row.id.clone(),
             source_path: row.path.clone(),
