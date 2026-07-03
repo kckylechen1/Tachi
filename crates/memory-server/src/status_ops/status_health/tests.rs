@@ -136,12 +136,12 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
     let reasoning = api_key_row(&rows, "REASONING_API_KEY");
 
     assert!(reasoning.deprecated);
-    assert_eq!(reasoning.canonical_name, "SILICONFLOW_API_KEY");
+    assert_eq!(reasoning.canonical_name, "DEEPSEEK_API_KEY");
     assert_eq!(reasoning.status, "configured");
     assert!(reasoning
         .cleanup_hint
         .as_deref()
-        .is_some_and(|hint| hint.contains("migrate this secret to SILICONFLOW_API_KEY")));
+        .is_some_and(|hint| hint.contains("migrate this secret to DEEPSEEK_API_KEY")));
 
     restore_env("REASONING_API_KEY", original);
 }

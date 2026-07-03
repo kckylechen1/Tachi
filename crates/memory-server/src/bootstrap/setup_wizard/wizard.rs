@@ -30,7 +30,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
 
     // ─── [1/5] API Keys ────────────────────────────────────────────────────
     println!("\n[1/5] API Keys");
-    println!("  Tachi uses Voyage (embeddings) and SiliconFlow (extraction).");
+    println!(
+        "  Tachi uses Voyage (vectors), SiliconFlow (extraction), and optional DeepSeek (distill/reasoning)."
+    );
     for entry in SETUP_API_KEYS.iter().filter(|entry| !entry.deprecated) {
         let key = entry.key;
         let label = entry.label;

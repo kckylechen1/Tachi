@@ -40,11 +40,15 @@ pub(crate) fn model_lanes_json() -> serde_json::Value {
         },
         "distill": {
             "provider": "raw_api default (FOUNDRY_DISTILL_BACKEND), claude_cli optional",
-            "keys": ["DISTILL_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            "default_base_url_when_deepseek_key_selected": "https://api.deepseek.com/chat/completions",
+            "default_model_when_deepseek_key_selected": "deepseek-chat",
+            "keys": ["DISTILL_API_KEY", "DEEPSEEK_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         },
         "reasoning": {
             "provider": "claude-cli-first, openai-compatible fallback",
-            "keys": ["REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "DISTILL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            "default_base_url_when_deepseek_key_selected": "https://api.deepseek.com/chat/completions",
+            "default_model_when_deepseek_key_selected": "deepseek-reasoner",
+            "keys": ["DEEPSEEK_API_KEY", "REASONING_API_KEY", "ZAI_API_KEY", "BIGMODEL_API_KEY", "DISTILL_API_KEY", "EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
         }
     })
 }

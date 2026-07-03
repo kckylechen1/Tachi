@@ -359,8 +359,9 @@ pub(crate) enum Commands {
     },
     /// PR-5: data-fix operations across manifest DBs (FTS rebuild, retention
     /// backfill, quarantine resolution, foundry job purge, integrity check,
-    /// VACUUM, orphan reference cleanup). Default is dry-run; pass --apply to
-    /// actually mutate. Per-DB backup auto-taken before any mutation.
+    /// VACUUM, orphan reference cleanup, opt-in memory hygiene). Default is
+    /// dry-run; pass --apply to actually mutate. Per-DB backup auto-taken
+    /// before any mutation.
     Repair {
         #[command(subcommand)]
         action: Option<RepairAction>,

@@ -1,5 +1,65 @@
 use super::*;
 
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn foundry_lanes_use_deepseek_defaults_when_only_deepseek_key_is_configured() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _env_guards = [
+        EnvRestore::unset("DISTILL_API_KEY"),
+        EnvRestore::unset("REASONING_API_KEY"),
+        EnvRestore::unset("ZAI_API_KEY"),
+        EnvRestore::unset("BIGMODEL_API_KEY"),
+        EnvRestore::unset("EXTRACT_API_KEY"),
+        EnvRestore::unset("SILICONFLOW_API_KEY"),
+        EnvRestore::unset("DISTILL_BASE_URL"),
+        EnvRestore::unset("EXTRACT_BASE_URL"),
+        EnvRestore::unset("SILICONFLOW_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_BASE_URL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_BASE_URL"),
+        EnvRestore::unset("DISTILL_MODEL"),
+        EnvRestore::unset("EXTRACT_MODEL"),
+        EnvRestore::unset("SILICONFLOW_MODEL"),
+        EnvRestore::unset("DEEPSEEK_MODEL"),
+        EnvRestore::unset("DEEPSEEK_DISTILL_MODEL"),
+        EnvRestore::unset("DEEPSEEK_REASONING_MODEL"),
+        EnvRestore::unset("TACHI_BACKEND_DISTILL_TIER"),
+        EnvRestore::unset("TACHI_BACKEND_REASONING_TIER"),
+    ];
+    let _deepseek = EnvRestore::set("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let _stale_reasoning_base = EnvRestore::set(
+        "REASONING_BASE_URL",
+        "https://api.siliconflow.cn/v1/chat/completions",
+    );
+    let _stale_reasoning_model = EnvRestore::set("REASONING_MODEL", "Qwen/Qwen3.5-27B");
+
+    let client = LlmClient::new().expect("client should initialize");
+    let distill = client.lane(ChatLane::Distill);
+    let reasoning = client.lane(ChatLane::Reasoning);
+
+    assert_eq!(
+        distill.base_url,
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(distill.model, "deepseek-chat");
+    assert_eq!(
+        client.provider_key_id_for_tests(&distill.api_key_envs),
+        Some("DEEPSEEK_API_KEY".to_string())
+    );
+
+    assert_eq!(
+        reasoning.base_url,
+        "https://api.deepseek.com/chat/completions"
+    );
+    assert_eq!(reasoning.model, "deepseek-reasoner");
+    assert_eq!(
+        client.provider_key_id_for_tests(&reasoning.api_key_envs),
+        Some("DEEPSEEK_API_KEY".to_string())
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn generate_summary_propagates_llm_failures() {

@@ -25,6 +25,9 @@
 //! - **R10** Enrichment failure marker reset (explicit opt-in only).
 //! - **R11** Plan C split-brain repair: merge a stale regular alias DB into
 //!   the repo-local canonical DB, then replace the alias with a symlink.
+//! - **R12** Memory hygiene backfill: promote legacy distill rows, backfill
+//!   derived/graph provenance, and archive only low-risk raw rows already
+//!   covered by distill or exact normalized duplicates.
 //!
 //! Exit codes: 0 clean (or successful dry-run with no findings), 1 if
 //! repairs were found and not applied, 2 if any rule errored.
@@ -44,6 +47,7 @@ pub mod integrity;
 pub mod inventory;
 pub mod jobs;
 pub mod junk;
+pub mod memory_hygiene;
 pub mod plan_c;
 pub mod quarantine;
 pub mod report;
@@ -272,6 +276,7 @@ async fn run_repair_sweep(
                 "R11" => Box::new(plan_c::PlanCRepair {
                     backup_alias: !no_backup,
                 }),
+                "R12" => Box::new(memory_hygiene::MemoryHygiene),
                 // R6 deliberately not part of bulk sweep — too aggressive.
                 _ => continue,
             };
