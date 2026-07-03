@@ -39,7 +39,7 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "domain", "TEXT")?;
     ensure_column(conn, "memories", "superseded_by", "TEXT")?;
 
-    // Memory lifecycle columns for tier-based decay and SFT factory (Phase 1)
+    // Memory lifecycle columns for tier-based decay and historical training flags.
     ensure_column(
         conn,
         "memories",

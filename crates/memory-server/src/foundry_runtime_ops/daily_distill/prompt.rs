@@ -6,7 +6,7 @@ use super::config::{scrub_agent_noise, MAX_BATCH_PAYLOAD_CHARS};
 use super::types::{CandidateGroup, GroupPayload};
 
 /// System prompt for the batch distill mega-call.
-/// Enforces structured synthesis using decision markers for downstream SFT factory use.
+/// Enforces structured synthesis using decision markers for durable memory reuse.
 pub(crate) const DISTILL_DAILY_SYSTEM_PROMPT: &str = r#"You are Tachi's batch memory distiller. You will receive a list of memory groups; each group contains 3+ related memories from a single coherence bucket (shared topic or entity, scoped to a single path prefix).
 
 For EACH group, write a concise, faithful synthesis that:

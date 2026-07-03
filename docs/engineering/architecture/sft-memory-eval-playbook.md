@@ -1,6 +1,6 @@
 # SFT Memory and Eval Playbook
 
-Status: active operating guide
+Status: partially historical — the daily SFT generation factory was retired 2026-07-03 (PR #474); the guidance below applies only to the frozen artifacts already on disk, which are no longer regenerated.
 Updated: 2026-06-09
 
 This guide defines how Tachi should use distilled SFT artifacts without pretending

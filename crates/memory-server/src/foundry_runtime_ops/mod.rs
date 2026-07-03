@@ -9,7 +9,6 @@ mod helpers;
 mod maintenance;
 mod recall;
 mod recall_cache;
-pub(crate) mod sft_factory;
 pub(crate) mod wiki_evolver;
 
 pub(crate) use recall::rerank_rows_with_outcome;
