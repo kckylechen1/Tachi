@@ -1,7 +1,7 @@
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
-    find_exact_path_text_duplicate, lookup_existing_revision, spawn_save_contradiction_detection,
+    find_exact_path_text_duplicate, lookup_existing_entry, spawn_save_contradiction_detection,
     upsert_save_entry,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
@@ -58,14 +58,18 @@ pub(crate) async fn handle_save_memory(
                 .map_err(|e| format!("Failed to serialize response: {}", e));
         }
     }
-    let existing_revision = lookup_existing_revision(
+    let existing_entry = lookup_existing_entry(
         server,
         &id,
         requested_id.is_some(),
         target_db,
         named_project.as_deref(),
     )?;
-    let enrichment_revision = existing_revision.unwrap_or(0) + 1;
+    let enrichment_revision = existing_entry
+        .as_ref()
+        .map(|entry| entry.revision)
+        .unwrap_or(0)
+        + 1;
 
     let needs_summary = params.summary.is_empty();
     let needs_embedding = params.vector.is_none();
@@ -79,6 +83,7 @@ pub(crate) async fn handle_save_memory(
         timestamp.clone(),
         valid_from,
         target_db,
+        existing_entry.as_ref(),
     );
 
     upsert_save_entry(server, &entry, target_db, named_project.as_deref())?;

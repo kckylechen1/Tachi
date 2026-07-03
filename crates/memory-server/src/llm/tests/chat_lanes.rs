@@ -331,7 +331,7 @@ async fn chat_lane_records_success_usage_to_vault_db() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn chat_lane_treats_insufficient_balance_as_retryable() {
+async fn chat_lane_marks_insufficient_balance_as_exhausted() {
     use axum::{http::StatusCode, response::IntoResponse, routing::post, Router};
 
     let _guard = crate::utils::global_test_lock()
@@ -385,6 +385,20 @@ async fn chat_lane_treats_insufficient_balance_as_retryable() {
     assert_eq!(status.available_keys, 0);
     assert_eq!(status.rate_limited_keys.len(), 1);
     assert_eq!(status.rate_limited_keys[0].key_id, "EXTRACT_API_KEY_1");
+    assert_eq!(status.rate_limited_keys[0].remaining_seconds, 0);
+    let health = client
+        .provider_key_health_for_tests("EXTRACT_API_KEY", "EXTRACT_API_KEY_1")
+        .expect("key health should be recorded");
+    assert_eq!(health.status, "exhausted");
+    assert!(!health.auth_failed);
+    assert!(health.cooldown_until.is_none());
+    assert!(
+        health
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("balance is insufficient")),
+        "last_error should explain the exhausted balance: {health:?}"
+    );
 
     server_task.abort();
 }

@@ -313,3 +313,76 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         serde_json::json!("changed_plan")
     );
 }
+
+#[tokio::test]
+async fn tachi_complete_accepts_stringified_trajectory_array() {
+    let server = make_server();
+    const DISTILLED_MARKDOWN: &str =
+        "# 适用场景\n- string trajectory\n\n# 核心步骤\n- parse\n\n# 踩坑记录\n- none\n\n# 验证标准\n- enqueued\n\n# 适用域标签\n- test";
+
+    server
+        .with_global_store(|store| {
+            let mut cap = store
+                .hub_get("skill:trajectory-distiller")
+                .map_err(|e| e.to_string())?
+                .expect("trajectory distiller should exist");
+            let mut def: Value =
+                serde_json::from_str(&cap.definition).map_err(|e| e.to_string())?;
+            def["mock_response"] = json!(DISTILLED_MARKDOWN);
+            cap.definition = serde_json::to_string(&def).map_err(|e| e.to_string())?;
+            store.hub_register(&cap).map_err(|e| e.to_string())
+        })
+        .expect("inject mock trajectory distiller");
+
+    let resp = server
+        .tachi_complete(Parameters(TachiCompleteParams {
+            task_id: Some("stringified-trajectory".to_string()),
+            task: "Complete with stringified trajectory".to_string(),
+            agent: "codex".to_string(),
+            outcome: "success".to_string(),
+            task_type: Some("fix_request".to_string()),
+            profile: Some("codex".to_string()),
+            risk: Some("medium".to_string()),
+            duration_ms: Some(100),
+            skills_used: Vec::new(),
+            cost_tokens: None,
+            cost_usd: None,
+            quality_score: Some(0.9),
+            notes: None,
+            trajectory: Some(json!(r#"[{"step":"reproduced"},{"step":"fixed"}]"#)),
+            diff: None,
+            worktree: None,
+            subagents: Vec::new(),
+            feedback_rules_applied: Vec::new(),
+            dispatch_id: None,
+            flow_id: None,
+            issue_ref: Some("kckylechen1/tachi#478".to_string()),
+            pr_ref: None,
+            evidence_refs: Vec::new(),
+            tests_run: vec![
+                "cargo test -p memory-server tachi_complete_accepts_stringified_trajectory_array"
+                    .to_string(),
+            ],
+            diff_present: None,
+            scope: Some("global".to_string()),
+            project: None,
+        }))
+        .await
+        .expect("tachi_complete should accept stringified trajectory");
+    let bundle: Value = serde_json::from_str(&resp).expect("complete response JSON");
+    assert_eq!(bundle["pipeline"]["distill_trajectory"], json!("enqueued"));
+
+    let eval_id = bundle["eval_entry"]["id"]
+        .as_str()
+        .expect("eval id")
+        .to_string();
+    let eval_entry = server
+        .with_global_store_read(|store| store.get(&eval_id).map_err(|e| e.to_string()))
+        .expect("read eval entry")
+        .expect("eval entry exists");
+    assert!(
+        eval_entry.metadata["trajectory"].is_array(),
+        "trajectory should be stored as an array, not a JSON string: {:#}",
+        eval_entry.metadata["trajectory"]
+    );
+}

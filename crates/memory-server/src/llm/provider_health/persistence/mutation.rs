@@ -123,6 +123,23 @@ impl super::super::super::LlmClient {
         self.persist_key_health(&persisted);
     }
 
+    pub(in crate::llm) fn mark_secret_exhausted(
+        &self,
+        selected: &SelectedProviderSecret,
+        reason: Option<&str>,
+    ) {
+        self.with_key_health(&selected.logical_name, &selected.key_id, |health| {
+            health.status = HEALTH_EXHAUSTED.to_string();
+            health.auth_failed = false;
+            health.disabled = false;
+            health.cooldown_until = None;
+            health.last_error = reason
+                .map(str::to_string)
+                .or_else(|| Some("key exhausted".to_string()));
+            health.error_count += 1;
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn mark_provider_key_rate_limited_for_tests(
         &self,
@@ -233,18 +250,12 @@ impl super::super::super::LlmClient {
             || matches!(outcome.as_deref(), Some("rate_limited" | "cooldown"))
         {
             self.mark_secret_rate_limited(&selected, retry_after);
+        } else if matches!(outcome.as_deref(), Some("exhausted")) {
+            self.mark_secret_exhausted(&selected, reason.or(Some("key exhausted")));
         } else if matches!(status_code, Some(401 | 403))
             || matches!(outcome.as_deref(), Some("auth_failed"))
         {
             self.mark_secret_auth_failed(&selected, reason.or(Some("auth failure")));
-        } else if matches!(outcome.as_deref(), Some("exhausted")) {
-            self.with_key_health(logical_name, key_id, |health| {
-                health.status = "exhausted".to_string();
-                health.last_error = reason
-                    .map(str::to_string)
-                    .or_else(|| Some("key exhausted".to_string()));
-                health.error_count += 1;
-            });
         } else if status_code.is_some_and(|code| (200..300).contains(&code))
             || matches!(outcome.as_deref(), Some("success" | "ok"))
         {
@@ -295,5 +306,14 @@ impl super::super::super::LlmClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reload.last_attempt =
             Instant::now().checked_sub(Self::KEY_HEALTH_RELOAD_TTL + Duration::from_secs(1));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_key_health_for_tests(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+    ) -> Option<VaultKeyHealth> {
+        self.read_key_health_entry(logical_name, key_id)
     }
 }

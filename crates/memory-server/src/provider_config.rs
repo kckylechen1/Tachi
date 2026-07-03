@@ -276,6 +276,24 @@ pub fn materialize_standalone(
 /// Best-effort unlock from macOS Keychain (`tachi-vault` / `default`) and materialize
 /// provider secrets into the running process. Used at daemon/MCP startup and after vault
 /// auto-lock so background embed/search can keep working without a manual unlock.
+pub fn keychain_vault_password_entry_available() -> Result<bool, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
+    }
+
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+        ])
+        .output()
+        .map_err(|e| format!("keychain status check failed: {e}"))?;
+    Ok(output.status.success())
+}
+
 pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, String> {
     if !cfg!(target_os = "macos") {
         return Ok(false);

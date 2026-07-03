@@ -25,15 +25,16 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         tracing::warn!("[provider] probe secret materialization failed: {err}");
     }
 
-    // Run all three probes concurrently — reduces worst-case latency from
-    // 15+15+20 = 50s to max(15,15,20) = 20s.
+    // Run probes concurrently so adding chat lanes does not make status
+    // probes serially accumulate their timeout budgets.
     let rerank_docs = vec![
         "Tachi stores operational memory".to_string(),
         "Unrelated weather note".to_string(),
     ];
     let llm_embed = llm.clone();
     let llm_rerank = llm.clone();
-    let (embed, rerank, chat) = tokio::join!(
+    let llm_extract = llm.clone();
+    let (embed, rerank, chat_extract, chat_distill) = tokio::join!(
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
             llm_embed.embed_voyage("tachi provider probe", "document"),
@@ -44,9 +45,19 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         ),
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
-            llm.call_extract_llm(
+            llm_extract.call_extract_llm(
                 "Return exactly OK.",
-                "Provider probe. Reply OK only.",
+                "Provider extract probe. Reply OK only.",
+                None,
+                0.0,
+                8,
+            ),
+        ),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            llm.call_distill_llm(
+                "Return exactly OK.",
+                "Provider distill probe. Reply OK only.",
                 None,
                 0.0,
                 8,
@@ -89,7 +100,7 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
             message: Some("timed out after 15s".to_string()),
         },
     });
-    out.push(match chat {
+    out.push(match chat_extract {
         Ok(Ok(text)) => ProviderProbeResult {
             name: "chat_extract".to_string(),
             status: "ok".to_string(),
@@ -102,6 +113,23 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
         },
         Err(_) => ProviderProbeResult {
             name: "chat_extract".to_string(),
+            status: "timeout".to_string(),
+            message: Some("timed out after 20s".to_string()),
+        },
+    });
+    out.push(match chat_distill {
+        Ok(Ok(text)) => ProviderProbeResult {
+            name: "chat_distill".to_string(),
+            status: "ok".to_string(),
+            message: Some(text.chars().take(80).collect()),
+        },
+        Ok(Err(err)) => ProviderProbeResult {
+            name: "chat_distill".to_string(),
+            status: "failed".to_string(),
+            message: Some(err),
+        },
+        Err(_) => ProviderProbeResult {
+            name: "chat_distill".to_string(),
             status: "timeout".to_string(),
             message: Some("timed out after 20s".to_string()),
         },
@@ -240,6 +268,24 @@ async fn probe_rotation_member(
                 client.call_extract_llm(
                     "Return exactly OK.",
                     "Provider rotation probe. Reply OK only.",
+                    None,
+                    0.0,
+                    8,
+                ),
+            )
+            .await;
+            match result {
+                Ok(Ok(text)) => Ok(text.chars().take(80).collect()),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err("timed out after 20s".to_string()),
+            }
+        }
+        "DISTILL_API_KEY" => {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                client.call_distill_llm(
+                    "Return exactly OK.",
+                    "Provider distill rotation probe. Reply OK only.",
                     None,
                     0.0,
                     8,

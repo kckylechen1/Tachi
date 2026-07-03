@@ -108,39 +108,10 @@ async fn tachi_event_project_updates_pattern_hit_miss_counters() {
         .expect("project counter events");
     let projected_json: Value = serde_json::from_str(&projected).expect("project JSON");
     assert_eq!(projected_json["projected_count"], json!(3));
-    assert_eq!(projected_json["promotion_candidate_count"], json!(1));
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["reason"],
-        json!("hit_threshold")
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["auto_promote"],
-        json!(false)
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["gate"]["final_ready"],
-        json!(false)
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["gate"]["missing"],
-        json!(["external_validation", "cold_seat_review"])
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["wiki_draft"]["path"],
-        json!("/wiki/drafts/patterns/counter-continuity")
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["skill_candidate"]["action"],
-        json!("from_pattern")
-    );
-    assert_eq!(
-        projected_json["promotion_candidates"][0]["review_artifacts"]["agent_profile_proposal"]
-            ["write"],
-        json!(false)
-    );
-    let memory_id = projected_json["promotion_candidates"][0]["memory_id"]
+    assert_eq!(projected_json["promotion_candidate_count"], json!(0));
+    let memory_id = projected_json["projections"][0]["memory_id"]
         .as_str()
-        .expect("promotion candidate memory id")
+        .expect("projection memory id")
         .to_string();
 
     let entry = server
@@ -150,14 +121,14 @@ async fn tachi_event_project_updates_pattern_hit_miss_counters() {
     assert_eq!(entry.metadata["counters"]["seen"], json!(3));
     assert_eq!(entry.metadata["counters"]["hit"], json!(1));
     assert_eq!(entry.metadata["counters"]["miss"], json!(1));
-    assert_eq!(entry.metadata["counters"]["confidence"], json!(1.0 / 3.0));
-    assert_eq!(entry.tier, "consolidated");
+    assert_eq!(entry.metadata["counters"]["confidence"], json!(0.5));
+    assert_eq!(entry.tier, "raw");
 
     let second = crate::event_ops::handle_tachi_event(&server, project)
         .await
         .expect("project counter events again");
     let second_json: Value = serde_json::from_str(&second).expect("second project JSON");
-    assert_eq!(second_json["promotion_candidate_count"], json!(1));
+    assert_eq!(second_json["promotion_candidate_count"], json!(0));
     let entry_after = server
         .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
         .expect("read projected counter entry again")
@@ -165,6 +136,66 @@ async fn tachi_event_project_updates_pattern_hit_miss_counters() {
     assert_eq!(entry_after.metadata["counters"]["seen"], json!(3));
     assert_eq!(entry_after.metadata["counters"]["hit"], json!(1));
     assert_eq!(entry_after.metadata["counters"]["miss"], json!(1));
+}
+
+#[tokio::test]
+async fn tachi_event_project_promotes_only_when_hits_beat_misses() {
+    let server = make_server();
+
+    for (id, event_type, created_at) in [
+        (
+            "pattern-brake-candidate",
+            "pattern.candidate",
+            "2026-06-24T00:00:00Z",
+        ),
+        ("pattern-brake-seen", "pattern.seen", "2026-06-24T00:01:00Z"),
+        ("pattern-brake-hit", "pattern.hit", "2026-06-24T00:02:00Z"),
+        ("pattern-brake-miss", "pattern.miss", "2026-06-24T00:03:00Z"),
+    ] {
+        let mut emit = tachi_event_params("emit");
+        emit.id = Some(id.to_string());
+        emit.source_repo = Some("sigil".to_string());
+        emit.adapter = Some("facade-test".to_string());
+        emit.domain = Some("agent_os".to_string());
+        emit.session_id = Some("session-pattern-brake".to_string());
+        emit.actor = Some("codex".to_string());
+        emit.event_type = Some(event_type.to_string());
+        emit.authority = Some("collect_only".to_string());
+        emit.projection_hints = vec!["pattern".to_string()];
+        emit.created_at = Some(created_at.to_string());
+        emit.payload = Some(json!({
+            "pattern_key": "miss-brake",
+            "summary": "Miss brake pattern",
+            "text": "A pattern with as many misses as hits must not promote.",
+            "confidence": 1.0,
+        }));
+        crate::event_ops::handle_tachi_event(&server, emit)
+            .await
+            .expect("emit brake event");
+    }
+
+    let mut project = tachi_event_params("project");
+    project.projection_hints = vec!["pattern".to_string()];
+    project.limit = 10;
+    let projected = crate::event_ops::handle_tachi_event(&server, project)
+        .await
+        .expect("project brake events");
+    let projected_json: Value = serde_json::from_str(&projected).expect("project JSON");
+
+    assert_eq!(projected_json["promotion_candidate_count"], json!(0));
+    let memory_id = projected_json["projections"][0]["memory_id"]
+        .as_str()
+        .expect("projection memory id")
+        .to_string();
+    let entry = server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|e| e.to_string()))
+        .expect("read brake projection")
+        .expect("projection exists");
+    assert_eq!(entry.metadata["counters"]["seen"], json!(4));
+    assert_eq!(entry.metadata["counters"]["hit"], json!(1));
+    assert_eq!(entry.metadata["counters"]["miss"], json!(1));
+    assert_eq!(entry.metadata["counters"]["confidence"], json!(0.5));
+    assert_eq!(entry.tier, "raw");
 }
 
 #[tokio::test]
