@@ -45,12 +45,6 @@ pub(crate) async fn run_daily_pipeline(
         eprintln!("[daily_pipeline] truth maintenance skipped: {e}");
     }
 
-    // ── SFT Factory: generate fine-tuning dialogues from distilled memories ───
-    if let Err(e) =
-        crate::foundry_runtime_ops::sft_factory::run_daily_sft_distillation(server).await
-    {
-        eprintln!("[daily_pipeline] SFT factory skipped: {e}");
-    }
     let agent_stage = run_agent_evolution_stage(server, &app_home).await;
     let skill_stage = run_skill_evolution_stage(server).await;
     let routing_stage = run_routing_analysis_stage(server, &date).await;

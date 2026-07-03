@@ -8,7 +8,7 @@ use super::maintenance::{
     scheduled_distill_path_prefix,
 };
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
-use super::{sft_factory, FOUNDRY_DISTILL_SOURCE, FOUNDRY_RELATED_LIMIT};
+use super::{FOUNDRY_DISTILL_SOURCE, FOUNDRY_RELATED_LIMIT};
 use crate::manifest::{DbEntry, DbRole, Manifest};
 use crate::server_state::DbScope;
 use crate::tool_params::{CaptureSessionParams, CompactRollupParams, Message};
@@ -26,4 +26,3 @@ mod distill_buckets;
 mod distill_guides;
 mod memory_maintenance;
 mod recall_parse_params;
-mod sft_daily;
