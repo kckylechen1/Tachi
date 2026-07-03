@@ -243,6 +243,16 @@ fn validate_files(files: &[String]) -> Result<(), String> {
         if file.is_empty() {
             return Err("files contains an empty path".to_string());
         }
+        let path = Path::new(file);
+        if path.is_absolute() {
+            return Err(format!("files contains absolute path '{file}'"));
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(format!("files contains path traversal '{file}'"));
+        }
         if !seen.insert(file) {
             return Err(format!("files contains duplicate path '{file}'"));
         }
@@ -264,7 +274,7 @@ fn build_file_plan(repo: &Path, files: &[String]) -> Result<Vec<ShipFilePlan>, S
 }
 
 fn file_state(repo: &Path, path: &str) -> Result<&'static str, String> {
-    if !repo.join(path).exists() {
+    if repo.join(path).symlink_metadata().is_err() {
         return Ok("missing");
     }
     let status = run_git(repo, &["status", "--porcelain=v1", "--", path])?;
@@ -353,7 +363,16 @@ fn verify_cached_set(repo: &Path, files: &[String]) -> Result<(), String> {
 }
 
 fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
+    struct TempFileGuard(PathBuf);
+
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
     let temp_path = commit_message_temp_path()?;
+    let _guard = TempFileGuard(temp_path.clone());
     let mut temp = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -364,7 +383,7 @@ fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
     temp.flush()
         .map_err(|err| format!("flush commit message tempfile: {err}"))?;
     drop(temp);
-    let commit_result = run_git_os(
+    run_git_os(
         repo,
         vec![
             OsString::from("commit"),
@@ -372,9 +391,7 @@ fn git_commit_verbatim(repo: &Path, message: &str) -> Result<String, String> {
             OsString::from("-F"),
             temp_path.as_os_str().to_os_string(),
         ],
-    );
-    let _ = fs::remove_file(&temp_path);
-    commit_result?;
+    )?;
     let sha = run_git(repo, &["rev-parse", "HEAD"])?;
     Ok(sha.trim().to_string())
 }
@@ -455,10 +472,15 @@ async fn create_pull_request(
         cmd.args(["--repo", repo]);
     }
     let raw = run_gh(cmd, &token)?;
+    let (number, url) = parse_created_pr_url(&raw)?;
+    Ok(CreatedPr { number, url })
+}
+
+pub(in crate::gh_ops) fn parse_created_pr_url(raw: &str) -> Result<(u64, String), String> {
     let url = raw
         .lines()
         .map(str::trim)
-        .find(|line| line.starts_with("https://github.com/"))
+        .find(|line| line.starts_with("https://") && line.contains("/pull/"))
         .unwrap_or_else(|| raw.trim())
         .to_string();
     let number = url
@@ -466,7 +488,7 @@ async fn create_pull_request(
         .next()
         .and_then(|part| part.parse::<u64>().ok())
         .ok_or_else(|| format!("gh pr create returned an unparseable PR URL: {url}"))?;
-    Ok(CreatedPr { number, url })
+    Ok((number, url))
 }
 
 async fn link_created_pr(

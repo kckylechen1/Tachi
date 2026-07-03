@@ -234,11 +234,9 @@ async fn ship_gb6_no_origin_commits_and_returns_partial_json() {
 
     assert_eq!(value["status"], "partial");
     assert_eq!(value["steps"]["pushed"], "no_remote");
-    assert!(
-        value["steps"]["committed"]["sha"]
-            .as_str()
-            .is_some_and(|sha| !sha.is_empty())
-    );
+    assert!(value["steps"]["committed"]["sha"]
+        .as_str()
+        .is_some_and(|sha| !sha.is_empty()));
 }
 
 #[tokio::test]
@@ -255,6 +253,65 @@ async fn ship_gb7_missing_commit_message_requires_caller_authorship() {
     assert!(err.contains("commit_message"), "{err}");
     assert!(err.contains("caller must author"), "{err}");
     assert!(git_ok(repo.path(), &["diff", "--cached", "--quiet"]));
+}
+
+#[tokio::test]
+async fn ship_gb8_rejects_absolute_and_parent_traversal_paths() {
+    let repo = init_repo(&[("a.txt", "one\n")], "feature/ship-gb8");
+    write_file(repo.path(), "a.txt", "one changed\n");
+    let before = head(repo.path());
+
+    let mut absolute = ship_params(repo.path(), vec!["/tmp/outside.txt"], Some("No absolute\n"));
+    absolute.confirm = true;
+    let err = handle_github_ship_inner(None, &absolute)
+        .await
+        .expect_err("absolute path should fail before staging");
+    assert!(err.contains("absolute path"), "{err}");
+
+    let mut traversal = ship_params(repo.path(), vec!["../outside.txt"], Some("No traversal\n"));
+    traversal.confirm = true;
+    let err = handle_github_ship_inner(None, &traversal)
+        .await
+        .expect_err("parent traversal should fail before staging");
+    assert!(err.contains("path traversal"), "{err}");
+
+    assert_eq!(head(repo.path()), before);
+    assert!(git_ok(repo.path(), &["diff", "--cached", "--quiet"]));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ship_gb8b_broken_symlink_is_detected_as_shippable() {
+    let repo = init_repo(&[("a.txt", "one\n")], "feature/ship-gb8b");
+    std::os::unix::fs::symlink("missing-target.txt", repo.path().join("broken-link"))
+        .expect("create broken symlink");
+    let mut params = ship_params(
+        repo.path(),
+        vec!["broken-link"],
+        Some("Ship broken symlink\n"),
+    );
+    params.confirm = true;
+
+    let raw = handle_github_ship_inner(None, &params)
+        .await
+        .expect("broken symlink should be shippable");
+    let value: Value = serde_json::from_str(&raw).expect("ship response JSON");
+
+    assert_eq!(value["status"], "partial");
+    assert_eq!(
+        changed_files(repo.path()),
+        BTreeSet::from(["broken-link".to_string()])
+    );
+}
+
+#[test]
+fn ship_gb8c_pr_url_parser_supports_github_enterprise_output() {
+    let raw = "Creating pull request...\nhttps://github.company.test/acme/project/pull/42\n";
+
+    let (number, url) = parse_created_pr_url(raw).expect("parse enterprise PR URL");
+
+    assert_eq!(number, 42);
+    assert_eq!(url, "https://github.company.test/acme/project/pull/42");
 }
 
 #[tokio::test]
@@ -275,11 +332,9 @@ async fn ship_gb9_chinese_filename_ships_with_unquoted_staged_compare() {
 
     assert_eq!(value["status"], "partial");
     assert_eq!(value["steps"]["pushed"], "no_remote");
-    assert!(
-        value["steps"]["committed"]["sha"]
-            .as_str()
-            .is_some_and(|sha| !sha.is_empty())
-    );
+    assert!(value["steps"]["committed"]["sha"]
+        .as_str()
+        .is_some_and(|sha| !sha.is_empty()));
     assert_eq!(
         changed_files(repo.path()),
         BTreeSet::from(["中文文件.txt".to_string()])
@@ -325,11 +380,9 @@ async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_ev
 
     assert_eq!(value["status"], "partial");
     assert!(!sha.is_empty());
-    assert!(
-        value["steps"]["pushed"]["error"]
-            .as_str()
-            .is_some_and(|err| !err.is_empty())
-    );
+    assert!(value["steps"]["pushed"]["error"]
+        .as_str()
+        .is_some_and(|err| !err.is_empty()));
     assert_eq!(value["steps"]["pr"], "skipped");
     assert_eq!(value["steps"]["linked"], "skipped");
     assert_eq!(value["steps"]["event_appended"], true);
@@ -346,11 +399,9 @@ async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_ev
     assert_eq!(event["event"], "github_ship_completed");
     assert_eq!(event["commit_sha"], sha);
     assert_eq!(event["steps"]["committed"]["sha"], sha);
-    assert!(
-        event["steps"]["pushed"]["error"]
-            .as_str()
-            .is_some_and(|err| !err.is_empty())
-    );
+    assert!(event["steps"]["pushed"]["error"]
+        .as_str()
+        .is_some_and(|err| !err.is_empty()));
     let status: Value =
         serde_json::from_str(&std::fs::read_to_string(run_dir.join("status.json")).unwrap())
             .expect("status JSON");
