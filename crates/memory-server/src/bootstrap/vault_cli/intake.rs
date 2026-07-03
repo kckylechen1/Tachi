@@ -3,7 +3,6 @@ use crate::provider_config::parse_vault_alias;
 use memory_core::vault::{SECRET_TYPE_API_KEY, SECRET_TYPE_JSON_BLOB};
 use serde::Serialize;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -74,6 +73,12 @@ fn discover_report(
     host: Option<&str>,
 ) -> DiscoveryReport {
     let (filter, notes) = parse_host_filter(host);
+    if filter == HostFilter::Unsupported {
+        return DiscoveryReport {
+            candidates: Vec::new(),
+            notes,
+        };
+    }
     let vault_names = vault_entry_names(global_db_path);
     let mut candidates = Vec::new();
 
@@ -147,6 +152,8 @@ fn env_source_paths(env_home: &Path, cwd: &Path) -> Vec<PathBuf> {
         cwd.join(".env"),
         cwd.join(".tachi").join("vault.env"),
     ]);
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
     paths
 }
 
@@ -163,8 +170,17 @@ fn parse_env_file(path: &Path) -> Vec<(PathBuf, String, String)> {
             let line = line.strip_prefix("export ").unwrap_or(line).trim();
             let (key, value) = line.split_once('=')?;
             let key = key.trim();
-            let value = value.trim();
+            let mut value = value.trim();
             if key.is_empty() || value.is_empty() {
+                return None;
+            }
+            if ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+                && value.len() >= 2
+            {
+                value = &value[1..value.len() - 1];
+            }
+            if value.is_empty() {
                 return None;
             }
             Some((path.to_path_buf(), key.to_string(), value.to_string()))
@@ -253,10 +269,14 @@ fn alias_family(name: &str) -> Option<&'static str> {
 
 fn fingerprint(value: &str) -> String {
     // This is a stable dedupe hint for one raw candidate value, not a security
-    // control. Avoid adding a crypto dependency for this read-only discovery slice.
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    let full = format!("{:016x}", hasher.finish());
+    // control. Use dependency-free FNV-1a so output is stable across processes
+    // and platforms without adding a crypto crate for this read-only slice.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in value.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let full = format!("{hash:016x}");
     full[..8].to_string()
 }
 
@@ -378,9 +398,35 @@ mod tests {
         let right = fingerprint("same-secret");
 
         assert_eq!(left, right);
+        assert_eq!(left, "df908812");
         assert_eq!(left.len(), 8);
         assert!(left.chars().all(|ch| ch.is_ascii_hexdigit()));
         assert_eq!(left, left.to_ascii_lowercase());
+    }
+
+    #[test]
+    fn vault_intake_strips_env_value_quotes_before_fingerprinting() {
+        let home = tempfile::tempdir().expect("home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        write_file(
+            &cwd.path().join(".env"),
+            "DOUBLE_QUOTED=\"same-secret\"\nSINGLE_QUOTED='same-secret'\nUNQUOTED=same-secret\n",
+        );
+
+        let rows = discover_candidates(home.path(), cwd.path());
+        let unquoted = candidate(&rows, "UNQUOTED").fingerprint.clone();
+
+        assert_eq!(candidate(&rows, "DOUBLE_QUOTED").fingerprint, unquoted);
+        assert_eq!(candidate(&rows, "SINGLE_QUOTED").fingerprint, unquoted);
+    }
+
+    #[test]
+    fn vault_intake_deduplicates_overlapping_source_paths() {
+        let home = tempfile::tempdir().expect("home");
+        let paths = env_source_paths(home.path(), home.path());
+        let unique = paths.iter().collect::<HashSet<_>>();
+
+        assert_eq!(paths.len(), unique.len(), "duplicate paths: {paths:#?}");
     }
 
     #[test]
