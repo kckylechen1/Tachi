@@ -1,0 +1,137 @@
+use super::*;
+
+fn compact_json_params(query: &str) -> TachiMemoryParams {
+    let mut params = tachi_memory_params("briefing");
+    params.format = Some("json".to_string());
+    params.query = Some(query.to_string());
+    params.compact = true;
+    params
+}
+
+#[tokio::test]
+async fn compact_briefing_uses_status_warnings_and_omits_doctrine_metadata() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let briefing_body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("payload diet briefing"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+    let briefing: Value = serde_json::from_str(&briefing_body).expect("briefing JSON");
+
+    let status_body = crate::status_ops::handle_tachi_status_agent(&server)
+        .await
+        .expect("status should serialize");
+    let status: Value = serde_json::from_str(&status_body).expect("status JSON");
+
+    assert_eq!(briefing["health"]["warnings"], status["warnings"]);
+    assert!(
+        !include_str!("../../../facade_memory_ops/briefing_ops.rs").contains("\"warnings\": []"),
+        "compact briefing must not hardcode an empty warnings array"
+    );
+    assert!(
+        !briefing
+            .as_object()
+            .expect("briefing object")
+            .contains_key("layer_authority"),
+        "compact briefing should omit doctrine text"
+    );
+    assert!(
+        !briefing
+            .as_object()
+            .expect("briefing object")
+            .contains_key("limits"),
+        "compact briefing should omit static limit metadata"
+    );
+
+    let mut full_params = tachi_memory_params("briefing");
+    full_params.format = Some("json".to_string());
+    full_params.query = Some("payload diet briefing".to_string());
+    full_params.compact = false;
+    let full_body = crate::facade_memory_ops::handle_tachi_memory(&server, full_params)
+        .await
+        .expect("full briefing should serialize");
+    let full: Value = serde_json::from_str(&full_body).expect("full briefing JSON");
+    assert!(full
+        .as_object()
+        .expect("full briefing object")
+        .contains_key("layer_authority"));
+    assert!(full
+        .as_object()
+        .expect("full briefing object")
+        .contains_key("limits"));
+}
+
+#[tokio::test]
+async fn compact_briefing_omits_empty_kanban_and_cross_project_sections() {
+    let (server, _temp_home) = make_server_with_temp_home();
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("empty payload diet briefing"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let object = parsed.as_object().expect("briefing object");
+
+    assert!(
+        !object.contains_key("kanban"),
+        "empty kanban must be omitted"
+    );
+    assert!(
+        !object.contains_key("cross_project"),
+        "empty cross-project handoff section must be omitted"
+    );
+}
+
+#[tokio::test]
+async fn compact_briefing_integration_has_no_low_relevance_memory_or_wiki_rows() {
+    let (server, _temp_home) = make_server_with_temp_home();
+    server
+        .with_global_store(|store| {
+            let mut memory = make_entry("payload-diet-memory-high");
+            memory.path = "/scratch/payload-diet/high".to_string();
+            memory.summary = "PayloadDietNeedle compact memory row".to_string();
+            memory.text =
+                "PayloadDietNeedle compact memory row should survive the floor.".to_string();
+            memory.topic = "payload-diet".to_string();
+            memory.keywords = vec!["PayloadDietNeedle".to_string()];
+            store.upsert(&memory).map_err(|e| e.to_string())?;
+
+            let mut wiki = make_entry("payload-diet-wiki-high");
+            wiki.path = "/wiki/payload-diet/high".to_string();
+            wiki.summary = "PayloadDietNeedle compact wiki row".to_string();
+            wiki.text = "PayloadDietNeedle compact wiki row should survive the floor.".to_string();
+            wiki.category = "experience".to_string();
+            wiki.topic = "payload-diet".to_string();
+            wiki.keywords = vec!["PayloadDietNeedle".to_string()];
+            wiki.scope = "global".to_string();
+            wiki.retention_policy = Some("permanent".to_string());
+            store.upsert(&wiki).map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
+        .expect("seed briefing rows");
+
+    let body = crate::facade_memory_ops::handle_tachi_memory(
+        &server,
+        compact_json_params("PayloadDietNeedle compact"),
+    )
+    .await
+    .expect("compact briefing should serialize");
+    let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+
+    for section in ["memories", "wiki"] {
+        if let Some(rows) = parsed.get(section).and_then(Value::as_array) {
+            for row in rows {
+                if let Some(relevance) = row.get("relevance").and_then(Value::as_f64) {
+                    assert!(
+                        relevance >= 0.25,
+                        "{section} row below compact relevance floor: {row}"
+                    );
+                }
+            }
+        }
+    }
+}

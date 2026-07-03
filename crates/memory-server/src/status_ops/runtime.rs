@@ -167,6 +167,34 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+fn slim_provider_health_value(value: serde_json::Value) -> serde_json::Value {
+    let has_error = value
+        .get("last_error")
+        .is_some_and(|error| !error.is_null())
+        || value
+            .get("persist_last_error")
+            .is_some_and(|error| !error.is_null());
+    if has_error {
+        return value;
+    }
+
+    json!({
+        "status": "ok",
+        "last_success_age_secs": value
+            .get("last_success_age_secs")
+            .or_else(|| value.get("persist_last_success_age_secs"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        "source_of_truth": value.get("source_of_truth").cloned().unwrap_or_else(|| json!("unknown")),
+    })
+}
+
+fn status_provider_health_json(server: &crate::MemoryServer) -> serde_json::Value {
+    let value = serde_json::to_value(server.llm.provider_health_status())
+        .unwrap_or(serde_json::Value::Null);
+    slim_provider_health_value(value)
+}
+
 /// MCP tool handler: returns a concise JSON health summary for agents.
 pub(crate) async fn handle_tachi_status_agent(
     server: &crate::MemoryServer,
@@ -495,7 +523,7 @@ async fn handle_tachi_status_detail(
             "daily_pipeline": snapshot.last_daily_report,
             "distill": snapshot.distill_marker,
             "api_keys": snapshot.api_keys,
-            "provider_health": server.llm.provider_health_status(),
+            "provider_health": status_provider_health_json(server),
             "provider_pools": server.llm.provider_pool_statuses(),
             "provider_probe_cache": snapshot.provider_probe_cache,
             "models": status_health::model_lanes_json(),
@@ -530,7 +558,7 @@ async fn handle_tachi_status_detail(
                 .filter(|p| !p.rate_limited_keys.is_empty())
                 .count(),
         });
-        serde_json::to_string(&json!({
+        let mut response = json!({
             "detail": "agent",
             "daemon": daemon_state,
             "daemon_inventory": snapshot.daemon_inventory,
@@ -551,18 +579,50 @@ async fn handle_tachi_status_detail(
             "vector_orphans": vector_orphan_dbs.len(),
             "enrichment_failures": enrichment_failure_dbs.len(),
             "namespace_issues": namespace_issues.len(),
-            "continuity": continuity_summary,
             "plan_c_split_brain": snapshot.plan_c_split_brain.len(),
             "provider_auth_failures": auth_failures.len(),
             "api_keys": {
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
-                "provider_health": server.llm.provider_health_status(),
+                "provider_health": status_provider_health_json(server),
                 "provider_pools": provider_pools_summary,
             },
             "provider_probe_cache": snapshot.provider_probe_cache,
             "doctor_hint": readiness.get("doctor_hint"),
-        }))
-        .map_err(|e| e.to_string())
+        });
+        if total_outcome_events > 0 {
+            response
+                .as_object_mut()
+                .expect("status response object")
+                .insert("continuity".to_string(), continuity_summary);
+        }
+        serde_json::to_string(&response).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slim_provider_health_value_keeps_full_shape_when_error_exists() {
+        let value = json!({
+            "source_of_truth": "vault_db",
+            "reload_ttl_secs": 300,
+            "last_attempt_at": "2026-07-03T00:00:00Z",
+            "last_success_at": null,
+            "last_success_age_secs": null,
+            "last_error": "forced auth failure",
+            "persist_last_attempt_at": null,
+            "persist_last_success_at": null,
+            "persist_last_success_age_secs": null,
+            "persist_last_error": null
+        });
+
+        let slimmed = slim_provider_health_value(value);
+
+        assert_eq!(slimmed["last_error"], json!("forced auth failure"));
+        assert_eq!(slimmed["reload_ttl_secs"], json!(300));
+        assert!(slimmed.get("status").is_none());
     }
 }

@@ -34,11 +34,13 @@ async fn tachi_memory_briefing_excludes_stale_run_board_noise() {
         .await
         .expect("briefing should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let tasks = parsed["kanban"]["tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
 
     assert!(
-        !parsed["kanban"]["tasks"]
-            .as_array()
-            .unwrap()
+        !tasks
             .iter()
             .any(|task| task["summary"] == json!("Arena mission stale briefing noise")),
         "briefing should not surface stale run board noise: {parsed}"
@@ -84,11 +86,13 @@ async fn tachi_memory_briefing_excludes_stale_kanban_card_noise() {
         .await
         .expect("briefing should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("briefing JSON");
+    let tasks = parsed["kanban"]["tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
 
     assert!(
-        !parsed["kanban"]["tasks"]
-            .as_array()
-            .unwrap()
+        !tasks
             .iter()
             .any(|task| task["summary"] == json!("Arena persisted kanban briefing noise")),
         "briefing should not surface stale persisted kanban noise: {parsed}"
