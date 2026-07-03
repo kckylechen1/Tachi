@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Added
+
+- `tachi vault intake discover` now reports redacted, read-only credential candidates from env-family files and Codex auth metadata without unlocking or mutating Vault.
+
 ### Changed
 
 - `tachi_skill(action="run")`, native `run_skill`, direct skill tools, and skill DLQ retry now return a JSON simulation envelope instead of bare skill text for LLM/mock skill runs. Simulated outputs are prefixed with an explicit marker warning that no commands, files, or tests were executed; `chain_skills` preserves raw step-to-step piping while adding chain-level simulated/warning provenance. This is a breaking response-shape change for consumers that parsed raw text.

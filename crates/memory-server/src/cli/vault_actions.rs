@@ -54,6 +54,27 @@ pub(crate) enum EnvAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub(crate) enum VaultIntakeAction {
+    /// Discover local credential candidates without unlocking or writing Vault.
+    Discover {
+        /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
+        #[arg(long)]
+        host: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+impl VaultIntakeAction {
+    pub(crate) fn into_discover(self) -> (Option<String>, bool) {
+        match self {
+            Self::Discover { host, json } => (host, json),
+        }
+    }
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub(crate) enum VaultAction {
     /// Initialize the vault with a master password.
     Init {
@@ -250,6 +271,11 @@ pub(crate) enum VaultAction {
     Lock,
     /// Show vault status (initialized, locked/unlocked, entry count).
     Status,
+    /// Discover local credential candidates without decrypting or writing secrets.
+    Intake {
+        #[command(subcommand)]
+        action: VaultIntakeAction,
+    },
     /// Plan or apply credential profile materialization without exposing secret values.
     Materialize {
         /// Credential profile name to materialize.
