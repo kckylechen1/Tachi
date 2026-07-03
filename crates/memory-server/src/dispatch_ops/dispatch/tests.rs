@@ -280,6 +280,7 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
             crate::vault_ops::VaultSetParams {
                 name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
                 value: "test123".to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "dispatch opencode serve password".to_string(),
                 allowed_agents: Some(vec!["custom".to_string()]),

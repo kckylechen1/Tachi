@@ -19,6 +19,7 @@ async fn vault_auto_lock_expires_cached_key() {
         .vault_set(Parameters(VaultSetParams {
             name: "OPENAI_API_KEY".to_string(),
             value: "secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "auto lock test secret".to_string(),
             allowed_agents: None,

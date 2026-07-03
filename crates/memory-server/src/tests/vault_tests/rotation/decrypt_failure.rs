@@ -19,6 +19,7 @@ async fn vault_get_auto_rotate_does_not_advance_rotation_on_decrypt_failure() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated key".to_string(),
                 allowed_agents: None,
@@ -32,6 +33,7 @@ async fn vault_get_auto_rotate_does_not_advance_rotation_on_decrypt_failure() {
     server
         .vault_setup_rotation(Parameters(VaultSetupRotationParams {
             prefix: "BROKEN_API_KEY".to_string(),
+            agent_id: None,
             total_keys: 2,
             strategy: "round_robin".to_string(),
         }))

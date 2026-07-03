@@ -38,6 +38,7 @@ async fn dispatch_credential_profile_requires_unlocked_vault_before_spawn() {
         .vault_set(Parameters(VaultSetParams {
             name: "LOCKED_DISPATCH_SECRET".to_string(),
             value: "locked-secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch credential lock test".to_string(),
             allowed_agents: None,
@@ -117,6 +118,7 @@ async fn dispatch_credential_profile_denies_consumer_before_decrypting_secret() 
         .vault_set(Parameters(VaultSetParams {
             name: "DENIED_DISPATCH_SECRET".to_string(),
             value: "denied-secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch credential deny test".to_string(),
             allowed_agents: None,

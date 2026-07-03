@@ -19,6 +19,7 @@ async fn dispatch_vault_env_injection_resolves_project_bindings_from_cwd() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "project env binding test".to_string(),
                 allowed_agents: None,

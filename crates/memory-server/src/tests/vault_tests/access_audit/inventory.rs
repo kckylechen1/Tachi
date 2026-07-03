@@ -17,6 +17,7 @@ async fn vault_remove_deletes_secret_and_audit_records() {
         .vault_set(Parameters(VaultSetParams {
             name: "DELETE_ME".to_string(),
             value: "secret-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "to be deleted".to_string(),
             allowed_agents: None,
@@ -40,6 +41,7 @@ async fn vault_remove_deletes_secret_and_audit_records() {
     server
         .vault_remove(Parameters(VaultRemoveParams {
             name: "DELETE_ME".to_string(),
+            agent_id: None,
         }))
         .await
         .expect("vault_remove should succeed");
@@ -72,6 +74,7 @@ async fn vault_list_filters_by_secret_type() {
         .vault_set(Parameters(VaultSetParams {
             name: "API_KEY_1".to_string(),
             value: "api-value".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "API key".to_string(),
             allowed_agents: None,
@@ -85,6 +88,7 @@ async fn vault_list_filters_by_secret_type() {
         .vault_set(Parameters(VaultSetParams {
             name: "OAUTH_TOKEN".to_string(),
             value: "oauth-value".to_string(),
+            agent_id: None,
             secret_type: "oauth_token".to_string(),
             description: "OAuth token".to_string(),
             allowed_agents: None,

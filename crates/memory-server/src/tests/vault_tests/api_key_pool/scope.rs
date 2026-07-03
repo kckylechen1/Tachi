@@ -14,6 +14,7 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
     server
         .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
             prefix: "ROUTER_API_KEY".to_string(),
+            agent_id: None,
             values: vec!["router-key-1".to_string()],
             strategy: "round_robin".to_string(),
             description: "router pool".to_string(),
@@ -26,6 +27,7 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
         .vault_set(Parameters(VaultSetParams {
             name: "UNRELATED_API_KEY".to_string(),
             value: "unrelated-secret".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "unrelated provider key".to_string(),
             allowed_agents: None,
@@ -72,6 +74,7 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
     server
         .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
             prefix: "SHRINK_API_KEY".to_string(),
+            agent_id: None,
             values: vec![
                 "shrink-key-1".to_string(),
                 "shrink-key-2".to_string(),
@@ -87,6 +90,7 @@ async fn vault_api_key_pool_shrink_removes_orphaned_members() {
     let shrunk = server
         .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
             prefix: "SHRINK_API_KEY".to_string(),
+            agent_id: None,
             values: vec!["shrink-key-1b".to_string()],
             strategy: "round_robin".to_string(),
             description: "shrunk pool".to_string(),

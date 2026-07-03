@@ -51,6 +51,7 @@ async fn dispatch_credential_profile_injects_env_without_response_secret() {
         .vault_set(Parameters(VaultSetParams {
             name: "DISPATCH_PROFILE_SECRET".to_string(),
             value: secret_value.to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch credential test".to_string(),
             allowed_agents: None,

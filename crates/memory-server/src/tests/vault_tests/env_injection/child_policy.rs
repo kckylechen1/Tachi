@@ -27,6 +27,7 @@ async fn dispatch_vault_env_injection_does_not_export_all_secrets_by_default() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env default injection test".to_string(),
                 allowed_agents: None,
@@ -84,6 +85,7 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env injection test".to_string(),
                 allowed_agents: None,
@@ -135,6 +137,7 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env fill-missing test".to_string(),
                 allowed_agents: None,

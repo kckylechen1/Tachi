@@ -18,6 +18,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         .vault_set(Parameters(VaultSetParams {
             name: "OPENAI_API_KEY".to_string(),
             value: "sk-test-123".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "primary openai key".to_string(),
             allowed_agents: None,

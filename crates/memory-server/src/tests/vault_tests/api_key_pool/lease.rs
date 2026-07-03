@@ -14,6 +14,7 @@ async fn vault_api_key_pool_sets_and_leases_rotated_env() {
     let stored = server
         .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
             prefix: "ROUTER_API_KEY".to_string(),
+            agent_id: None,
             values: vec!["router-key-1".to_string(), "router-key-2".to_string()],
             strategy: "round_robin".to_string(),
             description: "router pool".to_string(),

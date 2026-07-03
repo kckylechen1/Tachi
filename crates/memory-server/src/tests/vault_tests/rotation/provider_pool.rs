@@ -19,6 +19,7 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated voyage key".to_string(),
                 allowed_agents: None,
@@ -32,6 +33,7 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
     server
         .vault_setup_rotation(Parameters(VaultSetupRotationParams {
             prefix: "VOYAGE_API_KEY".to_string(),
+            agent_id: None,
             total_keys: 2,
             strategy: "round_robin".to_string(),
         }))

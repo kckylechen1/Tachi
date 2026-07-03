@@ -19,6 +19,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
             .vault_set(Parameters(VaultSetParams {
                 name: name.to_string(),
                 value: value.to_string(),
+                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated key".to_string(),
                 allowed_agents: None,
@@ -32,6 +33,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
     server
         .vault_setup_rotation(Parameters(VaultSetupRotationParams {
             prefix: "GEMINI_API_KEY".to_string(),
+            agent_id: None,
             total_keys: 2,
             strategy: "round_robin".to_string(),
         }))

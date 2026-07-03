@@ -16,6 +16,7 @@ async fn vault_provider_cache_skips_agent_scoped_api_keys() {
         .vault_set(Parameters(VaultSetParams {
             name: "LOCKED_DOWN_API_KEY".to_string(),
             value: "scoped-secret".to_string(),
+            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "capability-scoped key".to_string(),
             allowed_agents: Some(vec!["mcp:allowed".to_string()]),

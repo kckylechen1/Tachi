@@ -4,58 +4,73 @@ pub(crate) async fn handle_vault_setup_rotation(
     server: &MemoryServer,
     params: VaultSetupRotationParams,
 ) -> Result<String, String> {
-    ensure_vault_unlocked(server)?;
+    let rotation_prefix = params.prefix.clone();
+    let result = (|| {
+        authorize_vault_mutation(server, &params.prefix, params.agent_id.as_deref())?;
 
-    if params.total_keys < 2 {
-        return Err("Rotation requires at least 2 keys".into());
-    }
-
-    let strategy = normalize_rotation_strategy(&params.strategy);
-    let all_entries = server
-        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-    let mut found_keys = 0;
-    for i in 1..=params.total_keys {
-        let key_name = format!("{}_{}", params.prefix, i);
-        if all_entries.iter().any(|e| e.name == key_name) {
-            found_keys += 1;
+        if params.total_keys < 2 {
+            return Err("Rotation requires at least 2 keys".into());
         }
-    }
 
-    if found_keys < params.total_keys {
-        return Err(format!(
-            "Expected {} keys for prefix '{}', found {}. Please set all keys first.",
-            params.total_keys, params.prefix, found_keys
-        ));
-    }
+        let strategy = normalize_rotation_strategy(&params.strategy);
+        let all_entries = server
+            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+            .map_err(|e| format!("Failed to list entries: {e}"))?;
 
-    let now = Utc::now().to_rfc3339();
-    let rotation = VaultKeyRotation {
-        prefix: params.prefix.clone(),
-        current_index: 1,
-        total_keys: params.total_keys,
-        rotation_strategy: strategy.clone(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
+        let mut found_keys = 0;
+        for i in 1..=params.total_keys {
+            let key_name = format!("{}_{}", params.prefix, i);
+            if all_entries.iter().any(|e| e.name == key_name) {
+                found_keys += 1;
+            }
+        }
 
-    server
-        .with_global_store(|store| {
-            store
-                .vault_set_rotation(&rotation)
-                .map_err(|e| e.to_string())
-        })
-        .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+        if found_keys < params.total_keys {
+            return Err(format!(
+                "Expected {} keys for prefix '{}', found {}. Please set all keys first.",
+                params.total_keys, params.prefix, found_keys
+            ));
+        }
 
-    let resp = json!({
-        "setup": true,
-        "prefix": params.prefix,
-        "total_keys": params.total_keys,
-        "strategy": strategy,
-    });
-    let body = serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))?;
-    attach_provider_refresh_warning(server, body)
+        let now = Utc::now().to_rfc3339();
+        let rotation = VaultKeyRotation {
+            prefix: params.prefix.clone(),
+            current_index: 1,
+            total_keys: params.total_keys,
+            rotation_strategy: strategy.clone(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        server
+            .with_global_store(|store| {
+                store
+                    .vault_set_rotation(&rotation)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+
+        let resp = json!({
+            "setup": true,
+            "prefix": params.prefix,
+            "total_keys": params.total_keys,
+            "strategy": strategy,
+        });
+        let body = serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))?;
+        attach_provider_refresh_warning(server, body)
+    })();
+
+    let audit_result = record_vault_audit(
+        server,
+        "vault_setup_rotation",
+        Some(&rotation_prefix),
+        result.is_ok(),
+        match &result {
+            Ok(_) => Some("setup"),
+            Err(err) => Some(err.as_str()),
+        },
+    );
+    result_with_vault_audit_warning(result, audit_result)
 }
 
 pub(crate) async fn handle_vault_set_api_key_pool(
@@ -71,6 +86,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
                 params.prefix
             ));
         }
+        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())?;
         let values = params
             .values
             .iter()
