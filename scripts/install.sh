@@ -156,7 +156,62 @@ launchctl_bootstrap_plist() {
   if ! launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
     launchctl load "$plist" >/dev/null
   fi
-  launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
+}
+
+daemon_status_for_scope() {
+  local tachi_bin="$1"
+  local global_db="$2"
+  TACHI_DISABLE_AUTO_DAEMON=1 TACHI_DISABLE_STDIO_PROXY=1 \
+    "$tachi_bin" --global-db "$global_db" --no-project-db daemon status --json 2>/dev/null || true
+}
+
+daemon_status_is_running() {
+  grep -q '"state": "running"'
+}
+
+stop_existing_daemon_for_scope() {
+  local tachi_bin="$1"
+  local global_db="$2"
+  local status
+
+  status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
+  if printf '%s\n' "$status" | daemon_status_is_running; then
+    echo ">> Stopping existing Tachi daemon for this DB scope..."
+    TACHI_DISABLE_AUTO_DAEMON=1 TACHI_DISABLE_STDIO_PROXY=1 \
+      "$tachi_bin" --global-db "$global_db" --no-project-db daemon kill >/dev/null || true
+  fi
+
+  for _ in $(seq 1 50); do
+    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
+    if ! printf '%s\n' "$status" | daemon_status_is_running; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "❌ previous daemon for this DB scope did not stop"
+  printf '%s\n' "$status"
+  return 1
+}
+
+wait_for_daemon_for_scope() {
+  local tachi_bin="$1"
+  local global_db="$2"
+  local status
+
+  for _ in $(seq 1 50); do
+    status=$(daemon_status_for_scope "$tachi_bin" "$global_db")
+    if printf '%s\n' "$status" | daemon_status_is_running; then
+      TACHI_DISABLE_AUTO_DAEMON=1 TACHI_DISABLE_STDIO_PROXY=1 \
+        "$tachi_bin" --global-db "$global_db" --no-project-db daemon status || true
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "❌ daemon service did not report state=running"
+  printf '%s\n' "$status"
+  return 1
 }
 
 install_daemon_service() {
@@ -225,8 +280,6 @@ install_daemon_service() {
   </dict>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <true/>
   <key>StandardOutPath</key>
   <string>$(xml_escape "$logs_dir/launchd-daemon.out.log")</string>
   <key>StandardErrorPath</key>
@@ -236,17 +289,11 @@ install_daemon_service() {
 PLIST
 
   launchctl_bootout_plist "$plist" "$label"
+  stop_existing_daemon_for_scope "$tachi_bin" "$global_db"
   launchctl_bootstrap_plist "$plist" "$label"
 
-  sleep 2
-  local daemon_json
-  daemon_json=$(tachi daemon status --json 2>/dev/null || true)
-  if printf '%s\n' "$daemon_json" | grep -q '"state": "running"'; then
-    tachi daemon status || true
-  else
-    echo "❌ daemon service did not report state=running"
+  if ! wait_for_daemon_for_scope "$tachi_bin" "$global_db"; then
     echo "   Inspect: $logs_dir/launchd-daemon.err.log"
-    printf '%s\n' "$daemon_json"
     exit 1
   fi
 }

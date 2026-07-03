@@ -38,8 +38,10 @@ the global Tachi daemon:
 That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/memory.db
 --no-project-db` with `TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`, so it is a stable
 global/background worker on the canonical HTTP MCP port and does not accidentally
-bind itself to the directory where the installer was run. It keeps projection, vector sweep, Foundry, and
-daily maintenance alive after the installing shell exits. Skip service
+bind itself to the directory where the installer was run. It keeps projection,
+vector sweep, Foundry, and daily maintenance alive after the installing shell
+exits. The LaunchAgent uses `RunAtLoad` without `KeepAlive`; Tachi's singleton
+lock and auto-spawn path handle recovery without a launchd restart loop. Skip service
 installation with `--skip-daemon-service` when you only want stdio MCP clients
 to auto-spawn short-lived daemons.
 
@@ -67,7 +69,6 @@ restart it manually:
 ```bash
 launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
-launchctl kickstart -k "gui/$(id -u)/com.kckylechen.tachi.daemon"
 tachi daemon status
 ```
 
