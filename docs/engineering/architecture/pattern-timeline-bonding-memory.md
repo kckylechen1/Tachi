@@ -181,6 +181,48 @@ All evidence is one author. Validated cross-domain (quant / conversation / chara
 **not** cross-user. The pattern layer's generalization across users is unproven; treat
 per-user calibration as the unit until there is a second user.
 
+**8. The brake's consumption path is inert; a set `miss` must bite, not just store.**
+Constraint 1 is the *input* side (who produces the label). This is the *output* side
+(what a produced label does), and it is currently a no-op. Code-verified 2026-07-04:
+
+- `pattern_feedback(event="miss")` records the miss end-to-end into
+  `metadata.counters.miss` (`continuity_ops/projection/entry.rs:281,392-394,422-426`) —
+  so a miss is *visible*.
+- But nothing *consumes* it. `build_projection_entry` discards it (`entry.rs:510`,
+  destructured as `_miss`); the promotion-reason gate reads only seen+hit
+  (`projection.rs:307-309`: `seen >= 3 && hit > 0`), so a pattern at
+  `seen=10 / hit=1 / miss=9` promotes identically to `miss=0`; no recall weight or
+  `confidence` is derived from the hit/miss ratio (the SharedLexicon/pattern examples
+  carry a static, author-typed `confidence: high` — the anti-signal).
+
+Consequence: a pattern that keeps being *falsified* looks identical, at every decision
+point, to one that never is — a confirmation-bias amplifier that survives even a perfect
+labeler, because the label is dropped on read. This is the SharedLexicon failure too: a
+梗 whose recent track record is *misses* (fell flat / invoked at the wrong moment) must
+not keep ranking as if it lands, or the model injects a canned catchphrase at the wrong
+time (the warm-carrier / "解剖完幽默就死了" failure Constraint 2 guards).
+
+Design decision — split by cost:
+
+- **Cheap, ship-now (independent of Constraint 1's labeler):** make a *set* miss bite.
+  Promotion reads a hit-rate, not `hit > 0`; recall weight and `confidence` derive from
+  `hit / (hit + miss)` bounded by `seen` (sample size), not author assertion; stop
+  discarding `_miss`. The exact threshold is calibration-pending (Constraint 3), but the
+  floor invariant is non-negotiable: **`miss >= hit` must not promote and must
+  down-weight** — a falsified pattern may not rank as a confirmed one. This makes manual
+  `pattern_feedback(miss)` and cold-seat down-marks lower a pattern's standing *today*.
+- **Hard, gated on Constraint 1:** automatic hit/miss from `fwd_return`. Until it exists,
+  the cheap half at least honors a *human / cold-seat* miss instead of swallowing it.
+
+**Store vs act (why the store must stop here).** Memory is necessary, not sufficient.
+Tachi's job is the *stored* half — an honest, live counter that brakes over-confident
+patterns. The *act* of invoking a pattern or 梗 well — timing, restraint, and the next
+callback layer — is the consuming agent's forward pass, and is explicitly **out of the
+store's scope** (it is Phase 8; building invocation-timing into the store is the
+mechanical-catchphrase failure). The store makes the right invocation *possible* and the
+wrong one *cheaper to avoid*; it does not perform the invocation. Recall gives the map;
+the territory is walked live.
+
 ## Phasing (corrected — labeler-first, not detection-first)
 
 1. **Session-end labeler + label-quality eval** (Constraint 1). Nothing downstream is
@@ -281,6 +323,11 @@ Still missing:
   callbacks update counters, `tachi_complete` consumes `pattern:<id>` evidence refs,
   and `close_loop` records reviewed attached patterns as `hit`; ordinary briefing use
   and outcome-backed automatic hit/miss classification are still missing.
+- The `miss` counter is stored but **inert on read** (Constraint 8): `_miss` is discarded
+  in `build_projection_entry` and the promotion gate is miss-blind (`seen >= 3 && hit > 0`),
+  so a set miss neither blocks promotion nor down-weights recall/`confidence`. The cheap
+  half of Constraint 8 (hit-rate promotion + `miss >= hit` floor) is independent of the
+  labeler and shippable now.
 - Maturity gates produce and can execute conservative review artifacts, but they do
   not yet promote drafts/candidates into final wiki, listed skills, or host Agent MD
   writes. External-validation / cold-seat readiness is exposed as gate status.
