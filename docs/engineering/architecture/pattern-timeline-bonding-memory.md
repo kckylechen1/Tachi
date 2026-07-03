@@ -189,11 +189,12 @@ Constraint 1 is the *input* side (who produces the label). This is the *output* 
   `metadata.counters.miss` (`continuity_ops/projection/entry.rs:281,392-394,422-426`) —
   so a miss is *visible*.
 - But nothing *consumes* it. `build_projection_entry` discards it (`entry.rs:510`,
-  destructured as `_miss`); the promotion-reason gate reads only seen+hit
-  (`projection.rs:307-309`: `seen >= 3 && hit > 0`), so a pattern at
-  `seen=10 / hit=1 / miss=9` promotes identically to `miss=0`; no recall weight or
-  `confidence` is derived from the hit/miss ratio (the SharedLexicon/pattern examples
-  carry a static, author-typed `confidence: high` — the anti-signal).
+  destructured as `_miss`); the promotion-reason gates read only seen+hit
+  (`projection.rs:307-309` and `promotion.rs:109`: `seen >= 3 && hit > 0`), so
+  a pattern at `seen=10 / hit=1 / miss=9` promotes identically to `miss=0`; no
+  recall weight or `confidence` is derived from the hit/miss ratio (the
+  SharedLexicon/pattern examples carry a static, author-typed `confidence:
+  high` — the anti-signal).
 
 Consequence: a pattern that keeps being *falsified* looks identical, at every decision
 point, to one that never is — a confirmation-bias amplifier that survives even a perfect
@@ -324,10 +325,10 @@ Still missing:
   and `close_loop` records reviewed attached patterns as `hit`; ordinary briefing use
   and outcome-backed automatic hit/miss classification are still missing.
 - The `miss` counter is stored but **inert on read** (Constraint 8): `_miss` is discarded
-  in `build_projection_entry` and the promotion gate is miss-blind (`seen >= 3 && hit > 0`),
-  so a set miss neither blocks promotion nor down-weights recall/`confidence`. The cheap
-  half of Constraint 8 (hit-rate promotion + `miss >= hit` floor) is independent of the
-  labeler and shippable now.
+  in `build_projection_entry` and the projection/review promotion gates are miss-blind
+  (`seen >= 3 && hit > 0`), so a set miss neither blocks promotion nor down-weights
+  recall/`confidence`. The cheap half of Constraint 8 (hit-rate promotion + `miss >= hit`
+  floor) is independent of the labeler and shippable now.
 - Maturity gates produce and can execute conservative review artifacts, but they do
   not yet promote drafts/candidates into final wiki, listed skills, or host Agent MD
   writes. External-validation / cold-seat readiness is exposed as gate status.
