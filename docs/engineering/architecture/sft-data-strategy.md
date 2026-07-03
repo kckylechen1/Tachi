@@ -4,6 +4,7 @@
 [`model-training-eval-gate.md`](model-training-eval-gate.md)
 **Date:** 2026-06-03
 **Boundary update:** 2026-06-09
+**Factory retired:** 2026-07-03 (PR #474) — the daily SFT generator (`run_daily_sft_distillation`) and ~1,800 `/sft` recall rows were deleted; this document is now fully historical, not merely superseded-for-gating.
 **Source:** `/Volumes/Storage/agent_logs/sft/redistilled_v4_all_engineering.jsonl` (1,654 entries)
 **Scope:** Tachi 全系统 — Agent Router · Dispatch · Shell · Wiki · Memory · Briefing · Foundry
 
