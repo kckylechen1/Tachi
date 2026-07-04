@@ -84,11 +84,17 @@ impl GhClient for MockGhClient {
                 .linked_issue_refs
                 .iter()
                 .map(|reference| {
-                    let issue_labels = mock_issue_number_from_reference(reference)
-                        .and_then(|issue_number| {
-                            labels.get(&(repo.to_string(), issue_number)).cloned()
-                        })
-                        .unwrap_or_default();
+                    // Mock a SUCCESSFUL gh label lookup: registered labels, or an
+                    // empty set when none are registered → always `Some`. The
+                    // fetch-FAILURE (`None` → fail-closed) path is exercised by the
+                    // gate's direct-construction goldens, not through this mock.
+                    let issue_labels = Some(
+                        mock_issue_number_from_reference(reference)
+                            .and_then(|issue_number| {
+                                labels.get(&(repo.to_string(), issue_number)).cloned()
+                            })
+                            .unwrap_or_default(),
+                    );
                     ClosingIssueLabels {
                         reference: reference.clone(),
                         labels: issue_labels,

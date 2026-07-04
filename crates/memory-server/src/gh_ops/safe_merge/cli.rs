@@ -196,9 +196,11 @@ impl<'a> CliGhClient<'a> {
         references
             .iter()
             .map(|reference| {
+                // `None` when the ref can't be parsed or the label lookup errored
+                // → the gate fails CLOSED on this issue. `Some(vec)` (incl. empty)
+                // means the lookup succeeded.
                 let labels = issue_number_from_reference(reference)
-                    .and_then(|issue_number| self.issue_labels(repo, issue_number).ok())
-                    .unwrap_or_default();
+                    .and_then(|issue_number| self.issue_labels(repo, issue_number).ok());
                 ClosingIssueLabels {
                     reference: reference.clone(),
                     labels,

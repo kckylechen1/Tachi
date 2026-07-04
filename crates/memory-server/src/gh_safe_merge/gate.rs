@@ -91,14 +91,24 @@ pub fn evaluate_merge_gate_with_policy(pr: &PrState, policy: MergeGatePolicy) ->
     }
     if policy.block_protected_umbrella_close {
         for entry in &pr.closing_issue_labels {
-            if let Some(matched_label) = PROTECTED_NO_CLOSE_LABELS
-                .iter()
-                .find(|protected| entry.labels.iter().any(|label| label == **protected))
-            {
-                blocked.push(format!(
-                    "closes_protected:{}:{}",
-                    entry.reference, matched_label
-                ));
+            match &entry.labels {
+                Some(labels) => {
+                    if let Some(matched_label) = PROTECTED_NO_CLOSE_LABELS
+                        .iter()
+                        .find(|protected| labels.iter().any(|label| label == **protected))
+                    {
+                        blocked.push(format!(
+                            "closes_protected:{}:{}",
+                            entry.reference, matched_label
+                        ));
+                    }
+                }
+                None => {
+                    // Label lookup failed — cannot prove this closing issue is
+                    // safe to auto-close, so fail CLOSED (a wrong close is
+                    // irreversible). Overridable via allow_umbrella_close.
+                    blocked.push(format!("closes_protected_unknown:{}", entry.reference));
+                }
             }
         }
     }

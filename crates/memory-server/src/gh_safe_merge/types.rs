@@ -45,7 +45,12 @@ pub struct PrState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosingIssueLabels {
     pub reference: String,
-    pub labels: Vec<String>,
+    /// The closing issue's label names, or `None` when the label lookup failed
+    /// (transient GitHub error, or an unparsable ref). `None` fails the merge
+    /// CLOSED — we cannot prove the issue is safe to auto-close and a wrong
+    /// close is irreversible. `Some(vec![])` means the lookup succeeded and the
+    /// issue simply has no labels (safe to close).
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

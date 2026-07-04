@@ -18,7 +18,7 @@ fn open_pr() -> PrState {
 fn closing_issue(reference: &str, labels: &[&str]) -> ClosingIssueLabels {
     ClosingIssueLabels {
         reference: reference.to_string(),
-        labels: labels.iter().map(|label| label.to_string()).collect(),
+        labels: Some(labels.iter().map(|label| label.to_string()).collect()),
     }
 }
 
@@ -346,6 +346,57 @@ fn gate_allows_empty_closing_issue_labels() {
     );
 }
 
+// #483 hardening (fail-closed): a KNOWN-empty label set (lookup succeeded, no
+// labels) is safe to auto-close; UNKNOWN labels (lookup failed → None) fail
+// CLOSED so a transient GitHub error can't silently auto-close a protected issue.
+#[test]
+fn gate_allows_closing_issue_with_known_empty_labels() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![ClosingIssueLabels {
+        reference: "#5".to_string(),
+        labels: Some(Vec::new()),
+    }];
+
+    assert_eq!(
+        evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()),
+        MergeDecision::Ready
+    );
+}
+
+#[test]
+fn gate_blocks_closing_issue_with_unknown_labels() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![ClosingIssueLabels {
+        reference: "#769".to_string(),
+        labels: None,
+    }];
+
+    match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+        MergeDecision::Blocked { reasons } => {
+            assert!(reasons
+                .iter()
+                .any(|reason| reason == "closes_protected_unknown:#769"));
+        }
+        other => panic!("expected blocked, got {other:?}"),
+    }
+}
+
+#[test]
+fn gate_allows_unknown_labels_when_override_disables_gate() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![ClosingIssueLabels {
+        reference: "#769".to_string(),
+        labels: None,
+    }];
+    let mut policy = MergeGatePolicy::standard();
+    policy.block_protected_umbrella_close = false;
+
+    assert_eq!(
+        evaluate_merge_gate_with_policy(&pr, policy),
+        MergeDecision::Ready
+    );
+}
+
 #[test]
 fn gate_reports_draft_and_protected_closing_issue_together() {
     let mut pr = open_pr();
@@ -479,6 +530,8 @@ async fn mock_pr_view_populates_closing_issue_labels_from_registered_issue_label
     assert_eq!(got.closing_issue_labels[0].reference, "#769");
     assert!(got.closing_issue_labels[0]
         .labels
+        .as_ref()
+        .expect("labels fetched")
         .iter()
         .any(|label| label == "agent:no-close"));
 }
