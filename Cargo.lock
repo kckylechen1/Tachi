@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "aes-gcm",
  "argon2",
