@@ -2,7 +2,8 @@ use chrono::{SecondsFormat, Utc};
 use memory_core::TachiEventQuery;
 
 use crate::tool_params::TachiEventParams;
-use crate::{DbScope, MemoryServer};
+use crate::utils::{query_limit, trim_opt};
+use crate::MemoryServer;
 
 mod context;
 mod emit;
@@ -57,29 +58,11 @@ fn stable_event_payload_id(parts: &[&str]) -> String {
     format!("event-{}", crate::utils::stable_hash(&joined))
 }
 
-fn query_limit(limit: usize) -> usize {
-    limit.clamp(1, 500)
-}
-
-fn trim_opt(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 fn target_from_event_params(
     server: &MemoryServer,
     params: &TachiEventParams,
 ) -> ContinuityEventTarget {
-    if let Some(project) = trim_opt(&params.project) {
-        ContinuityEventTarget::new(DbScope::Project, Some(project), None)
-    } else if server.has_project_db() {
-        ContinuityEventTarget::new(DbScope::Project, None, None)
-    } else {
-        ContinuityEventTarget::new(DbScope::Global, None, None)
-    }
+    ContinuityEventTarget::from_default_write(server, params.project.as_deref())
 }
 
 fn event_query_from_params(params: &TachiEventParams) -> TachiEventQuery {
@@ -97,6 +80,7 @@ fn event_query_from_params(params: &TachiEventParams) -> TachiEventQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DbScope;
 
     #[test]
     fn parses_continuity_candidates_with_projection_aliases() {

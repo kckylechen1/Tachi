@@ -3,6 +3,7 @@ use memory_core::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventQuery, 
 use serde_json::json;
 
 use crate::tool_params::TachiEventParams;
+use crate::utils::query_limit;
 use crate::MemoryServer;
 
 fn json_string(value: &serde_json::Value) -> Result<String, String> {
@@ -85,10 +86,6 @@ fn parse_projection_hints(values: &[String]) -> Result<Vec<ProjectionKind>, Stri
     Ok(out)
 }
 
-fn query_limit(limit: usize) -> usize {
-    limit.clamp(1, 500)
-}
-
 fn workspace_project_label() -> Option<String> {
     crate::memory_search_ops::resolve_workspace_named_project()
 }
@@ -119,25 +116,12 @@ fn emit_event(server: &MemoryServer, params: TachiEventParams) -> Result<String,
         created_at: normalize_created_at(params.created_at.clone())?,
     };
 
-    if let Some(project_name) = trim_string(params.project.clone()) {
-        server.with_named_project_store(&project_name, |store| {
-            store
-                .insert_tachi_event(&event)
-                .map_err(|e| format!("insert tachi event: {e}"))
-        })?;
-    } else if server.has_project_db() {
-        server.with_project_store(|store| {
-            store
-                .insert_tachi_event(&event)
-                .map_err(|e| format!("insert tachi event: {e}"))
-        })?;
-    } else {
-        server.with_global_store(|store| {
-            store
-                .insert_tachi_event(&event)
-                .map_err(|e| format!("insert tachi event: {e}"))
-        })?;
-    }
+    let route = server.event_db_route(params.project.as_deref());
+    server.with_event_route_store(&route, |store| {
+        store
+            .insert_tachi_event(&event)
+            .map_err(|e| format!("insert tachi event: {e}"))
+    })?;
 
     json_string(&json!({
         "status": "saved",
@@ -157,25 +141,12 @@ fn query_events(server: &MemoryServer, params: TachiEventParams) -> Result<Strin
         limit: query_limit(params.limit),
     };
 
-    let events = if let Some(project_name) = trim_string(params.project.clone()) {
-        server.with_named_project_store_read(&project_name, |store| {
-            store
-                .list_tachi_events(&query)
-                .map_err(|e| format!("list tachi events: {e}"))
-        })?
-    } else if server.has_project_db() {
-        server.with_project_store_read(|store| {
-            store
-                .list_tachi_events(&query)
-                .map_err(|e| format!("list tachi events: {e}"))
-        })?
-    } else {
-        server.with_global_store_read(|store| {
-            store
-                .list_tachi_events(&query)
-                .map_err(|e| format!("list tachi events: {e}"))
-        })?
-    };
+    let route = server.event_db_route(params.project.as_deref());
+    let events = server.with_event_route_store_read(&route, |store| {
+        store
+            .list_tachi_events(&query)
+            .map_err(|e| format!("list tachi events: {e}"))
+    })?;
 
     json_string(&json!({
         "status": "completed",
@@ -186,25 +157,12 @@ fn query_events(server: &MemoryServer, params: TachiEventParams) -> Result<Strin
 
 fn event_metrics(server: &MemoryServer, params: TachiEventParams) -> Result<String, String> {
     let limit = query_limit(params.limit);
-    let metrics = if let Some(project_name) = trim_string(params.project.clone()) {
-        server.with_named_project_store_read(&project_name, |store| {
-            store
-                .continuity_metrics(limit)
-                .map_err(|e| format!("compute continuity metrics: {e}"))
-        })?
-    } else if server.has_project_db() {
-        server.with_project_store_read(|store| {
-            store
-                .continuity_metrics(limit)
-                .map_err(|e| format!("compute continuity metrics: {e}"))
-        })?
-    } else {
-        server.with_global_store_read(|store| {
-            store
-                .continuity_metrics(limit)
-                .map_err(|e| format!("compute continuity metrics: {e}"))
-        })?
-    };
+    let route = server.event_db_route(params.project.as_deref());
+    let metrics = server.with_event_route_store_read(&route, |store| {
+        store
+            .continuity_metrics(limit)
+            .map_err(|e| format!("compute continuity metrics: {e}"))
+    })?;
 
     json_string(&json!({
         "status": "completed",

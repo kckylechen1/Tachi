@@ -2,12 +2,13 @@ use memory_core::{AuthorityLevel, EffectScope, MemoryEntry, ProjectionKind, Tach
 use serde_json::{json, Value};
 
 use crate::tool_params::{TachiEventParams, TachiSkillParams, WikiWriteParams};
+use crate::utils::trim_opt;
 use crate::MemoryServer;
 
 use super::context::list_active_patterns;
 use super::feedback::pattern_ref_json;
 use super::storage::write_event;
-use super::{now_rfc3339, trim_opt, ContinuityEventTarget};
+use super::{now_rfc3339, ContinuityEventTarget};
 
 fn payload_bool(payload: Option<&Value>, key: &str) -> bool {
     payload

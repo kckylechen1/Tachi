@@ -4,14 +4,13 @@ use memory_core::{
 use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
+use crate::utils::query_limit;
 use crate::MemoryServer;
 
 use super::storage::{
     add_memory_edge, get_projection_memory, read_events, upsert_projection_memory,
 };
-use super::{
-    event_query_from_params, query_limit, target_from_event_params, ContinuityEventTarget,
-};
+use super::{event_query_from_params, target_from_event_params, ContinuityEventTarget};
 
 mod entry;
 

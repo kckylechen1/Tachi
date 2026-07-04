@@ -24,6 +24,16 @@ impl DbScope {
     }
 }
 
+/// Default store routing for event reads/writes: an explicit project name
+/// routes to that named project DB, otherwise the bound project DB when one
+/// exists, otherwise the global DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EventDbRoute {
+    NamedProject(String),
+    Project,
+    Global,
+}
+
 pub(crate) struct CachedVaultKey {
     bytes: [u8; 32],
 }

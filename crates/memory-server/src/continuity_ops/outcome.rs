@@ -2,10 +2,11 @@ use memory_core::{OutcomeEvidenceBasis, SessionOutcomeKind, TachiEventRecord};
 use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
+use crate::utils::query_limit;
 use crate::MemoryServer;
 
 use super::storage::read_events;
-use super::{event_query_from_params, query_limit, target_from_event_params};
+use super::{event_query_from_params, target_from_event_params};
 
 fn payload_string<'a>(payload: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter()

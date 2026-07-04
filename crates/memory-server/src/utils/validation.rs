@@ -1,3 +1,7 @@
+pub(crate) fn query_limit(limit: usize) -> usize {
+    limit.clamp(1, 500)
+}
+
 pub(crate) fn is_shell_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use memory_core::{ContinuityMetrics, MemoryEdge, MemoryEntry, TachiEventQuery, TachiEventRecord};
 
+use crate::server_state::EventDbRoute;
 use crate::{DbScope, MemoryServer};
 
 #[derive(Debug, Clone)]
@@ -25,13 +26,10 @@ impl ContinuityEventTarget {
     }
 
     pub(crate) fn from_default_write(server: &MemoryServer, project: Option<&str>) -> Self {
-        if let Some(project) = project.map(str::trim).filter(|value| !value.is_empty()) {
-            return Self::new(DbScope::Project, Some(project.to_string()), None);
-        }
-        if server.has_project_db() {
-            Self::new(DbScope::Project, None, None)
-        } else {
-            Self::new(DbScope::Global, None, None)
+        match server.event_db_route(project) {
+            EventDbRoute::NamedProject(project) => Self::new(DbScope::Project, Some(project), None),
+            EventDbRoute::Project => Self::new(DbScope::Project, None, None),
+            EventDbRoute::Global => Self::new(DbScope::Global, None, None),
         }
     }
 

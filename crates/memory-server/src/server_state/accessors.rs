@@ -1,10 +1,13 @@
 use super::cache::CachedResult;
 use super::memory_server::MemoryServer;
-use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime, RateLimiter, VaultState};
+use super::runtime::{
+    AgentRuntime, EnrichmentRuntime, EventDbRoute, FoundryRuntime, RateLimiter, VaultState,
+};
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::shared_defs::DeadLetter;
 use crate::utils::{lock_or_recover, read_or_recover, write_or_recover};
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
+use memory_core::MemoryStore;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -108,5 +111,39 @@ impl MemoryServer {
 
     pub(crate) fn agent_runtime_write(&self) -> std::sync::RwLockWriteGuard<'_, AgentRuntime> {
         write_or_recover(&self.agent_runtime, "agent_runtime")
+    }
+
+    pub(crate) fn event_db_route(&self, project: Option<&str>) -> EventDbRoute {
+        if let Some(project) = project.map(str::trim).filter(|value| !value.is_empty()) {
+            EventDbRoute::NamedProject(project.to_string())
+        } else if self.has_project_db() {
+            EventDbRoute::Project
+        } else {
+            EventDbRoute::Global
+        }
+    }
+
+    pub(crate) fn with_event_route_store<T>(
+        &self,
+        route: &EventDbRoute,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match route {
+            EventDbRoute::NamedProject(name) => self.with_named_project_store(name, f),
+            EventDbRoute::Project => self.with_project_store(f),
+            EventDbRoute::Global => self.with_global_store(f),
+        }
+    }
+
+    pub(crate) fn with_event_route_store_read<T>(
+        &self,
+        route: &EventDbRoute,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match route {
+            EventDbRoute::NamedProject(name) => self.with_named_project_store_read(name, f),
+            EventDbRoute::Project => self.with_project_store_read(f),
+            EventDbRoute::Global => self.with_global_store_read(f),
+        }
     }
 }
