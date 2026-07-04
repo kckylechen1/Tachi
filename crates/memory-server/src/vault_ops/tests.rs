@@ -203,3 +203,66 @@ fn read_unlock_password_fifo_rejects_regular_file_without_removing_it() {
         std::env::remove_var("TACHI_HOME");
     }
 }
+
+// G-B5: auto-lock clears the stale Vault-derived provider cache, and
+// re-materialization after auto-lock — which reads the now-locked Vault, NOT
+// process env — must not resurrect the stale value. (An earlier draft set a
+// process-global provider env var to model "config fallback present"; that was
+// wrong — re-materialization is vault-based, not env-based — and the global env
+// mutation raced with parallel tests. The real regression is vault-based.)
+#[tokio::test]
+async fn with_vault_key_auto_lock_clears_cache_and_rematerialize_does_not_resurrect() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _openai_env = EnvGuard::remove("OPENAI_API_KEY");
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-auto-lock-rematerialize-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+    let key = [9u8; 32];
+    {
+        let mut v = server.vault_write();
+        v.key = Some(crate::CachedVaultKey::copy_from(&key));
+        v.unlock_time = Some(Instant::now() - Duration::from_secs(60));
+        v.auto_lock_after_secs = 30;
+    }
+    assert!(server.llm.set_provider_secret("OPENAI_API_KEY", "cached"));
+
+    let err = with_vault_key(&server, |_| Ok(())).expect_err("expired key should auto-lock");
+    assert!(err.contains("Vault auto-locked"), "{err}");
+
+    // A second re-materialization from the now-locked vault must not bring the
+    // stale "cached" value back.
+    crate::provider_config::re_materialize_provider_secrets_after_auto_lock(&server);
+    assert_ne!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("cached"),
+        "auto-lock + re-materialization from a locked vault must not resurrect the stale cache entry"
+    );
+}
+
+// macOS Keychain auto-unlock integration smoke. Ignored by default because it
+// touches the real developer Keychain; run explicitly with `--ignored`.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "touches real macOS Keychain; run explicitly with --ignored"]
+async fn keychain_auto_unlock_smoke() {
+    let db_path = std::env::temp_dir().join(format!(
+        "memory-server-vault-keychain-smoke-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("create test server");
+
+    // The keychain-availability probe and the auto-unlock path must run without
+    // panicking regardless of whether a real `tachi-vault/default` entry exists.
+    let available = crate::provider_config::keychain_vault_password_entry_available()
+        .expect("keychain availability probe should return a Result, not panic");
+    let unlocked = crate::provider_config::auto_unlock_vault_from_keychain(&server)
+        .expect("auto-unlock attempt should return a Result, not panic");
+    eprintln!("keychain_available={available} auto_unlocked={unlocked}");
+}

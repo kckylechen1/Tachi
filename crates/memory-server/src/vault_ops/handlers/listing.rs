@@ -114,6 +114,8 @@ pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
         "unlocked"
     } else if keychain_available {
         "locked_keychain_available"
+    } else if keychain_error.is_some() {
+        "auto_unlock_failed"
     } else {
         "locked"
     };

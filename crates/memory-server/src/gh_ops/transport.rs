@@ -95,10 +95,7 @@ pub(in crate::gh_ops) fn sanitize_output(text: &str, token: &str) -> String {
 }
 
 pub(in crate::gh_ops) fn vault_secret_unavailable(err: &str) -> bool {
-    err.starts_with("Secret not found: ")
-        || err.starts_with("Vault is locked")
-        || err.starts_with("Vault auto-locked")
-        || err.starts_with("Vault not initialized")
+    crate::vault_ops::is_env_fallback_eligible(crate::vault_ops::classify_vault_read_error(err))
 }
 
 pub(in crate::gh_ops) fn env_gh_token() -> Option<String> {

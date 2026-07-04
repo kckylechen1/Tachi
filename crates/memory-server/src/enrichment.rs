@@ -431,9 +431,15 @@ fn should_defer_enrichment_failure(stage: &str, error: &str) -> bool {
         return false;
     }
 
+    // Vault lock states (incl. auto-lock, previously missed) are transient and
+    // deferrable; classification comes from the shared resolver. NotAuthorized/
+    // Missing are intentionally NOT deferred here (auth fails closed; a missing
+    // secret will not become present by retrying).
     let lower = error.to_ascii_lowercase();
-    lower.contains("vault is locked")
-        || lower.contains("secret materialization failed")
+    matches!(
+        crate::vault_ops::classify_vault_read_error(error),
+        crate::vault_ops::VaultReadState::Locked | crate::vault_ops::VaultReadState::AutoLocked
+    ) || lower.contains("secret materialization failed")
         || lower.contains("temporarily unavailable")
         || lower.contains("retry after")
         || lower.contains("missing api key")

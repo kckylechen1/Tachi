@@ -10,12 +10,12 @@ impl MemoryServer {
             Ok(value) => Ok(Some(value)),
             // Backward compatibility: existing Hub definitions can still run
             // from env vars when the vault is unavailable or intentionally
-            // locked. Authorization failures are not swallowed below.
+            // locked. Authorization failures fail closed (never swallowed) —
+            // the shared resolver policy is the single source of truth.
             Err(err)
-                if err.starts_with("Secret not found: ")
-                    || err.starts_with("Vault is locked")
-                    || err.starts_with("Vault auto-locked")
-                    || err.starts_with("Vault not initialized") =>
+                if crate::vault_ops::is_env_fallback_eligible(
+                    crate::vault_ops::classify_vault_read_error(&err),
+                ) =>
             {
                 Ok(None)
             }
