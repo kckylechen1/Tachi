@@ -16,6 +16,8 @@ pub(crate) use rerank::{
 };
 pub(crate) use save_memory::handle_remember;
 pub(crate) use save_memory::handle_save_memory;
+pub(crate) use search_helpers::client_project_precedence;
+pub(crate) use search_helpers::explicit_workspace_project;
 pub(crate) use search_helpers::list_available_named_projects;
 pub(crate) use search_helpers::named_project_db_exists;
 pub(crate) use search_helpers::named_project_from_db_path;
