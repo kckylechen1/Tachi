@@ -36,28 +36,44 @@ impl ContinuityEventTarget {
     }
 
     pub(super) fn project_label(&self, explicit_project: Option<&str>) -> String {
-        if let Some(project) = explicit_project
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return project.to_string();
-        }
-        if let Some(project) = self.named_project.as_deref() {
-            return project.to_string();
-        }
-        if let Some(label) = self
+        let pin = crate::memory_search_ops::explicit_workspace_project();
+        let db_parent = self
             .db_path
             .as_ref()
             .and_then(|path| path.parent())
             .and_then(|parent| parent.file_name())
-            .and_then(|name| name.to_str())
-            .filter(|value| !value.is_empty())
-        {
+            .and_then(|name| name.to_str());
+        if let Some(label) = pick_label(
+            explicit_project,
+            self.named_project.as_deref(),
+            pin.as_deref(),
+            db_parent,
+        ) {
             return label.to_string();
         }
+        // All cheap sources empty — only now pay for the git-root workspace lookup.
         crate::memory_search_ops::resolve_workspace_named_project()
             .unwrap_or_else(|| self.target_db.as_str().to_string())
     }
+}
+
+/// Label precedence for a continuity projection over the cheap (non-git-walk)
+/// sources: explicit param > store's named project > TACHI_PROJECT pin > db-path
+/// parent (git-hash) name. The pin sits ahead of the git-hash name so a pinned
+/// repo's direct-daemon projections carry the same label as its pinned reads and
+/// proxy-injected writes (#488). Pure — no env/git access — so the ordering is
+/// unit-tested without a process-global env race.
+fn pick_label<'a>(
+    explicit_project: Option<&'a str>,
+    named_project: Option<&'a str>,
+    pin: Option<&'a str>,
+    db_parent_name: Option<&'a str>,
+) -> Option<&'a str> {
+    [explicit_project, named_project, pin, db_parent_name]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
 }
 
 pub(super) fn write_event(
@@ -240,5 +256,62 @@ pub(super) fn continuity_metrics(
                 .continuity_metrics(limit)
                 .map_err(|e| format!("compute continuity metrics: {e}"))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_label;
+
+    // #488: the TACHI_PROJECT pin must win over the git-hash db-path parent name
+    // so direct-daemon continuity projections align with pinned reads/writes.
+    #[test]
+    fn pick_label_prefers_pin_over_git_hash_db_parent() {
+        assert_eq!(
+            pick_label(
+                None,
+                None,
+                Some("trading"),
+                Some("Quant_Analyzer_2026-b4773587"),
+            ),
+            Some("trading")
+        );
+    }
+
+    #[test]
+    fn pick_label_full_precedence_order() {
+        // explicit param > named project > pin > db-path parent.
+        assert_eq!(
+            pick_label(
+                Some("explicit"),
+                Some("named"),
+                Some("pin"),
+                Some("dbparent")
+            ),
+            Some("explicit")
+        );
+        assert_eq!(
+            pick_label(None, Some("named"), Some("pin"), Some("dbparent")),
+            Some("named")
+        );
+        assert_eq!(
+            pick_label(None, None, Some("pin"), Some("dbparent")),
+            Some("pin")
+        );
+        // No pin -> db-path parent (git-hash) name — behavior unchanged.
+        assert_eq!(
+            pick_label(None, None, None, Some("Quant_Analyzer_2026-b4773587")),
+            Some("Quant_Analyzer_2026-b4773587")
+        );
+        assert_eq!(pick_label(None, None, None, None), None);
+    }
+
+    #[test]
+    fn pick_label_skips_blank_sources() {
+        assert_eq!(
+            pick_label(Some("   "), None, Some("trading"), None),
+            Some("trading")
+        );
+        assert_eq!(pick_label(None, None, None, Some("  ")), None);
     }
 }
