@@ -57,7 +57,7 @@ pub(crate) use maintenance_actions::{
     ManifestAction, PokeAction, QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction,
     WatcherAction, WikiAction,
 };
-pub(crate) use vault_actions::{EnvAction, VaultAction};
+pub(crate) use vault_actions::{EnvAction, VaultAction, VaultIntakeAction};
 
 #[cfg(test)]
 mod tests;

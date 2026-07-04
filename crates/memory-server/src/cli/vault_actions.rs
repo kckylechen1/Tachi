@@ -64,14 +64,20 @@ pub(crate) enum VaultIntakeAction {
         #[arg(long)]
         json: bool,
     },
-}
-
-impl VaultIntakeAction {
-    pub(crate) fn into_discover(self) -> (Option<String>, bool) {
-        match self {
-            Self::Discover { host, json } => (host, json),
-        }
-    }
+    /// Plan intake actions for discovered candidates. Read-only: never unlocks the
+    /// Vault, never reads a secret value, and writes nothing unless --write is set.
+    Plan {
+        /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
+        #[arg(long)]
+        host: Option<String>,
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+        /// Write a redacted plan artifact to <cwd>/.tachi/intake-plan.json.
+        /// Default is stdout only (fully read-only).
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
