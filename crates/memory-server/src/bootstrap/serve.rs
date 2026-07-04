@@ -438,15 +438,18 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
-    let client_project_name = project_db_path
-        .as_deref()
-        .and_then(crate::memory_search_ops::named_project_from_db_path)
-        .or_else(|| {
-            project_db_path
-                .is_some()
-                .then(crate::memory_search_ops::resolve_workspace_named_project)
-                .flatten()
-        });
+    // An explicit TACHI_PROJECT pin wins over the path-derived (git-hash) name so
+    // the label injected into proxied WRITES matches the label used for reads —
+    // otherwise briefing reads the pinned library while proxy writes still land
+    // in the git-hash library (a silent read/write split). Only bind a label
+    // when a project DB is bound, preserving the prior "global-only ⇒ no label".
+    let client_project_name = project_db_path.as_deref().and_then(|p| {
+        crate::memory_search_ops::client_project_precedence(
+            crate::memory_search_ops::explicit_workspace_project(),
+            crate::memory_search_ops::named_project_from_db_path(p),
+            crate::memory_search_ops::resolve_workspace_named_project(),
+        )
+    });
 
     if !cli.daemon {
         if let Some(info) =

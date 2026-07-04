@@ -250,11 +250,58 @@ pub(crate) fn named_project_from_db_path(path: &std::path::Path) -> Option<Strin
     })
 }
 
-/// Infer a named project library from query text when the caller omitted `project`.
-/// Git repo folder name for Plan C (`~/.tachi/projects/<name>/memory.db`), if any.
+/// Resolve the default workspace project library when the caller omitted `project`.
+///
+/// Honors an explicit pin (`TACHI_PROJECT`, populated from `.tachi/config.env`
+/// at bootstrap) FIRST, so a repo whose memories live in an explicitly-named
+/// library (e.g. `trading`) is the default target without passing `project=` on
+/// every call. Falls back to the git-derived Plan C folder name
+/// (`~/.tachi/projects/<name>/memory.db`) when no pin is set — which is what a
+/// repo without an explicit library relies on.
 pub(crate) fn resolve_workspace_named_project() -> Option<String> {
+    if let Some(pinned) = explicit_workspace_project() {
+        return Some(pinned);
+    }
     let git_root = crate::utils::find_project_git_root()?;
     crate::path_utils::plan_c_dir_name_from_root(&git_root)
+}
+
+/// Explicit project pin from the `TACHI_PROJECT` env var. Returns `None` when
+/// unset/blank/unsafe so resolution falls back to the git-derived name.
+pub(crate) fn explicit_workspace_project() -> Option<String> {
+    normalize_pinned_project(&std::env::var("TACHI_PROJECT").ok()?)
+}
+
+/// Normalize a raw project pin. Mirrors the `project=` guard in
+/// `resolve_named_project_db_path`: reject names that could escape the
+/// `projects/` directory; return the trimmed name (downstream resolution
+/// applies the same sanitization the `project=` param path does).
+fn normalize_pinned_project(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || trimmed.starts_with('.')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Precedence for the daemon's client project label that the stdio proxy
+/// injects into project-aware tools (reads AND writes): an explicit
+/// `TACHI_PROJECT` pin wins over the path-derived name, which wins over the
+/// git-workspace fallback. Kept pure so `serve.rs` supplies the three
+/// candidates and this stays unit-testable without touching process env.
+/// Aligning the WRITE label with the pin here is what prevents a
+/// read-from-pin / write-to-git-hash split.
+pub(crate) fn client_project_precedence(
+    pin: Option<String>,
+    named_from_path: Option<String>,
+    workspace_fallback: Option<String>,
+) -> Option<String> {
+    pin.or(named_from_path).or(workspace_fallback)
 }
 
 /// Resolve the named project DB to use when the caller omitted `project` but
@@ -390,6 +437,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    // #485: explicit TACHI_PROJECT pin normalization. Pure function — no process
+    // env is mutated, so these do not race with parallel tests that resolve the
+    // workspace project.
+    #[test]
+    fn normalize_pinned_project_accepts_plain_name() {
+        assert_eq!(
+            normalize_pinned_project("trading"),
+            Some("trading".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_pinned_project_trims_whitespace() {
+        assert_eq!(
+            normalize_pinned_project("  trading  "),
+            Some("trading".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_pinned_project_rejects_blank() {
+        assert_eq!(normalize_pinned_project(""), None);
+        assert_eq!(normalize_pinned_project("   "), None);
+    }
+
+    #[test]
+    fn normalize_pinned_project_rejects_path_escape() {
+        assert_eq!(normalize_pinned_project("../evil"), None);
+        assert_eq!(normalize_pinned_project("a/b"), None);
+        assert_eq!(normalize_pinned_project("a\\b"), None);
+        assert_eq!(normalize_pinned_project(".hidden"), None);
+    }
+
+    // #485 review fix: the pin must win over the path-derived (git-hash) name for
+    // the daemon's client project label, so proxied WRITES align with reads.
+    #[test]
+    fn client_project_precedence_prefers_pin_then_path_then_workspace() {
+        // Pin present -> pin wins over the git-hash path name and workspace.
+        assert_eq!(
+            client_project_precedence(
+                Some("trading".to_string()),
+                Some("Quant_Analyzer_2026-b4773587".to_string()),
+                Some("ws".to_string()),
+            ),
+            Some("trading".to_string())
+        );
+        // No pin -> path-derived name wins (prior behavior, unchanged).
+        assert_eq!(
+            client_project_precedence(
+                None,
+                Some("Quant_Analyzer_2026-b4773587".to_string()),
+                Some("ws".to_string()),
+            ),
+            Some("Quant_Analyzer_2026-b4773587".to_string())
+        );
+        // No pin, no path name -> workspace fallback.
+        assert_eq!(
+            client_project_precedence(None, None, Some("ws".to_string())),
+            Some("ws".to_string())
+        );
+        assert_eq!(client_project_precedence(None, None, None), None);
     }
 
     fn test_entry(id: &str, text: &str) -> MemoryEntry {
