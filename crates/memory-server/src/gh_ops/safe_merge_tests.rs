@@ -14,6 +14,7 @@ fn ready_pr() -> PrState {
         is_draft: false,
         head_sha: "deadbeef".to_string(),
         linked_issue_refs: Vec::new(),
+        closing_issue_labels: Vec::new(),
         head_consistent: None,
     }
 }

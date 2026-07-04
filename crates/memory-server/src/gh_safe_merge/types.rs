@@ -31,10 +31,21 @@ pub struct PrState {
     /// these links or an explicit Tachi `flow_id`.
     #[serde(default)]
     pub linked_issue_refs: Vec<String>,
+    /// Labels fetched for each GitHub issue that this PR would close on merge.
+    /// `closingIssuesReferences` itself does not include labels, so production
+    /// clients enrich this field after parsing the pure PR-view payload.
+    #[serde(default)]
+    pub closing_issue_labels: Vec<ClosingIssueLabels>,
     /// Whether the caller has proven the merge gate input is current for
     /// `head_sha`. `None` means the caller has not evaluated that proof.
     #[serde(default)]
     pub head_consistent: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosingIssueLabels {
+    pub reference: String,
+    pub labels: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +75,7 @@ pub struct MergeGatePolicy {
     pub allow_missing_review_decision: bool,
     pub require_linked_issue_or_flow: bool,
     pub require_head_consistency: bool,
+    pub block_protected_umbrella_close: bool,
 }
 
 impl MergeGatePolicy {
@@ -76,6 +88,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: true,
             require_linked_issue_or_flow: false,
             require_head_consistency: false,
+            block_protected_umbrella_close: true,
         }
     }
 
@@ -88,6 +101,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: false,
             require_head_consistency: false,
+            block_protected_umbrella_close: true,
         }
     }
 
@@ -100,6 +114,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: true,
             require_head_consistency: true,
+            block_protected_umbrella_close: true,
         }
     }
 

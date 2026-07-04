@@ -1,7 +1,7 @@
 use crate::gh_safe_merge::{
-    evaluate_merge_gate_with_policy, ChecksState, GhClient, GhError, MergeDecision,
-    MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable, PrLifecycleState,
-    PrState, ReviewDecision,
+    evaluate_merge_gate_with_policy, ChecksState, ClosingIssueLabels, GhClient, GhError,
+    MergeDecision, MergeGatePolicy, MergeGatePolicyMode, MergeResult, MergeStrategy, Mergeable,
+    PrLifecycleState, PrState, ReviewDecision,
 };
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{

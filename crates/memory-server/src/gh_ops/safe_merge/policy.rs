@@ -109,6 +109,15 @@ pub(in crate::gh_ops) fn parse_merge_gate_policy(
     Ok(MergeGatePolicy::from_mode(mode))
 }
 
+pub(in crate::gh_ops) fn merge_gate_policy_from_params(
+    raw: Option<&str>,
+    allow_umbrella_close: bool,
+) -> Result<MergeGatePolicy, String> {
+    let mut policy = parse_merge_gate_policy(raw)?;
+    policy.block_protected_umbrella_close = !allow_umbrella_close;
+    Ok(policy)
+}
+
 pub(in crate::gh_ops) fn merge_strategy_flag(s: MergeStrategy) -> &'static str {
     match s {
         MergeStrategy::Squash => "--squash",

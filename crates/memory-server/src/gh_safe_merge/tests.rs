@@ -10,7 +10,15 @@ fn open_pr() -> PrState {
         is_draft: false,
         head_sha: "abc123".to_string(),
         linked_issue_refs: Vec::new(),
+        closing_issue_labels: Vec::new(),
         head_consistent: None,
+    }
+}
+
+fn closing_issue(reference: &str, labels: &[&str]) -> ClosingIssueLabels {
+    ClosingIssueLabels {
+        reference: reference.to_string(),
+        labels: labels.iter().map(|label| label.to_string()).collect(),
     }
 }
 
@@ -289,6 +297,79 @@ fn gate_decision_to_merge_state_label() {
     );
 }
 
+#[test]
+fn gate_blocks_protected_closing_issue_labels() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![closing_issue("#769", &["agent:no-close", "type:umbrella"])];
+
+    match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+        MergeDecision::Blocked { reasons } => {
+            assert!(reasons
+                .iter()
+                .any(|reason| { reason.contains("#769") && reason.contains("agent:no-close") }));
+        }
+        other => panic!("expected blocked, got {other:?}"),
+    }
+}
+
+#[test]
+fn gate_allows_protected_closing_issue_when_policy_override_disables_gate() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![closing_issue("#769", &["agent:no-close", "type:umbrella"])];
+    let mut policy = MergeGatePolicy::standard();
+    policy.block_protected_umbrella_close = false;
+
+    assert_eq!(
+        evaluate_merge_gate_with_policy(&pr, policy),
+        MergeDecision::Ready
+    );
+}
+
+#[test]
+fn gate_allows_unprotected_closing_issue_labels() {
+    let mut pr = open_pr();
+    pr.closing_issue_labels = vec![closing_issue("#12", &["type:bug", "status:ready"])];
+
+    assert_eq!(
+        evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()),
+        MergeDecision::Ready
+    );
+}
+
+#[test]
+fn gate_allows_empty_closing_issue_labels() {
+    let pr = open_pr();
+
+    assert_eq!(
+        evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()),
+        MergeDecision::Ready
+    );
+}
+
+#[test]
+fn gate_reports_draft_and_protected_closing_issue_together() {
+    let mut pr = open_pr();
+    pr.is_draft = true;
+    pr.closing_issue_labels = vec![closing_issue("#769", &["agent:no-close"])];
+
+    match evaluate_merge_gate_with_policy(&pr, MergeGatePolicy::standard()) {
+        MergeDecision::Blocked { reasons } => {
+            assert!(reasons.iter().any(|reason| reason == "draft"));
+            assert!(reasons
+                .iter()
+                .any(|reason| { reason.contains("#769") && reason.contains("agent:no-close") }));
+        }
+        other => panic!("expected blocked, got {other:?}"),
+    }
+}
+
+#[test]
+fn gate_policy_modes_default_to_blocking_protected_umbrella_close() {
+    assert!(MergeGatePolicy::permissive().block_protected_umbrella_close);
+    assert!(MergeGatePolicy::standard().block_protected_umbrella_close);
+    assert!(MergeGatePolicy::strict().block_protected_umbrella_close);
+}
+
 // ─── ChecksState::aggregate ──────────────────────────────────────────
 
 fn check(name: &str, status: &str, conclusion: Option<&str>) -> CheckRun {
@@ -380,6 +461,26 @@ async fn mock_pr_view_returns_registered_state() {
     let mock = MockGhClient::new().with_pr("o/r", pr.clone());
     let got = mock.pr_view("o/r", 1).await.expect("pr_view");
     assert_eq!(got, pr);
+}
+
+#[tokio::test]
+async fn mock_pr_view_populates_closing_issue_labels_from_registered_issue_labels() {
+    let mut pr = open_pr();
+    pr.linked_issue_refs = vec!["#769".to_string()];
+    let mock = MockGhClient::new().with_pr("o/r", pr).with_issue_labels(
+        "o/r",
+        769,
+        vec!["agent:no-close", "type:umbrella"],
+    );
+
+    let got = mock.pr_view("o/r", 1).await.expect("pr_view");
+
+    assert_eq!(got.closing_issue_labels.len(), 1);
+    assert_eq!(got.closing_issue_labels[0].reference, "#769");
+    assert!(got.closing_issue_labels[0]
+        .labels
+        .iter()
+        .any(|label| label == "agent:no-close"));
 }
 
 #[tokio::test]
