@@ -306,7 +306,8 @@ fn projection_promotion_reason(entry: &MemoryEntry) -> Option<&'static str> {
     }
     let seen = counter_i64(&entry.metadata, "seen");
     let hit = counter_i64(&entry.metadata, "hit");
-    if seen >= 3 && hit > 0 {
+    let miss = counter_i64(&entry.metadata, "miss");
+    if seen >= 3 && hit > 0 && hit > miss {
         return Some("hit_threshold");
     }
     if entry.tier == "pattern" {

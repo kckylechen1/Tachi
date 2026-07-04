@@ -59,6 +59,17 @@ async fn vault_auto_lock_expires_cached_key() {
     let status_json: serde_json::Value =
         serde_json::from_str(&status).expect("vault_status response should be JSON");
     assert_eq!(status_json["locked"], json!(true));
+    assert_eq!(status_json["session"]["locked"], json!(true));
+    assert!(matches!(
+        status_json["resolver"]["state"].as_str(),
+        Some("locked" | "locked_keychain_available")
+    ));
+    assert!(
+        status_json["provider_cache"]["secret_pool_count"]
+            .as_u64()
+            .is_some(),
+        "vault_status should report provider cache count: {status_json:#}"
+    );
     assert!(
         server
             .llm

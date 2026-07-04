@@ -106,7 +106,8 @@ fn promotion_reason(entry: &MemoryEntry) -> Option<&'static str> {
     }
     let seen = entry_counter(&entry.metadata, "seen");
     let hit = entry_counter(&entry.metadata, "hit");
-    if seen >= 3 && hit > 0 {
+    let miss = entry_counter(&entry.metadata, "miss");
+    if seen >= 3 && hit > 0 && hit > miss {
         return Some("hit_threshold");
     }
     if entry.tier == "pattern" {

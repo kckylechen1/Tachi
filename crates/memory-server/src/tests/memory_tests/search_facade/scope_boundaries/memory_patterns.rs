@@ -236,7 +236,7 @@ async fn tachi_memory_pattern_feedback_records_hit_without_skill_promotion() {
     assert_eq!(entry.metadata["counters"]["seen"], json!(2));
     assert_eq!(entry.metadata["counters"]["hit"], json!(1));
     assert_eq!(entry.metadata["counters"]["miss"], json!(0));
-    assert_eq!(entry.metadata["counters"]["confidence"], json!(0.5));
+    assert_eq!(entry.metadata["counters"]["confidence"], json!(1.0));
     assert_eq!(entry.tier, "raw");
 }
 

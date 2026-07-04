@@ -121,7 +121,7 @@ fn tachi_gh_action_schema_mentions_lifecycle_actions() {
     let action = &value["properties"]["action"];
     let description = action["description"].as_str().expect("action description");
 
-    for expected in ["link_pr", "pr_status", "pr_handoff", "release_note"] {
+    for expected in ["ship", "link_pr", "pr_status", "pr_handoff", "release_note"] {
         assert!(
             description.contains(expected),
             "tachi_gh action schema should mention {expected}: {description}"

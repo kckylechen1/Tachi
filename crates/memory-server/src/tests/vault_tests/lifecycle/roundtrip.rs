@@ -102,4 +102,13 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
     assert_eq!(status_json["initialized"], json!(true));
     assert_eq!(status_json["locked"], json!(false));
     assert_eq!(status_json["entry_count"], json!(1));
+    assert_eq!(status_json["session"]["unlocked"], json!(true));
+    assert!(
+        status_json["provider_cache"]["secret_pool_count"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "vault_status should report provider cache materialized: {status_json:#}"
+    );
+    assert_eq!(status_json["resolver"]["state"], json!("unlocked"));
+    assert!(status_json["secure_store"]["auto_unlock_available"].is_boolean());
 }

@@ -360,11 +360,11 @@ export class MemoryMcpClient {
   ) {}
 
   private logInfo(message: string): void {
-    this.logger?.info?.(`memory-hybrid-bridge[mcp]: ${message}`);
+    this.logger?.info?.(`tachi[mcp]: ${message}`);
   }
 
   private logWarn(message: string): void {
-    this.logger?.warn?.(`memory-hybrid-bridge[mcp]: ${message}`);
+    this.logger?.warn?.(`tachi[mcp]: ${message}`);
   }
 
   private resolveServerCommand(): string {
@@ -451,7 +451,7 @@ export class MemoryMcpClient {
 
     const client = new Client(
       {
-        name: "memory-hybrid-bridge",
+        name: "tachi-openclaw",
         version: MemoryMcpClient.CLIENT_VERSION,
       },
       {},

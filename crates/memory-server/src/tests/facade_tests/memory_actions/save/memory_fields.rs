@@ -1,6 +1,68 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_memory_save_with_id_preserves_unspecified_fields() {
+    let server = make_server();
+    let memory_id = "save-patch-preserves-fields";
+
+    let mut first = tachi_memory_params("save");
+    first.format = Some("json".to_string());
+    first.id = Some(memory_id.to_string());
+    first.force = true;
+    first.scope = Some("project".to_string());
+    first.kind = Some("memory".to_string());
+    first.category = Some("decision".to_string());
+    first.path = Some("/scratch/save-patch".to_string());
+    first.text = Some("Original durable memory body.".to_string());
+    first.summary = Some("Original summary".to_string());
+    first.topic = Some("save-patch-topic".to_string());
+    first.keywords = vec!["patch".to_string(), "preserve".to_string()];
+    first.entities = vec!["Tachi".to_string()];
+    first.importance = Some(0.82);
+    first.retention_policy = Some("durable".to_string());
+    first.domain = Some("memory".to_string());
+    first.metadata = Some(json!({"tier": "consolidated", "source": "test"}));
+    first.valid_from = Some("2026-07-01T00:00:00Z".to_string());
+    first.valid_until = Some("2026-12-31T00:00:00Z".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, first)
+        .await
+        .expect("first save succeeds");
+    let original_entry = server
+        .with_global_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
+        .expect("read original memory")
+        .expect("original memory exists");
+
+    let mut patch = tachi_memory_params("save");
+    patch.format = Some("json".to_string());
+    patch.id = Some(memory_id.to_string());
+    patch.force = true;
+    patch.scope = Some("project".to_string());
+    patch.text = Some("Patched body only.".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, patch)
+        .await
+        .expect("patch save succeeds");
+
+    let entry = server
+        .with_global_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
+        .expect("read patched memory")
+        .expect("patched memory exists");
+    assert_eq!(entry.text, "Patched body only.");
+    assert_eq!(entry.summary, "Original summary");
+    assert_eq!(entry.category, "decision");
+    assert_eq!(entry.path, "/scratch/save-patch");
+    assert_eq!(entry.topic, "save-patch-topic");
+    assert_eq!(entry.keywords, vec!["patch", "preserve"]);
+    assert_eq!(entry.entities, vec!["Tachi"]);
+    assert_eq!(entry.importance, 0.82);
+    assert_eq!(entry.retention_policy.as_deref(), Some("durable"));
+    assert_eq!(entry.domain.as_deref(), Some("memory"));
+    assert_eq!(entry.metadata["tier"], json!("consolidated"));
+    assert_eq!(entry.metadata["source"], json!("test"));
+    assert_eq!(entry.valid_from, original_entry.valid_from);
+    assert_eq!(entry.valid_until, original_entry.valid_until);
+}
+
+#[tokio::test]
 async fn tachi_memory_save_persists_programming_agent_fields() {
     let server = make_server();
     let mem_id = "mcp-agent-fields-001";

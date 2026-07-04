@@ -28,13 +28,13 @@ pub(in crate::memory_search_ops::save_memory) fn find_exact_path_text_duplicate(
     }
 }
 
-pub(in crate::memory_search_ops::save_memory) fn lookup_existing_revision(
+pub(in crate::memory_search_ops::save_memory) fn lookup_existing_entry(
     server: &MemoryServer,
     id: &str,
     requested_id: bool,
     target_db: DbScope,
     named_project: Option<&str>,
-) -> Result<Option<i64>, String> {
+) -> Result<Option<MemoryEntry>, String> {
     if !requested_id {
         return Ok(None);
     }
@@ -42,7 +42,6 @@ pub(in crate::memory_search_ops::save_memory) fn lookup_existing_revision(
     let lookup = |store: &mut MemoryStore| {
         store
             .get(id)
-            .map(|entry| entry.map(|entry| entry.revision))
             .map_err(|e| format_save_error(server, target_db, named_project, &e))
     };
     if let Some(project_name) = named_project {

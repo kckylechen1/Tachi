@@ -220,7 +220,10 @@ impl super::super::LlmClient {
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
                 if status.as_u16() == 403 && is_retriable_billing_failure(&resp_text) {
-                    self.mark_secret_rate_limited(&selected, retry_after.or(Some(300)));
+                    self.mark_secret_exhausted(
+                        &selected,
+                        Some(&chat_auth_failure_reason(status.as_u16(), &resp_text)),
+                    );
                 } else {
                     self.mark_secret_auth_failed(
                         &selected,

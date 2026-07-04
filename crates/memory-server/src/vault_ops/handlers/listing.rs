@@ -102,12 +102,48 @@ pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
     } else {
         0
     };
+    let keychain_available_result =
+        crate::provider_config::keychain_vault_password_entry_available();
+    let (keychain_available, keychain_error) = match keychain_available_result {
+        Ok(available) => (available, None),
+        Err(error) => (false, Some(error)),
+    };
+    let resolver_state = if !initialized {
+        "not_initialized"
+    } else if !locked {
+        "unlocked"
+    } else if keychain_available {
+        "locked_keychain_available"
+    } else {
+        "locked"
+    };
+    let provider_secret_count = server.llm.provider_secret_count();
 
     let resp = json!({
         "initialized": initialized,
         "locked": locked,
         "entry_count": entry_count,
         "auto_lock_after_secs": auto_lock_secs,
+        "session": {
+            "locked": locked,
+            "unlocked": !locked,
+            "auto_lock_after_secs": auto_lock_secs,
+        },
+        "secure_store": {
+            "backend": if cfg!(target_os = "macos") { "macos_keychain" } else { "unavailable" },
+            "service": "tachi-vault",
+            "account": "default",
+            "auto_unlock_available": keychain_available,
+            "last_error": keychain_error,
+        },
+        "provider_cache": {
+            "secret_pool_count": provider_secret_count,
+            "loaded": provider_secret_count > 0,
+        },
+        "resolver": {
+            "state": resolver_state,
+            "last_failure": null,
+        },
     });
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }

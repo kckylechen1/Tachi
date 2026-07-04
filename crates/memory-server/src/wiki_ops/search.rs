@@ -314,6 +314,23 @@ pub(crate) fn handle_wiki_read(
     {
         return Ok(crate::agent_markdown::format_wiki_read(&value["entry"]));
     }
+    if value
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "ambiguous")
+    {
+        let resolved = value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| path.trim());
+        let count = value
+            .get("candidate_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return Ok(format!(
+            "## Wiki read\n\n_Ambiguous path `{resolved}` matched {count} entries._\n\nUse `tachi_wiki(action=\"search\")` or read by a more specific path."
+        ));
+    }
     let resolved = value
         .get("path")
         .and_then(Value::as_str)
@@ -342,7 +359,25 @@ pub(crate) fn collect_wiki_read_value(
     };
 
     let (entries, _) = list_wiki_entries(server, project, 5000)?;
-    let entry = entries.iter().find(|e| e.path == resolved).or_else(|| {
+    let exact_matches = entries
+        .iter()
+        .filter(|entry| entry.path == resolved)
+        .collect::<Vec<_>>();
+    if exact_matches.len() > 1 {
+        return Ok(json!({
+            "status": "ambiguous",
+            "project": project,
+            "path": resolved,
+            "entry": null,
+            "candidate_count": exact_matches.len(),
+            "candidates": exact_matches
+                .into_iter()
+                .map(wiki_read_candidate)
+                .collect::<Vec<_>>(),
+            "next_action": "Use tachi_wiki(action=\"search\") or read by a more specific path.",
+        }));
+    }
+    let entry = exact_matches.into_iter().next().or_else(|| {
         let prefix = format!("{resolved}/");
         entries.iter().find(|e| e.path.starts_with(&prefix))
     });
@@ -374,4 +409,17 @@ pub(crate) fn collect_wiki_read_value(
             "next_action": "Use tachi_wiki(action=\"search\") or tachi_wiki(action=\"browse\") to find entries.",
         })),
     }
+}
+
+fn wiki_read_candidate(entry: &memory_core::MemoryEntry) -> Value {
+    json!({
+        "id": entry.id,
+        "path": entry.path,
+        "summary": entry.summary,
+        "importance": entry.importance,
+        "keywords": entry.keywords,
+        "entities": entry.entities,
+        "topic": entry.topic,
+        "timestamp": entry.timestamp,
+    })
 }

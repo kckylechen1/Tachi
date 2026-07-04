@@ -47,10 +47,12 @@ pub(super) fn build_complete_eval_record(
     let safe_skills_used = scrub_eval_strings(&params.skills_used, &mut secret_redactions);
     let safe_evidence_refs = scrub_eval_strings(&params.evidence_refs, &mut secret_redactions);
     let safe_tests_run = scrub_eval_strings(&params.tests_run, &mut secret_redactions);
-    let safe_trajectory = params
-        .trajectory
-        .as_ref()
-        .map(|trajectory| scrub_eval_json(trajectory.clone(), &mut secret_redactions));
+    let safe_trajectory = params.trajectory.as_ref().map(|trajectory| {
+        scrub_eval_json(
+            coerce_stringified_trajectory_array(trajectory.clone()),
+            &mut secret_redactions,
+        )
+    });
     let safe_diff = params
         .diff
         .as_ref()
@@ -319,5 +321,15 @@ pub(super) fn build_complete_eval_record(
         verification_present,
         secret_redactions,
         mem_params,
+    }
+}
+
+fn coerce_stringified_trajectory_array(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::String(raw) = &value else {
+        return value;
+    };
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(parsed) if parsed.is_array() => parsed,
+        _ => value,
     }
 }

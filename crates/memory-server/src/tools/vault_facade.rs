@@ -72,7 +72,9 @@ impl MemoryServer {
         handle_vault_remove(self, params).await
     }
 
-    #[tool(description = "Check vault status (initialized, locked/unlocked, entry count).")]
+    #[tool(
+        description = "Check vault status (initialized, locked/unlocked, entry count, Keychain auto-unlock availability, provider secret cache, and resolver state)."
+    )]
     pub(crate) async fn vault_status(&self) -> Result<String, String> {
         handle_vault_status(self).await
     }

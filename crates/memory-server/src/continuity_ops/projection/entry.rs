@@ -306,6 +306,7 @@ fn projection_tier(
     payload: &Value,
     seen: i64,
     hit: i64,
+    miss: i64,
 ) -> String {
     if existing
         .map(|entry| entry.tier.as_str() == "pattern")
@@ -329,6 +330,7 @@ fn projection_tier(
         ProjectionKind::Pattern | ProjectionKind::Bonding
     ) && seen >= 3
         && hit > 0
+        && hit > miss
     {
         "consolidated".to_string()
     } else {
@@ -392,8 +394,9 @@ fn projection_metadata(
     let seen = counter_i64(&Value::Object(metadata.clone()), "seen") + seen_delta;
     let hit = counter_i64(&Value::Object(metadata.clone()), "hit") + hit_delta;
     let miss = counter_i64(&Value::Object(metadata.clone()), "miss") + miss_delta;
-    let confidence = if seen > 0 {
-        Some(hit as f64 / seen as f64)
+    let feedback = hit + miss;
+    let confidence = if feedback > 0 {
+        Some(hit as f64 / feedback as f64)
     } else {
         payload
             .get("confidence")
@@ -507,7 +510,7 @@ pub(super) fn build_projection_entry(
     let path = projection_path(event, projection, &key);
     let payload = nested_payload(event);
     let existing_ref = existing.as_ref();
-    let (metadata, already_projected, seen, hit, _miss) =
+    let (metadata, already_projected, seen, hit, miss) =
         projection_metadata(existing_ref, event, projection, &key);
     let tier = projection_tier(
         existing_ref,
@@ -516,6 +519,7 @@ pub(super) fn build_projection_entry(
         payload,
         seen,
         hit,
+        miss,
     );
     let text = projected_text(event, projection);
     let summary = projected_summary(event, projection);
