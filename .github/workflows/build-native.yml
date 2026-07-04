@@ -173,7 +173,7 @@ jobs:
           for dir in npm/*/; do
             if [ -f "$dir/package.json" ]; then
               cd "$dir"
-              npm publish --access public || true
+              npm publish --access public
               cd -
             fi
           done

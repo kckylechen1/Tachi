@@ -1356,7 +1356,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "memory-core"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "chrono",
  "libsimple",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "memory-node"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "memory-core",
  "napi",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server-params"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "chrono",
  "memory-core",

@@ -889,7 +889,7 @@ export const memoryHybridBridgePlugin = {
           ? formatJsonTextResult({
               ...result.value,
               openclaw_bridge: {
-                version: "1.6.1",
+                version: "1.6.2",
                 adapter: "openclaw",
                 native_memory_capability: nativeMemoryCapabilityRegistered,
                 continuity_board: true,
