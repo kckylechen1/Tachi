@@ -57,6 +57,7 @@ fn tachi_task_pr_status_builds_safe_merge_preview_params() {
     params.merge_policy = Some("strict".to_string());
     params.strategy = Some("squash".to_string());
     params.confirm = true;
+    params.allow_umbrella_close = true;
 
     let gh_params =
         crate::tools::build_task_pr_status_gh_params(&params).expect("pr_status params");
@@ -67,6 +68,7 @@ fn tachi_task_pr_status_builds_safe_merge_preview_params() {
     assert!(!gh_params.confirm);
     assert_eq!(gh_params.flow_id.as_deref(), Some("flow_pr_status"));
     assert_eq!(gh_params.merge_policy.as_deref(), Some("strict"));
+    assert!(gh_params.allow_umbrella_close);
     assert_eq!(gh_params.merge_strategy, None);
 }
 

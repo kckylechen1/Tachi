@@ -110,6 +110,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         branch: None,
         strategy: None,
         merge_policy: None,
+        allow_umbrella_close: false,
         delete_worktree: true,
         confirm: false,
         wiki_title: None,

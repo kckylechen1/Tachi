@@ -69,6 +69,7 @@ pub(in crate::gh_ops) fn parse_pr_view_json(
         is_draft,
         head_sha,
         linked_issue_refs,
+        closing_issue_labels: Vec::new(),
         head_consistent: None,
     })
 }

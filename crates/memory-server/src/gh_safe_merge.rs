@@ -50,6 +50,6 @@ pub use gate::evaluate_merge_gate_with_policy;
 pub(crate) use mock::MockGhClient;
 #[allow(unused_imports)]
 pub use types::{
-    CheckRun, ChecksState, MergeDecision, MergeGatePolicy, MergeGatePolicyMode, Mergeable,
-    PrLifecycleState, PrState, ReviewDecision,
+    CheckRun, ChecksState, ClosingIssueLabels, MergeDecision, MergeGatePolicy, MergeGatePolicyMode,
+    Mergeable, PrLifecycleState, PrState, ReviewDecision,
 };

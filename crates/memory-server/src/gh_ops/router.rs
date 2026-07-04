@@ -147,7 +147,10 @@ pub(crate) async fn handle_tachi_gh(
                 .number
                 .ok_or("safe_merge requires 'number' parameter (PR number)")?;
             let strategy = parse_merge_strategy(params.merge_strategy.as_deref())?;
-            let policy = parse_merge_gate_policy(params.merge_policy.as_deref())?;
+            let policy = merge_gate_policy_from_params(
+                params.merge_policy.as_deref(),
+                params.allow_umbrella_close,
+            )?;
             let client = CliGhClient { server };
             let repo = required_repo(&params, "safe_merge")?;
             handle_github_safe_merge(
@@ -176,7 +179,10 @@ pub(crate) async fn handle_tachi_gh(
                 "pr_status requires either repo+number or pr_ref='owner/repo#123' / GitHub PR URL"
                     .to_string()
             })?;
-            let policy = parse_merge_gate_policy(task_params.merge_policy.as_deref())?;
+            let policy = merge_gate_policy_from_params(
+                task_params.merge_policy.as_deref(),
+                task_params.allow_umbrella_close,
+            )?;
             let client = CliGhClient { server };
             handle_github_safe_merge(
                 &client,

@@ -216,6 +216,7 @@ pub(crate) fn build_task_pr_status_gh_params(
         confirm: false,
         flow_id: params.flow_id.clone(),
         merge_policy: params.merge_policy.clone(),
+        allow_umbrella_close: params.allow_umbrella_close,
         ..Default::default()
     })
 }

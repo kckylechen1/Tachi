@@ -25,6 +25,7 @@ fn parse_pr_view_json_happy_path() {
         pr.linked_issue_refs,
         vec!["https://github.com/o/r/issues/99".to_string()]
     );
+    assert!(pr.closing_issue_labels.is_empty());
 }
 
 #[test]
@@ -74,6 +75,11 @@ fn parse_merge_gate_policy_defaults_to_standard() {
         parse_merge_gate_policy(None).unwrap().mode,
         MergeGatePolicyMode::Standard
     );
+    assert!(
+        parse_merge_gate_policy(None)
+            .unwrap()
+            .block_protected_umbrella_close
+    );
     assert_eq!(
         parse_merge_gate_policy(Some("permissive")).unwrap().mode,
         MergeGatePolicyMode::Permissive
@@ -83,6 +89,25 @@ fn parse_merge_gate_policy_defaults_to_standard() {
         MergeGatePolicyMode::Strict
     );
     assert!(parse_merge_gate_policy(Some("loose")).is_err());
+}
+
+#[test]
+fn safe_merge_policy_from_params_applies_explicit_umbrella_close_override() {
+    assert!(
+        merge_gate_policy_from_params(None, false)
+            .unwrap()
+            .block_protected_umbrella_close
+    );
+    assert!(
+        merge_gate_policy_from_params(Some("permissive"), false)
+            .unwrap()
+            .block_protected_umbrella_close
+    );
+    assert!(
+        !merge_gate_policy_from_params(None, true)
+            .unwrap()
+            .block_protected_umbrella_close
+    );
 }
 
 #[test]

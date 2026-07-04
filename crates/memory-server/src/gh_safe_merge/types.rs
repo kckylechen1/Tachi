@@ -31,10 +31,26 @@ pub struct PrState {
     /// these links or an explicit Tachi `flow_id`.
     #[serde(default)]
     pub linked_issue_refs: Vec<String>,
+    /// Labels fetched for each GitHub issue that this PR would close on merge.
+    /// `closingIssuesReferences` itself does not include labels, so production
+    /// clients enrich this field after parsing the pure PR-view payload.
+    #[serde(default)]
+    pub closing_issue_labels: Vec<ClosingIssueLabels>,
     /// Whether the caller has proven the merge gate input is current for
     /// `head_sha`. `None` means the caller has not evaluated that proof.
     #[serde(default)]
     pub head_consistent: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosingIssueLabels {
+    pub reference: String,
+    /// The closing issue's label names, or `None` when the label lookup failed
+    /// (transient GitHub error, or an unparsable ref). `None` fails the merge
+    /// CLOSED — we cannot prove the issue is safe to auto-close and a wrong
+    /// close is irreversible. `Some(vec![])` means the lookup succeeded and the
+    /// issue simply has no labels (safe to close).
+    pub labels: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +80,7 @@ pub struct MergeGatePolicy {
     pub allow_missing_review_decision: bool,
     pub require_linked_issue_or_flow: bool,
     pub require_head_consistency: bool,
+    pub block_protected_umbrella_close: bool,
 }
 
 impl MergeGatePolicy {
@@ -76,6 +93,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: true,
             require_linked_issue_or_flow: false,
             require_head_consistency: false,
+            block_protected_umbrella_close: true,
         }
     }
 
@@ -88,6 +106,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: false,
             require_head_consistency: false,
+            block_protected_umbrella_close: true,
         }
     }
 
@@ -100,6 +119,7 @@ impl MergeGatePolicy {
             allow_missing_review_decision: false,
             require_linked_issue_or_flow: true,
             require_head_consistency: true,
+            block_protected_umbrella_close: true,
         }
     }
 

@@ -73,6 +73,10 @@ pub struct TachiGhParams {
     /// Standard waits on missing checks or missing review decisions instead of treating them as green.
     #[serde(default)]
     pub merge_policy: Option<String>,
+    /// Explicit override for safe_merge to allow closing protected umbrella/no-close issues.
+    /// Defaults false; plain confirm does not disable the protected-close gate.
+    #[serde(default)]
+    pub allow_umbrella_close: bool,
     /// Optional author/login substring for pr_review_digest. Defaults to "gemini".
     #[serde(default)]
     pub author_filter: Option<String>,

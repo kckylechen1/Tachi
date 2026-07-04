@@ -2,7 +2,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use super::{CheckRun, GhClient, GhError, IssueState, MergeResult, MergeStrategy, PrState};
+use super::{
+    CheckRun, ClosingIssueLabels, GhClient, GhError, IssueState, MergeResult, MergeStrategy,
+    PrState,
+};
 
 /// In-memory fixture for integration-testing the `safe_merge` orchestrator
 /// without spawning `gh`. Registered PRs/issues are returned verbatim;
@@ -13,6 +16,7 @@ use super::{CheckRun, GhClient, GhError, IssueState, MergeResult, MergeStrategy,
 pub struct MockGhClient {
     prs: Mutex<HashMap<(String, u64), PrState>>,
     issues: Mutex<HashMap<(String, u64), IssueState>>,
+    issue_labels: Mutex<HashMap<(String, u64), Vec<String>>>,
     checks: Mutex<HashMap<(String, u64), Vec<CheckRun>>>,
     merge_calls: Mutex<Vec<(String, u64, MergeStrategy, String)>>,
     next_issue_number: Mutex<u64>,
@@ -23,6 +27,7 @@ impl MockGhClient {
         Self {
             prs: Mutex::new(HashMap::new()),
             issues: Mutex::new(HashMap::new()),
+            issue_labels: Mutex::new(HashMap::new()),
             checks: Mutex::new(HashMap::new()),
             merge_calls: Mutex::new(Vec::new()),
             next_issue_number: Mutex::new(1000),
@@ -42,6 +47,13 @@ impl MockGhClient {
             .insert((repo.to_string(), pr_number), runs);
         self
     }
+    pub fn with_issue_labels(self, repo: &str, issue_number: u64, labels: Vec<&str>) -> Self {
+        self.issue_labels.lock().unwrap().insert(
+            (repo.to_string(), issue_number),
+            labels.into_iter().map(str::to_string).collect(),
+        );
+        self
+    }
     pub fn merge_calls(&self) -> Vec<(String, u64, MergeStrategy, String)> {
         self.merge_calls.lock().unwrap().clone()
     }
@@ -59,12 +71,38 @@ impl MockGhClient {
 #[async_trait]
 impl GhClient for MockGhClient {
     async fn pr_view(&self, repo: &str, number: u64) -> Result<PrState, GhError> {
-        self.prs
+        let mut pr = self
+            .prs
             .lock()
             .unwrap()
             .get(&(repo.to_string(), number))
             .cloned()
-            .ok_or_else(|| GhError::NotFound(format!("pr {repo}#{number}")))
+            .ok_or_else(|| GhError::NotFound(format!("pr {repo}#{number}")))?;
+        if pr.closing_issue_labels.is_empty() {
+            let labels = self.issue_labels.lock().unwrap();
+            pr.closing_issue_labels = pr
+                .linked_issue_refs
+                .iter()
+                .map(|reference| {
+                    // Mock a SUCCESSFUL gh label lookup: registered labels, or an
+                    // empty set when none are registered → always `Some`. The
+                    // fetch-FAILURE (`None` → fail-closed) path is exercised by the
+                    // gate's direct-construction goldens, not through this mock.
+                    let issue_labels = Some(
+                        mock_issue_number_from_reference(reference)
+                            .and_then(|issue_number| {
+                                labels.get(&(repo.to_string(), issue_number)).cloned()
+                            })
+                            .unwrap_or_default(),
+                    );
+                    ClosingIssueLabels {
+                        reference: reference.clone(),
+                        labels: issue_labels,
+                    }
+                })
+                .collect();
+        }
+        Ok(pr)
     }
     async fn pr_merge(
         &self,
@@ -131,4 +169,16 @@ impl GhClient for MockGhClient {
             .cloned()
             .unwrap_or_default())
     }
+}
+
+fn mock_issue_number_from_reference(reference: &str) -> Option<u64> {
+    let trimmed = reference.trim();
+    if let Some(number) = trimmed.strip_prefix('#') {
+        return number.parse::<u64>().ok();
+    }
+    trimmed
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|tail| tail.parse::<u64>().ok())
 }

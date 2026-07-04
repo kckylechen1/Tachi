@@ -3,6 +3,17 @@ use super::{
     ReviewDecision,
 };
 
+pub const PROTECTED_NO_CLOSE_LABELS: &[&str] = &[
+    "agent:no-close",
+    "type:umbrella",
+    "type:roadmap",
+    "type:rfc",
+    "type:design",
+    "status:needs-split",
+    "status:partially-done",
+    "status:reference",
+];
+
 /// Decide whether a PR may be merged based on a snapshot of its state.
 ///
 /// Gate ordering (hard fails first, then soft waits):
@@ -76,6 +87,29 @@ pub fn evaluate_merge_gate_with_policy(pr: &PrState, policy: MergeGatePolicy) ->
             Some(true) => {}
             Some(false) => blocked.push("head:consistency_mismatch".to_string()),
             None => pending.push("head:consistency_unavailable".to_string()),
+        }
+    }
+    if policy.block_protected_umbrella_close {
+        for entry in &pr.closing_issue_labels {
+            match &entry.labels {
+                Some(labels) => {
+                    if let Some(matched_label) = PROTECTED_NO_CLOSE_LABELS
+                        .iter()
+                        .find(|protected| labels.iter().any(|label| label == **protected))
+                    {
+                        blocked.push(format!(
+                            "closes_protected:{}:{}",
+                            entry.reference, matched_label
+                        ));
+                    }
+                }
+                None => {
+                    // Label lookup failed — cannot prove this closing issue is
+                    // safe to auto-close, so fail CLOSED (a wrong close is
+                    // irreversible). Overridable via allow_umbrella_close.
+                    blocked.push(format!("closes_protected_unknown:{}", entry.reference));
+                }
+            }
         }
     }
 

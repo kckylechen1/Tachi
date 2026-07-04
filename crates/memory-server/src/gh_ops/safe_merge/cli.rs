@@ -25,8 +25,10 @@ impl<'a> GhClient for CliGhClient<'a> {
         let v: serde_json::Value = serde_json::from_str(&raw)
             .map_err(|e| GhError::Sanitized(format!("pr_view parse: {e}")))?;
         let checks = self.checks_list(repo, number).await?;
-        Ok(parse_pr_view_json(&v, checks)
-            .map_err(|e| GhError::Sanitized(format!("pr_view shape: {e}")))?)
+        let mut pr = parse_pr_view_json(&v, checks)
+            .map_err(|e| GhError::Sanitized(format!("pr_view shape: {e}")))?;
+        pr.closing_issue_labels = self.fetch_closing_issue_labels(repo, &pr.linked_issue_refs);
+        Ok(pr)
     }
 
     async fn pr_merge(
@@ -183,4 +185,70 @@ impl<'a> GhClient for CliGhClient<'a> {
             })
             .collect())
     }
+}
+
+impl<'a> CliGhClient<'a> {
+    fn fetch_closing_issue_labels(
+        &self,
+        repo: &str,
+        references: &[String],
+    ) -> Vec<ClosingIssueLabels> {
+        references
+            .iter()
+            .map(|reference| {
+                // `None` when the ref can't be parsed or the label lookup errored
+                // → the gate fails CLOSED on this issue. `Some(vec)` (incl. empty)
+                // means the lookup succeeded.
+                let labels = issue_number_from_reference(reference)
+                    .and_then(|issue_number| self.issue_labels(repo, issue_number).ok());
+                ClosingIssueLabels {
+                    reference: reference.clone(),
+                    labels,
+                }
+            })
+            .collect()
+    }
+
+    fn issue_labels(&self, repo: &str, issue_number: u64) -> Result<Vec<String>, GhError> {
+        let (mut cmd, token) = self.build()?;
+        cmd.args(["issue", "view", &issue_number.to_string()])
+            .args(["--repo", repo])
+            .args(["--json", "labels"]);
+        let raw = run_gh(cmd, &token).map_err(|e| classify_gh_error(&e))?;
+        parse_issue_labels_json(&raw)
+            .map_err(|e| GhError::Sanitized(format!("issue_labels parse: {e}")))
+    }
+}
+
+fn issue_number_from_reference(reference: &str) -> Option<u64> {
+    let trimmed = reference.trim();
+    if let Some(number) = trimmed.strip_prefix('#') {
+        return number.parse::<u64>().ok();
+    }
+    trimmed
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|tail| tail.parse::<u64>().ok())
+}
+
+fn parse_issue_labels_json(raw: &str) -> Result<Vec<String>, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid json: {e}"))?;
+    Ok(value
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    label
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .or_else(|| label.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default())
 }

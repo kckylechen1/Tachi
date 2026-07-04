@@ -363,6 +363,11 @@ pub struct TachiTaskParams {
         description = "GitHub PR gate policy for action='pr_status': permissive | standard | strict. Defaults to standard."
     )]
     pub merge_policy: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Explicitly allow pr_status/safe_merge preview to pass a PR that would close protected umbrella/no-close issues. Defaults false; plain confirm does not disable this gate."
+    )]
+    pub allow_umbrella_close: bool,
     #[serde(default = "super::default_true")]
     #[schemars(
         description = "[action=merge] Remove the local worktree after a successful merge. Defaults true."
