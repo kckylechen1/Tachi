@@ -91,6 +91,24 @@ fn opencode_serve_preflight_error(status: &Value, server_url: Option<&str>) -> S
     )
 }
 
+fn opencode_sop_label(agent_norm: &str, params: &TachiDispatchParams) -> Option<String> {
+    if agent_norm != "opencode" {
+        return None;
+    }
+    let route = crate::copilot_ops::build_task_brief_routing(&params.task, &[]);
+    let selected = route
+        .selected_sops
+        .iter()
+        .filter_map(|sop| sop.get("id").and_then(Value::as_str))
+        .take(3)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        Some(route.intent.to_string())
+    } else {
+        Some(format!("{}:{}", route.intent, selected.join(",")))
+    }
+}
+
 pub(crate) struct DispatchResult {
     pub output: String,
     pub exit_code: Option<i32>,
@@ -386,6 +404,7 @@ pub(crate) async fn handle_tachi_dispatch(
         harness_transport: harness_transport.clone(),
         harness_server_url: harness_server_url.clone(),
         host_adapter: host_adapter.clone(),
+        opencode_sop_label: opencode_sop_label(&agent_norm, &params),
         execution_backend_metadata: execution_backend_metadata.clone(),
         execution,
         flow_dispatch_slot,
