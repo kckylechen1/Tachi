@@ -61,12 +61,12 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
 }
 
 mod agent_profile;
-mod receipt_golden;
 mod briefing;
 mod cli_daemon;
 mod domain_adapter;
 mod event;
 mod memory_actions;
 mod memory_search;
+mod receipt_golden;
 mod schema;
 mod status;

@@ -13,14 +13,14 @@ mod readiness_ops;
 mod recall_proposal_ops;
 mod recall_simulate_ops;
 
+use crate::facade_save_ops::finalize_tachi_save_response;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
+use evidence_format::{format_extract_result, json_string, parse_json_or_empty};
 pub(crate) use evidence_format::{
     shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };
-use evidence_format::{format_extract_result, json_string, parse_json_or_empty};
-use crate::facade_save_ops::finalize_tachi_save_response;
 use serde_json::json;
 
 pub(crate) async fn handle_tachi_memory(

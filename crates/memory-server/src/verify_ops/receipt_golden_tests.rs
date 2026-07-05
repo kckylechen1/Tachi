@@ -46,7 +46,9 @@ async fn g1_record_single_check_receipt_ignores_other_checks() {
     let mut seed = verify_params("record");
     seed.kind = Some("gitleaks".to_string());
     seed.status = Some("passed".to_string());
-    handle_tachi_verify(&server, seed).await.expect("seed check");
+    handle_tachi_verify(&server, seed)
+        .await
+        .expect("seed check");
 
     let mut second = verify_params("record");
     second.kind = Some("clippy".to_string());

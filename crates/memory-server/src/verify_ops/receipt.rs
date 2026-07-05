@@ -21,11 +21,7 @@ pub(super) fn validate_record_params(params: &TachiVerifyParams) -> Result<(), S
 
 pub(super) fn recorded_check_ids(params: &TachiVerifyParams) -> Vec<String> {
     if !params.checks.is_empty() {
-        return params
-            .checks
-            .iter()
-            .map(check_id_for_entry)
-            .collect();
+        return params.checks.iter().map(check_id_for_entry).collect();
     }
     let commands = if params.commands.is_empty() {
         vec![params.command.as_deref()]
@@ -85,22 +81,28 @@ pub(super) fn shape_record_response(
 }
 
 fn single_recorded_status(ledger: &Value, check_id: &str) -> Option<String> {
-    ledger.get("items").and_then(Value::as_array).and_then(|items| {
-        items.iter().find_map(|item| {
-            (item.get("id").and_then(Value::as_str) == Some(check_id))
-                .then(|| {
-                    item.get("status")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .flatten()
+    ledger
+        .get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                (item.get("id").and_then(Value::as_str) == Some(check_id))
+                    .then(|| {
+                        item.get("status")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .flatten()
+            })
         })
-    })
 }
 
 pub(super) fn render_record_receipt(value: &Value) -> String {
     let flow_id = value.get("flow_id").and_then(Value::as_str).unwrap_or("?");
-    let overall = value.get("overall").and_then(Value::as_str).unwrap_or("pending");
+    let overall = value
+        .get("overall")
+        .and_then(Value::as_str)
+        .unwrap_or("pending");
     let mut out = vec![
         "## Tachi verify receipt".to_string(),
         format!("flow_id: `{flow_id}`"),
@@ -115,7 +117,10 @@ pub(super) fn render_record_receipt(value: &Value) -> String {
             .join(", ");
         out.push(format!("check_ids: {joined}"));
     } else if let Some(check_id) = value.get("check_id").and_then(Value::as_str) {
-        let status = value.get("status").and_then(Value::as_str).unwrap_or("passed");
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("passed");
         out.push(format!("check_id: `{check_id}`"));
         out.push(format!("status: `{status}`"));
     }

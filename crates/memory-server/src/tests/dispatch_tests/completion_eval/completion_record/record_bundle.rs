@@ -67,12 +67,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert!(bundle.get("task").is_none(), "receipt omits task echo");
     let next_steps = bundle["next_steps"].as_array().expect("next_steps array");
     assert!(
-        next_steps.iter().any(|step| step
-            .as_str()
-            .is_some_and(|s| {
-                let lower = s.to_ascii_lowercase();
-                lower.contains("no worktree") || lower.contains("no approve_merge")
-            })),
+        next_steps.iter().any(|step| step.as_str().is_some_and(|s| {
+            let lower = s.to_ascii_lowercase();
+            lower.contains("no worktree") || lower.contains("no approve_merge")
+        })),
         "no-worktree completion should not imply approve_merge: {bundle:#}"
     );
     let path = bundle["eval_entry"]["path"]

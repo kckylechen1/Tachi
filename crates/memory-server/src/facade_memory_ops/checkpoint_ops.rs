@@ -22,7 +22,8 @@ pub(crate) async fn handle_memory_checkpoint(
     if already_formatted {
         return Ok(body);
     }
-    if wants_json(format.as_deref()) || crate::facade_memory_ops::wants_full_format(format.as_deref())
+    if wants_json(format.as_deref())
+        || crate::facade_memory_ops::wants_full_format(format.as_deref())
     {
         return shape_save_facade_response(
             &body,
