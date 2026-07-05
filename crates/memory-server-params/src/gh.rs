@@ -54,7 +54,7 @@ pub struct TachiGhParams {
     /// Task summary used by pr_handoff lifecycle artifacts.
     #[serde(default)]
     pub task: Option<String>,
-    /// GitHub issue ref for lifecycle actions, e.g. owner/repo#123 or URL.
+    /// GitHub issue ref for lifecycle actions, e.g. owner/repo#123 or URL. Contract-mode ship emits `Refs <issue_ref>` in the generated PR body when set.
     #[serde(default)]
     pub issue_ref: Option<String>,
     /// GitHub PR ref for lifecycle actions, e.g. owner/repo#123 or URL.
@@ -66,7 +66,7 @@ pub struct TachiGhParams {
     /// Evidence references used by pr_handoff lifecycle artifacts.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
-    /// Verification commands used by pr_handoff lifecycle artifacts.
+    /// Verification commands used by pr_handoff lifecycle artifacts and contract-mode ship PR body (`## Tested` section).
     #[serde(default)]
     pub tests_run: Vec<String>,
     /// Merge gate policy mode: permissive | standard | strict. Defaults to standard.
@@ -83,19 +83,19 @@ pub struct TachiGhParams {
     /// Write pr_review_digest artifacts under .tachi/reviews. Defaults to true.
     #[serde(default)]
     pub write_digest: Option<bool>,
-    /// Exact file list to stage for action="ship". Required non-empty at runtime.
+    /// Exact file list to stage for action="ship" mechanical mode. Omit with commit_message for contract mode (zero-prose PR from git log).
     #[serde(default)]
     pub files: Vec<String>,
-    /// Commit message for action="ship". Required at runtime and used byte-verbatim.
+    /// Commit message for action="ship" mechanical mode (byte-verbatim). Omit with empty files for contract mode.
     #[serde(default)]
     pub commit_message: Option<String>,
-    /// Pull request title for action="ship". PR creation runs only when pr_title and pr_body are both supplied.
+    /// Pull request title for action="ship". Mechanical mode: PR creation only when pr_title and pr_body are both supplied. Contract mode: optional override; defaults to last commit subject.
     #[serde(default)]
     pub pr_title: Option<String>,
-    /// Pull request body for action="ship". Used byte-verbatim; never drafted.
+    /// Pull request body for action="ship" mechanical mode (byte-verbatim). Contract mode ignores this and builds the body from issue_ref, git log, and tests_run.
     #[serde(default)]
     pub pr_body: Option<String>,
-    /// Pull request base branch for action="ship". Defaults to "main".
+    /// Pull request base branch for action="ship". Defaults to "main". Contract mode resolves origin/<base> or local <base> before listing commits.
     #[serde(default)]
     pub pr_base: Option<String>,
     /// Expected current branch guard for action="ship".
