@@ -2465,6 +2465,11 @@ dependencies = [
 [[package]]
 name = "tachi-dispatch"
 version = "1.6.2"
+dependencies = [
+ "memory-server-params",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "tachi-foundry"
