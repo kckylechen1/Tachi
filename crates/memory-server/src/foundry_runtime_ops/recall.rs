@@ -2,10 +2,10 @@ use super::helpers::{
     build_foundry_agent_root, build_openclaw_agent_root, dedup_strings,
     normalize_path_prefix_value, path_is_within_prefix, round3,
 };
-use super::maintenance::build_foundry_distill_root;
 use super::{CompactContextDraft, RecallScope, RerankOutcome, SessionCaptureDraft};
 use crate::server_state::MemoryServer;
 use serde_json::{json, Value};
+use tachi_foundry::build_foundry_distill_root;
 
 fn value_text(row: &Value) -> String {
     row.get("text")

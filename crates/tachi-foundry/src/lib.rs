@@ -19,7 +19,8 @@ pub use daily_distill::{
 };
 
 const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
-const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
+pub const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
+const DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING: f64 = 0.85;
 const GUIDE_TYPE_CONSTRAINT: &str = "constraint";
 const GUIDE_TYPE_FIX_PATTERN: &str = "fix_pattern";
 const GUIDE_TYPE_DECISION: &str = "decision";
@@ -441,6 +442,78 @@ pub fn plan_daily_distill_memory(input: DailyDistillMemoryInput<'_>) -> DailyDis
         namespace_key: input.path_prefix.to_string(),
         bucket_key: format!("{}#{}", input.path_prefix, input.coherence_key),
     }
+}
+
+pub fn build_daily_distill_candidate_groups(
+    candidate_entries: Vec<MemoryEntry>,
+) -> Vec<CandidateGroup> {
+    collect_coherent_distill_buckets(candidate_entries)
+        .into_iter()
+        .filter(|bucket| bucket.entries.len() >= MIN_BUCKET_SIZE)
+        .map(|bucket| {
+            let group_id = format!(
+                "{}|{}",
+                sanitize_daily_distill_group_id_segment(&bucket.path_prefix),
+                sanitize_daily_distill_group_id_segment(&bucket.coherence_key)
+            );
+            CandidateGroup {
+                group_id,
+                path_prefix: bucket.path_prefix,
+                coherence_key: bucket.coherence_key,
+                entries: bucket.entries,
+            }
+        })
+        .collect()
+}
+
+pub fn should_skip_daily_distill_candidate(entry: &MemoryEntry, wiki_project: bool) -> bool {
+    entry.archived
+        || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
+        || memory_core::is_recall_cache_entry(entry)
+        || is_quarantine_entry(entry)
+        || (!wiki_project && memory_core::is_wiki_entry(entry))
+}
+
+pub fn should_archive_daily_distill_source(entry: &MemoryEntry) -> bool {
+    if entry.archived
+        || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
+        || !entry.tier.eq_ignore_ascii_case("raw")
+        || entry.access_count > 0
+        || entry.recall_count > 0
+    {
+        return false;
+    }
+
+    if entry
+        .retention_policy
+        .as_deref()
+        .is_some_and(|policy| matches!(policy, "pinned" | "permanent"))
+    {
+        return false;
+    }
+
+    entry.importance < DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING
+}
+
+pub fn sanitize_daily_distill_group_id_segment(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').chars().take(40).collect::<String>()
+}
+
+fn is_quarantine_entry(entry: &MemoryEntry) -> bool {
+    entry.path.starts_with("/_quarantine/") || entry.path.starts_with("/quarantine/")
 }
 
 pub fn plan_distill_edges(
@@ -1101,6 +1174,117 @@ mod tests {
         assert_eq!(buckets.len(), 2);
         assert_eq!(buckets[0].0, "/hapi#topic:launch-signal");
         assert_eq!(buckets[1].0, "/hapi#topic:risk-signal");
+    }
+
+    #[test]
+    fn daily_distill_group_id_segment_keeps_safe_chars() {
+        assert_eq!(
+            sanitize_daily_distill_group_id_segment("topic:foo bar"),
+            "topic_foo_bar"
+        );
+        assert_eq!(
+            sanitize_daily_distill_group_id_segment("/project/x"),
+            "project_x"
+        );
+    }
+
+    #[test]
+    fn daily_distill_candidate_groups_sanitize_ids_and_enforce_min_size() {
+        let entries = [
+            ("m-1", "/project/bounded/1", "bounded scan"),
+            ("m-2", "/project/bounded/2", "bounded scan"),
+            ("m-3", "/project/bounded/3", "bounded scan"),
+            ("m-4", "/project/small/1", "small"),
+            ("m-5", "/project/small/2", "small"),
+        ]
+        .into_iter()
+        .map(|(id, path, topic)| entry(id, path, topic, topic, vec![format!("entity-{topic}")]))
+        .collect();
+
+        let groups = build_daily_distill_candidate_groups(entries);
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].group_id, "project_bounded|topic_bounded_scan");
+        assert_eq!(groups[0].entries.len(), MIN_BUCKET_SIZE);
+    }
+
+    #[test]
+    fn daily_distill_candidate_filter_hides_namespace_noise() {
+        let mut archived = entry(
+            "archived",
+            "/project/bounded/archived",
+            "bounded",
+            "archived",
+            vec![],
+        );
+        archived.archived = true;
+        let mut recall_cache = entry(
+            "cache",
+            "/scratch/recall-cache/noise",
+            "recall_rerank_cache",
+            "cache",
+            vec![],
+        );
+        recall_cache.source = memory_core::FOUNDRY_RECALL_CACHE_SOURCE.to_string();
+        recall_cache.metadata = json!({"recall_rerank_cache": true});
+        let mut wiki = entry("wiki", "/wiki/page", "wiki", "wiki", vec![]);
+        wiki.domain = Some("wiki".to_string());
+        let quarantine = entry(
+            "quarantine",
+            "/_quarantine/cross-db/noise",
+            "noise",
+            "noise",
+            vec![],
+        );
+        let visible = entry(
+            "visible",
+            "/project/bounded/visible",
+            "bounded",
+            "visible",
+            vec![],
+        );
+
+        assert!(should_skip_daily_distill_candidate(&archived, false));
+        assert!(should_skip_daily_distill_candidate(&recall_cache, false));
+        assert!(should_skip_daily_distill_candidate(&wiki, false));
+        assert!(!should_skip_daily_distill_candidate(&wiki, true));
+        assert!(should_skip_daily_distill_candidate(&quarantine, false));
+        assert!(!should_skip_daily_distill_candidate(&visible, false));
+    }
+
+    #[test]
+    fn daily_distill_archive_policy_preserves_used_or_protected_raw_sources() {
+        let eligible = entry(
+            "eligible",
+            "/project/bounded/eligible",
+            "bounded",
+            "eligible",
+            vec![],
+        );
+        let mut used = eligible.clone();
+        used.access_count = 1;
+        let mut recalled = eligible.clone();
+        recalled.recall_count = 1;
+        let mut pinned = eligible.clone();
+        pinned.retention_policy = Some("pinned".to_string());
+        let mut permanent = eligible.clone();
+        permanent.retention_policy = Some("permanent".to_string());
+        let mut important = eligible.clone();
+        important.importance = 0.95;
+        let mut consolidated = eligible.clone();
+        consolidated.tier = "consolidated".to_string();
+
+        assert!(should_archive_daily_distill_source(&eligible));
+        for source in [
+            &used,
+            &recalled,
+            &pinned,
+            &permanent,
+            &important,
+            &consolidated,
+        ] {
+            assert!(!should_archive_daily_distill_source(source));
+        }
     }
 
     #[test]

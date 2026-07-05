@@ -30,12 +30,6 @@ fn parse_distill_response_rejects_non_array() {
 }
 
 #[test]
-fn sanitize_id_segment_keeps_safe_chars() {
-    assert_eq!(sanitize_id_segment("topic:foo bar"), "topic_foo_bar");
-    assert_eq!(sanitize_id_segment("/project/x"), "project_x");
-}
-
-#[test]
 fn resolve_distill_backend_defaults_to_raw_api() {
     with_backend_env(None, || {
         assert_eq!(resolve_distill_backend(), DistillBackend::RawApi);
