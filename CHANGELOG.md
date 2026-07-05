@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CONTRIBUTING.md` and an automated governance workflow: pull requests opened by anyone other than `kckylechen1` are now automatically closed with a link to the contribution policy.
+- Missing `AGPL-3.0-only` license metadata was added to `packages/tachi-cli/package.json` and `tools/cleaner/Cargo.toml` so every shipped package consistently declares the project license.
 - `tachi vault intake discover` now reports redacted, read-only credential candidates from env-family files and Codex auth metadata without unlocking or mutating Vault.
 
 ### Changed
