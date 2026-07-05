@@ -517,7 +517,7 @@ fn collect_commits_oneline(repo: &Path, baseref: &str) -> Result<Vec<String>, St
 fn last_commit_subject(log_lines: &[String]) -> String {
     log_lines
         .first()
-        .and_then(|line| line.splitn(2, ' ').nth(1))
+        .and_then(|line| line.split_once(' ').map(|x| x.1))
         .unwrap_or_default()
         .to_string()
 }
