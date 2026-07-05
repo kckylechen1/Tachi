@@ -17,10 +17,15 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 fn current_exposed_tool_patterns() -> Option<Vec<String>> {
-    std::env::var("TACHI_EXPOSED_TOOLS")
-        .ok()
-        .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
-        .filter(|patterns| !patterns.is_empty())
+    static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("TACHI_EXPOSED_TOOLS")
+                .ok()
+                .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+                .filter(|patterns| !patterns.is_empty())
+        })
+        .clone()
 }
 
 fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
