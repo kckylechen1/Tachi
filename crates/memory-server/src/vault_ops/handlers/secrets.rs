@@ -7,7 +7,8 @@ pub(crate) async fn handle_vault_set(
     let secret_name = params.name.clone();
     let result = (|| {
         crypto::validate_secret_name(&params.name)?;
-        authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())?;
+        authorize_vault_mutation(server, &params.name, params.agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
         with_vault_key(server, |key| {
             let secret_type = normalize_secret_type(&params.secret_type);
             let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
@@ -113,7 +114,8 @@ pub(crate) async fn handle_vault_get(
     let result = with_vault_key(server, |key| {
         let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())?;
+        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
 
         let decrypted =
             crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
