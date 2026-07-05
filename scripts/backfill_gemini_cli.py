@@ -100,7 +100,10 @@ def find_sessions(since: str | None = None, project_filter: str | None = None):
                         "path": path,
                         "project": project_name,
                         "project_dir": project_dir,
-                        "session_id": data.get("sessionId", ""),
+                        # Fall back to the file path when sessionId is absent —
+                        # an empty session_id would collapse every path-less
+                        # session onto one PRIMARY KEY row and drop all but one.
+                        "session_id": data.get("sessionId", "") or path,
                         "start_time": data.get("startTime", ""),
                         "summary": data.get("summary", ""),
                         "msg_count": msg_count,

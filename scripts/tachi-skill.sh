@@ -40,6 +40,7 @@ ensure_dirs() {
 cmd_scan() {
     ensure_dirs
     local count=0
+    local failed=0
     local updated=0
 
     for skill_dir in "$SKILLS_DIR"/*/; do
@@ -78,7 +79,7 @@ cmd_scan() {
         # Upsert skill metadata + definition in one parameterized transaction.
         # All values are passed via sys.argv — prevents SQL/shell injection
         # from skill names or descriptions containing quotes or semicolons.
-        python3 -c '
+        if python3 -c '
 import sqlite3, json, sys
 
 db_path, skill_id, skill_name, description, skill_file, visibility, now = sys.argv[1:8]
@@ -105,16 +106,24 @@ try:
     )
     db.commit()
 except Exception as exc:
-    sys.stderr.write("warning: hub upsert failed for %s: %s\n" % (skill_name, exc))
+    sys.stderr.write("error: hub upsert failed for %s: %s\n" % (skill_name, exc))
+    sys.exit(1)
 finally:
     db.close()
-' "$DB_PATH" "$skill_id" "$name" "$description" "$skill_file" "$current_vis" "$now"
-
-        count=$((count + 1))
-        echo -e "  ${GREEN}✓${NC} $name ${DIM}($current_vis)${NC}"
+' "$DB_PATH" "$skill_id" "$name" "$description" "$skill_file" "$current_vis" "$now"; then
+            count=$((count + 1))
+            echo -e "  ${GREEN}✓${NC} $name ${DIM}($current_vis)${NC}"
+        else
+            failed=$((failed + 1))
+            echo -e "  ${RED}✗${NC} $name ${DIM}(hub upsert failed)${NC}"
+        fi
     done
 
     echo -e "\n${BOLD}Scanned: $count skills registered in Hub${NC}"
+    if [ "$failed" -gt 0 ]; then
+        echo -e "${RED}${failed} skill(s) failed to register — see errors above${NC}" >&2
+        return 1
+    fi
 }
 
 # ─── List ──────────────────────────────────────────────────────────────────────
