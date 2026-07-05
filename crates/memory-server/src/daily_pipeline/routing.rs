@@ -132,43 +132,9 @@ pub(crate) async fn run_routing_analysis_stage(
 
 fn collect_eval_rows_30d(server: &MemoryServer) -> Result<Vec<EvalEvidenceRow>, String> {
     let collect = |store: &mut MemoryStore| -> Result<Vec<EvalEvidenceRow>, String> {
-        let mut stmt = store
-            .connection()
-            .prepare(
-                "SELECT id, path, summary, text, metadata, created_at
-                 FROM memories
-                 WHERE path LIKE '/eval/%'
-                   AND created_at > datetime('now', '-30 day')
-                   -- Exclude watchdog auto-close synthesized records; those
-                   -- attribute outcome to agent='watchdog/<backend>' with
-                   -- empty quality/trajectory/diff and would skew per-agent
-                   -- success-rate stats.
-                   AND (
-                       json_extract(metadata, '$.auto_synthesized') IS NULL
-                       OR json_extract(metadata, '$.auto_synthesized') = 0
-                   )
-                 ORDER BY created_at DESC
-                 LIMIT 500",
-            )
-            .map_err(|e| format!("prepare routing eval query: {e}"))?;
-        let rows = stmt
-            .query_map([], |row| {
-                let metadata_raw: String = row.get(4)?;
-                Ok(EvalEvidenceRow {
-                    id: row.get(0)?,
-                    path: row.get(1)?,
-                    summary: row.get(2)?,
-                    text: row.get(3)?,
-                    metadata: serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({})),
-                    created_at: row.get(5)?,
-                })
-            })
-            .map_err(|e| format!("query routing evals: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| format!("read routing eval row: {e}"))?);
-        }
-        Ok(out)
+        store
+            .list_eval_evidence(30, 500, true)
+            .map_err(|e| format!("list routing eval evidence: {e}"))
     };
 
     let mut rows = server

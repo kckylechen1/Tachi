@@ -20,6 +20,7 @@
 pub mod agent_state;
 pub mod audit;
 pub mod crud;
+pub mod daily_pipeline;
 pub mod derived;
 pub mod domain;
 pub mod enrichment;

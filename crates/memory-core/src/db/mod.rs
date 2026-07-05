@@ -1,6 +1,7 @@
 mod agent_state;
 mod audit;
 mod common;
+mod daily_pipeline;
 mod domain;
 mod event_ledger;
 pub mod foundry_config;
@@ -24,6 +25,13 @@ pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
+pub use daily_pipeline::{
+    collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
+    count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
+    list_promotion_candidate_ids, promote_memory_to_durable, truth_maintenance_prune_stale,
+    truth_maintenance_self_heal_promote_raw, CategorySourceGroup, DailyHealthDbSnapshot,
+    DuplicateSummaryRow, EvalEvidenceRow,
+};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
 pub use graph::{
