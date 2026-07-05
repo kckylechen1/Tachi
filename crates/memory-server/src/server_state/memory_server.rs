@@ -59,4 +59,7 @@ pub(crate) struct MemoryServer {
     // ─── Agent Runtime ───────────────────────────────────────────────────────
     /// Agent profile, tool profile, and handoff memos grouped together.
     pub(crate) agent_runtime: Arc<StdRwLock<AgentRuntime>>,
+    // ─── Vault ACL Runtime ───────────────────────────────────────────────────
+    /// Server-bound vault identity read once from `TACHI_AGENT_ID` at startup.
+    pub(crate) bound_agent_id: Arc<StdRwLock<Option<String>>>,
 }
