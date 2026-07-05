@@ -2,6 +2,7 @@ use memory_core::MemoryEntry;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::json;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -51,6 +52,18 @@ pub struct DailyDistillMemoryPlan {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub struct DailyDistillMemoryInput<'a> {
+    pub agent_id: &'a str,
+    pub path_prefix: &'a str,
+    pub coherence_key: &'a str,
+    pub entries: &'a [MemoryEntry],
+    pub payload_summary: &'a str,
+    pub payload_text: &'a str,
+    pub payload_keywords: &'a [String],
+    pub timestamp_segment: &'a str,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct FoundryJobMetadata<'a> {
     metadata: &'a serde_json::Value,
 }
@@ -94,6 +107,18 @@ pub struct SectionArtifact {
     pub item_count: usize,
     pub source_refs: Vec<String>,
     pub block: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SectionArtifactInput<'a> {
+    pub layer: &'a str,
+    pub kind: &'a str,
+    pub title: Option<&'a str>,
+    pub content: &'a str,
+    pub items: &'a [String],
+    pub cache_boundary: &'a str,
+    pub source_refs: &'a [String],
+    pub target_tokens: Option<usize>,
 }
 
 fn round3(value: f64) -> f64 {
@@ -213,25 +238,17 @@ fn section_seed(
     )
 }
 
-pub fn build_section_artifact(
-    layer: &str,
-    kind: &str,
-    title: Option<&str>,
-    content: &str,
-    items: &[String],
-    cache_boundary: &str,
-    source_refs: &[String],
-    target_tokens: Option<usize>,
-) -> SectionArtifact {
-    let layer = normalize_section_layer(layer);
-    let kind = normalize_section_kind(kind);
-    let cache_boundary = normalize_cache_boundary(cache_boundary);
-    let clean_items = dedup_strings(items.to_vec());
-    let title = title
+pub fn build_section_artifact(input: SectionArtifactInput<'_>) -> SectionArtifact {
+    let layer = normalize_section_layer(input.layer);
+    let kind = normalize_section_kind(input.kind);
+    let cache_boundary = normalize_cache_boundary(input.cache_boundary);
+    let clean_items = dedup_strings(input.items.to_vec());
+    let title = input
+        .title
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let body = truncate_to_token_budget(content, target_tokens);
+    let body = truncate_to_token_budget(input.content, input.target_tokens);
     let section_id = format!(
         "section:{}",
         uuid::Uuid::new_v5(
@@ -243,7 +260,7 @@ pub fn build_section_artifact(
                 &body,
                 &clean_items,
                 &cache_boundary,
-                source_refs
+                input.source_refs
             )
             .as_bytes()
         )
@@ -269,9 +286,9 @@ pub fn build_section_artifact(
             block_lines.push(format!("- {item}"));
         }
     }
-    if !source_refs.is_empty() {
+    if !input.source_refs.is_empty() {
         block_lines.push(String::new());
-        block_lines.push(format!("Source refs: {}", source_refs.join(", ")));
+        block_lines.push(format!("Source refs: {}", input.source_refs.join(", ")));
     }
     block_lines.push("<!-- /tachi:section -->".to_string());
     let block = block_lines.join("\n");
@@ -284,7 +301,7 @@ pub fn build_section_artifact(
         cache_boundary,
         estimated_tokens: estimate_token_count(&block),
         item_count: clean_items.len(),
-        source_refs: dedup_strings(source_refs.to_vec()),
+        source_refs: dedup_strings(input.source_refs.to_vec()),
         block,
     }
 }
@@ -328,7 +345,7 @@ pub fn select_memory_distill_bucket(
         }
     }
 
-    buckets.sort_by(|a, b| b.entries.len().cmp(&a.entries.len()));
+    buckets.sort_by_key(|bucket| Reverse(bucket.entries.len()));
     buckets.into_iter().next()
 }
 
@@ -381,44 +398,36 @@ pub fn plan_guide_distill_memory(
     }
 }
 
-pub fn plan_daily_distill_memory(
-    agent_id: &str,
-    path_prefix: &str,
-    coherence_key: &str,
-    entries: &[MemoryEntry],
-    payload_summary: &str,
-    payload_text: &str,
-    payload_keywords: &[String],
-    timestamp_segment: &str,
-) -> DailyDistillMemoryPlan {
-    let summary = if payload_summary.trim().is_empty() {
-        payload_text.chars().take(100).collect::<String>()
+pub fn plan_daily_distill_memory(input: DailyDistillMemoryInput<'_>) -> DailyDistillMemoryPlan {
+    let summary = if input.payload_summary.trim().is_empty() {
+        input.payload_text.chars().take(100).collect::<String>()
     } else {
-        payload_summary.to_string()
+        input.payload_summary.to_string()
     };
     let mut keywords = vec!["foundry".to_string(), "distill".to_string()];
-    keywords.extend(payload_keywords.iter().cloned());
-    for entry in entries {
+    keywords.extend(input.payload_keywords.iter().cloned());
+    for entry in input.entries {
         keywords.extend(entry.keywords.iter().cloned());
     }
 
     DailyDistillMemoryPlan {
         path: format!(
             "{}/{}",
-            build_foundry_distill_root(agent_id),
-            timestamp_segment
+            build_foundry_distill_root(input.agent_id),
+            input.timestamp_segment
         ),
         summary,
         keywords: dedup_strings(keywords),
         entities: dedup_strings(
-            entries
+            input
+                .entries
                 .iter()
                 .flat_map(|entry| entry.entities.clone())
                 .collect(),
         ),
-        source_memory_ids: entries.iter().map(|entry| entry.id.clone()).collect(),
-        namespace_key: path_prefix.to_string(),
-        bucket_key: format!("{path_prefix}#{coherence_key}"),
+        source_memory_ids: input.entries.iter().map(|entry| entry.id.clone()).collect(),
+        namespace_key: input.path_prefix.to_string(),
+        bucket_key: format!("{}#{}", input.path_prefix, input.coherence_key),
     }
 }
 
@@ -1034,26 +1043,26 @@ mod tests {
 
     #[test]
     fn section_artifact_is_stable_for_same_inputs() {
-        let first = build_section_artifact(
-            "session",
-            "memory_recall",
-            None,
-            "alpha beta",
-            &["one".to_string(), "one".to_string()],
-            "session",
-            &["m1".to_string()],
-            None,
-        );
-        let second = build_section_artifact(
-            "session",
-            "memory_recall",
-            None,
-            "alpha beta",
-            &["one".to_string()],
-            "session",
-            &["m1".to_string()],
-            None,
-        );
+        let first = build_section_artifact(SectionArtifactInput {
+            layer: "session",
+            kind: "memory_recall",
+            title: None,
+            content: "alpha beta",
+            items: &["one".to_string(), "one".to_string()],
+            cache_boundary: "session",
+            source_refs: &["m1".to_string()],
+            target_tokens: None,
+        });
+        let second = build_section_artifact(SectionArtifactInput {
+            layer: "session",
+            kind: "memory_recall",
+            title: None,
+            content: "alpha beta",
+            items: &["one".to_string()],
+            cache_boundary: "session",
+            source_refs: &["m1".to_string()],
+            target_tokens: None,
+        });
 
         assert_eq!(first.section_id, second.section_id);
         assert_eq!(first.item_count, 1);
@@ -1128,15 +1137,17 @@ mod tests {
         assert_eq!(
             classify_distill_guide_type(
                 "Fix linker error by rebuilding sqlite vec.",
-                &[source.clone()]
+                std::slice::from_ref(&source)
             ),
             "fix_pattern"
         );
-        assert!(infer_file_patterns(&[source.clone()])
+        assert!(infer_file_patterns(std::slice::from_ref(&source))
             .contains(&"crates/memory-server/src/tools.rs".to_string()));
-        assert!(infer_error_patterns(&guide.text, &[source.clone()])
-            .iter()
-            .any(|line| line.contains("linker error")));
+        assert!(
+            infer_error_patterns(&guide.text, std::slice::from_ref(&source))
+                .iter()
+                .any(|line| line.contains("linker error"))
+        );
         let relations = build_distill_edges(&guide, &[source], "fix_pattern", &guide.timestamp)
             .into_iter()
             .map(|edge| edge.relation)

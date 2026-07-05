@@ -1,4 +1,4 @@
-pub(super) use tachi_foundry::build_section_artifact;
+pub(super) use tachi_foundry::{build_section_artifact, SectionArtifactInput};
 
 use crate::utils::sanitize_safe_path_name;
 use std::collections::HashSet;

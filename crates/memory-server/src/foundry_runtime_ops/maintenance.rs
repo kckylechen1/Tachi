@@ -27,7 +27,7 @@ pub(crate) const SKIP_EMPTY_LLM_OUTPUT: &str = "empty_llm_output";
 
 pub(super) use distill_helpers::{
     build_foundry_distill_root, collect_coherent_distill_buckets, plan_daily_distill_memory,
-    plan_distill_edges, FoundryJobMetadata,
+    plan_distill_edges, DailyDistillMemoryInput, FoundryJobMetadata,
 };
 #[cfg(test)]
 pub(super) use distill_helpers::{infer_memory_insight, plan_guide_distill_memory};

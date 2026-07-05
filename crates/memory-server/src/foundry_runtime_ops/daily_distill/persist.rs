@@ -4,7 +4,9 @@ use serde_json::json;
 use crate::server_state::{DbScope, MemoryServer};
 use memory_core::{MemoryEdge, MemoryEntry, MemoryStore};
 
-use crate::foundry_runtime_ops::maintenance::{plan_daily_distill_memory, plan_distill_edges};
+use crate::foundry_runtime_ops::maintenance::{
+    plan_daily_distill_memory, plan_distill_edges, DailyDistillMemoryInput,
+};
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 
 use super::types::{CandidateGroup, GroupPayload};
@@ -124,16 +126,16 @@ pub(crate) fn persist_distill_memory(
     let timestamp = Utc::now().to_rfc3339();
     let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let memory_id = uuid::Uuid::new_v4().to_string();
-    let plan = plan_daily_distill_memory(
-        &agent_id,
-        &group.path_prefix,
-        &group.coherence_key,
-        &group.entries,
-        &payload.summary,
-        &payload.text,
-        &payload.keywords,
-        &timestamp_segment,
-    );
+    let plan = plan_daily_distill_memory(DailyDistillMemoryInput {
+        agent_id: &agent_id,
+        path_prefix: &group.path_prefix,
+        coherence_key: &group.coherence_key,
+        entries: &group.entries,
+        payload_summary: &payload.summary,
+        payload_text: &payload.text,
+        payload_keywords: &payload.keywords,
+        timestamp_segment: &timestamp_segment,
+    });
 
     let metadata = crate::provenance::inject_provenance(
         server,
