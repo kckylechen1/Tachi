@@ -128,6 +128,18 @@ install_tachi_brew() {
   fi
 }
 
+sha256_file() {
+  local file="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    echo "❌ Required command not found: sha256sum or shasum" >&2
+    return 1
+  fi
+}
+
 xml_escape() {
   local value="$1"
   value=${value//&/&amp;}
@@ -300,18 +312,22 @@ PLIST
 
 download_plugin_tarball() {
   local tarball="$1"
-  local primary_url="https://github.com/$REPO/releases/download/v${VERSION}/tachi-openclaw-v${VERSION}.tar.gz"
-  local legacy_url="https://github.com/$REPO/releases/download/v${VERSION}/memory-hybrid-bridge-v${VERSION}.tar.gz"
+  local primary_asset="tachi-openclaw-v${VERSION}.tar.gz"
+  local legacy_asset="memory-hybrid-bridge-v${VERSION}.tar.gz"
+  local primary_url="https://github.com/$REPO/releases/download/v${VERSION}/${primary_asset}"
+  local legacy_url="https://github.com/$REPO/releases/download/v${VERSION}/${legacy_asset}"
 
   echo ">> Downloading OpenClaw plugin release asset..."
   if curl -fSL -o "$tarball" "$primary_url"; then
     echo "   Downloaded: $primary_url"
+    DOWNLOADED_PLUGIN_ASSET="$primary_asset"
     return 0
   fi
 
   echo "   Primary asset not found, falling back to legacy asset name..."
   if curl -fSL -o "$tarball" "$legacy_url"; then
     echo "   Downloaded: $legacy_url"
+    DOWNLOADED_PLUGIN_ASSET="$legacy_asset"
     return 0
   fi
 
@@ -319,6 +335,47 @@ download_plugin_tarball() {
   echo "   $primary_url"
   echo "   $legacy_url"
   return 1
+}
+
+download_plugin_checksum() {
+  local checksum_file="$1"
+  local asset_name="$2"
+  local checksum_url="https://github.com/$REPO/releases/download/v${VERSION}/${asset_name}.sha256"
+
+  echo ">> Downloading OpenClaw plugin checksum..."
+  if curl -fSL -o "$checksum_file" "$checksum_url"; then
+    echo "   Downloaded: $checksum_url"
+    return 0
+  fi
+
+  echo "❌ Checksum download failed. Refusing to install an unverifiable plugin archive."
+  echo "   Expected checksum asset: $checksum_url"
+  echo "   Use --skip-plugin to install only the Tachi binary/daemon."
+  return 1
+}
+
+verify_plugin_tarball() {
+  local tarball="$1"
+  local asset_name="$2"
+  local checksum_file="$3"
+  local expected
+  local actual
+
+  expected=$(awk 'NF {print $1; exit}' "$checksum_file" | tr '[:upper:]' '[:lower:]')
+  if ! printf '%s' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "❌ Invalid checksum file for $asset_name"
+    return 1
+  fi
+
+  actual=$(sha256_file "$tarball" | tr '[:upper:]' '[:lower:]')
+  if [ "$actual" != "$expected" ]; then
+    echo "❌ Checksum mismatch for $asset_name"
+    echo "   expected: $expected"
+    echo "   actual:   $actual"
+    return 1
+  fi
+
+  echo "   ✅ Checksum verified: $expected"
 }
 
 configure_openclaw_json() {
@@ -363,8 +420,12 @@ install_openclaw_plugin() {
   local tmpdir
   tmpdir=$(mktemp -d)
   local tarball="$tmpdir/plugin.tar.gz"
+  local checksum_file="$tmpdir/plugin.tar.gz.sha256"
+  DOWNLOADED_PLUGIN_ASSET=""
 
   download_plugin_tarball "$tarball"
+  download_plugin_checksum "$checksum_file" "$DOWNLOADED_PLUGIN_ASSET"
+  verify_plugin_tarball "$tarball" "$DOWNLOADED_PLUGIN_ASSET" "$checksum_file"
 
   echo ">> Installing OpenClaw plugin to $PLUGIN_DIR..."
   mkdir -p "$PLUGIN_DIR"

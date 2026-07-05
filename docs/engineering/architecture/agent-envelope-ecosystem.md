@@ -811,6 +811,6 @@ docs/ADD_A_MODEL.md            # Backend integration guide
 crates/memory-server/src/shell_ops/mod.rs    # 5-stage lifecycle
 crates/memory-server/src/dispatch_ops/       # Agent dispatch
 crates/memory-server/src/claude_pool.rs      # Bounded concurrency
-crates/memory-server/src/tool_params/        # MCP tool schemas
+crates/memory-server-params/src/             # MCP tool schemas
 crates/memory-server/src/llm.rs              # Multi-model backend lanes (Qwen/Claude)
 ```

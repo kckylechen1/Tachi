@@ -112,7 +112,7 @@ tachi --version
 
 ### 3. 使用
 
-以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/memory-server-params/src/facade.rs`。
+以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/memory-server-params/src/facade.rs` 及其 `facade/` 子模块。
 
 ```json
 // tachi_save —— 结构化记忆

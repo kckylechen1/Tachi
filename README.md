@@ -163,7 +163,7 @@ The server also loads `.env` from the project root automatically. Copy `.env.exa
 
 ### 3. Use
 
-These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/memory-server-params/src/facade.rs`.
+These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/memory-server-params/src/facade.rs` and its `facade/` submodules.
 
 ```json
 // tachi_save — structured memory
