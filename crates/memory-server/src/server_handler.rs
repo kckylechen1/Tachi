@@ -19,7 +19,7 @@ use tachi_hub::should_expose_mcp_tools;
 fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     std::env::var("TACHI_EXPOSED_TOOLS")
         .ok()
-        .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+        .map(|raw| tachi_hub::parse_tool_patterns_csv(&raw))
         .filter(|patterns| !patterns.is_empty())
 }
 
@@ -170,7 +170,7 @@ impl ServerHandler for MemoryServer {
             }
 
             let env_patterns = current_exposed_tool_patterns();
-            tools = crate::profiles::filter_tool_defs(
+            tools = tachi_hub::filter_tool_defs(
                 tools,
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
@@ -200,11 +200,8 @@ impl ServerHandler for MemoryServer {
             let name = params.name.as_ref();
             let env_patterns = current_exposed_tool_patterns();
 
-            let visible = crate::profiles::tool_visible(
-                name,
-                self.active_tool_profile(),
-                env_patterns.as_deref(),
-            );
+            let visible =
+                tachi_hub::tool_visible(name, self.active_tool_profile(), env_patterns.as_deref());
 
             if !visible {
                 return Ok(tool_not_found_result(name));

@@ -232,7 +232,7 @@ impl MemoryServer {
             })),
             agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
                 agent_profile: None,
-                tool_profile: Some(crate::profiles::default_tool_profile()),
+                tool_profile: Some(tachi_hub::default_tool_profile()),
                 handoff_memos: Vec::new(),
             })),
         };

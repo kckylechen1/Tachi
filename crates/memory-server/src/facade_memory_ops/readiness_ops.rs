@@ -331,7 +331,7 @@ pub(crate) async fn handle_memory_readiness(
     let tool_profile = server
         .active_tool_profile()
         .map(|profile| profile.as_str())
-        .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str());
+        .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str());
     let suggestions = readiness_suggestions(&hidden_core_tools, &hidden_advanced_tools);
     let vector_health =
         crate::status_ops::database_vector_health_json(&server.global_db_path_buf());
