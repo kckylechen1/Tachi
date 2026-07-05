@@ -40,6 +40,7 @@ ensure_dirs() {
 cmd_scan() {
     ensure_dirs
     local count=0
+    local failed=0
     local updated=0
 
     for skill_dir in "$SKILLS_DIR"/*/; do
@@ -65,69 +66,64 @@ cmd_scan() {
         fi
         [ -z "$description" ] && description="Skill: $name"
 
-        # Read full content for Hub definition
-        local content
-        content=$(cat "$skill_file")
-
         # Determine current visibility
         local current_vis="discoverable"
         if [ -L "$CLAUDE_SKILLS_DIR/$name" ] || [ -d "$CLAUDE_SKILLS_DIR/$name" ]; then
             current_vis="listed"
         fi
 
-        # Build definition JSON (escaped for sqlite)
-        local def_json
-        def_json=$(python3 -c "
-import json, sys
-content = sys.stdin.read()
-print(json.dumps({
-    'format': 'claude-code-skill-markdown',
-    'source_path': '$skill_file',
-    'content': content,
-    'policy': {'visibility': '$current_vis', 'scope': 'pack-shared'}
-}))
-" < "$skill_file" 2>/dev/null)
-
-        if [ -z "$def_json" ]; then
-            echo -e "${YELLOW}  warn: failed to build definition for $name${NC}"
-            continue
-        fi
-
-        # Upsert into Hub via SQLite directly
         local skill_id="skill:$name"
         local now
         now=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
-        sqlite3 "$DB_PATH" "
-            INSERT INTO hub_capabilities (id, type, name, version, description, definition, enabled, created_at, updated_at)
-            VALUES ('$skill_id', 'skill', '$(echo "$name" | sed "s/'/''/g")', 1,
-                    '$(echo "$description" | head -c 200 | sed "s/'/''/g")', '', 1, '$now', '$now')
-            ON CONFLICT(id) DO UPDATE SET
-                description = excluded.description,
-                updated_at = excluded.updated_at;
-        " 2>/dev/null
-
-        # Update definition separately (avoids shell quoting issues with large JSON)
-        python3 -c "
+        # Upsert skill metadata + definition in one parameterized transaction.
+        # All values are passed via sys.argv — prevents SQL/shell injection
+        # from skill names or descriptions containing quotes or semicolons.
+        if python3 -c '
 import sqlite3, json, sys
-db = sqlite3.connect('$DB_PATH')
-content = open('$skill_file').read()
-defn = json.dumps({
-    'format': 'claude-code-skill-markdown',
-    'source_path': '$skill_file',
-    'content': content,
-    'policy': {'visibility': '$current_vis', 'scope': 'pack-shared'}
-})
-db.execute('UPDATE hub_capabilities SET definition=? WHERE id=?', (defn, 'skill:$name'))
-db.commit()
-db.close()
-" 2>/dev/null
 
-        count=$((count + 1))
-        echo -e "  ${GREEN}✓${NC} $name ${DIM}($current_vis)${NC}"
+db_path, skill_id, skill_name, description, skill_file, visibility, now = sys.argv[1:8]
+
+db = sqlite3.connect(db_path)
+try:
+    content = open(skill_file).read()
+    defn = json.dumps({
+        "format": "claude-code-skill-markdown",
+        "source_path": skill_file,
+        "content": content,
+        "policy": {"visibility": visibility, "scope": "pack-shared"},
+    })
+    desc = (description or "")[:200]
+    db.execute(
+        """INSERT INTO hub_capabilities
+               (id, type, name, version, description, definition, enabled, created_at, updated_at)
+           VALUES (?, "skill", ?, 1, ?, ?, 1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+               description = excluded.description,
+               definition = excluded.definition,
+               updated_at = excluded.updated_at""",
+        (skill_id, skill_name, desc, defn, now, now),
+    )
+    db.commit()
+except Exception as exc:
+    sys.stderr.write("error: hub upsert failed for %s: %s\n" % (skill_name, exc))
+    sys.exit(1)
+finally:
+    db.close()
+' "$DB_PATH" "$skill_id" "$name" "$description" "$skill_file" "$current_vis" "$now"; then
+            count=$((count + 1))
+            echo -e "  ${GREEN}✓${NC} $name ${DIM}($current_vis)${NC}"
+        else
+            failed=$((failed + 1))
+            echo -e "  ${RED}✗${NC} $name ${DIM}(hub upsert failed)${NC}"
+        fi
     done
 
     echo -e "\n${BOLD}Scanned: $count skills registered in Hub${NC}"
+    if [ "$failed" -gt 0 ]; then
+        echo -e "${RED}${failed} skill(s) failed to register — see errors above${NC}" >&2
+        return 1
+    fi
 }
 
 # ─── List ──────────────────────────────────────────────────────────────────────
@@ -157,14 +153,26 @@ cmd_list() {
             discoverable=$((discoverable + 1))
         fi
 
-        # Get uses count from Hub
-        local uses
-        uses=$(sqlite3 "$DB_PATH" "SELECT uses FROM hub_capabilities WHERE id='skill:$name'" 2>/dev/null || echo "0")
+        # Query uses count + substr(description, ...) in one parameterized call
+        local hub_data
+        hub_data=$(python3 -c '
+import sqlite3, sys
+db_path, skill_name = sys.argv[1], sys.argv[2]
+db = sqlite3.connect(db_path)
+row = db.execute(
+    "SELECT COALESCE(uses, 0), COALESCE(substr(description, 1, 50), \"\") "
+    "FROM hub_capabilities WHERE id=?",
+    ("skill:" + skill_name,),
+).fetchone()
+db.close()
+if row:
+    print("%s|%s" % (row[0], row[1] or ""))
+else:
+    print("0|")
+' "$DB_PATH" "$name" 2>/dev/null || echo "0|")
+        local uses="${hub_data%%|*}"
+        local desc="${hub_data#*|}"
         [ -z "$uses" ] && uses="—"
-
-        # Get description (truncated)
-        local desc
-        desc=$(sqlite3 "$DB_PATH" "SELECT substr(description, 1, 50) FROM hub_capabilities WHERE id='skill:$name'" 2>/dev/null || echo "")
 
         printf "%-30s %-25b %-8s %s\n" "$name" "$status" "$uses" "$desc"
     done
@@ -194,20 +202,25 @@ cmd_enable() {
         echo -e "${GREEN}✓${NC} Enabled: $name → ~/.claude/skills/$name"
     fi
 
-    # Update Hub visibility to listed
-    python3 -c "
-import sqlite3, json
-db = sqlite3.connect('$DB_PATH')
-row = db.execute('SELECT definition FROM hub_capabilities WHERE id=?', ('skill:$name',)).fetchone()
-if row:
-    try:
+    # Update Hub visibility to listed.
+    # Values passed via sys.argv to prevent injection; errors logged, not swallowed.
+    python3 -c '
+import sqlite3, json, sys
+db_path, skill_name = sys.argv[1], sys.argv[2]
+skill_id = "skill:" + skill_name
+db = sqlite3.connect(db_path)
+try:
+    row = db.execute("SELECT definition FROM hub_capabilities WHERE id=?", (skill_id,)).fetchone()
+    if row:
         defn = json.loads(row[0])
-        defn.setdefault('policy', {})['visibility'] = 'listed'
-        db.execute('UPDATE hub_capabilities SET definition=? WHERE id=?', (json.dumps(defn), 'skill:$name'))
+        defn.setdefault("policy", {})["visibility"] = "listed"
+        db.execute("UPDATE hub_capabilities SET definition=? WHERE id=?", (json.dumps(defn), skill_id))
         db.commit()
-    except: pass
-db.close()
-" 2>/dev/null
+except (json.JSONDecodeError, sqlite3.Error) as exc:
+    sys.stderr.write("warning: hub visibility update skipped for %s: %s\n" % (skill_name, exc))
+finally:
+    db.close()
+' "$DB_PATH" "$name"
 
     echo -e "${DIM}Hub visibility → listed (appears in system prompt next session)${NC}"
 }
@@ -234,20 +247,25 @@ cmd_disable() {
         echo -e "${DIM}Already disabled: $name${NC}"
     fi
 
-    # Update Hub visibility to discoverable
-    python3 -c "
-import sqlite3, json
-db = sqlite3.connect('$DB_PATH')
-row = db.execute('SELECT definition FROM hub_capabilities WHERE id=?', ('skill:$name',)).fetchone()
-if row:
-    try:
+    # Update Hub visibility to discoverable.
+    # Values passed via sys.argv to prevent injection; errors logged, not swallowed.
+    python3 -c '
+import sqlite3, json, sys
+db_path, skill_name = sys.argv[1], sys.argv[2]
+skill_id = "skill:" + skill_name
+db = sqlite3.connect(db_path)
+try:
+    row = db.execute("SELECT definition FROM hub_capabilities WHERE id=?", (skill_id,)).fetchone()
+    if row:
         defn = json.loads(row[0])
-        defn.setdefault('policy', {})['visibility'] = 'discoverable'
-        db.execute('UPDATE hub_capabilities SET definition=? WHERE id=?', (json.dumps(defn), 'skill:$name'))
+        defn.setdefault("policy", {})["visibility"] = "discoverable"
+        db.execute("UPDATE hub_capabilities SET definition=? WHERE id=?", (json.dumps(defn), skill_id))
         db.commit()
-    except: pass
-db.close()
-" 2>/dev/null
+except (json.JSONDecodeError, sqlite3.Error) as exc:
+    sys.stderr.write("warning: hub visibility update skipped for %s: %s\n" % (skill_name, exc))
+finally:
+    db.close()
+' "$DB_PATH" "$name"
 
     echo -e "${DIM}Hub visibility → discoverable (still accessible via run_skill)${NC}"
 }
@@ -290,25 +308,36 @@ cmd_scan_single() {
     local now
     now=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
-    python3 -c "
-import sqlite3, json
-db = sqlite3.connect('$DB_PATH')
-content = open('$SKILLS_DIR/$name/SKILL.md').read()
-defn = json.dumps({
-    'format': 'claude-code-skill-markdown',
-    'source_path': '$SKILLS_DIR/$name/SKILL.md',
-    'content': content,
-    'policy': {'visibility': 'listed', 'scope': 'pack-shared'}
-})
-desc = '''$(echo "$description" | sed "s/'/\\\\'/g")'''[:200]
-db.execute('''
-    INSERT INTO hub_capabilities (id, type, name, version, description, definition, enabled, created_at, updated_at)
-    VALUES (?, 'skill', ?, 1, ?, ?, 1, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET description=excluded.description, definition=excluded.definition, updated_at=excluded.updated_at
-''', ('skill:$name', '$name', desc, defn, '$now', '$now'))
-db.commit()
-db.close()
-" 2>/dev/null
+    python3 -c '
+import sqlite3, json, sys
+db_path, skill_name, skill_file, description, now = sys.argv[1:6]
+skill_id = "skill:" + skill_name
+db = sqlite3.connect(db_path)
+try:
+    content = open(skill_file).read()
+    defn = json.dumps({
+        "format": "claude-code-skill-markdown",
+        "source_path": skill_file,
+        "content": content,
+        "policy": {"visibility": "listed", "scope": "pack-shared"},
+    })
+    desc = (description or "")[:200]
+    db.execute(
+        """INSERT INTO hub_capabilities
+               (id, type, name, version, description, definition, enabled, created_at, updated_at)
+           VALUES (?, "skill", ?, 1, ?, ?, 1, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+               description = excluded.description,
+               definition = excluded.definition,
+               updated_at = excluded.updated_at""",
+        (skill_id, skill_name, desc, defn, now, now),
+    )
+    db.commit()
+except Exception as exc:
+    sys.stderr.write("warning: hub registration failed for %s: %s\n" % (skill_name, exc))
+finally:
+    db.close()
+' "$DB_PATH" "$name" "$SKILLS_DIR/$name/SKILL.md" "$description" "$now"
 }
 
 # ─── Status ────────────────────────────────────────────────────────────────────
@@ -343,11 +372,20 @@ cmd_status() {
 
     # Hub
     local hub_info
-    hub_info=$(sqlite3 "$DB_PATH" "
-        SELECT uses, successes, failures, avg_rating,
-               json_extract(definition, '$.policy.visibility')
-        FROM hub_capabilities WHERE id='skill:$name'
-    " 2>/dev/null)
+    hub_info=$(python3 -c '
+import sqlite3, sys
+db_path, skill_name = sys.argv[1], sys.argv[2]
+db = sqlite3.connect(db_path)
+row = db.execute(
+    "SELECT uses, successes, failures, avg_rating, "
+    "json_extract(definition, \"$.policy.visibility\") "
+    "FROM hub_capabilities WHERE id=?",
+    ("skill:" + skill_name,),
+).fetchone()
+db.close()
+if row:
+    print("|".join(str(v) if v is not None else "" for v in row))
+' "$DB_PATH" "$name" 2>/dev/null || true)
 
     if [ -n "$hub_info" ]; then
         IFS='|' read -r uses succ fail rating vis <<< "$hub_info"
