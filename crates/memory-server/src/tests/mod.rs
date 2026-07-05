@@ -139,12 +139,93 @@ impl Drop for TestServer {
     }
 }
 
+/// Path to a schema-initialized SQLite file, built once per test binary
+/// process, that every `make_server*` call below copies from instead of
+/// paying `MemoryServer::new`'s full DDL + `ensure_column` + data-migration
+/// chain on a brand-new empty file. `run_data_migrations` is already
+/// exercised twice-in-a-row by memory-core's own migration tests (see
+/// `crates/memory-core/src/db/migrations.rs`), so re-running the same
+/// startup path against an already-migrated file is a normal, supported
+/// state (identical to a real restart against an existing `~/.tachi` DB) —
+/// not a special case invented for this fixture (issue #682 template-DB
+/// fixture, G2).
+/// The template lives at a STABLE path keyed by the test binary's identity
+/// (path + size + mtime), NOT behind a process-local `OnceLock` alone:
+/// nextest runs each test in its own process, so a per-process cache would
+/// rebuild the template for every single test and make the suite slower,
+/// not faster. Keying on the binary identity means a recompile (which is
+/// the only way the schema/migration chain can change) automatically gets
+/// a fresh template, while all test processes of one build share one file.
+fn template_db_path() -> &'static std::path::PathBuf {
+    static TEMPLATE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        ensure_test_env();
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let exe = std::env::current_exe().expect("test binary path");
+            let meta = std::fs::metadata(&exe).expect("test binary metadata");
+            let mut hasher = std::hash::DefaultHasher::new();
+            exe.hash(&mut hasher);
+            meta.len().hash(&mut hasher);
+            meta.modified()
+                .expect("test binary mtime")
+                .hash(&mut hasher);
+            hasher.finish()
+        };
+        let path = std::env::temp_dir().join(format!(
+            "memory-server-test-template-{fingerprint:016x}.sqlite"
+        ));
+        if path.exists() {
+            return path;
+        }
+        // Build at a unique scratch path first, then atomically rename into
+        // place so concurrent test processes never observe a half-written
+        // template. If several processes race, each builds an equivalent
+        // file and the renames just overwrite one another; `fs::copy`
+        // readers hold their own fd so an overwrite mid-copy is still safe.
+        let build = std::env::temp_dir().join(format!(
+            "memory-server-test-template-build-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        {
+            let server =
+                MemoryServer::new(build.clone(), None).expect("build template test db fixture");
+            // Fold the WAL back into the main file and truncate it so a plain
+            // `fs::copy` of the base path is a complete, self-contained
+            // snapshot — no `-wal`/`-shm` sidecars required.
+            server
+                .db
+                .global_store
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .checkpoint_wal_truncate()
+                .expect("checkpoint template test db fixture");
+        } // `server` (and its connections) drop here before the rename.
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = build.clone().into_os_string();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+        }
+        std::fs::rename(&build, &path).expect("publish template test db fixture");
+        path
+    })
+}
+
+/// Copy the schema-initialized template into `dest` so the caller's
+/// subsequent `MemoryServer::new` finds an already-migrated file. The
+/// template is checkpointed with `wal_checkpoint(TRUNCATE)` before publish,
+/// so the base file alone is a complete snapshot (no sidecars to copy).
+fn copy_template_db(dest: &std::path::Path) {
+    std::fs::copy(template_db_path(), dest).expect("seed test db from template fixture");
+}
+
 pub(crate) fn make_server() -> TestServer {
     ensure_test_env();
     let db_path = std::env::temp_dir().join(format!(
         "memory-server-test-{}.sqlite",
         uuid::Uuid::new_v4()
     ));
+    copy_template_db(&db_path);
     let server = MemoryServer::new(db_path.clone(), None).expect("failed to create test server");
     TestServer {
         server: Some(server),
@@ -158,6 +239,7 @@ fn make_server_with_temp_home() -> (MemoryServer, TempHomeGuard) {
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
     std::fs::create_dir_all(global_db.parent().expect("global db parent"))
         .expect("create global db dir");
+    copy_template_db(&global_db);
     let server = MemoryServer::new(global_db, None).expect("failed to create test server");
     (server, temp_home)
 }
@@ -202,6 +284,7 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
     let global_db = temp_home.temp_home.join(".tachi/global/memory.db");
     std::fs::create_dir_all(global_db.parent().expect("global db parent"))
         .expect("create global db dir");
+    copy_template_db(&global_db);
     let server = MemoryServer::new(global_db, None).expect("failed to create test server");
     (server, temp_home)
 }
