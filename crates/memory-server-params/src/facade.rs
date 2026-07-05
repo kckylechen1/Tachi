@@ -33,6 +33,19 @@ pub(crate) fn memory_scope_schema(
     )
 }
 
+pub(crate) fn tachi_memory_scope_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "all", "memory", "wiki", "patterns", "sft", "note", "user", "project", "general",
+            "global",
+        ],
+        "Action-polymorphic tachi_memory scope: recall scopes, save note routing, and storage/routing scopes.",
+        generator,
+    )
+}
+
 pub(crate) fn save_kind_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {

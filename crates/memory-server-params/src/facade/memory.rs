@@ -283,8 +283,8 @@ pub struct TachiMemoryParams {
     pub query: Option<String>,
     #[serde(default)]
     #[schemars(
-        schema_with = "super::memory_scope_schema",
-        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\"."
+        schema_with = "super::tachi_memory_scope_schema",
+        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\". [action=save] \"note\" routes to the note writer; \"user\", \"project\", \"general\", and \"global\" select storage/routing scope."
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
