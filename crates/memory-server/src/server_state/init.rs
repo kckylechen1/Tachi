@@ -45,6 +45,13 @@ fn background_workers_enabled() -> bool {
     }
 }
 
+fn read_bound_agent_id_from_env() -> Option<String> {
+    std::env::var("TACHI_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 impl MemoryServer {
     pub(crate) fn new(
         global_db_path: PathBuf,
@@ -116,6 +123,12 @@ impl MemoryServer {
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let bound_agent_id = read_bound_agent_id_from_env();
+        if bound_agent_id.is_none() {
+            tracing::warn!(
+                "TACHI_AGENT_ID is not set; vault ACL falls back to caller-supplied agent_id"
+            );
+        }
         let mcp_discovery_timeout_ms = match parse_env_u64("MCP_DISCOVERY_TIMEOUT_MS") {
             Some(0) => {
                 eprintln!("MCP_DISCOVERY_TIMEOUT_MS must be >= 1; using 1ms");
@@ -231,6 +244,7 @@ impl MemoryServer {
                 tool_profile: Some(crate::profiles::default_tool_profile()),
                 handoff_memos: Vec::new(),
             })),
+            bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
             named_project_cache: Arc::new(StdMutex::new(HashMap::new())),
         };
 

@@ -143,9 +143,22 @@ fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
 
     migrate_enum_constraints(conn)?;
 
+    ensure_optimization_indexes(conn);
+
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
+}
+
+fn ensure_optimization_indexes(conn: &Connection) {
+    if has_column(conn, "memories", "superseded_by").unwrap_or(false) {
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_path_active_ts \
+             ON memories(path, timestamp DESC) \
+             WHERE archived = 0 AND superseded_by IS NULL",
+            [],
+        );
+    }
 }
 
 fn execute_batch_retry(conn: &Connection, sql: &str) -> Result<(), MemoryError> {
@@ -576,6 +589,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_superseded ON memories(superseded_by);
         CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
         CREATE INDEX IF NOT EXISTS idx_memories_recall ON memories(recall_count DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_path_active_ts ON memories(path, timestamp DESC) WHERE archived = 0 AND superseded_by IS NULL;
 
         "#
         .replace("__RECALL_COUNT_EXPR__", recall_count_expr)

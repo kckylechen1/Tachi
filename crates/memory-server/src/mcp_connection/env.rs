@@ -168,8 +168,10 @@ where
     } else {
         "No configured vault secret fallback is available".to_string()
     };
-    if let Some(err) = last_secret_error {
-        Err(format!("{base}: {err}"))
+    if let Some(_err) = last_secret_error {
+        Err(format!(
+            "{base} (resolver reported an error; check server logs for details)"
+        ))
     } else {
         Err(base)
     }

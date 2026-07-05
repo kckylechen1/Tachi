@@ -29,9 +29,10 @@ runs:
           throw "rustup is required on the runner but was not found."
         }
 
-        rustup set profile minimal
+        rustup set profile default
         rustup toolchain install $env:INPUT_TOOLCHAIN --no-self-update
         rustup default $env:INPUT_TOOLCHAIN
+        rustup component add clippy rustfmt
 
         if ($env:INPUT_TARGETS) {
           $targets = $env:INPUT_TARGETS -split '[,\s]+' | Where-Object { $_ }

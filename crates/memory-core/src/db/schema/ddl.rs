@@ -82,6 +82,7 @@ pub(super) const BASE_SCHEMA_SQL: &str = r#"
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
         CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem_time ON access_history(memory_id, accessed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_access_hist_hash ON access_history(memory_id, query_hash) WHERE query_hash != '';
 
         -- Derived items (causal extractions, distilled rules, etc.)
         CREATE TABLE IF NOT EXISTS derived_items (
