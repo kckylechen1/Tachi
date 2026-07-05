@@ -822,6 +822,7 @@ async fn create_pull_request(
     body: &str,
     repo: Option<&str>,
 ) -> Result<CreatedPr, String> {
+    // TODO: migrate `pr create --body` to `--body-file` for gh shim compatibility.
     let (mut cmd, token) = build_gh_command(server)?;
     cmd.current_dir(repo_root)
         .args(["pr", "create"])
