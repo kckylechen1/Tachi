@@ -98,6 +98,7 @@ pub struct SearchMemoryParams {
         default = "default_mmr_threshold",
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub mmr_threshold: Option<f64>,
 
     /// Graph expand hops (0 = disabled, default = 1)

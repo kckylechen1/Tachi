@@ -14,6 +14,7 @@ pub struct TachiGhParams {
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub number: Option<u64>,
     /// Issue title (required for issue_create)
     #[serde(default)]
@@ -32,6 +33,7 @@ pub struct TachiGhParams {
         default,
         deserialize_with = "super::coerce::opt_u32_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub limit: Option<u32>,
     /// Merge strategy for safe_merge: "merge", "squash", "rebase" (default: "squash").
     /// Applies only to the GitHub PR merge path, not local worktree merging.

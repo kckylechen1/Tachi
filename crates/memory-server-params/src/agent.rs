@@ -46,6 +46,7 @@ pub struct AgentRegisterParams {
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub rate_limit_rpm: Option<u64>,
 
     /// Optional per-agent burst limit override (0 = use server default)
@@ -53,6 +54,7 @@ pub struct AgentRegisterParams {
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub rate_limit_burst: Option<u64>,
 }
 

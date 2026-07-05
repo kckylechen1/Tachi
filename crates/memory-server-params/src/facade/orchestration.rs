@@ -121,6 +121,7 @@ pub struct TachiArenaParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub timeout_secs: Option<u64>,
 
     /// When true, spawn creates the tracked mission documents and also launches
@@ -266,6 +267,7 @@ pub struct TachiVerifyParams {
         default,
         deserialize_with = "crate::coerce::opt_i64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub exit_code: Option<i64>,
 
     /// Path to a durable log/artifact for this verification run.
@@ -289,6 +291,7 @@ pub struct TachiVerifyParams {
         default,
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub limit: Option<u32>,
 
     /// Batch record/start payload. Cannot be combined with single-check fields (check_id/kind/command/commands).
