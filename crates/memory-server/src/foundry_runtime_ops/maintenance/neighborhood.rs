@@ -6,13 +6,13 @@ use super::super::helpers::round3;
 use super::super::{
     FoundryMaintenanceItem, CAPTURE_DEDUP_THRESHOLD, CAPTURE_MERGE_THRESHOLD, FOUNDRY_RELATED_LIMIT,
 };
-use super::distill_helpers::infer_memory_insight;
 use super::store::{
     merge_foundry_metadata, update_entry_metadata, with_foundry_store, with_foundry_store_read,
 };
 use crate::server_state::MemoryServer;
 use chrono::Utc;
 use serde_json::json;
+use tachi_foundry::infer_memory_insight;
 
 pub(super) async fn process_memory_neighborhood_job(
     server: &MemoryServer,
