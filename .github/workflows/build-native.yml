@@ -109,7 +109,9 @@ jobs:
 
       - name: Build native module
         working-directory: crates/memory-node
-        run: npx napi build --platform --release --cargo-cwd . --target ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} --manifest-path Cargo.toml
+          npx napi build --platform --release --cargo-cwd . --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 

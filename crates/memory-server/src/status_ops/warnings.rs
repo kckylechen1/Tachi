@@ -4,8 +4,8 @@
 //! from `status_ops::mod` (no behavior change); shared types come via the parent.
 
 use super::{
-    collect_snapshot, resolve_app_home, truncate, DaemonStatus, DbStatus, StatusSnapshot,
-    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+    collect_snapshot, resolve_app_home, status_health, truncate, DaemonStatus, DbStatus,
+    StatusSnapshot, EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
 };
 use serde_json::json;
 
@@ -99,9 +99,32 @@ pub(crate) fn build_status_warnings(
         warnings.push(issue.warning_message());
     }
     if low_coverage_count > 0 {
-        warnings.push(format!(
-            "{low_coverage_count} db(s) have vector coverage below 90%: {}",
-            low_coverage_dbs.join(", ")
+        let mut details = snapshot
+            .dbs
+            .iter()
+            .filter(|d| low_vector_coverage(d))
+            .take(4)
+            .map(|d| {
+                format!(
+                    "{} missing={} action={}",
+                    d.label,
+                    d.vector_missing,
+                    status_health::format_backfill_command(d)
+                )
+            })
+            .collect::<Vec<_>>();
+        if low_coverage_count > details.len() {
+            details.push(format!(
+                "{} more db(s)",
+                low_coverage_count.saturating_sub(details.len())
+            ));
+        }
+        warnings.push(truncate(
+            &format!(
+                "WARNING: vector backfill needed below 99% coverage: {}",
+                details.join("; ")
+            ),
+            240,
         ));
     }
     if vector_dimension_mismatch_count > 0 {
@@ -304,10 +327,10 @@ pub(crate) fn vector_dimension_mismatch(db: &DbStatus) -> bool {
     db.vector_count > 0 && db.vector_dimension != Some(EXPECTED_EMBEDDING_DIM)
 }
 
-/// Coverage threshold below which a populated DB is flagged as having low
-/// vector coverage. Single source of truth for the hand-copied `0.9` literal
-/// that previously lived inline in health scoring, status warnings, and the CLI.
-pub(crate) const LOW_VECTOR_COVERAGE: f64 = 0.9;
+/// Coverage threshold below which a populated DB is flagged as needing vector
+/// backfill. This is intentionally stricter than a health-emergency threshold:
+/// the operator should see the backfill action before the library is visibly ill.
+pub(crate) const LOW_VECTOR_COVERAGE: f64 = 0.99;
 
 pub(crate) fn low_vector_coverage(db: &DbStatus) -> bool {
     db.memory_total > 0 && db.vector_coverage < LOW_VECTOR_COVERAGE

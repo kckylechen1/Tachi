@@ -24,10 +24,6 @@ impl MemoryStore {
         db::truth_maintenance_prune_stale(&self.conn)
     }
 
-    pub fn count_active_memories(&self) -> Result<i64, MemoryError> {
-        db::count_active_memories(&self.conn)
-    }
-
     pub fn count_consolidated_active_memories(&self) -> Result<i64, MemoryError> {
         db::count_consolidated_active_memories(&self.conn)
     }
@@ -49,9 +45,5 @@ impl MemoryStore {
 
     pub fn count_distinct_access_days(&self, memory_id: &str) -> Result<usize, MemoryError> {
         db::count_distinct_access_days(&self.conn, memory_id)
-    }
-
-    pub fn promote_memory_to_durable(&self, memory_id: &str) -> Result<(), MemoryError> {
-        db::promote_memory_to_durable(&self.conn, memory_id)
     }
 }

@@ -16,11 +16,16 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 use tachi_hub::should_expose_mcp_tools;
 
-fn current_exposed_tool_patterns() -> Option<Vec<String>> {
-    std::env::var("TACHI_EXPOSED_TOOLS")
-        .ok()
-        .map(|raw| tachi_hub::parse_tool_patterns_csv(&raw))
-        .filter(|patterns| !patterns.is_empty())
+pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
+    static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("TACHI_EXPOSED_TOOLS")
+                .ok()
+                .map(|raw| tachi_hub::parse_tool_patterns_csv(&raw))
+                .filter(|patterns| !patterns.is_empty())
+        })
+        .clone()
 }
 
 fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {

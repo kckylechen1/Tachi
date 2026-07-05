@@ -84,27 +84,21 @@ async fn run_truth_maintenance_for_target(
         .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
 
     store
-        .truth_maintenance_prune_stale()
+        .archive_stale_low_value_memories()
         .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
 
     // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
-    let total_active = store
-        .count_active_memories()
-        .map_err(|e| format!("count active memories {}: {e}", target.label))?;
-    let consolidated_count = store
-        .count_consolidated_active_memories()
-        .map_err(|e| format!("count consolidated memories {}: {e}", target.label))?;
-    let health_ratio = if total_active > 0 {
-        consolidated_count as f64 / total_active as f64
+    let counts = store
+        .tier_health_counts()
+        .map_err(|e| format!("count tier health {}: {e}", target.label))?;
+    let health_ratio = if counts.total_active > 0 {
+        counts.consolidated as f64 / counts.total_active as f64
     } else {
         1.0
     };
-    if health_ratio < 0.35 && total_active > 0 {
-        // Self-healing may only apply the same promotion gate as record_access:
-        // repeated exact recall from diverse queries. Do not promote merely
-        // because a raw note was accessed often.
+    if health_ratio < 0.35 && counts.total_active > 0 {
         let promoted = store
-            .truth_maintenance_self_heal_promote_raw()
+            .promote_diversely_recalled_raw_memories()
             .map_err(|e| format!("self-heal promote raw memories {}: {e}", target.label))?;
         if promoted > 0 {
             eprintln!(
@@ -115,15 +109,15 @@ async fn run_truth_maintenance_for_target(
     }
 
     // ── Post-distillation embedding: enqueue non-raw entries without vectors ──
-    let needs_embed_ids = store
-        .list_memory_ids_needing_embedding(50)
-        .map_err(|e| format!("list embedding candidates {}: {e}", target.label))?;
-    if !needs_embed_ids.is_empty() {
-        let candidates = memory_core::db::fetch_by_ids(store.connection(), &needs_embed_ids, false)
-            .map_err(|e| format!("fetch embedding candidates {}: {e}", target.label))?;
-        for entry in candidates.values() {
-            let _ = server.enrichment_lock().enrich_tx.try_send(
-                crate::enrichment::build_enrichment_item(
+    let needs_embed = store
+        .entries_missing_vectors(50)
+        .map_err(|e| format!("scan embedding candidates {}: {e}", target.label))?;
+    for entry in &needs_embed {
+        let _ =
+            server
+                .enrichment_lock()
+                .enrich_tx
+                .try_send(crate::enrichment::build_enrichment_item(
                     entry,
                     true,  // needs_embedding
                     false, // needs_summary
@@ -133,20 +127,15 @@ async fn run_truth_maintenance_for_target(
                     None,
                     None,
                     entry.revision,
-                ),
-            );
-        }
+                ));
     }
 
-    let ids = store
-        .list_promotion_candidate_ids(200)
-        .map_err(|e| format!("list promotion candidates {}: {e}", target.label))?;
-    let entries = memory_core::db::fetch_by_ids(store.connection(), &ids, false)
-        .map_err(|e| format!("fetch promotion candidates {}: {e}", target.label))?;
-
-    for entry in entries.values() {
+    let promotion_candidates = store
+        .promotion_candidate_entries(200)
+        .map_err(|e| format!("scan promotion candidates {}: {e}", target.label))?;
+    for entry in &promotion_candidates {
         let access_days = store
-            .count_distinct_access_days(&entry.id)
+            .distinct_access_days(&entry.id)
             .map_err(|e| format!("count access days for {}: {e}", entry.id))?;
         if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
             continue;

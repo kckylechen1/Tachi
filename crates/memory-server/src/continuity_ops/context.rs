@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
 use crate::MemoryServer;
+use memory_server_runtime::{query_limit, trim_opt};
 
 use super::emit::emit_pattern_seen_events;
 use super::feedback::pattern_ref_json;
@@ -11,9 +12,7 @@ use super::read_models::{
     a2a_context_bundle, bonding_context_json, host_lifecycle_contract, timeline_context_json,
 };
 use super::storage::{continuity_metrics, list_projection_memories, read_events};
-use super::{
-    event_query_from_params, query_limit, target_from_event_params, trim_opt, ContinuityEventTarget,
-};
+use super::{event_query_from_params, target_from_event_params, ContinuityEventTarget};
 
 fn is_active_pattern_projection(entry: &MemoryEntry) -> bool {
     if !entry.path.starts_with("/user/patterns") {

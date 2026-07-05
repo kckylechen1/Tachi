@@ -1,7 +1,3 @@
-use std::collections::HashSet;
-
-use serde_json::{json, Value};
-
 use crate::server_state::MemoryServer;
 use memory_core::{MemoryEntry, MemoryStore};
 use tachi_foundry::{
@@ -27,62 +23,19 @@ fn scan_distill_inputs(
     candidate_scan_limit: i64,
     wiki_project: bool,
 ) -> Result<Vec<MemoryEntry>, String> {
-    let conn = store.connection();
-    let mut processed_ids: HashSet<String> = HashSet::new();
-    let mut stmt = conn
-        .prepare(
-            "SELECT metadata FROM memories
-             WHERE archived = 0 AND source = ?1
-             ORDER BY timestamp DESC
-             LIMIT ?2",
-        )
-        .map_err(|e| format!("prepare distill metadata query: {e}"))?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![FOUNDRY_DISTILL_SOURCE, processed_scan_limit],
-            |row| row.get::<_, String>(0),
-        )
+    let processed_ids = store
+        .distill_processed_source_ids(FOUNDRY_DISTILL_SOURCE, processed_scan_limit)
         .map_err(|e| format!("query distill metadata rows: {e}"))?;
-    for row in rows {
-        let raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
-        let metadata: Value = serde_json::from_str(&raw).unwrap_or_else(|_| json!({}));
-        let ids = metadata
-            .get("source_memory_ids")
-            .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|v| v.as_str())
-            .map(ToOwned::to_owned);
-        processed_ids.extend(ids);
-    }
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier
-              FROM memories
-              WHERE archived = 0 AND source != ?1
-              ORDER BY timestamp ASC
-              LIMIT ?2",
-        )
-        .map_err(|e| format!("prepare candidate query: {e}"))?;
-    let rows = stmt
-        .query_map(
-            rusqlite::params![FOUNDRY_DISTILL_SOURCE, candidate_scan_limit],
-            memory_core::row_to_entry,
-        )
+    let candidates = store
+        .distill_candidate_entries(FOUNDRY_DISTILL_SOURCE, candidate_scan_limit)
         .map_err(|e| format!("query candidate rows: {e}"))?;
-
-    let mut entries: Vec<MemoryEntry> = Vec::new();
-    for row in rows {
-        let entry = row.map_err(|e| format!("read candidate row: {e}"))?;
-        if processed_ids.contains(&entry.id) {
-            continue;
-        }
-        if !should_skip_daily_distill_candidate(&entry, wiki_project) {
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
+    Ok(candidates
+        .into_iter()
+        .filter(|entry| {
+            !processed_ids.contains(&entry.id)
+                && !should_skip_daily_distill_candidate(entry, wiki_project)
+        })
+        .collect())
 }
 
 /// Collect distill candidate groups for either the bound project DB

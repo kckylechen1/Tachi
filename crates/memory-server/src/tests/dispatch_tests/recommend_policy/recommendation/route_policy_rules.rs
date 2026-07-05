@@ -56,6 +56,7 @@ async fn tachi_task_recommend_consumes_approved_route_policy_rules() {
                 diff_present: Some(true),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed eval row");

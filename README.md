@@ -450,7 +450,7 @@ cargo test --all
 cargo run -p memory-server -- --profile standard
 ```
 
-Requires Rust ≥ 1.75. `maturin` and `cargo-watch` are useful for Node binding work and iterative development.
+Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.
 
 ---
 

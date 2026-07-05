@@ -24,6 +24,38 @@ impl DbScope {
     }
 }
 
+/// Default store routing for event reads/writes: an explicit project name
+/// routes to that named project DB, otherwise the bound project DB when one
+/// exists, otherwise the global DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventDbRoute {
+    NamedProject(String),
+    Project,
+    Global,
+}
+
+pub fn event_db_route(project: Option<&str>, has_project_db: bool) -> EventDbRoute {
+    if let Some(project) = project.map(str::trim).filter(|value| !value.is_empty()) {
+        EventDbRoute::NamedProject(project.to_string())
+    } else if has_project_db {
+        EventDbRoute::Project
+    } else {
+        EventDbRoute::Global
+    }
+}
+
+pub fn trim_opt(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn query_limit(limit: usize) -> usize {
+    limit.clamp(1, 500)
+}
+
 #[derive(Clone)]
 pub struct ReadStorePool {
     stores: Arc<Vec<StdMutex<MemoryStore>>>,

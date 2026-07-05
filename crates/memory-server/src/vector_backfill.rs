@@ -8,6 +8,8 @@ use memory_core::MemoryStore;
 use tachi_llm::LlmClient;
 
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
+pub(crate) const AUTO_BACKFILL_COVERAGE_THRESHOLD: f64 = 0.99;
+const DEFAULT_AUTO_BACKFILL_PENDING_THRESHOLD: usize = 0;
 
 fn embedding_input(text: &str, summary: &str) -> String {
     let t = text.trim();
@@ -42,6 +44,59 @@ pub(crate) fn list_missing_vector_entries(
             limit,
         )
         .map_err(|e| format!("list missing vectors: {e}"))
+}
+
+pub(crate) fn auto_backfill_pending_threshold() -> usize {
+    std::env::var("TACHI_VECTOR_SWEEP_PENDING_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_AUTO_BACKFILL_PENDING_THRESHOLD)
+}
+
+pub(crate) fn auto_backfill_needed(
+    total: usize,
+    with_vec: usize,
+    pending_enrichment: usize,
+    pending_threshold: usize,
+) -> bool {
+    if total == 0 || pending_enrichment == 0 {
+        return false;
+    }
+    let coverage = with_vec as f64 / total as f64;
+    pending_enrichment > pending_threshold || coverage < AUTO_BACKFILL_COVERAGE_THRESHOLD
+}
+
+fn vector_counts_filtered(
+    store: &MemoryStore,
+    skip_recall_cache: bool,
+) -> Result<(usize, usize), String> {
+    if !skip_recall_cache {
+        let (total, with_vec) = store
+            .vector_stats()
+            .map_err(|e| format!("vector stats: {e}"))?;
+        return Ok((total.max(0) as usize, with_vec.max(0) as usize));
+    }
+
+    let total: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE source != ?1",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("vector total stats: {e}"))?;
+    let with_vec: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories_vec v
+             JOIN memories m ON m.id = v.id
+             WHERE m.source != ?1",
+            [FOUNDRY_RECALL_CACHE_SOURCE],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("vector populated stats: {e}"))?;
+    Ok((total.max(0) as usize, with_vec.max(0) as usize))
 }
 
 /// Embed and persist up to `batch_size` rows; returns count written.
@@ -90,6 +145,11 @@ pub(crate) async fn sweep_db_vectors(
 
     let mut store =
         MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
+    let (total, with_vec) = vector_counts_filtered(&store, skip_recall_cache)?;
+    let pending = total.saturating_sub(with_vec);
+    if !auto_backfill_needed(total, with_vec, pending, auto_backfill_pending_threshold()) {
+        return Ok((0, pending));
+    }
     let missing = list_missing_vector_entries(&store, skip_recall_cache, Some(max_entries))?;
     if missing.is_empty() {
         return Ok((0, 0));
@@ -109,7 +169,7 @@ pub(crate) async fn sweep_db_vectors(
 
 #[cfg(test)]
 mod tests {
-    use super::embedding_input;
+    use super::{auto_backfill_needed, embedding_input};
 
     #[test]
     fn embedding_input_prefers_summary_for_long_text() {
@@ -132,5 +192,13 @@ mod tests {
             embedding_input("tiny", "fallback summary"),
             "fallback summary"
         );
+    }
+
+    #[test]
+    fn auto_backfill_starts_when_pending_or_coverage_crosses_threshold() {
+        assert!(auto_backfill_needed(100, 99, 1, 0));
+        assert!(auto_backfill_needed(200, 197, 3, 10));
+        assert!(!auto_backfill_needed(100, 100, 0, 0));
+        assert!(!auto_backfill_needed(1000, 990, 10, 10));
     }
 }

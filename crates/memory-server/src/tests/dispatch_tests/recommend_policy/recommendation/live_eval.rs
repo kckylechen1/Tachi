@@ -33,6 +33,7 @@ async fn tachi_task_recommend_uses_live_eval_and_dispatch_profiles() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("seed eval row");
@@ -151,6 +152,7 @@ async fn tachi_task_recommend_surfaces_human_override_and_retry_penalties() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("seed eval row");

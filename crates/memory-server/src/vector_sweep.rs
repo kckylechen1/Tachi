@@ -17,7 +17,7 @@ fn sweep_interval_secs() -> u64 {
     std::env::var("TACHI_VECTOR_SWEEP_INTERVAL_SECS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .filter(|&n| n >= 60)
+        .filter(|&n| n >= 1)
         .unwrap_or(DEFAULT_SWEEP_INTERVAL_SECS)
 }
 
@@ -358,5 +358,20 @@ mod tests {
         assert!(own_paths.iter().any(|p| p.ends_with("agent-global.db")));
         assert!(own_paths.iter().any(|p| p.ends_with("project.db")));
         assert!(!own_paths.iter().any(|p| p.ends_with("unrelated.db")));
+    }
+
+    #[test]
+    fn sweep_interval_allows_env_shortened_debounce_for_tests() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("TACHI_VECTOR_SWEEP_INTERVAL_SECS");
+        std::env::set_var("TACHI_VECTOR_SWEEP_INTERVAL_SECS", "1");
+        assert_eq!(sweep_interval_secs(), 1);
+        if let Some(value) = saved {
+            std::env::set_var("TACHI_VECTOR_SWEEP_INTERVAL_SECS", value);
+        } else {
+            std::env::remove_var("TACHI_VECTOR_SWEEP_INTERVAL_SECS");
+        }
     }
 }

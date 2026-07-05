@@ -48,6 +48,9 @@ pub(crate) async fn handle_vault_init(
     })();
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
+    if result.is_ok() {
+        server.requeue_auth_failed_enrichment_retries("vault init");
+    }
 
     let audit_result = record_vault_audit(
         server,
@@ -134,6 +137,9 @@ pub(crate) async fn handle_vault_unlock(
     .await;
 
     let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
+    if result.is_ok() {
+        server.requeue_auth_failed_enrichment_retries("vault unlock");
+    }
 
     let audit_result = record_vault_audit(
         server,

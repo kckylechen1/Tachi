@@ -1,8 +1,8 @@
+use memory_core::store::llm_usage::LlmUsageEvent;
 use reqwest::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     Url,
 };
-use rusqlite::params;
 use serde_json::{self, Value};
 use std::time::{Duration, Instant};
 
@@ -13,22 +13,6 @@ struct ChatUsageTokens {
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     total_tokens: Option<i64>,
-}
-
-struct LlmUsageRecord {
-    timestamp: String,
-    lane: &'static str,
-    model: String,
-    provider_host: String,
-    provider_logical_name: String,
-    provider_key_id: String,
-    prompt_tokens: Option<i64>,
-    completion_tokens: Option<i64>,
-    total_tokens: Option<i64>,
-    max_tokens: i64,
-    request_chars: i64,
-    response_chars: i64,
-    duration_ms: i64,
 }
 
 impl super::super::LlmClient {
@@ -331,9 +315,9 @@ impl super::super::LlmClient {
         let Some(db_path) = self.vault_db_path.clone() else {
             return;
         };
-        let record = LlmUsageRecord {
+        let record = LlmUsageEvent {
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-            lane: lane.as_str(),
+            lane: lane.as_str().to_string(),
             model: model.to_string(),
             provider_host: provider_host(base_url),
             provider_logical_name: selected.logical_name.clone(),
@@ -404,7 +388,7 @@ fn chat_auth_failure_reason(status: u16, resp_text: &str) -> String {
 
 fn persist_llm_usage_blocking(
     db_path: std::path::PathBuf,
-    record: LlmUsageRecord,
+    record: LlmUsageEvent,
 ) -> Result<(), String> {
     let db_path = db_path
         .to_str()
@@ -412,30 +396,6 @@ fn persist_llm_usage_blocking(
     let store = memory_core::MemoryStore::open(db_path)
         .map_err(|err| format!("persist llm usage open db: {err}"))?;
     store
-        .connection()
-        .execute(
-            "INSERT INTO llm_usage (
-                timestamp, lane, model, provider_host, provider_logical_name,
-                provider_key_id, prompt_tokens, completion_tokens, total_tokens,
-                max_tokens, request_chars, response_chars, duration_ms, success,
-                created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 1, ?1)",
-            params![
-                record.timestamp,
-                record.lane,
-                record.model,
-                record.provider_host,
-                record.provider_logical_name,
-                record.provider_key_id,
-                record.prompt_tokens,
-                record.completion_tokens,
-                record.total_tokens,
-                record.max_tokens,
-                record.request_chars,
-                record.response_chars,
-                record.duration_ms,
-            ],
-        )
-        .map_err(|err| format!("persist llm usage insert: {err}"))?;
-    Ok(())
+        .record_llm_usage(&record)
+        .map_err(|err| format!("persist llm usage insert: {err}"))
 }

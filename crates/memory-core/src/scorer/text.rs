@@ -70,6 +70,38 @@ pub fn symbolic_score(
     (overlap as f64) / (query_tokens.len().max(1) as f64)
 }
 
+pub fn symbolic_score_entry(query: &str, entry: &MemoryEntry) -> f64 {
+    let query_tokens: HashSet<String> = tokenize(query).into_iter().collect();
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let mut text_tokens: HashSet<String> = HashSet::new();
+    for field in [
+        entry.id.as_str(),
+        entry.path.as_str(),
+        entry.topic.as_str(),
+        entry.summary.as_str(),
+        entry.text.as_str(),
+    ] {
+        text_tokens.extend(tokenize(field));
+    }
+    for kw in &entry.keywords {
+        text_tokens.extend(tokenize(kw));
+    }
+    for ent in &entry.entities {
+        let trimmed = ent.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        text_tokens.extend(tokenize(trimmed));
+        text_tokens.insert(trimmed.to_ascii_lowercase());
+    }
+
+    let overlap = query_tokens.intersection(&text_tokens).count();
+    (overlap as f64) / (query_tokens.len().max(1) as f64)
+}
+
 /// A caller-injected, domain-specific precision booster.
 ///
 /// A host project registers matchers through `SearchOptions::precision_matchers`

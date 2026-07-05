@@ -18,6 +18,13 @@ struct CreatedPr {
     url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::gh_ops) struct ResolvedBase {
+    pub base: String,
+    pub baseref: String,
+    pub base_pushed_needed: bool,
+}
+
 pub(in crate::gh_ops) async fn handle_github_ship(
     server: &MemoryServer,
     params: &TachiGhParams,
@@ -50,6 +57,9 @@ pub(in crate::gh_ops) async fn handle_github_ship_inner(
                 "expect_branch_mismatch: expected '{expected}', current branch is '{branch}'"
             ));
         }
+    }
+    if params.files.is_empty() && params.commit_message.is_none() {
+        return handle_contract_ship(server, params, &repo_root, &branch).await;
     }
     validate_files(&params.files)?;
     let commit_message = params
@@ -114,7 +124,30 @@ pub(in crate::gh_ops) async fn handle_github_ship_inner(
                 steps["pushed"] = json!("pushed");
                 if pr_requested {
                     if let Some(server) = server {
-                        match create_pull_request(server, &repo_root, &branch, params).await {
+                        let base = params
+                            .pr_base
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("main");
+                        let title = params.pr_title.as_deref().ok_or_else(|| {
+                            "pr_title missing after pr_requested gate".to_string()
+                        })?;
+                        let body = params
+                            .pr_body
+                            .as_deref()
+                            .ok_or_else(|| "pr_body missing after pr_requested gate".to_string())?;
+                        match create_pull_request(
+                            server,
+                            &repo_root,
+                            &branch,
+                            base,
+                            title,
+                            body,
+                            params.repo.as_deref(),
+                        )
+                        .await
+                        {
                             Ok(pr) => {
                                 steps["pr"] = json!({
                                     "number": pr.number,
@@ -435,26 +468,361 @@ fn git_push_origin(repo: &Path, branch: &str) -> Result<(), String> {
     ))
 }
 
-async fn create_pull_request(
+pub(in crate::gh_ops) fn resolve_base_ref(repo: &Path, base: &str) -> Result<ResolvedBase, String> {
+    let base = base.trim();
+    if base.is_empty() {
+        return Err("base_not_found: base name is empty".to_string());
+    }
+    let origin_ref = format!("origin/{base}");
+    if git_ref_exists(repo, &origin_ref) {
+        return Ok(ResolvedBase {
+            base: base.to_string(),
+            baseref: origin_ref,
+            base_pushed_needed: false,
+        });
+    }
+    if git_ref_exists(repo, base) {
+        return Ok(ResolvedBase {
+            base: base.to_string(),
+            baseref: base.to_string(),
+            base_pushed_needed: true,
+        });
+    }
+    Err(format!(
+        "base_not_found: no local or origin ref for base '{base}'"
+    ))
+}
+
+fn git_ref_exists(repo: &Path, ref_name: &str) -> bool {
+    run_git(repo, &["rev-parse", "--verify", ref_name]).is_ok()
+}
+
+fn collect_commits_oneline(repo: &Path, baseref: &str) -> Result<Vec<String>, String> {
+    let range = format!("{baseref}..HEAD");
+    let output = run_git(repo, &["log", "--oneline", "--no-merges", range.as_str()])?;
+    let lines: Vec<String> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    if lines.is_empty() {
+        return Err(format!(
+            "nothing_to_ship: no commits between {baseref} and HEAD"
+        ));
+    }
+    Ok(lines)
+}
+
+fn last_commit_subject(log_lines: &[String]) -> String {
+    log_lines
+        .first()
+        .and_then(|line| line.split_once(' ').map(|x| x.1))
+        .unwrap_or_default()
+        .to_string()
+}
+
+pub(in crate::gh_ops) fn build_contract_pr_body(
+    issue_ref: Option<&str>,
+    log_lines: &[String],
+    tests_run: &[String],
+) -> String {
+    let mut body = String::new();
+    if let Some(issue_ref) = issue_ref {
+        body.push_str("Refs ");
+        body.push_str(issue_ref);
+        body.push('\n');
+        body.push('\n');
+    }
+    body.push_str("## Commits (one bounded contract, batched)\n");
+    for line in log_lines {
+        body.push_str("- ");
+        body.push_str(line);
+        body.push('\n');
+    }
+    body.push('\n');
+    body.push_str("## Tested (full suite, once)\n");
+    if tests_run.is_empty() {
+        body.push_str("_(not run — record the full-suite command via tests_run)_\n");
+    } else {
+        for test in tests_run {
+            body.push_str("- ");
+            body.push_str(test);
+            body.push('\n');
+        }
+    }
+    body.push('\n');
+    body.push_str("## Not-tested\n");
+    body.push_str("_fill honest gaps_\n");
+    body
+}
+
+fn contract_coaching_line(base_name: &str) -> String {
+    if base_name == "main" {
+        "This contract's ceremony is DONE — owner merges. If your mandate has more contracts, start the next one NOW.".to_string()
+    } else {
+        format!(
+            "Self-merge into '{base_name}' is allowed after review; ONE reviewed PR {base_name} -> main at campaign end. Start the next slice NOW."
+        )
+    }
+}
+
+async fn find_open_pr_for_head(
     server: &MemoryServer,
     repo_root: &Path,
     branch: &str,
+    repo: Option<&str>,
+) -> Result<Option<CreatedPr>, String> {
+    let (mut cmd, token) = build_gh_command(server)?;
+    cmd.current_dir(repo_root)
+        .args(["pr", "list", "--state", "open", "--head", branch])
+        .args(["--json", "number,url"]);
+    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
+        validate_repo(repo)?;
+        cmd.args(["--repo", repo]);
+    }
+    let raw = run_gh(cmd, &token).map_err(|err| format!("pr_exists_check_failed: {err}"))?;
+    let parsed: Vec<Value> = serde_json::from_str(raw.trim())
+        .map_err(|err| format!("pr_exists_check_failed: parse gh pr list JSON: {err}"))?;
+    Ok(parsed.first().and_then(|entry| {
+        let number = entry.get("number")?.as_u64()?;
+        let url = entry.get("url")?.as_str()?.to_string();
+        Some(CreatedPr { number, url })
+    }))
+}
+
+async fn handle_contract_ship(
+    server: Option<&MemoryServer>,
     params: &TachiGhParams,
-) -> Result<CreatedPr, String> {
-    let title = params
-        .pr_title
-        .as_deref()
-        .ok_or_else(|| "pr_title missing after pr_requested gate".to_string())?;
-    let body = params
-        .pr_body
-        .as_deref()
-        .ok_or_else(|| "pr_body missing after pr_requested gate".to_string())?;
-    let base = params
+    repo_root: &Path,
+    branch: &str,
+) -> Result<String, String> {
+    let base_name = params
         .pr_base
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("main");
+    if branch == base_name {
+        return Err(format!(
+            "self_pr: branch '{branch}' equals pr_base; pick a different pr_base or branch"
+        ));
+    }
+    let resolved = resolve_base_ref(repo_root, base_name)?;
+    let log_lines = collect_commits_oneline(repo_root, &resolved.baseref)?;
+    let commit_count = log_lines.len();
+    let pr_title = params
+        .pr_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| last_commit_subject(&log_lines));
+    let issue_ref = params
+        .issue_ref
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let pr_body = build_contract_pr_body(issue_ref, &log_lines, &params.tests_run);
+
+    if !params.confirm {
+        let mut response = json!({
+            "status": "dry_run",
+            "mode": "contract",
+            "branch": branch,
+            "base": resolved.base,
+            "baseref": resolved.baseref,
+            "base_pushed_needed": resolved.base_pushed_needed,
+            "commit_count": commit_count,
+            "pr_title": pr_title,
+            "pr_body_preview": pr_body,
+            "steps": {
+                "gates": "passed",
+                "pushed": "dry_run",
+                "pr": "dry_run",
+                "linked": null,
+                "event_appended": false,
+            },
+            "warnings": [],
+        });
+        if server.is_none() {
+            response["pr_exists_check"] = json!("deferred");
+        }
+        return serde_json::to_string(&response)
+            .map_err(|err| format!("serialize contract ship dry-run response: {err}"));
+    }
+
+    if let Some(server) = server {
+        if let Some(existing) =
+            find_open_pr_for_head(server, repo_root, branch, params.repo.as_deref()).await?
+        {
+            return serde_json::to_string(&json!({
+                "status": "existing_pr",
+                "number": existing.number,
+                "url": existing.url,
+            }))
+            .map_err(|err| format!("serialize existing_pr response: {err}"));
+        }
+    }
+
+    let sha = run_git(repo_root, &["rev-parse", "HEAD"])?
+        .trim()
+        .to_string();
+    let mut status = "completed";
+    let mut warnings: Vec<String> = Vec::new();
+    let mut steps = json!({
+        "gates": "passed",
+        "staged": "skipped",
+        "committed": "skipped",
+        "pushed": null,
+        "pr": null,
+        "linked": null,
+        "event_appended": false,
+    });
+    let mut created_pr: Option<CreatedPr> = None;
+    let coaching = server.map(|_| contract_coaching_line(base_name));
+
+    if resolved.base_pushed_needed {
+        if !origin_remote_exists(repo_root) {
+            return Err(
+                "base_push_failed: origin remote not found for local-only base".to_string(),
+            );
+        }
+        git_push_origin(repo_root, &resolved.base)
+            .map_err(|err| format!("base_push_failed: {err}"))?;
+    }
+
+    if origin_remote_exists(repo_root) {
+        match git_push_origin(repo_root, branch) {
+            Ok(()) => {
+                steps["pushed"] = json!("pushed");
+                if let Some(server) = server {
+                    match create_pull_request(
+                        server,
+                        repo_root,
+                        branch,
+                        base_name,
+                        &pr_title,
+                        &pr_body,
+                        params.repo.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(pr) => {
+                            steps["pr"] = json!({
+                                "number": pr.number,
+                                "url": pr.url,
+                            });
+                            if let Some(flow_id) = params
+                                .flow_id
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|v| !v.is_empty())
+                            {
+                                match link_created_pr(server, flow_id, &pr.url).await {
+                                    Ok(linked) => {
+                                        steps["linked"] = linked;
+                                    }
+                                    Err(err) => {
+                                        status = "partial";
+                                        warnings.push(format!(
+                                            "branch {branch} pushed and PR created but link_pr failed: {err}"
+                                        ));
+                                        steps["linked"] = json!({ "error": err });
+                                    }
+                                }
+                            } else {
+                                steps["linked"] = json!("skipped");
+                            }
+                            created_pr = Some(pr);
+                        }
+                        Err(err) => {
+                            status = "partial";
+                            warnings.push(format!(
+                                "branch {branch} pushed but PR creation failed; open the PR manually: {err}"
+                            ));
+                            steps["pr"] = json!({ "error": err });
+                            steps["linked"] = json!("skipped");
+                        }
+                    }
+                } else {
+                    let err =
+                        "ship pr creation requires a MemoryServer for GitHub transport".to_string();
+                    status = "partial";
+                    warnings.push(format!(
+                        "branch {branch} pushed but PR creation failed; open the PR manually: {err}"
+                    ));
+                    steps["pr"] = json!({ "error": err });
+                    steps["linked"] = json!("skipped");
+                }
+            }
+            Err(err) => {
+                status = "partial";
+                warnings.push(
+                    "branch ready locally but push failed; push manually and open the PR yourself"
+                        .to_string(),
+                );
+                steps["pushed"] = json!({ "error": err });
+                steps["pr"] = json!("skipped");
+                steps["linked"] = json!("skipped");
+            }
+        }
+    } else {
+        status = "partial";
+        warnings.push("origin remote not found; skipped push and PR".to_string());
+        steps["pushed"] = json!("no_remote");
+        steps["pr"] = json!("skipped");
+        steps["linked"] = json!("skipped");
+    }
+
+    if let Some(flow_id) = params
+        .flow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if let Err(err) = append_ship_flow_event(
+            flow_id,
+            status,
+            branch,
+            &[],
+            &sha,
+            &mut steps,
+            &warnings,
+            created_pr.as_ref(),
+        ) {
+            status = "partial";
+            warnings.push(format!("append github ship event failed: {err}"));
+        }
+    }
+
+    let mut response = json!({
+        "status": status,
+        "mode": "contract",
+        "branch": branch,
+        "steps": steps,
+        "warnings": warnings,
+    });
+    if let Some(coaching) = coaching {
+        response["coaching"] = json!(coaching);
+    }
+    if server.is_none() {
+        response["pr_exists_check"] = json!("deferred");
+    }
+    serde_json::to_string(&response)
+        .map_err(|err| format!("serialize contract ship response: {err}"))
+}
+
+async fn create_pull_request(
+    server: &MemoryServer,
+    repo_root: &Path,
+    branch: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    repo: Option<&str>,
+) -> Result<CreatedPr, String> {
+    // TODO: migrate `pr create --body` to `--body-file` for gh shim compatibility.
     let (mut cmd, token) = build_gh_command(server)?;
     cmd.current_dir(repo_root)
         .args(["pr", "create"])
@@ -462,12 +830,7 @@ async fn create_pull_request(
         .args(["--head", branch])
         .args(["--title", title])
         .args(["--body", body]);
-    if let Some(repo) = params
-        .repo
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
+    if let Some(repo) = repo.map(str::trim).filter(|value| !value.is_empty()) {
         validate_repo(repo)?;
         cmd.args(["--repo", repo]);
     }

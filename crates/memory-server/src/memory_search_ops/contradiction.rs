@@ -215,16 +215,8 @@ pub(crate) fn persist_confirmed_contradiction(
         .add_edge(&supersedes_edge)
         .map_err(|e| format!("add supersedes edge: {e}"))?;
 
-    // Close valid_until at supersession time (same invariant as
-    // db::supersede_memory) so as_of point-in-time recall stops returning the
-    // contradicted fact once it has been superseded. COALESCE keeps any
-    // explicit window intact.
     store
-        .connection()
-        .execute(
-            "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
-            rusqlite::params![&entry.id, &now, &candidate.entry.id],
-        )
+        .mark_superseded_closing_validity(&candidate.entry.id, &entry.id, &now)
         .map_err(|e| format!("mark contradicted memory superseded: {e}"))?;
     Ok(())
 }

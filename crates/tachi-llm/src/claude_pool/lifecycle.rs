@@ -147,12 +147,12 @@ impl super::ClaudePool {
     /// Spawn `claude -p --output-format json [--dangerously-skip-permissions]`
     /// with the prompt on stdin. Honors `TACHI_CLAUDE_SKIP_PERMISSIONS`:
     /// `true`/`1` enables `--dangerously-skip-permissions`; any other value,
-    /// or an unset variable, leaves interactive permission prompts enabled.
-    /// Non-interactive callers must opt in explicitly.
+    /// disables it. When unset, non-interactive callers default to
+    /// `--dangerously-skip-permissions`; interactive callers keep prompts enabled.
     pub(super) async fn run_claude_cli(&self, prompt: &str) -> Result<String, String> {
         let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or_else(|_| !std::io::IsTerminal::is_terminal(&std::io::stdin()));
         let binary = self.binary.as_ref().map_err(|err| err.clone())?;
         let mut cmd = Command::new(binary);
         cmd.arg("-p").arg("--output-format").arg("json");

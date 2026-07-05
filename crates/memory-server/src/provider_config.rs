@@ -129,7 +129,9 @@ pub fn materialize_provider_secrets(
 }
 
 fn format_provider_materialization_error(err: String) -> String {
-    if err.starts_with("provider alias ") && err.contains(" could not be resolved from secret ") {
+    if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
+        || (err.starts_with("Config key ") && err.contains("references Vault alias "))
+    {
         format!(
             "{err}. The alias came from config.env or process env, but the referenced Vault secret is missing or Vault is locked. \
              Run vault_unlock and vault_set, or store the key in Vault under the referenced secret name."
@@ -231,6 +233,7 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
 
     let loaded = server.refresh_llm_provider_secrets_from_vault()?;
     tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
+    server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
     Ok(true)
 }
 
@@ -435,9 +438,9 @@ mod tests {
         let err = materialize_provider_secrets(&llm, &HashMap::new())
             .expect_err("missing alias should fail");
 
-        assert!(err
-            .contains("provider alias VOYAGE_API_KEY=vault:MISSING_VOYAGE could not be resolved"));
-        assert!(err.contains("config.env or process env"));
+        assert!(err.contains("Config key 'VOYAGE_API_KEY' references Vault alias 'MISSING_VOYAGE'"));
+        assert!(!err.contains("VOYAGE_API_KEY=vault:MISSING_VOYAGE"));
+        assert!(err.contains("secret is missing or Vault is locked"));
         assert!(err.contains("vault_unlock"));
         assert!(err.contains("vault_set"));
     }

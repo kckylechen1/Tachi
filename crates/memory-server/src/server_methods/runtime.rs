@@ -12,10 +12,7 @@ impl MemoryServer {
     }
 
     pub(crate) fn native_tool_visibility(&self) -> Vec<(String, String, bool)> {
-        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
-            .ok()
-            .map(|raw| tachi_hub::parse_tool_patterns_csv(&raw))
-            .filter(|patterns| !patterns.is_empty());
+        let env_patterns = crate::server_handler::current_exposed_tool_patterns();
         let profile = self.active_tool_profile();
         let mut tools = self
             .tool_router

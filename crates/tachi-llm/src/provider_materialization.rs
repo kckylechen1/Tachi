@@ -97,7 +97,7 @@ where
                 })
                 .ok_or_else(|| {
                     format!(
-                        "provider alias {key}={trimmed} could not be resolved from secret '{vault_name}'"
+                        "Config key '{key}' references Vault alias '{vault_name}' but the secret is missing or Vault is locked."
                     )
                 })?;
             resolved_pools.insert(key.clone(), pool);
@@ -252,8 +252,9 @@ mod tests {
                 .expect_err("missing alias should fail");
 
         assert!(err.contains(
-            "provider alias TACHI_TEST_PROVIDER_ALIAS_KEY=vault:MISSING_ALIAS could not be resolved"
+            "Config key 'TACHI_TEST_PROVIDER_ALIAS_KEY' references Vault alias 'MISSING_ALIAS'"
         ));
+        assert!(!err.contains("TACHI_TEST_PROVIDER_ALIAS_KEY=vault:MISSING_ALIAS"));
         assert!(!err.contains("config.env"));
         assert!(!err.contains("vault_unlock"));
         assert!(!err.contains("vault_set"));

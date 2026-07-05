@@ -70,6 +70,7 @@ mod graph_state_ops;
 mod handoff_ops;
 mod hub_cli;
 mod hub_ops;
+mod i18n;
 mod kanban;
 mod manifest;
 mod manifest_audit;
