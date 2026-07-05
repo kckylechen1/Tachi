@@ -1,6 +1,6 @@
 use super::super::capture::persist_capture_entry;
 use super::super::helpers::{normalize_path_prefix_value, path_is_within_prefix, round3};
-use super::super::maintenance::{job_metadata_string, job_metadata_usize, with_foundry_store_read};
+use super::super::maintenance::{with_foundry_store_read, FoundryJobMetadata};
 use super::super::recall::{
     rerank_rows_with_outcome, value_id, value_path, value_relevance, value_topic,
 };
@@ -50,18 +50,24 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
         return Ok(0);
     }
 
-    let top_k = job_metadata_usize(&item.job.metadata, "top_k", FOUNDRY_RECALL_RERANK_TOP_K).max(1);
-    let candidate_multiplier = job_metadata_usize(
-        &item.job.metadata,
-        "candidate_multiplier",
-        FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
-    )
-    .max(1);
+    let job_metadata = FoundryJobMetadata::new(&item.job.metadata);
+    let top_k = job_metadata
+        .usize("top_k", FOUNDRY_RECALL_RERANK_TOP_K)
+        .max(1);
+    let candidate_multiplier = job_metadata
+        .usize(
+            "candidate_multiplier",
+            FOUNDRY_RECALL_RERANK_CANDIDATE_MULTIPLIER,
+        )
+        .max(1);
     let candidate_top_k = top_k.saturating_mul(candidate_multiplier);
-    let path_prefix = job_metadata_string(&item.job.metadata, "path_prefix")
+    let path_prefix = job_metadata
+        .string("path_prefix")
         .or_else(|| normalize_path_prefix_value(&item.path_prefix));
-    let agent_role = job_metadata_string(&item.job.metadata, "agent_role");
-    let project = job_metadata_string(&item.job.metadata, "project").or(item.named_project.clone());
+    let agent_role = job_metadata.string("agent_role");
+    let project = job_metadata
+        .string("project")
+        .or(item.named_project.clone());
     let scope = if item.target_db == DbScope::Project {
         "project".to_string()
     } else {

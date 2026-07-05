@@ -1,0 +1,12 @@
+[package]
+name = "tachi-foundry"
+version = "1.6.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]
+memory-core = { path = "../memory-core" }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }

@@ -1412,6 +1412,7 @@ dependencies = [
  "serde_json",
  "tachi-clean",
  "tachi-dispatch",
+ "tachi-foundry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2444,6 +2445,17 @@ dependencies = [
 [[package]]
 name = "tachi-dispatch"
 version = "1.6.2"
+
+[[package]]
+name = "tachi-foundry"
+version = "1.6.2"
+dependencies = [
+ "memory-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
 
 [[package]]
 name = "tempfile"
