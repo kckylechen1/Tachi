@@ -388,6 +388,34 @@ impl HttpGhClient {
         Ok(runs)
     }
 
+    async fn pr_merge_verify(&self, repo: &str, number: u64) -> Result<String, GhError> {
+        let (owner, name) = repo_parts(repo)?;
+        let path = format!(
+            "/repos/{}/{}/pulls/{}",
+            url_segment(owner),
+            url_segment(name),
+            number
+        );
+        let value = self
+            .send_json(self.request(reqwest::Method::GET, self.rest_url(&path)))
+            .await?;
+        if value.get("merged").and_then(Value::as_bool) != Some(true) {
+            return Err(GhError::Sanitized(
+                "independent merge verification failed: pull request is not merged".to_string(),
+            ));
+        }
+        value
+            .get("merge_commit_sha")
+            .and_then(Value::as_str)
+            .filter(|sha| !sha.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                GhError::Sanitized(
+                    "independent merge verification failed: missing merge_commit_sha".to_string(),
+                )
+            })
+    }
+
     async fn issue_labels(&self, repo: &str, issue_number: u64) -> Result<Vec<String>, GhError> {
         let (owner, name) = repo_parts(repo)?;
         let path = format!(
@@ -503,12 +531,7 @@ impl GhClient for HttpGhClient {
                 "GitHub merge response did not confirm merged=true".to_string(),
             ));
         }
-        let merge_sha = value
-            .get("sha")
-            .and_then(Value::as_str)
-            .filter(|sha| !sha.trim().is_empty())
-            .ok_or_else(|| GhError::Sanitized("GitHub merge response missing sha".to_string()))?
-            .to_string();
+        let merge_sha = self.pr_merge_verify(repo, number).await?;
         Ok(MergeResult {
             pr_number: number,
             merge_sha,
@@ -826,6 +849,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_client_rejects_spoofed_merge_without_independent_verification() {
+        let server = TestGitHubServer::spawn().await;
+        let client = HttpGhClient::for_tests(server.base_url(), server.graphql_url());
+
+        let merge_err = client
+            .pr_merge("owner/repo", 44, MergeStrategy::Squash, "head-sha")
+            .await
+            .unwrap_err();
+
+        assert!(
+            merge_err
+                .to_string()
+                .contains("independent merge verification failed"),
+            "{merge_err}"
+        );
+    }
+
+    #[tokio::test]
     async fn http_client_rejects_malformed_success_responses() {
         let server = TestGitHubServer::spawn().await;
         let client = HttpGhClient::for_tests(server.base_url(), server.graphql_url());
@@ -840,8 +881,9 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            merge_err.to_string().contains("missing sha")
-                || merge_err.to_string().contains("merged=true"),
+            merge_err
+                .to_string()
+                .contains("independent merge verification failed"),
             "{merge_err}"
         );
         assert!(
@@ -1127,11 +1169,50 @@ mod tests {
                 })
                 .to_string(),
             ),
+            ("GET", "/repos/owner/repo/pulls/42") => status(
+                "200 OK",
+                json!({
+                    "number": 42,
+                    "merged": true,
+                    "merge_commit_sha": "merge-sha",
+                    "state": "closed"
+                })
+                .to_string(),
+            ),
             ("PUT", "/repos/owner/repo/pulls/43/merge") => status(
                 "200 OK",
                 json!({
                     "merged": true,
                     "message": "missing sha"
+                })
+                .to_string(),
+            ),
+            ("GET", "/repos/owner/repo/pulls/43") => status(
+                "200 OK",
+                json!({
+                    "number": 43,
+                    "merged": false,
+                    "merge_commit_sha": null,
+                    "state": "open"
+                })
+                .to_string(),
+            ),
+            ("PUT", "/repos/owner/repo/pulls/44/merge") => status(
+                "200 OK",
+                json!({
+                    "merged": true,
+                    "sha": "fake",
+                    "message": "spoofed merge response"
+                })
+                .to_string(),
+            ),
+            ("GET", "/repos/owner/repo/pulls/44") => status(
+                "200 OK",
+                json!({
+                    "number": 44,
+                    "merged": false,
+                    "merge_commit_sha": null,
+                    "state": "open"
                 })
                 .to_string(),
             ),
