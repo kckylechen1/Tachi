@@ -6,6 +6,18 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
+mod daily_distill;
+
+pub use daily_distill::{
+    build_batch_prompt, build_batch_user_payload, build_fallback_user_payload,
+    parse_distill_response, resolve_batch_size, resolve_candidate_scan_limit,
+    resolve_distill_backend, resolve_processed_scan_limit, scrub_agent_noise, CandidateGroup,
+    DistillBackend, DistillBatchReport, GroupPayload, SourceManifestEntry,
+    DEFAULT_CANDIDATE_SCAN_LIMIT, DEFAULT_GROUPS_PER_BATCH, DEFAULT_PROCESSED_SCAN_LIMIT,
+    DISTILL_DAILY_SYSTEM_PROMPT, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, MAX_BATCH_PAYLOAD_CHARS,
+    MAX_DISTILL_SCAN_LIMIT, MIN_BUCKET_SIZE,
+};
+
 const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
 const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const GUIDE_TYPE_CONSTRAINT: &str = "constraint";
