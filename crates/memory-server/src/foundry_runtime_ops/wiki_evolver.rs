@@ -147,36 +147,9 @@ pub(crate) struct WikiEvolverReport {
 
 fn collect_pattern_memories(server: &MemoryServer) -> Result<Vec<MemoryEntry>, String> {
     let collect = |store: &mut memory_core::MemoryStore| -> Result<Vec<MemoryEntry>, String> {
-        let conn = store.connection();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id,path,summary,text,importance,timestamp,valid_from,valid_until,
-                        category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,
-                        access_count,last_access,revision,metadata,retention_policy,domain,
-                        recall_count,query_diversity,tier
-                 FROM memories
-                 WHERE archived = 0
-                   AND tier = 'pattern'
-                   AND path != '/sft'
-                   AND path NOT LIKE '/sft/%'
-                   AND topic != 'sft-memory'
-                   AND source != 'sft_seed'
-                   AND COALESCE(json_extract(metadata, '$.training_sample'), 0) = 0
-                   AND created_at > datetime('now', '-7 day')
-                   AND (json_extract(metadata, '$.rem.processed') IS NULL
-                        OR json_extract(metadata, '$.rem.processed') = 0)
-                 ORDER BY importance DESC, access_count DESC
-                 LIMIT 200",
-            )
-            .map_err(|e| format!("prepare pattern query: {e}"))?;
-        let rows = stmt
-            .query_map([], memory_core::row_to_entry)
-            .map_err(|e| format!("query pattern memories: {e}"))?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row.map_err(|e| format!("read pattern memory row: {e}"))?);
-        }
-        Ok(entries)
+        store
+            .unprocessed_pattern_memories()
+            .map_err(|e| format!("query pattern memories: {e}"))
     };
 
     let mut entries = server
@@ -433,18 +406,7 @@ async fn save_wiki_draft(
             let now = Utc::now().to_rfc3339();
             if let Err(e) = server.with_named_project_store("wiki", |store| {
                 store
-                    .connection()
-                    .execute(
-                        r#"UPDATE memories
-                           SET metadata = json_set(
-                                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                                 '$.review_status', 'pending',
-                                 '$.rem.generated_at', ?1
-                               )
-                           WHERE path = ?2
-                             AND (json_extract(metadata, '$.review_status') IS NULL)"#,
-                        rusqlite::params![now, path],
-                    )
+                    .mark_wiki_draft_review_pending(&path, &now)
                     .map_err(|e| format!("patch review_status: {e}"))
             }) {
                 eprintln!(
@@ -467,34 +429,18 @@ fn mark_rem_processed<'a>(
     }
     let now = Utc::now().to_rfc3339();
 
-    fn mark_ids_in_store(
-        store: &mut memory_core::MemoryStore,
-        ids: &[String],
-        now: &str,
-    ) -> Result<(), String> {
-        let conn = store.connection();
-        for id in ids {
-            conn.execute(
-                r#"UPDATE memories
-                   SET metadata = json_set(
-                         CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                         '$.rem.processed', 1,
-                         '$.rem.processed_at', ?1
-                       )
-                   WHERE id = ?2"#,
-                rusqlite::params![now, id],
-            )
-            .map_err(|e| format!("mark rem.processed for {id}: {e}"))?;
-        }
-        Ok(())
-    }
+    let mark_ids_in_store = |store: &mut memory_core::MemoryStore| -> Result<(), String> {
+        store
+            .mark_rem_processed(&ids, &now)
+            .map_err(|e| format!("mark rem.processed: {e}"))
+    };
 
     server
-        .with_global_store(|store| mark_ids_in_store(store, &ids, &now))
+        .with_global_store(mark_ids_in_store)
         .map_err(|e| format!("mark REM processed in global store: {e}"))?;
     if server.has_project_db() {
         server
-            .with_project_store(|store| mark_ids_in_store(store, &ids, &now))
+            .with_project_store(mark_ids_in_store)
             .map_err(|e| format!("mark REM processed in project store: {e}"))?;
     }
     Ok(())
