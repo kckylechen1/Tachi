@@ -27,6 +27,8 @@ jobs:
       - name: Resolve and validate release version
         id: version
         run: |
+          python3 scripts/check_release_versions.py
+
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
             version="${{ inputs.version }}"
           else

@@ -5,6 +5,7 @@ members = [
     "crates/memory-server",
     "crates/memory-server-params",
     "crates/memory-server-runtime",
+    "crates/tachi-bootstrap",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
     "crates/tachi-llm",
@@ -13,6 +14,7 @@ members = [
 default-members = [
     "crates/memory-core",
     "crates/memory-server",
+    "crates/tachi-bootstrap",
 ]
 resolver = "2"
 

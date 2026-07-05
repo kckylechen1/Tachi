@@ -1,7 +1,7 @@
-use crate::cli::HarnessAction;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::HarnessAction;
 
 const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
 const MANAGED_MARKER: &str = "TACHI:HARNESS";

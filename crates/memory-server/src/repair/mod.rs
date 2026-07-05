@@ -36,8 +36,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::cli::{QuarantineAction, RepairAction};
 use crate::manifest::{DbEntry, Manifest};
+use tachi_bootstrap::cli::{QuarantineAction, RepairAction};
 
 pub mod domain;
 pub mod edges;

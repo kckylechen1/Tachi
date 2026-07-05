@@ -1,8 +1,10 @@
 use clap::Subcommand;
 use std::path::PathBuf;
 
+pub const DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS: u64 = 7;
+
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum CleanAction {
+pub enum CleanAction {
     /// Clean Cargo target artifacts while preserving top-level release binaries.
     Target {
         /// Repository root or target directory. Defaults to the current directory.
@@ -39,7 +41,7 @@ pub(crate) enum CleanAction {
         #[arg(long, value_name = "PATH")]
         root: Vec<PathBuf>,
         /// Minimum age in days before a marked worktree is considered stale.
-        #[arg(long, default_value_t = tachi_clean::sweep::DEFAULT_SWEEP_MAX_AGE_DAYS)]
+        #[arg(long, default_value_t = DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS)]
         max_age_days: u64,
         /// Remove candidates with git worktree remove --force.
         #[arg(long, conflicts_with = "dry_run")]
@@ -70,7 +72,7 @@ pub(crate) enum CleanAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum RepairAction {
+pub enum RepairAction {
     /// Quarantine resolution helpers (PR-3 v4 migration aftermath).
     Quarantine {
         #[command(subcommand)]
@@ -102,7 +104,7 @@ pub(crate) enum RepairAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum QuarantineAction {
+pub enum QuarantineAction {
     /// List all rows under /_quarantine/cross-db/* across the manifest.
     List {
         #[arg(long)]
@@ -139,7 +141,7 @@ pub(crate) enum QuarantineAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum DaemonAction {
+pub enum DaemonAction {
     /// Show the running daemon's PID, port, started_at, and lock state.
     Status {
         #[arg(long)]
@@ -168,7 +170,7 @@ pub(crate) enum DaemonAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum WatcherAction {
+pub enum WatcherAction {
     /// Report known passive transcript sources without writing memory.
     Status {
         #[arg(long)]
@@ -182,7 +184,7 @@ pub(crate) enum WatcherAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum FoundryAction {
+pub enum FoundryAction {
     /// Per-DB runtime config: get current values for one DB.
     ConfigGet {
         /// Absolute path to the target DB. Defaults to the global DB.
@@ -220,7 +222,7 @@ pub(crate) enum FoundryAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum DistillAction {
+pub enum DistillAction {
     /// Run one daily batch distill pass against the project DB.
     Run {
         /// Project DB path (defaults to `--project-db` when set).
@@ -230,7 +232,7 @@ pub(crate) enum DistillAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum RescueAction {
+pub enum RescueAction {
     /// Split the legacy antigravity memory.db into per-project Tachi DBs.
     Antigravity {
         /// Source DB path (defaults to ~/.gemini/antigravity/memory.db)
@@ -249,7 +251,7 @@ pub(crate) enum RescueAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum ManifestAction {
+pub enum ManifestAction {
     /// Show the current manifest (human or --json)
     Show {
         #[arg(long)]
@@ -300,7 +302,7 @@ pub(crate) enum ManifestAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum WikiAction {
+pub enum WikiAction {
     /// Export wiki entries to Markdown files.
     Export {
         /// Export format. Currently only "obsidian" is supported.
@@ -316,7 +318,7 @@ pub(crate) enum WikiAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum HarnessAction {
+pub enum HarnessAction {
     /// Read-only inventory of host AgentMD / workflow files managed by Tachi
     Status {
         /// Limit the scan to one or more hosts. Repeat or comma-separate values.
@@ -332,7 +334,7 @@ pub(crate) enum HarnessAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum SkillSurfaceAction {
+pub enum SkillSurfaceAction {
     /// Read-only inventory of local skill stores, hashes, symlinks, and host projections
     Status {
         /// Limit host projection checks. Repeat or comma-separate values.
@@ -360,7 +362,7 @@ pub(crate) enum SkillSurfaceAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum CardAction {
+pub enum CardAction {
     /// List Cards available to the current project/runtime.
     List {
         /// Emit machine-readable JSON instead of the human table.
@@ -378,7 +380,7 @@ pub(crate) enum CardAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum PokeAction {
+pub enum PokeAction {
     /// Run a local Poke probe suite.
     Run {
         /// Probe suite to run. Currently only "smoke" is supported.
@@ -391,7 +393,7 @@ pub(crate) enum PokeAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum HubAction {
+pub enum HubAction {
     /// List capabilities (table by default; pass --json for machine output)
     List {
         /// Filter by type: skill | plugin | mcp

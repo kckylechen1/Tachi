@@ -1,8 +1,8 @@
 use super::print_pretty_json;
-use crate::cli::RescueAction;
 use crate::rescue::{apply_rescue, plan_rescue, render_plan};
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::RescueAction;
 
 pub(super) async fn run_rescue_command(
     action: RescueAction,

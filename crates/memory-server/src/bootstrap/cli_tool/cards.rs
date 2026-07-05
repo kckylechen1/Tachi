@@ -1,8 +1,8 @@
-use crate::cli::CardAction;
 use crate::tool_params::TachiTaskParams;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use tachi_bootstrap::cli::CardAction;
 
 use super::super::print_pretty_json;
 use super::tool_dispatch::dispatch_cli_tool;

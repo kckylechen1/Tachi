@@ -1,7 +1,7 @@
 use super::keys::decrypt_profile_secret_values;
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
-use crate::cli::VaultAction;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::VaultAction;
 
 pub(super) fn run_credential_action(
     global_db_path: &PathBuf,

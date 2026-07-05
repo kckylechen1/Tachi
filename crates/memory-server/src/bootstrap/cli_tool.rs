@@ -3,7 +3,6 @@ mod hub;
 mod tool_dispatch;
 
 use super::{open_cli_store, open_cli_store_read_only, print_pretty_json};
-use crate::cli::Commands;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
@@ -12,6 +11,7 @@ use crate::tool_params::{
 };
 use serde_json::json;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::Commands;
 
 use self::tool_dispatch::{dispatch_cli_tool, print_cli_tool_result};
 
@@ -167,7 +167,7 @@ pub(super) async fn run_cli_command(
             Ok(())
         }
         Commands::Wiki { action } => match action {
-            crate::cli::WikiAction::Export {
+            tachi_bootstrap::cli::WikiAction::Export {
                 format,
                 output,
                 project,

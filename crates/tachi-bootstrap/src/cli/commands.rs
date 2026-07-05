@@ -7,7 +7,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum Commands {
+pub enum Commands {
     /// Start MCP Server (default when no subcommand is provided)
     Serve,
     /// Search memories

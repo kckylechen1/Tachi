@@ -109,7 +109,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(crate::bootstrap::mcp_server_instructions())
+            .with_instructions(crate::server_instructions::mcp_server_instructions())
     }
 
     fn list_tools(

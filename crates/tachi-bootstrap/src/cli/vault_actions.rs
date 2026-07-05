@@ -2,7 +2,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum EnvAction {
+pub enum EnvAction {
     /// Inspect project .tachi/vault.env bindings without decrypting values.
     Plan {
         /// Project directory to inspect. Defaults to current directory.
@@ -54,7 +54,7 @@ pub(crate) enum EnvAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum VaultIntakeAction {
+pub enum VaultIntakeAction {
     /// Discover local credential candidates without unlocking or writing Vault.
     Discover {
         /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
@@ -81,7 +81,7 @@ pub(crate) enum VaultIntakeAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
-pub(crate) enum VaultAction {
+pub enum VaultAction {
     /// Initialize the vault with a master password.
     Init {
         /// Read password from stdin instead of prompting.

@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::cli::HubAction;
+use tachi_bootstrap::cli::HubAction;
 
 mod commands;
 
