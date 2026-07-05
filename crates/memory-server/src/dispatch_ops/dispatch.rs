@@ -99,12 +99,17 @@ pub(crate) struct DispatchResult {
 mod artifacts;
 mod backend;
 mod backend_failure;
+mod credential_apply;
 mod credentials;
 mod dedupe;
 mod execution;
+mod flow_setup;
+mod harness_preflight;
+mod plan_stage;
 mod recovery;
 mod response_helpers;
 mod start;
+mod workspace_setup;
 
 #[cfg(test)]
 mod tests;
@@ -112,11 +117,18 @@ mod tests;
 use self::artifacts::{write_dispatch_artifacts, DispatchArtifactInputs, DispatchArtifacts};
 use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
 use self::backend_failure::*;
+use self::credential_apply::{
+    apply_materialized_credentials, inject_legacy_vault_env, CredentialApplyInputs,
+};
 use self::credentials::*;
 use self::dedupe::*;
 use self::execution::{spawn_background_dispatch, BackgroundDispatchContext, DispatchExecution};
+use self::flow_setup::{init_kanban_and_flow, FlowSetupInputs};
+use self::harness_preflight::{run_harness_preflight, HarnessPreflightInputs};
+use self::plan_stage::{run_v2_plan_stage, PlanStageInputs};
 use self::response_helpers::*;
 use self::start::*;
+use self::workspace_setup::prepare_workspace_and_mcp;
 
 #[cfg(test)]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
@@ -143,34 +155,19 @@ pub(crate) async fn handle_tachi_dispatch(
         host_adapter,
     } = resolve_dispatch_start(server, &mut params, now)?;
 
-    // 1. Create isolated workspace directory
-    tokio::fs::create_dir_all(&workspace_dir)
-        .await
-        .map_err(|e| format!("Failed to create workspace dir: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&workspace_dir, std::fs::Permissions::from_mode(0o700))
-            .await
-            .map_err(|e| format!("Failed to set workspace dir permissions: {e}"))?;
-    }
+    // 1. Create isolated workspace directory + MCP config
+    let mcp_config_path = prepare_workspace_and_mcp(
+        server,
+        &workspace_dir,
+        &dispatch_id,
+        inject_tachi,
+        inject_hub,
+        params.tool_profile.as_deref(),
+        &params.allowed_mcp_servers,
+    )
+    .await?;
 
-    // 2. Generate MCP config if requested
-    let mcp_config_path = if inject_tachi || inject_hub {
-        generate_mcp_config(
-            server,
-            &dispatch_id,
-            inject_tachi,
-            inject_hub,
-            params.tool_profile.as_deref(),
-            &params.allowed_mcp_servers,
-        )
-        .await?
-    } else {
-        None
-    };
-
-    // 3. Assemble prompt & write audit files to workspace
+    // 2. Assemble prompt & write audit files to workspace
     let prompt_assembly = assemble_prompt_with_trace(server, &params).await;
     let base_prompt = prompt_assembly.prompt.clone();
     let (effective_skills_for_files, _) = resolve_effective_skills(&params);
@@ -179,10 +176,6 @@ pub(crate) async fn handle_tachi_dispatch(
     // V2 is opt-in. Default behaviour stays V1 (legacy single-stage).
     let v2_decision = v2_enabled_from_env(params.stage.as_deref());
     let v2 = matches!(v2_decision, V2Decision::Enabled);
-
-    // The actual prompt fed to the executing agent. In V1 this is just the
-    // assembled prompt. In V2 it is rewritten after Stage 1 succeeds.
-    let mut prompt = base_prompt.clone();
 
     let DispatchArtifacts {
         plan_path,
@@ -244,216 +237,50 @@ pub(crate) async fn handle_tachi_dispatch(
         })),
     );
 
-    // ─── Stage 1 (V2 only): generate plan via ClaudePool ────────────────
-    let mut plan_duration_ms: Option<u64> = None;
-    let mut plan_generated_at: Option<String> = None;
-
-    if v2 {
-        let label = format!("dispatch-plan-{}", &dispatch_id);
-        let plan_timeout = Duration::from_secs(plan_timeout_secs());
-        let plan_fut = run_plan_stage(server, &params.task, &label);
-        let plan_outcome = match tokio::time::timeout(plan_timeout, plan_fut).await {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                append_trajectory_event(
-                    &trajectory_path,
-                    json!({
-                        "event": "plan_failed",
-                        "dispatch_id": dispatch_id,
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "error": e,
-                    }),
-                );
-                write_status_json(
-                    &workspace_dir,
-                    &dispatch_id,
-                    true,
-                    None,
-                    None,
-                    "failed",
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    Some(json!({
-                        "error": e,
-                        "capability_bundle": capability_bundle_card.clone(),
-                    })),
-                );
-                return Err(e);
-            }
-            Err(_) => {
-                let e = format!(
-                    "dispatch v2 stage1 (plan) timed out after {}s",
-                    plan_timeout.as_secs()
-                );
-                append_trajectory_event(
-                    &trajectory_path,
-                    json!({
-                        "event": "plan_failed",
-                        "dispatch_id": dispatch_id,
-                        "timestamp": Utc::now().to_rfc3339(),
-                        "error": e,
-                    }),
-                );
-                write_status_json(
-                    &workspace_dir,
-                    &dispatch_id,
-                    true,
-                    None,
-                    None,
-                    "failed",
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    Some(json!({
-                        "error": e,
-                        "capability_bundle": capability_bundle_card.clone(),
-                    })),
-                );
-                return Err(e);
-            }
-        };
-
-        // Persist plan.md (overwrites the V1 placeholder).
-        crate::utils::write_owner_only_file_atomic(&plan_path, plan_outcome.plan_md.as_bytes())
-            .map_err(|e| format!("Failed to write plan.md: {e}"))?;
-        let sections = parse_plan_sections(&plan_outcome.plan_md);
-
-        plan_duration_ms = Some(plan_outcome.duration_ms);
-        let pgen_at = Utc::now().to_rfc3339();
-        plan_generated_at = Some(pgen_at.clone());
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "plan_generated",
-                "dispatch_id": dispatch_id,
-                "timestamp": pgen_at,
-                "duration_ms": plan_outcome.duration_ms,
-                "bytes": plan_outcome.plan_md.len(),
-                "sections_complete": sections.is_complete(),
-            }),
-        );
-
-        // ─── Optional review gate ────────────────────────────────────
-        if plan_review_required() {
-            write_status_json(
-                &workspace_dir,
-                &dispatch_id,
-                true,
-                plan_generated_at.as_deref(),
-                None,
-                "pending_review",
-                None,
-                plan_duration_ms,
-                None,
-                plan_duration_ms,
-                Some(json!({
-                    "capability_bundle": capability_bundle_card.clone(),
-                })),
-            );
-            append_trajectory_event(
-                &trajectory_path,
-                json!({
-                    "event": "plan_pending_review",
-                    "dispatch_id": dispatch_id,
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            let response = json!({
-                "dispatch_id": dispatch_id,
-                "task": {
-                    "id": dispatch_id,
-                    "status": { "state": "TASK_STATE_PENDING_REVIEW" },
-                },
-                "agent": agent_norm,
-                "profile": profile_payload,
-                "selected_profile": resolved_profile.selected_profile,
-                "tool_access": resolved_profile.mcp_access,
-                "dispatch_profile": resolved_profile.mbit_card,
-                "route_explanation": resolved_profile.route_explanation,
-                "fallback_chain": resolved_profile.fallback_chain,
-                "issue_ref": params.issue_ref,
-                "pr_ref": params.pr_ref,
-                "flow_id": params.flow_id,
-                "auto_capability_bundle": resolved_profile.auto_capability_bundle,
-                "capability_bundle": capability_bundle_card,
-                "capability_bundle_file": capability_bundle_file,
-                "feedback_rules": feedback_rules_trace.clone(),
-                "v2": true,
-                "plan_review_status": "pending_review",
-                "message": "Plan generated. DISPATCH_V2_PLAN_REVIEW=true — execute stage paused. Audit plan.md and re-dispatch with the env var unset to proceed.",
-                "suggested_complete_command": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
-                "plan_file": plan_path.to_string_lossy(),
-                "prompt_file": prompt_md_path.to_string_lossy(),
-                "context_file": context_md_path.to_string_lossy(),
-                "trajectory_file": trajectory_path.to_string_lossy(),
-                "run_dir": workspace_dir.to_string_lossy(),
-            });
-            return Ok(
-                serde_json::to_string(&response).unwrap_or_else(|e| format!("serialize: {e}"))
-            );
-        }
-
-        // Auto-approve: rewrite the prompt fed to the executing agent so
-        // it contains the plan + implement-plan skill.
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "plan_approved",
-                "dispatch_id": dispatch_id,
-                "timestamp": Utc::now().to_rfc3339(),
-                "auto": true,
-            }),
-        );
-        prompt = build_execute_prompt(&plan_outcome.plan_md, &params.task, &base_prompt);
-    }
-
-    // 4. Initialize kanban task
-    init_kanban_task(
+    // 3. Stage 1 (V2 only): generate plan via ClaudePool
+    let plan_stage_outcome = run_v2_plan_stage(PlanStageInputs {
         server,
-        &dispatch_id,
-        &params,
-        Some(&plan_path.to_string_lossy()),
-    )
+        params: &params,
+        dispatch_id: &dispatch_id,
+        agent_norm: &agent_norm,
+        resolved_profile: &resolved_profile,
+        profile_payload: &profile_payload,
+        base_prompt: &base_prompt,
+        plan_path: &plan_path,
+        prompt_md_path: &prompt_md_path,
+        context_md_path: &context_md_path,
+        trajectory_path: &trajectory_path,
+        workspace_dir: &workspace_dir,
+        capability_bundle_card: &capability_bundle_card,
+        capability_bundle_file: &capability_bundle_file,
+        feedback_rules_trace: &feedback_rules_trace,
+        v2_decision,
+    })
     .await?;
-    if let Some(flow_id) = params.flow_id.as_deref().filter(|id| !id.trim().is_empty()) {
-        if let Err(error) = crate::task_lifecycle::mark_task_dispatch(
-            flow_id,
-            &dispatch_id,
-            json!({
-                "agent": agent_norm.clone(),
-                "profile": params.profile.clone(),
-                "tool_profile": params.tool_profile.clone(),
-                "stage": params.stage.clone(),
-                "task": params.task.clone(),
-                "issue_ref": params.issue_ref.clone(),
-                "pr_ref": params.pr_ref.clone(),
-                "run_dir": workspace_dir.to_string_lossy(),
-                "prompt_file": prompt_md_path.to_string_lossy(),
-                "context_file": context_md_path.to_string_lossy(),
-                "trajectory_file": trajectory_path.to_string_lossy(),
-                "plan_file": plan_path.to_string_lossy(),
-                "capability_bundle": capability_bundle_card.clone(),
-                "capability_bundle_file": capability_bundle_file.clone(),
-                "evidence_required": resolved_profile.evidence_required.clone(),
-                "route_explanation": resolved_profile.route_explanation.clone(),
-                "suggested_complete": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
-            }),
-        ) {
-            append_trajectory_event(
-                &trajectory_path,
-                json!({
-                    "event": "flow_dispatch_marker_failed",
-                    "dispatch_id": dispatch_id,
-                    "flow_id": flow_id,
-                    "error": error,
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-        }
+    if let Some(early_response) = plan_stage_outcome.early_response {
+        return Ok(early_response);
     }
+    let prompt = plan_stage_outcome.prompt;
+    let plan_duration_ms = plan_stage_outcome.plan_duration_ms;
+    let plan_generated_at = plan_stage_outcome.plan_generated_at;
+
+    // 4. Initialize kanban task + flow dispatch marker
+    init_kanban_and_flow(FlowSetupInputs {
+        server,
+        dispatch_id: &dispatch_id,
+        params: &params,
+        agent_norm: &agent_norm,
+        plan_path: &plan_path,
+        workspace_dir: &workspace_dir,
+        prompt_md_path: &prompt_md_path,
+        context_md_path: &context_md_path,
+        trajectory_path: &trajectory_path,
+        capability_bundle_card: &capability_bundle_card,
+        capability_bundle_file: &capability_bundle_file,
+        evidence_required: &resolved_profile.evidence_required,
+        route_explanation: &resolved_profile.route_explanation,
+    })
+    .await?;
 
     // 5. Build execution backend
     let PreparedDispatchBackend {
@@ -479,186 +306,68 @@ pub(crate) async fn handle_tachi_dispatch(
         capability_bundle_card: &capability_bundle_card,
         timeout_secs_for_status,
     })?;
-    let legacy_vault_env =
-        unlocked_vault_child_env_map(server, params.cwd.as_deref().map(std::path::Path::new));
-    let legacy_vault_env_count = legacy_vault_env.len();
-    if legacy_vault_env_count > 0 {
-        match &mut execution {
-            DispatchExecution::Subprocess(cmd) => {
-                for (name, value) in &legacy_vault_env {
-                    cmd.env(name, value);
-                }
-            }
-            DispatchExecution::NativeAcp(spec) => {
-                spec.env.extend(legacy_vault_env.clone());
-            }
-        }
-    }
-    if legacy_vault_env_count > 0 {
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "legacy_vault_env_injected",
-                "dispatch_id": dispatch_id,
-                "agent": agent_norm.clone(),
-                "count": legacy_vault_env_count,
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
-    }
-    let dispatch_credentials = match materialize_dispatch_credentials(
-        server,
-        &params,
-        &agent_norm,
-        resolved_profile.selected_profile.as_deref(),
-        &workspace_dir,
-    ) {
-        Ok(materialized) => materialized,
-        Err(err) => {
-            append_trajectory_event(
-                &trajectory_path,
-                json!({
-                    "event": "credentials_materialization_failed",
-                    "dispatch_id": dispatch_id,
-                    "agent": agent_norm.clone(),
-                    "credential_profiles": params.credential_profiles.clone(),
-                    "error": err.clone(),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            write_status_json(
-                &workspace_dir,
-                &dispatch_id,
-                v2,
-                plan_generated_at.as_deref(),
-                None,
-                if v2 { "approved" } else { "n/a" },
-                Some(1),
-                plan_duration_ms,
-                None,
-                plan_duration_ms,
-                Some(json!({
-                    "agent": agent_norm.clone(),
-                    "task": params.task.clone(),
-                    "state": "TASK_STATE_FAILED",
-                    "updated_at": Utc::now().to_rfc3339(),
-                    "run_dir": workspace_dir.to_string_lossy(),
-                    "result_written": false,
-                    "harness_transport": harness_transport.clone(),
-                    "harness_server_url": harness_server_url.clone(),
-                    "host_adapter": host_adapter.clone(),
-                    "execution_backend": execution_backend_name,
-                    "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
-                    "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
-                    "capability_bundle": capability_bundle_card.clone(),
-                    "timeout_secs": timeout_secs_for_status,
-                    "error": err.clone(),
-                })),
-            );
-            return Err(err);
-        }
-    };
-    for (name, value) in &dispatch_credentials.env {
-        match &mut execution {
-            DispatchExecution::Subprocess(cmd) => {
-                cmd.env(name, value);
-            }
-            DispatchExecution::NativeAcp(spec) => {
-                spec.env.insert(name.clone(), value.clone());
-            }
-        }
-    }
-    if !dispatch_credentials.reports.is_empty() {
-        append_trajectory_event(
-            &trajectory_path,
-            json!({
-                "event": "credentials_materialized",
-                "dispatch_id": dispatch_id,
-                "agent": agent_norm.clone(),
-                "credential_profiles": params.credential_profiles.clone(),
-                "reports": dispatch_credentials
-                    .reports
-                    .iter()
-                    .map(credential_materialize_report_json)
-                    .collect::<Vec<_>>(),
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
-        );
-    }
-    let credential_reports_json = dispatch_credentials
-        .reports
-        .iter()
-        .map(credential_materialize_report_json)
-        .collect::<Vec<_>>();
 
-    if is_opencode_serve_transport(&harness_transport) {
-        let harness_status = crate::dispatch_ops::probe_harness_server_status_with_env(
-            harness_server_url.as_deref(),
-            Some(&dispatch_credentials.env),
-        );
-        let attach_ready = harness_status
-            .get("attach_ready")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if !attach_ready {
-            let err =
-                opencode_serve_preflight_error(&harness_status, harness_server_url.as_deref());
-            append_trajectory_event(
-                &trajectory_path,
-                json!({
-                    "event": "harness_preflight_failed",
-                    "dispatch_id": dispatch_id,
-                    "agent": agent_norm.clone(),
-                    "harness_transport": harness_transport.clone(),
-                    "harness_server_url": harness_server_url.clone(),
-                    "harness_server_status": harness_status.clone(),
-                    "error": err.clone(),
-                    "timestamp": Utc::now().to_rfc3339(),
-                }),
-            );
-            let result_written = crate::utils::write_owner_only_file_atomic(
-                &workspace_dir.join("result.md"),
-                err.as_bytes(),
-            )
-            .is_ok();
-            write_status_json(
-                &workspace_dir,
-                &dispatch_id,
-                v2,
-                plan_generated_at.as_deref(),
-                None,
-                if v2 { "approved" } else { "n/a" },
-                Some(1),
-                plan_duration_ms,
-                None,
-                plan_duration_ms,
-                Some(json!({
-                    "agent": agent_norm.clone(),
-                    "task": params.task.clone(),
-                    "state": "TASK_STATE_FAILED",
-                    "updated_at": Utc::now().to_rfc3339(),
-                    "run_dir": workspace_dir.to_string_lossy(),
-                    "result_written": result_written,
-                    "harness_transport": harness_transport.clone(),
-                    "harness_server_url": harness_server_url.clone(),
-                    "harness_server_status": harness_status,
-                    "host_adapter": host_adapter.clone(),
-                    "execution_backend": execution_backend_name,
-                    "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
-                    "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
-                    "capability_bundle": capability_bundle_card.clone(),
-                    "timeout_secs": timeout_secs_for_status,
-                    "error": err.clone(),
-                })),
-            );
-            return Err(err);
-        }
-    }
+    // 6. Inject legacy vault env + materialize credentials
+    inject_legacy_vault_env(
+        server,
+        params.cwd.as_deref().map(std::path::Path::new),
+        &mut execution,
+        &trajectory_path,
+        &dispatch_id,
+        &agent_norm,
+    );
+
+    let credentials = apply_materialized_credentials(
+        CredentialApplyInputs {
+            server,
+            params: &params,
+            agent_norm: &agent_norm,
+            selected_profile: resolved_profile.selected_profile.as_deref(),
+            workspace_dir: &workspace_dir,
+            trajectory_path: &trajectory_path,
+            dispatch_id: &dispatch_id,
+            v2,
+            plan_generated_at: plan_generated_at.as_deref(),
+            plan_duration_ms,
+            harness_transport: &harness_transport,
+            harness_server_url: &harness_server_url,
+            host_adapter: &host_adapter,
+            execution_backend_name,
+            execution_backend_metadata: &execution_backend_metadata,
+            acpx_enabled,
+            native_acp_enabled,
+            capability_bundle_card: &capability_bundle_card,
+            timeout_secs_for_status,
+        },
+        &mut execution,
+    )?;
+
+    // 7. Harness preflight (opencode_serve only)
+    run_harness_preflight(HarnessPreflightInputs {
+        harness_transport: &harness_transport,
+        harness_server_url: &harness_server_url,
+        credential_env: &credentials.env,
+        dispatch_id: &dispatch_id,
+        agent_norm: &agent_norm,
+        task: &params.task,
+        trajectory_path: &trajectory_path,
+        workspace_dir: &workspace_dir,
+        v2,
+        plan_generated_at: plan_generated_at.as_deref(),
+        plan_duration_ms,
+        host_adapter: &host_adapter,
+        execution_backend_name,
+        execution_backend_metadata: &execution_backend_metadata,
+        acpx_enabled,
+        native_acp_enabled,
+        capability_bundle_card: &capability_bundle_card,
+        timeout_secs_for_status,
+    })?;
 
     let flow_dispatch_slot =
         reserve_dispatch_slot(params.flow_id.as_deref(), &params.task, &dispatch_id)?;
 
-    // 6. Spawn background task with Watchdog
+    // 8. Spawn background task with Watchdog
     let workspace_dir_for_response = workspace_dir.clone();
     spawn_background_dispatch(BackgroundDispatchContext {
         server: server.clone(),
@@ -683,45 +392,30 @@ pub(crate) async fn handle_tachi_dispatch(
         mcp_config_path,
     });
 
-    // 7. Immediately return — main agent is unblocked!
-    let response = json!({
-        "dispatch_id": dispatch_id,
-        "task": {
-            "id": dispatch_id,
-            "status": { "state": "TASK_STATE_WORKING" },
-        },
-        "agent": agent_norm,
-        "profile": profile_payload,
-        "selected_profile": resolved_profile.selected_profile,
-        "tool_access": resolved_profile.mcp_access,
-        "dispatch_profile": resolved_profile.mbit_card,
-        "credentials": credential_reports_json,
-        "route_explanation": resolved_profile.route_explanation,
-        "fallback_chain": resolved_profile.fallback_chain,
-        "issue_ref": params.issue_ref,
-        "pr_ref": params.pr_ref,
-        "flow_id": params.flow_id,
-        "auto_capability_bundle": resolved_profile.auto_capability_bundle,
-        "capability_bundle": capability_bundle_card,
-        "capability_bundle_file": capability_bundle_file,
-        "feedback_rules": feedback_rules_trace,
-        "harness_transport": harness_transport,
-        "harness_server_url": harness_server_url,
-        "host_adapter": host_adapter,
-        "execution_backend": execution_backend_name,
-        "acpx": if acpx_enabled { execution_backend_metadata.clone() } else { None },
-        "acp_native": if native_acp_enabled { execution_backend_metadata.clone() } else { None },
-        "v2": v2,
-        "plan_review_status": if v2 { "approved" } else { "n/a" },
-        "duration_ms_plan": plan_duration_ms,
-        "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
-        "suggested_complete_command": suggested_complete_payload(&dispatch_id, &agent_norm, &params),
-        "plan_file": plan_path.to_string_lossy(),
-        "prompt_file": prompt_md_path.to_string_lossy(),
-        "context_file": context_md_path.to_string_lossy(),
-        "trajectory_file": trajectory_path.to_string_lossy(),
-        "run_dir": workspace_dir_for_response.to_string_lossy(),
-    });
-
-    serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+    // 9. Immediately return — main agent is unblocked!
+    build_dispatch_response(DispatchResponseInputs {
+        dispatch_id: &dispatch_id,
+        agent_norm: &agent_norm,
+        profile_payload: &profile_payload,
+        resolved_profile: &resolved_profile,
+        credential_reports_json: &credentials.reports_json,
+        capability_bundle_card: &capability_bundle_card,
+        capability_bundle_file: &capability_bundle_file,
+        feedback_rules_trace: &feedback_rules_trace,
+        harness_transport: &harness_transport,
+        harness_server_url: &harness_server_url,
+        host_adapter: &host_adapter,
+        execution_backend_name,
+        execution_backend_metadata: &execution_backend_metadata,
+        acpx_enabled,
+        native_acp_enabled,
+        v2,
+        plan_duration_ms,
+        params: &params,
+        plan_path: &plan_path,
+        prompt_md_path: &prompt_md_path,
+        context_md_path: &context_md_path,
+        trajectory_path: &trajectory_path,
+        workspace_dir: &workspace_dir_for_response,
+    })
 }
