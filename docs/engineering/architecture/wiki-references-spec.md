@@ -17,7 +17,7 @@ Add a first-class `references` parameter to Wiki write tools so agents and users
 
 | File | Change |
 |------|--------|
-| `crates/memory-server/src/tool_params/memory.rs` | Add `references: Vec<String>` to `WikiWriteParams` |
+| `crates/memory-server-params/src/memory/wiki.rs` | Add `references: Vec<String>` to `WikiWriteParams` |
 | `crates/memory-server-params/src/facade.rs` | Add `references: Vec<String>` to `TachiWikiParams` |
 | `crates/memory-server/src/tools.rs` | Forward `references` from facade to memory params |
 | `crates/memory-server/src/wiki_ops.rs` | Add `validate_reference_format`, wire into write path, render in `markdown_for_obsidian` |
@@ -30,7 +30,7 @@ Add a first-class `references` parameter to Wiki write tools so agents and users
 ### 3.1 `WikiWriteParams`
 
 ```rust
-// crates/memory-server/src/tool_params/memory.rs
+// crates/memory-server-params/src/memory/wiki.rs
 pub struct WikiWriteParams {
     pub title: String,
     pub content: String,
@@ -274,8 +274,8 @@ fn test_invalid_references() {
 
 | Step | File | Action | Est |
 |------|------|--------|-----|
-| 1 | `tool_params/memory.rs` | Add `references: Vec<String>` with `#[serde(default)]` | 5 min |
-| 2 | `crates/memory-server-params/src/facade.rs` | Add `references: Vec<String>` with `#[serde(default)]` | 5 min |
+| 1 | `memory/wiki.rs` | Add `references: Vec<String>` with `#[serde(default)]` | 5 min |
+| 2 | `facade.rs` | Add `references: Vec<String>` with `#[serde(default)]` | 5 min |
 | 3 | `tools.rs` | Forward `references` from `TachiWikiParams` → `WikiWriteParams` | 5 min |
 | 4 | `wiki_ops.rs` | Add `validate_reference_format` + `validate_references` helpers | 15 min |
 | 5 | `wiki_ops.rs` | Call `validate_references` in write handler before DB op | 5 min |

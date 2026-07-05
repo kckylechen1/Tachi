@@ -387,7 +387,7 @@ Gastown 不作为新工具暴露，而是作为 `tachi_shell` 的协作协议：
 预计涉及：
 
 - `crates/memory-server/src/tools.rs`：tool registration / call routing。
-- `crates/memory-server/src/tool_params/facade.rs`：facade 参数。
+- `crates/memory-server-params/src/facade.rs`：facade 参数。
 - `crates/memory-server/src/profiles.rs`：standard/delegate profile 暴露。
 - `crates/memory-server/src/dispatch_ops.rs`：后台 clanker 执行。
 - `crates/memory-server/src/task_ops.rs` 或现有 `tachi_task` facade：kanban/status 复用。
@@ -499,4 +499,3 @@ brainstorm -> plan -> dispatch -> review -> ship
 - meta skill 文件被 **拷贝** 到 `.tachi/runs/<flow_id>/injected/<basename>`，并记录原始路径 + sha256（写入 `status.json.injected[]`）。
 - 后续可外置为：注册表 JSON / Hub-managed meta skill registry。但 MVP 不引入这层抽象，避免与现有 SkillHub 边界混淆。
 - meta skill 永远 **不进** SkillHub 的 `tachi_skill(action="discover")` 结果面（与现有约束一致）。
-

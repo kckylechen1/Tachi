@@ -88,6 +88,12 @@ support `brew services restart tachi` once the formula is published with the
 service definition. The shell installer keeps the LaunchAgent fallback because
 older/private taps may not expose a trusted service block yet.
 
+When installing the OpenClaw plugin, the shell installer downloads the release
+tarball and its companion `.sha256` asset, verifies the archive before
+extraction, and fails closed if the checksum asset is missing or mismatched. Use
+`--skip-plugin` when installing a binary-only release that does not publish the
+plugin checksum.
+
 ---
 
 ## Step 2: Configure Your Agent's MCP Settings

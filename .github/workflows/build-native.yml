@@ -241,9 +241,13 @@ jobs:
           fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
           NODE
           tar -czf "tachi-openclaw-v${VERSION}.tar.gz" -C "$STAGING" .
+          sha256sum "tachi-openclaw-v${VERSION}.tar.gz" > "tachi-openclaw-v${VERSION}.tar.gz.sha256"
           echo "TARBALL=tachi-openclaw-v${VERSION}.tar.gz" >> "$GITHUB_ENV"
+          echo "TARBALL_SHA256=tachi-openclaw-v${VERSION}.tar.gz.sha256" >> "$GITHUB_ENV"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: integrations/openclaw/${{ env.TARBALL }}
+          files: |
+            integrations/openclaw/${{ env.TARBALL }}
+            integrations/openclaw/${{ env.TARBALL_SHA256 }}
