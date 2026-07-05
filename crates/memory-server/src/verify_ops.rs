@@ -19,12 +19,16 @@ const RECENT_SCAN_MAX: usize = 128;
 mod gate;
 mod handler;
 mod ledger;
+mod receipt;
 mod recent;
 mod render;
 mod storage;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod receipt_golden_tests;
 
 pub(crate) use self::gate::evaluate_verification_gate;
 pub(crate) use self::handler::handle_tachi_verify;

@@ -33,6 +33,7 @@ async fn tachi_complete_failure_with_notes_saves_lesson_hook() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("failure complete should still record eval");
@@ -72,6 +73,7 @@ async fn tachi_complete_failure_with_notes_saves_lesson_hook() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("distinct short task should still record a lesson");

@@ -62,6 +62,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
                 diff_present: Some(true),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed eval row");
@@ -173,6 +174,7 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
                 diff_present: Some(true),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed eval row");

@@ -44,7 +44,7 @@ async fn tachi_complete_links_eval_to_flow_dispatch_card_and_ux_matrix() {
         .expect("complete should succeed");
     let bundle: Value = serde_json::from_str(&raw).expect("complete bundle");
     assert_eq!(
-        bundle["pipeline"]["dispatch_completion_link"]["recorded"],
+        bundle["pipeline"]["dispatch_completion_link"],
         json!(true),
         "{bundle:#}"
     );
@@ -110,6 +110,7 @@ async fn tachi_complete_infers_task_agent_and_profile_from_dispatch_card() {
     .expect("mark dispatch");
 
     let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
     complete_params.outcome = Some("success".to_string());
     complete_params.task_id = Some("eval-link-004".to_string());
     complete_params.dispatch_id = Some(dispatch_id.to_string());
@@ -159,6 +160,7 @@ async fn tachi_complete_surfaces_warning_when_kanban_card_is_missing() {
     let dispatch_id = "20260615T000008Z-kanban-warning";
 
     let mut complete_params = task_params("complete");
+    complete_params.format = Some("full".to_string());
     complete_params.task = Some("Write completion while kanban is stale".to_string());
     complete_params.agent = Some("codex".to_string());
     complete_params.outcome = Some("success".to_string());

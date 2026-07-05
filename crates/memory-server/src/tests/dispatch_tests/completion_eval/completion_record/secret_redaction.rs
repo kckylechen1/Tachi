@@ -62,6 +62,7 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
             diff_present: None,
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("tachi_complete should succeed");

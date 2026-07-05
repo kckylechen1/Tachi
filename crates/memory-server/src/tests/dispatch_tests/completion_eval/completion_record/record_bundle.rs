@@ -56,6 +56,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             diff_present: None,
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("tachi_complete should succeed");
@@ -68,7 +69,10 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
     assert!(
         next_steps.iter().any(|step| step
             .as_str()
-            .is_some_and(|s| s.contains("no approve_merge step is implied"))),
+            .is_some_and(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.contains("no worktree") || lower.contains("no approve_merge")
+            })),
         "no-worktree completion should not imply approve_merge: {bundle:#}"
     );
     let path = bundle["path"].as_str().expect("path present");
@@ -366,6 +370,7 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             diff_present: None,
             scope: Some("global".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("tachi_complete should accept stringified trajectory");

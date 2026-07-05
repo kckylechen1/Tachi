@@ -3,6 +3,13 @@
 use crate::utils::compact_text_line;
 use serde_json::{json, Value};
 
+pub(crate) fn wants_full_format(format: Option<&str>) -> bool {
+    format
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
+        .is_some_and(|format| format.eq_ignore_ascii_case("full"))
+}
+
 pub(crate) fn wants_json(format: Option<&str>) -> bool {
     match format
         .map(str::trim)
@@ -11,7 +18,7 @@ pub(crate) fn wants_json(format: Option<&str>) -> bool {
         .as_deref()
     {
         Some("markdown" | "md" | "text" | "plain" | "human") => false,
-        Some("json" | "application/json" | "structured" | "machine") => true,
+        Some("json" | "application/json" | "structured" | "machine" | "full") => true,
         Some(_) => false,
         None => true,
     }
@@ -26,6 +33,138 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
         let preview: String = raw.chars().take(500).collect();
         json!({ "raw_preview": preview, "parse_error": true })
     })
+}
+
+const SAVE_RECEIPT_KEYS: &[&str] = &[
+    "id", "path", "status", "enrichment", "warning", "note_file", "note_path", "db", "timestamp",
+    "saved", "secret_redactions", "capture_gate_warnings",
+];
+
+pub(crate) fn save_receipt_value(value: &Value) -> Value {
+    let mut receipt = serde_json::Map::new();
+    receipt.insert("ok".to_string(), json!(true));
+    for key in SAVE_RECEIPT_KEYS {
+        if let Some(field) = value.get(*key) {
+            if !field.is_null() {
+                receipt.insert((*key).to_string(), field.clone());
+            }
+        }
+    }
+    if !receipt.contains_key("status") {
+        receipt.insert("status".to_string(), json!("saved"));
+    }
+    Value::Object(receipt)
+}
+
+pub(crate) fn shape_save_facade_response(
+    raw: &str,
+    format: Option<&str>,
+    echo: Option<&str>,
+    requested_path: Option<&str>,
+) -> Result<String, String> {
+    let mut value = parse_json_or_empty(raw.to_string());
+    if wants_full_format(format) {
+        if let (Some(obj), Some(echo_text)) = (
+            value.as_object_mut(),
+            echo.filter(|text| !text.trim().is_empty()),
+        ) {
+            obj.insert("echo".to_string(), json!(echo_text));
+        }
+        return json_string(&value);
+    }
+
+    let receipt = save_receipt_value(&value);
+    if wants_json(format) {
+        json_string(&receipt)
+    } else {
+        Ok(format_save_result(
+            &serde_json::to_string(&receipt).map_err(|e| format!("serialize save receipt: {e}"))?,
+            requested_path.or_else(|| receipt.get("path").and_then(Value::as_str)),
+        ))
+    }
+}
+
+pub(crate) fn slim_eval_entry(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .map(|status| compact_text_line(status, 24));
+    json!({
+        "id": value.get("id"),
+        "path": value.get("path"),
+        "status": status,
+    })
+}
+
+fn slim_next_steps(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|step| json!(compact_text_line(step, 30)))
+            .collect(),
+    )
+}
+
+fn slim_pipeline_step(value: &Value) -> Value {
+    match value {
+        Value::String(text) => json!(compact_text_line(text, 18)),
+        Value::Object(obj) => obj
+            .get("status")
+            .or_else(|| obj.get("recorded"))
+            .cloned()
+            .unwrap_or_else(|| json!("updated")),
+        Value::Array(items) => json!(items.len()),
+        other if other.is_null() => Value::Null,
+        other => other.clone(),
+    }
+}
+
+pub(crate) fn slim_pipeline(value: Option<&Value>) -> Value {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+    Value::Object(
+        map.iter()
+            .map(|(key, value)| (key.clone(), slim_pipeline_step(value)))
+            .collect(),
+    )
+}
+
+pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Value {
+    if wants_full_format(format) {
+        return bundle;
+    }
+    let mut receipt = serde_json::Map::new();
+    for key in [
+        "recorded",
+        "task_id",
+        "path",
+        "outcome",
+        "subagent_count",
+    ] {
+        if let Some(value) = bundle.get(key) {
+            receipt.insert(key.to_string(), value.clone());
+        }
+    }
+    receipt.insert(
+        "next_steps".to_string(),
+        slim_next_steps(bundle.get("next_steps")),
+    );
+    receipt.insert(
+        "pipeline".to_string(),
+        slim_pipeline(bundle.get("pipeline")),
+    );
+    receipt.insert(
+        "eval_entry".to_string(),
+        slim_eval_entry(bundle.get("eval_entry")),
+    );
+    Value::Object(receipt)
 }
 
 pub(crate) fn sections_to_evidence(sections: &[(String, Value)]) -> Result<Value, String> {
@@ -115,10 +254,11 @@ pub(crate) fn checkpoint_message(
     display_path: Option<&str>,
     already_formatted: bool,
     echo: Option<&str>,
+    format: Option<&str>,
 ) -> String {
     if already_formatted {
         raw.to_string()
-    } else {
+    } else if wants_full_format(format) {
         let mut msg = format_save_result(raw, display_path);
         if let Some(echo) = echo.filter(|text| !text.trim().is_empty()) {
             msg.push_str(&format!(
@@ -127,6 +267,8 @@ pub(crate) fn checkpoint_message(
             ));
         }
         msg
+    } else {
+        format_save_result(raw, display_path)
     }
 }
 

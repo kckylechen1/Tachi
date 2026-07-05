@@ -546,7 +546,8 @@ pub use task::TachiTaskParams;
 mod orchestration;
 pub use orchestration::{
     TachiAgentEvalParams, TachiAgentsParams, TachiArenaParams, TachiBoardParams,
-    TachiOrchestratorParams, TachiShellDispatchSliceParams, TachiShellParams, TachiVerifyParams,
+    TachiOrchestratorParams, TachiShellDispatchSliceParams, TachiShellParams, TachiVerifyCheckItem,
+    TachiVerifyParams,
 };
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use chrono::Utc;
 use serde_json::json;
 
+use crate::facade_memory_ops::shape_complete_response;
 use crate::hub_ops::handle_distill_trajectory;
 use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{DistillTrajectoryParams, TachiCompleteParams};
@@ -397,6 +398,7 @@ pub(crate) async fn handle_tachi_complete(
         crate::mcp_proxy::append_warning(obj, warning);
     }
 
-    serde_json::to_string(&review_bundle)
+    let response = shape_complete_response(review_bundle, params.format.as_deref());
+    serde_json::to_string(&response)
         .map_err(|e| format!("Failed to serialize review bundle: {}", e))
 }

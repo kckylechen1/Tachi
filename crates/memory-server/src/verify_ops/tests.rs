@@ -19,6 +19,7 @@ fn params(action: &str) -> TachiVerifyParams {
         cwd: None,
         required: None,
         limit: None,
+        checks: vec![],
     }
 }
 

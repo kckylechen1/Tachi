@@ -16,10 +16,11 @@ mod recall_simulate_ops;
 use crate::facade_save_ops::handle_tachi_save;
 use crate::tool_params::*;
 use crate::MemoryServer;
-pub(crate) use evidence_format::wants_json;
-use evidence_format::{
-    format_extract_result, format_save_result, json_string, parse_json_or_empty,
+pub(crate) use evidence_format::{
+    shape_complete_response, shape_save_facade_response, wants_full_format, wants_json,
 };
+use evidence_format::{format_extract_result, json_string, parse_json_or_empty};
+use crate::facade_save_ops::finalize_tachi_save_response;
 use serde_json::json;
 
 pub(crate) async fn handle_tachi_memory(
@@ -129,7 +130,7 @@ pub(crate) async fn handle_tachi_memory(
                 &mut metadata,
             );
             let save_params = TachiSaveParams {
-                text,
+                text: text.clone(),
                 id: params.id.clone(),
                 kind,
                 title: params.title.clone(),
@@ -152,12 +153,10 @@ pub(crate) async fn handle_tachi_memory(
                 metadata,
                 emit_continuity: params.emit_continuity,
                 files: params.files.clone(),
+                format: params.format.clone(),
             };
-            let body = handle_tachi_save(server, save_params).await?;
-            if wants_json(params.format.as_deref()) {
-                return json_string(&parse_json_or_empty(body));
-            }
-            Ok(format_save_result(&body, params.path.as_deref()))
+            let raw = handle_tachi_save(server, save_params.clone()).await?;
+            finalize_tachi_save_response(&save_params, &raw, Some(text.as_str()))
         }
         "extract_facts" => {
             if let Some(body) =
@@ -195,6 +194,7 @@ pub(crate) async fn handle_tachi_memory(
                 metadata: params.metadata.clone(),
                 emit_continuity: false,
                 files: params.files.clone(),
+                format: None,
             };
             let body = handle_tachi_save(server, save_params).await?;
             if wants_json(params.format.as_deref()) {

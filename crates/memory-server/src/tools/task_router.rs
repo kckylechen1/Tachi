@@ -134,6 +134,7 @@ pub(super) async fn handle_tachi_task_facade(
                 diff_present: params.diff_present,
                 scope: params.scope.clone(),
                 project: params.project.clone(),
+                format: params.format.clone(),
             };
             crate::complete_ops::handle_tachi_complete(server, complete_params).await
         }
