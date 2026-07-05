@@ -4,7 +4,7 @@ use super::*;
 async fn standard_profile_direct_add_edge_call_is_rejected() {
     let server = make_server();
     server.set_tool_profile(Some(
-        crate::profiles::parse_tool_profile("standard").expect("standard profile should parse"),
+        tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
     ));
 
     let result = call_tool_via_server(server, "add_edge", None)
@@ -45,7 +45,7 @@ async fn unknown_tool_returns_tool_error_without_crashing_service() {
 async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
     let server = make_server();
     server.set_tool_profile(Some(
-        crate::profiles::parse_tool_profile("standard").expect("standard profile should parse"),
+        tachi_hub::parse_tool_profile("standard").expect("standard profile should parse"),
     ));
 
     let tools = server
@@ -68,7 +68,7 @@ async fn standard_profile_exposes_arena_but_hides_heavy_coordination_facades() {
 async fn coordinate_profile_exposes_advanced_coordination_facades() {
     let server = make_server();
     server.set_tool_profile(Some(
-        crate::profiles::parse_tool_profile("coordinate").expect("coordinate profile should parse"),
+        tachi_hub::parse_tool_profile("coordinate").expect("coordinate profile should parse"),
     ));
 
     let tools = server

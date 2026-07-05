@@ -1,4 +1,54 @@
-use super::*;
+use std::collections::BTreeSet;
+use tachi_hub::{
+    tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
+    DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
+    REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
+};
+
+fn ensure_test_env() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
+        std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
+        std::env::set_var("SILICONFLOW_MODEL", "test-model");
+        std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+        std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
+    });
+}
+
+fn native_route_names() -> Vec<String> {
+    ensure_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("profiles test runtime");
+    let _guard = runtime.enter();
+    let db_path = std::env::temp_dir().join(format!(
+        "profiles-metadata-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
+    let mut names: Vec<String> = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn bundle_count(tool_name: &str) -> usize {
+    [
+        ToolBundle::Observe,
+        ToolBundle::Remember,
+        ToolBundle::Coordinate,
+        ToolBundle::Operate,
+    ]
+    .into_iter()
+    .filter(|bundle| tool_matches_bundle(tool_name, *bundle))
+    .count()
+}
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "add_edge",
@@ -103,8 +153,6 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
 ];
 
 const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory", "tachi_board", "tachi_dispatch"];
-
-use std::collections::BTreeSet;
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {

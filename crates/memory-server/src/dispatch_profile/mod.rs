@@ -1,6 +1,6 @@
 //! Dispatch profiles describe who to ask, which context/tools to expose, and
 //! what evidence a delegated agent must return. They are intentionally separate
-//! from `profiles::ToolProfile`, which only gates MCP tool visibility.
+//! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
 use crate::agent_eval::{
     aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,

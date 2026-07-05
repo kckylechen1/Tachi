@@ -1,5 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ToolBundle {
+pub enum ToolBundle {
     Observe,
     Remember,
     Coordinate,
@@ -7,23 +7,23 @@ pub(crate) enum ToolBundle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ToolProfile {
-    pub(crate) observe: bool,
-    pub(crate) remember: bool,
-    pub(crate) coordinate: bool,
-    pub(crate) operate: bool,
-    pub(crate) admin: bool,
+pub struct ToolProfile {
+    observe: bool,
+    remember: bool,
+    coordinate: bool,
+    operate: bool,
+    admin: bool,
     /// Standard profile: curated daily allow-list for IDE + CLI agents.
     /// When set, only patterns in STANDARD_MINIMAL_TOOL_PATTERNS pass.
-    pub(crate) standard_minimal: bool,
+    standard_minimal: bool,
     /// Delegate profile: curated 6-tool allow-list for worker agents.
     /// When set, only patterns in DELEGATE_MINIMAL_TOOL_PATTERNS pass.
     /// Standard takes precedence over delegate if both are set.
-    pub(crate) delegate_minimal: bool,
+    delegate_minimal: bool,
 }
 
 impl ToolProfile {
-    pub(crate) const fn observe() -> Self {
+    pub const fn observe() -> Self {
         Self {
             observe: true,
             remember: false,
@@ -35,7 +35,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) const fn remember() -> Self {
+    pub const fn remember() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -47,7 +47,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) const fn coordinate() -> Self {
+    pub const fn coordinate() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -59,7 +59,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) const fn operate() -> Self {
+    pub const fn operate() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -71,7 +71,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) const fn admin() -> Self {
+    pub const fn admin() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -86,7 +86,7 @@ impl ToolProfile {
     /// Standard profile for IDE + CLI agents (Windsurf, Cursor, Antigravity,
     /// Trae, Codex standalone, Claude Code standalone). Enables all bundles but
     /// intersects with a curated daily facade allow-list to keep the tool tray small.
-    pub(crate) const fn standard() -> Self {
+    pub const fn standard() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -101,7 +101,7 @@ impl ToolProfile {
     /// Delegate profile for worker agents spawned by tachi_dispatch.
     /// Read + remember bundles only, intersected with a curated 7-tool allow-list.
     /// No dispatch (prevent recursion), no handoff (parent manages), no hub_discover.
-    pub(crate) const fn delegate() -> Self {
+    pub const fn delegate() -> Self {
         Self {
             observe: true,
             remember: true,
@@ -113,7 +113,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) fn merge(self, other: Self) -> Self {
+    pub fn merge(self, other: Self) -> Self {
         Self {
             observe: self.observe || other.observe,
             remember: self.remember || other.remember,
@@ -126,7 +126,7 @@ impl ToolProfile {
         }
     }
 
-    pub(crate) fn allows(self, bundle: ToolBundle) -> bool {
+    pub fn allows(self, bundle: ToolBundle) -> bool {
         self.admin
             || match bundle {
                 ToolBundle::Observe => self.observe,
@@ -136,7 +136,19 @@ impl ToolProfile {
             }
     }
 
-    pub(crate) fn as_str(self) -> String {
+    pub(crate) fn is_admin(self) -> bool {
+        self.admin
+    }
+
+    pub(crate) fn uses_standard_allow_list(self) -> bool {
+        self.standard_minimal
+    }
+
+    pub(crate) fn uses_delegate_allow_list(self) -> bool {
+        self.delegate_minimal
+    }
+
+    pub fn as_str(self) -> String {
         if self.admin {
             return "admin".to_string();
         }
@@ -168,6 +180,6 @@ impl ToolProfile {
     }
 }
 
-pub(crate) const fn default_tool_profile() -> ToolProfile {
+pub const fn default_tool_profile() -> ToolProfile {
     ToolProfile::standard()
 }

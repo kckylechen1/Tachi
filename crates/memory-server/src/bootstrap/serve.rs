@@ -508,7 +508,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .clone()
         .or_else(|| std::env::var("TACHI_PROFILE").ok());
     if let Some(raw_profile) = requested_tool_profile.as_deref() {
-        match crate::profiles::parse_tool_profile(raw_profile) {
+        match tachi_hub::parse_tool_profile(raw_profile) {
             Some(profile) => server.set_tool_profile(Some(profile)),
             None => eprintln!(
                 "Ignoring unknown tool profile '{}'; expected observe | remember | coordinate | operate | admin or a compatible host alias",
@@ -562,7 +562,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         server
             .active_tool_profile()
             .map(|profile| profile.as_str())
-            .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str())
+            .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str())
     );
 
     if cli.daemon {

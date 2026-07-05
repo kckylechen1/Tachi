@@ -84,7 +84,6 @@ mod orchestrator_ops;
 mod pack_ops;
 mod path_utils;
 mod pipeline_ops;
-mod profiles;
 mod project_db_ops;
 mod prompt_envelope;
 mod prompts;

@@ -5,7 +5,7 @@ use super::patterns::{
 use super::types::{default_tool_profile, ToolBundle, ToolProfile};
 use rmcp::model::Tool;
 
-pub(crate) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
+pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     let mut resolved: Option<ToolProfile> = None;
 
     for token in raw
@@ -39,7 +39,7 @@ pub(crate) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     resolved
 }
 
-pub(crate) fn parse_tool_patterns_csv(raw: &str) -> Vec<String> {
+pub fn parse_tool_patterns_csv(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(|part| part.trim())
         .filter(|part| !part.is_empty())
@@ -47,7 +47,7 @@ pub(crate) fn parse_tool_patterns_csv(raw: &str) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn filter_tool_defs(
+pub fn filter_tool_defs(
     tools: Vec<Tool>,
     profile: Option<ToolProfile>,
     env_patterns: Option<&[String]>,
@@ -61,8 +61,7 @@ pub(crate) fn filter_tool_defs(
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn tool_matches_bundle(tool_name: &str, bundle: ToolBundle) -> bool {
+pub fn tool_matches_bundle(tool_name: &str, bundle: ToolBundle) -> bool {
     matches_any_pattern(
         tool_name,
         match bundle {
@@ -74,7 +73,7 @@ pub(crate) fn tool_matches_bundle(tool_name: &str, bundle: ToolBundle) -> bool {
     )
 }
 
-pub(crate) fn tool_visible(
+pub fn tool_visible(
     tool_name: &str,
     profile: Option<ToolProfile>,
     env_patterns: Option<&[String]>,
@@ -86,19 +85,19 @@ pub(crate) fn tool_visible(
     }
 
     let profile = profile.unwrap_or_else(default_tool_profile);
-    if profile.admin {
+    if profile.is_admin() {
         return true;
     }
 
     // Curated minimal allow-lists: standard daily surface > delegate worker surface.
-    if profile.standard_minimal {
+    if profile.uses_standard_allow_list() {
         if !matches_any_pattern(tool_name, STANDARD_MINIMAL_TOOL_PATTERNS.iter().copied()) {
             return false;
         }
-    } else if profile.delegate_minimal {
-        if !matches_any_pattern(tool_name, DELEGATE_MINIMAL_TOOL_PATTERNS.iter().copied()) {
-            return false;
-        }
+    } else if profile.uses_delegate_allow_list()
+        && !matches_any_pattern(tool_name, DELEGATE_MINIMAL_TOOL_PATTERNS.iter().copied())
+    {
+        return false;
     }
 
     profile.allows(ToolBundle::Observe)
@@ -115,7 +114,7 @@ fn matches_any_pattern<'a>(tool_name: &str, mut patterns: impl Iterator<Item = &
     patterns.any(|pattern| tool_name_matches_pattern(tool_name, pattern))
 }
 
-pub(crate) fn tool_name_matches_pattern(tool_name: &str, pattern: &str) -> bool {
+pub fn tool_name_matches_pattern(tool_name: &str, pattern: &str) -> bool {
     if pattern == "*" {
         return true;
     }

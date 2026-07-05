@@ -1,4 +1,4 @@
-pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
+pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "tachi_task_brief",
     "tachi_wiki_search",
@@ -34,7 +34,7 @@ pub(crate) const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_briefing",
 ];
 
-pub(crate) const REMEMBER_TOOL_PATTERNS: &[&str] = &[
+pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "save_memory",
     "remember",
     "tachi_wiki_write",
@@ -57,7 +57,7 @@ pub(crate) const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_domain_adapter",
 ];
 
-pub(crate) const COORDINATE_TOOL_PATTERNS: &[&str] = &[
+pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "check_inbox",
     "handoff_check",
     "handoff_leave",
@@ -81,7 +81,7 @@ pub(crate) const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "tachi_verify",
 ];
 
-pub(crate) const OPERATE_TOOL_PATTERNS: &[&str] = &[
+pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "section_build",
     "compact_context",
     "compact_rollup",
@@ -110,7 +110,7 @@ pub(crate) const OPERATE_TOOL_PATTERNS: &[&str] = &[
 
 /// Standard profile allow-list. Intersected with all bundles so the IDE/CLI
 /// tool tray stays small and focused on daily facade entrypoints.
-pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     // Active tool discovery for the current profile
     "tachi_tools",
     // Runtime identity / DB routing self-check for embedded clients
@@ -144,7 +144,7 @@ pub(crate) const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
 
 /// Delegate profile allow-list (7 tools). For worker agents spawned by
 /// tachi_dispatch. No dispatch (prevent recursion), no handoff, no hub_discover.
-pub(crate) const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "runtime_info",
     // Unified memory facade (search + save)

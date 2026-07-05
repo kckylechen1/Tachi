@@ -210,7 +210,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let tool_profile = server
         .active_tool_profile()
         .map(|profile| profile.as_str())
-        .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str());
+        .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str());
     let requested_profile = std::env::var("TACHI_PROFILE").ok();
     let derivative_identity = std::env::var("TACHI_DERIVATIVE_IDENTITY")
         .ok()

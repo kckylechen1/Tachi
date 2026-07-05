@@ -103,6 +103,143 @@ pub struct RateLimiter {
     pub burst: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitRejection {
+    pub message: String,
+}
+
+impl RateLimiter {
+    pub fn check_tool_call(
+        &mut self,
+        tool_name: &str,
+        args_hash: &str,
+        session_id: &str,
+        rpm_override: Option<u64>,
+        burst_override: Option<u64>,
+    ) -> Result<Option<String>, RateLimitRejection> {
+        let now = Instant::now();
+        let effective_rpm = rpm_override.unwrap_or(self.rpm);
+        let effective_burst = burst_override.unwrap_or(self.burst);
+
+        if effective_rpm > 0 {
+            Self::reserve_entry_capacity(
+                &mut self.windows,
+                RATE_LIMIT_MAX_SESSIONS,
+                now - Duration::from_secs(120),
+                session_id,
+            );
+
+            let window = self.windows.entry(session_id.to_string()).or_default();
+            let cutoff = now - Duration::from_secs(60);
+            while let Some(&front) = window.front() {
+                if front < cutoff {
+                    window.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if window.len() as u64 >= effective_rpm {
+                let oldest = window.front().copied().unwrap_or(now);
+                let retry_after = Duration::from_secs(60)
+                    .checked_sub(now.duration_since(oldest))
+                    .unwrap_or(Duration::from_secs(1));
+                return Err(RateLimitRejection {
+                    message: format!(
+                        "Rate limited: {} calls/min exceeded (limit={}). Retry in {:.0}s.",
+                        window.len(),
+                        effective_rpm,
+                        retry_after.as_secs_f64()
+                    ),
+                });
+            }
+
+            window.push_back(now);
+        }
+
+        let mut soft_warning: Option<String> = None;
+        if effective_burst > 0 {
+            let burst_key = format!("{session_id}:{tool_name}:{args_hash}");
+            Self::reserve_entry_capacity(
+                &mut self.bursts,
+                RATE_LIMIT_MAX_BURST_KEYS,
+                now - RATE_LIMIT_BURST_WINDOW,
+                &burst_key,
+            );
+
+            let stamps = self.bursts.entry(burst_key).or_default();
+            let cutoff = now - RATE_LIMIT_BURST_WINDOW;
+            while let Some(&front) = stamps.front() {
+                if front < cutoff {
+                    stamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if stamps.len() as u64 >= effective_burst {
+                return Err(RateLimitRejection {
+                    message: format!(
+                        "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
+                         Stop before retrying the same path. Call tachi_unstick with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
+                        tool_name,
+                        stamps.len() + 1,
+                        RATE_LIMIT_BURST_WINDOW.as_secs(),
+                        effective_burst
+                    ),
+                });
+            }
+
+            let upcoming_count = stamps.len() as u64 + 1;
+            if upcoming_count >= STUCK_SOFT_WARN_THRESHOLD && upcoming_count < effective_burst {
+                soft_warning = Some(format!(
+                    "⚠️ stuck-detection: tool '{}' has been called {} times with identical arguments within {}s. \
+                     Hard block triggers at {} repeats. Consider calling tachi_unstick with the current task / attempts / latest error, \
+                     or searching prior solutions via tachi_wiki_search / tachi_task_brief before retrying the same path.",
+                    tool_name,
+                    upcoming_count,
+                    RATE_LIMIT_BURST_WINDOW.as_secs(),
+                    effective_burst
+                ));
+            }
+
+            stamps.push_back(now);
+        }
+
+        Ok(soft_warning)
+    }
+
+    pub fn entry_counts(&self) -> (usize, usize) {
+        (self.windows.len(), self.bursts.len())
+    }
+
+    fn reserve_entry_capacity(
+        map: &mut HashMap<String, VecDeque<Instant>>,
+        max_entries: usize,
+        stale_cutoff: Instant,
+        new_key: &str,
+    ) {
+        if max_entries == 0 || map.contains_key(new_key) {
+            return;
+        }
+
+        if map.len() >= max_entries {
+            map.retain(|_, deque| deque.back().is_some_and(|&t| t >= stale_cutoff));
+        }
+
+        while map.len() >= max_entries {
+            let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, deque)| deque.back().copied().unwrap_or(stale_cutoff))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest_key);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DbRuntime {
     pub global_store: Arc<StdMutex<MemoryStore>>,
