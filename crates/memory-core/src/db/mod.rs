@@ -2,10 +2,12 @@ mod agent_state;
 mod audit;
 mod common;
 mod daily_pipeline;
+mod doctor_probe;
 mod domain;
 mod event_ledger;
 pub mod foundry_config;
 pub mod foundry_jobs;
+mod gc_candidates;
 mod graph;
 mod hub_db;
 mod memory_crud;
@@ -32,8 +34,17 @@ pub use daily_pipeline::{
     truth_maintenance_self_heal_promote_raw, CategorySourceGroup, DailyHealthDbSnapshot,
     DuplicateSummaryRow, EvalEvidenceRow,
 };
+pub use doctor_probe::{
+    checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
+    count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
+    open_immutable_readonly, open_raw, schema_version, table_exists, FoundryJobStatusCounts,
+};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
+pub use gc_candidates::{
+    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
+    CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
+};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
     get_superseded_ids, graph_expand, remove_edge,
