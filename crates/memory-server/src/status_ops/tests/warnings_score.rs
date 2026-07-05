@@ -1,13 +1,15 @@
 use super::*;
 
 fn db_status(label: &str, failed: usize, stuck: usize, coverage: f64) -> DbStatus {
+    let memory_total = 100;
+    let vector_count = (memory_total as f64 * coverage) as usize;
     DbStatus {
         path: format!("/tmp/{label}.db"),
         label: label.to_string(),
         orphan: false,
-        memory_total: 100,
-        vector_count: (100.0 * coverage) as usize,
-        vector_missing: 0,
+        memory_total,
+        vector_count,
+        vector_missing: memory_total.saturating_sub(vector_count),
         vector_orphans: 0,
         vector_coverage: coverage,
         vector_dimension: Some(EXPECTED_EMBEDDING_DIM),
@@ -93,24 +95,35 @@ fn build_status_warnings_names_foreign_daemon() {
 }
 
 #[test]
-fn build_status_warnings_lists_db_names_for_low_coverage() {
+fn build_status_warnings_emits_bounded_action_for_needed_backfill() {
     let snapshot = empty_snapshot(vec![
-        db_status("global", 0, 0, 0.95),
-        db_status("sigil", 0, 0, 0.42),
+        db_status("global", 0, 0, 1.0),
+        db_status("sigil", 0, 0, 0.98),
         db_status("hyperion", 0, 0, 0.81),
     ]);
     let warnings = build_status_warnings(&snapshot, &daemon_running());
     let low_cov = warnings
         .iter()
-        .find(|w| w.contains("vector coverage below 90%"))
-        .expect("low-coverage warning present");
+        .find(|w| w.starts_with("WARNING: vector backfill needed"))
+        .expect("backfill warning present");
     assert!(
         low_cov.contains("sigil") && low_cov.contains("hyperion"),
-        "low-coverage warning should name the affected dbs, got: {low_cov}"
+        "backfill warning should name the affected dbs, got: {low_cov}"
     );
     assert!(
         !low_cov.contains("global"),
-        "healthy dbs must not appear in low-coverage warning, got: {low_cov}"
+        "healthy dbs must not appear in backfill warning, got: {low_cov}"
+    );
+    assert!(
+        low_cov.contains("missing=2")
+            && low_cov.contains("missing=19")
+            && low_cov.contains("tachi backfill-vectors"),
+        "backfill warning should include missing counts and action, got: {low_cov}"
+    );
+    assert!(
+        low_cov.len() <= 240,
+        "backfill warning must stay size-bounded, got {} chars: {low_cov}",
+        low_cov.len()
     );
 }
 

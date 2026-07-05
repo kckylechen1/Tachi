@@ -332,8 +332,24 @@ impl MemoryServer {
         })?;
 
         let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
-        let mut store = MemoryStore::open_with_label(db_str, project_name)
-            .map_err(|e| format!("open named project store: {e}"))?;
+
+        let store_arc = {
+            let mut cache = self
+                .named_project_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = cache.get(project_name) {
+                existing.clone()
+            } else {
+                let store = MemoryStore::open_with_label(db_str, project_name)
+                    .map_err(|e| format!("open named project store: {e}"))?;
+                let arc = Arc::new(StdMutex::new(store));
+                cache.insert(project_name.to_string(), arc.clone());
+                arc
+            }
+        };
+
+        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut store)
     }
 

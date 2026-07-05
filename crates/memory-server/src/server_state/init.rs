@@ -245,6 +245,7 @@ impl MemoryServer {
                 handoff_memos: Vec::new(),
             })),
             bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
+            named_project_cache: Arc::new(StdMutex::new(HashMap::new())),
         };
 
         if background_workers_enabled() {

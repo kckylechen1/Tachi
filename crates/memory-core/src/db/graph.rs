@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryError;
 use crate::types::{GraphExpandResult, MemoryEdge};
@@ -101,6 +101,78 @@ pub fn get_edges(
     Ok(edges)
 }
 
+fn get_edges_batch(
+    conn: &Connection,
+    ids: &[String],
+    relation_filter: Option<&str>,
+) -> Result<HashMap<String, Vec<MemoryEdge>>, MemoryError> {
+    use std::collections::HashMap;
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
+
+    let base_sql = format!(
+        "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to \
+         FROM memory_edges \
+         WHERE (source_id IN ({ph}) OR target_id IN ({ph})) \
+         AND (valid_to IS NULL OR valid_to > datetime('now'))",
+        ph = placeholders
+    );
+
+    let full_sql = if relation_filter.is_some() {
+        format!("{base_sql} AND relation = ?")
+    } else {
+        base_sql
+    };
+
+    let mut stmt = conn.prepare(&full_sql)?;
+    let row_mapper = |row: &rusqlite::Row| {
+        let meta_str: String = row.get(4)?;
+        let metadata = serde_json::from_str(&meta_str).unwrap_or_default();
+        Ok(MemoryEdge {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            relation: row.get(2)?,
+            weight: row.get(3)?,
+            metadata,
+            created_at: row.get(5)?,
+            valid_from: row.get(6)?,
+            valid_to: row.get(7)?,
+        })
+    };
+
+    let mut params: Vec<&str> = Vec::with_capacity(ids.len() * 2 + 1);
+    for id in ids {
+        params.push(id.as_str());
+    }
+    for id in ids {
+        params.push(id.as_str());
+    }
+    if let Some(rel) = relation_filter {
+        params.push(rel);
+    }
+
+    let mut result: HashMap<String, Vec<MemoryEdge>> = HashMap::new();
+    for id in ids {
+        result.insert(id.clone(), Vec::new());
+    }
+
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), row_mapper)?;
+    for edge in rows {
+        let edge = edge?;
+        if let Some(entry) = result.get_mut(&edge.source_id) {
+            entry.push(edge.clone());
+        }
+        if let Some(entry) = result.get_mut(&edge.target_id) {
+            entry.push(edge);
+        }
+    }
+
+    Ok(result)
+}
+
 /// Count the number of 'contradicts' edges for a given memory ID.
 /// Used by surprise scoring to detect controversial/surprising memories.
 pub fn get_contradiction_count(conn: &Connection, memory_id: &str) -> Result<u32, MemoryError> {
@@ -182,7 +254,6 @@ pub fn graph_expand(
     let mut all_edges: Vec<MemoryEdge> = Vec::new();
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
 
-    // Initialize with seeds at distance 0
     for id in seed_ids {
         if visited.insert(id.clone()) {
             distances.insert(id.clone(), 0);
@@ -190,31 +261,49 @@ pub fn graph_expand(
         }
     }
 
-    // BFS with max_nodes throttle (protect context window)
     const MAX_NODES: usize = 50;
-    while let Some((current_id, depth)) = queue.pop_front() {
-        if depth >= max_hops {
-            continue;
+
+    while !queue.is_empty() {
+        let mut frontier: Vec<String> = Vec::new();
+        let mut current_depth = 0u32;
+
+        while let Some((id, depth)) = queue.front() {
+            if *depth >= max_hops || visited.len() >= MAX_NODES {
+                queue.pop_front();
+                continue;
+            }
+            current_depth = *depth;
+            frontier.push(id.clone());
+            queue.pop_front();
+            if visited.len() >= MAX_NODES {
+                break;
+            }
         }
-        if visited.len() >= MAX_NODES {
+
+        if frontier.is_empty() {
             break;
         }
 
-        let edges = get_edges(conn, &current_id, "both", relation_filter)?;
-        for edge in &edges {
-            let neighbor = if edge.source_id == current_id {
-                &edge.target_id
-            } else {
-                &edge.source_id
-            };
-
-            if visited.insert(neighbor.clone()) {
-                let new_depth = depth + 1;
-                distances.insert(neighbor.clone(), new_depth);
-                queue.push_back((neighbor.clone(), new_depth));
+        let edges_batch = get_edges_batch(conn, &frontier, relation_filter)?;
+        for (node_id, edges) in &edges_batch {
+            for edge in edges {
+                let neighbor = if &edge.source_id == node_id {
+                    &edge.target_id
+                } else {
+                    &edge.source_id
+                };
+                if visited.insert(neighbor.clone()) {
+                    let new_depth = current_depth + 1;
+                    distances.insert(neighbor.clone(), new_depth);
+                    queue.push_back((neighbor.clone(), new_depth));
+                }
             }
+            all_edges.extend(edges.iter().cloned());
         }
-        all_edges.extend(edges);
+
+        if visited.len() >= MAX_NODES {
+            break;
+        }
     }
 
     // Fetch all discovered entries (exclude seeds — caller already has those)

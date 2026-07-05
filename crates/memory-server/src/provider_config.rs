@@ -354,6 +354,7 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
 
     let loaded = server.refresh_llm_provider_secrets_from_vault()?;
     tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
+    server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
     Ok(true)
 }
 
