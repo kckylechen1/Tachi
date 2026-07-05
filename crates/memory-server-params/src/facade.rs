@@ -23,6 +23,59 @@ fn string_enum_schema(
     })
 }
 
+pub(crate) fn memory_scope_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["all", "memory", "wiki", "patterns", "sft"],
+        "Recall scope: all (default), memory, wiki, patterns, or sft.",
+        generator,
+    )
+}
+
+pub(crate) fn save_kind_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["memory", "note", "wiki"],
+        "What to save: memory (full entry), note (quick), or wiki (knowledge page).",
+        generator,
+    )
+}
+
+pub(crate) fn memory_category_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &[
+            "fact",
+            "decision",
+            "experience",
+            "preference",
+            "entity",
+            "other",
+            "kanban",
+            "handoff",
+            "ghost",
+            "wiki",
+            "guide",
+            "eval",
+        ],
+        "Memory category for typed recall filtering.",
+        generator,
+    )
+}
+
+pub(crate) fn retention_policy_schema(
+    generator: &mut rmcp::schemars::SchemaGenerator,
+) -> rmcp::schemars::Schema {
+    string_enum_schema(
+        &["ephemeral", "durable", "permanent", "pinned"],
+        "Retention policy controlling GC behavior.",
+        generator,
+    )
+}
+
 fn tachi_event_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
