@@ -1,10 +1,11 @@
 use super::{
-    add_edge, archive_memory, delete, fetch_by_ids, gc_tables, get_all, get_edges,
-    get_sandbox_policy, graph_expand, init_schema, insert_tachi_event, list_by_path,
-    list_sandbox_policies, list_tachi_events, list_wiki_duplicate_candidates, normalize_for_write,
-    now_utc_iso, record_access, record_access_with_updates, register_sqlite_vec,
-    release_event_claim, search_fts, search_symbolic_candidates, search_vec, serialize_f32,
-    set_sandbox_policy, stats, supersede_memory, try_claim_event, try_load_sqlite_vec,
+    add_edge, archive_memory, collect_daily_health_snapshot, count_distinct_access_days, delete,
+    fetch_by_ids, gc_tables, get_all, get_edges, get_sandbox_policy, graph_expand, init_schema,
+    insert_tachi_event, list_by_path, list_eval_evidence, list_sandbox_policies, list_tachi_events,
+    list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso, promote_memory_to_durable,
+    record_access, record_access_with_updates, register_sqlite_vec, release_event_claim,
+    search_fts, search_symbolic_candidates, search_vec, serialize_f32, set_sandbox_policy, stats,
+    supersede_memory, truth_maintenance_prune_stale, try_claim_event, try_load_sqlite_vec,
     update_agent_known_state, update_enrichment_fields, update_with_revision, upsert,
     vault_touch_entry, vault_upsert_entry, AccessUpdate,
 };
@@ -18,6 +19,7 @@ use crate::types::{
 };
 
 mod access;
+mod daily_pipeline_ops;
 mod delete_ops;
 mod events;
 mod gc;

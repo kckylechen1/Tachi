@@ -82,33 +82,17 @@ async fn run_truth_maintenance_for_target(
     };
     let store = MemoryStore::open_with_label(db_path, &target.label)
         .map_err(|e| format!("open maintenance DB {}: {e}", target.label))?;
-    let conn = store.connection();
 
-    conn.execute(
-        "UPDATE memories
-         SET archived = 1, updated_at = datetime('now')
-         WHERE archived = 0
-           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
-           AND importance < 0.70
-           AND access_count = 0
-           AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
-        [],
-    )
-    .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
+    store
+        .truth_maintenance_prune_stale()
+        .map_err(|e| format!("truth maintenance prune {}: {e}", target.label))?;
 
     // ── Self-healing: promote raw → consolidated when DB health ratio is low ──
-    let total_active: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM memories WHERE archived = 0",
-            [],
-            |r| r.get(0),
-        )
+    let total_active = store
+        .count_active_memories()
         .map_err(|e| format!("count active memories {}: {e}", target.label))?;
-    let consolidated_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM memories WHERE archived = 0 AND tier IN ('consolidated','pattern')",
-            [], |r| r.get(0),
-        )
+    let consolidated_count = store
+        .count_consolidated_active_memories()
         .map_err(|e| format!("count consolidated memories {}: {e}", target.label))?;
     let health_ratio = if total_active > 0 {
         consolidated_count as f64 / total_active as f64
@@ -119,17 +103,8 @@ async fn run_truth_maintenance_for_target(
         // Self-healing may only apply the same promotion gate as record_access:
         // repeated exact recall from diverse queries. Do not promote merely
         // because a raw note was accessed often.
-        let promoted = conn
-            .execute(
-                "UPDATE memories
-                 SET tier = 'consolidated', updated_at = datetime('now')
-                 WHERE archived = 0
-                   AND tier = 'raw'
-                   AND recall_count >= 3
-                   AND query_diversity >= 3
-                   AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
-                [],
-            )
+        let promoted = store
+            .truth_maintenance_self_heal_promote_raw()
             .map_err(|e| format!("self-heal promote raw memories {}: {e}", target.label))?;
         if promoted > 0 {
             eprintln!(
@@ -140,27 +115,11 @@ async fn run_truth_maintenance_for_target(
     }
 
     // ── Post-distillation embedding: enqueue non-raw entries without vectors ──
-    let needs_embed_ids: Vec<String> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT m.id FROM memories m
-                 LEFT JOIN memories_vec v ON m.id = v.id
-                 WHERE m.archived = 0
-                   AND m.tier != 'raw'
-                   AND v.id IS NULL
-                 ORDER BY m.importance DESC
-                 LIMIT 50",
-            )
-            .map_err(|e| format!("prepare embedding scan {}: {e}", target.label))?;
-        let ids: Vec<String> = stmt
-            .query_map([], |r| r.get(0))
-            .map_err(|e| format!("query embedding scan {}: {e}", target.label))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read embedding scan row {}: {e}", target.label))?;
-        ids
-    };
+    let needs_embed_ids = store
+        .list_memory_ids_needing_embedding(50)
+        .map_err(|e| format!("list embedding candidates {}: {e}", target.label))?;
     if !needs_embed_ids.is_empty() {
-        let candidates = memory_core::db::fetch_by_ids(conn, &needs_embed_ids, false)
+        let candidates = memory_core::db::fetch_by_ids(store.connection(), &needs_embed_ids, false)
             .map_err(|e| format!("fetch embedding candidates {}: {e}", target.label))?;
         for entry in candidates.values() {
             let _ = server.enrichment_lock().enrich_tx.try_send(
@@ -179,41 +138,22 @@ async fn run_truth_maintenance_for_target(
         }
     }
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT id FROM memories
-             WHERE archived = 0
-               AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned')
-             ORDER BY access_count DESC, timestamp DESC
-             LIMIT 200",
-        )
-        .map_err(|e| format!("prepare promotion scan {}: {e}", target.label))?;
-    let ids = stmt
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| format!("query promotion scan {}: {e}", target.label))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("read promotion scan row {}: {e}", target.label))?;
-    let entries = memory_core::db::fetch_by_ids(conn, &ids, false)
+    let ids = store
+        .list_promotion_candidate_ids(200)
+        .map_err(|e| format!("list promotion candidates {}: {e}", target.label))?;
+    let entries = memory_core::db::fetch_by_ids(store.connection(), &ids, false)
         .map_err(|e| format!("fetch promotion candidates {}: {e}", target.label))?;
 
     for entry in entries.values() {
-        let access_days = conn
-            .query_row(
-                "SELECT COUNT(DISTINCT date(accessed_at)) FROM access_history WHERE memory_id = ?1",
-                rusqlite::params![entry.id],
-                |row| row.get::<_, usize>(0),
-            )
+        let access_days = store
+            .count_distinct_access_days(&entry.id)
             .map_err(|e| format!("count access days for {}: {e}", entry.id))?;
         if crate::pipeline_ops::calculate_promotion_score(entry, access_days) < 0.60 {
             continue;
         }
-        conn.execute(
-            "UPDATE memories
-             SET importance = 0.7, retention_policy = 'durable', updated_at = datetime('now')
-             WHERE id = ?1",
-            rusqlite::params![entry.id],
-        )
-        .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
+        store
+            .promote_memory_to_durable(&entry.id)
+            .map_err(|e| format!("promote memory {}: {e}", entry.id))?;
         let _ =
             server
                 .enrichment_lock()
