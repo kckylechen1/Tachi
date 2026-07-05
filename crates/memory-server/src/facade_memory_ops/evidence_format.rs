@@ -149,6 +149,11 @@ pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Va
             receipt.insert("pr_ref".to_string(), pr_ref.clone());
         }
     }
+    // Security signal, not an echo: the caller must see that its metadata
+    // contained secret-ish content and was scrubbed.
+    if let Some(redactions) = bundle.get("secret_redactions") {
+        receipt.insert("secret_redactions".to_string(), redactions.clone());
+    }
     receipt.insert(
         "eval_entry".to_string(),
         receipt_eval_entry(bundle.get("eval_entry")),

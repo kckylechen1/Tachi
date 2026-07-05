@@ -68,10 +68,9 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
         .expect("tachi_complete should succeed");
 
     assert!(!resp.contains(secret), "response leaked secret: {resp}");
-    assert!(
-        resp.contains("[REDACTED]"),
-        "response should show redaction"
-    );
+    // Receipt contract (#528): the default response signals redaction via the
+    // secret_redactions count; the redacted content itself lives in storage
+    // (asserted below), not echoed back.
     let bundle: Value = serde_json::from_str(&resp).expect("complete JSON");
     assert!(
         bundle["secret_redactions"].as_u64().unwrap_or(0) > 0,
