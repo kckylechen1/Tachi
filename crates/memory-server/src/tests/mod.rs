@@ -194,6 +194,7 @@ fn template_db_path() -> &'static std::path::PathBuf {
             // `fs::copy` of the base path is a complete, self-contained
             // snapshot — no `-wal`/`-shm` sidecars required.
             server
+                .db
                 .global_store
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
