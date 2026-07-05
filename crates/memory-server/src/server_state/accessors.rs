@@ -100,7 +100,7 @@ impl MemoryServer {
     }
 
     pub(crate) fn project_vec_available(&self) -> bool {
-        self.db.project_vec_available
+        self.db.project_vec_available()
     }
 
     pub(crate) fn agent_runtime_read(&self) -> std::sync::RwLockReadGuard<'_, AgentRuntime> {
