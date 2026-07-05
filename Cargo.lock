@@ -1402,6 +1402,7 @@ dependencies = [
  "libsimple",
  "memory-core",
  "memory-server-params",
+ "memory-server-runtime",
  "rand 0.8.5",
  "regex",
  "reqwest",
@@ -1434,6 +1435,15 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "memory-server-runtime"
+version = "1.6.2"
+dependencies = [
+ "memory-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

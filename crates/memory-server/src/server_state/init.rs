@@ -1,10 +1,12 @@
 use super::cache::{ToolDiscovery, DEFAULT_MCP_DISCOVERY_TIMEOUT_MS};
 use super::memory_server::MemoryServer;
-use super::read_pool::{configured_memory_read_pool_size, ReadStorePool};
 use super::runtime::{
-    AgentRuntime, DbScope, EnrichmentRuntime, FoundryRuntime, ProjectDbState, RateLimiter,
-    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM, ENRICH_CHANNEL_CAPACITY,
+    AgentRuntime, EnrichmentRuntime, FoundryRuntime, ENRICH_CHANNEL_CAPACITY,
     FOUNDRY_CHANNEL_CAPACITY,
+};
+use super::{
+    configured_memory_read_pool_size, DbScope, ProjectDbState, RateLimiter, ReadStorePool,
+    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
 use crate::claude_pool;
