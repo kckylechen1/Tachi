@@ -7,6 +7,7 @@ license = "AGPL-3.0-only"
 [dependencies]
 memory-core = { path = "../memory-core" }
 memory-server-params = { path = "../memory-server-params" }
+tachi-dispatch = { path = "../tachi-dispatch" }
 tachi-clean = { path = "../../tools/cleaner" }
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
 serde = { workspace = true }

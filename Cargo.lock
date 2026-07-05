@@ -1411,6 +1411,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tachi-clean",
+ "tachi-dispatch",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2439,6 +2440,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "tachi-dispatch"
+version = "1.6.2"
 
 [[package]]
 name = "tempfile"

@@ -4,6 +4,7 @@ members = [
     "crates/memory-node",
     "crates/memory-server",
     "crates/memory-server-params",
+    "crates/tachi-dispatch",
     "tools/cleaner",
 ]
 default-members = [

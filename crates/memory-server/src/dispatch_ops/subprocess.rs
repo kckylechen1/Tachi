@@ -49,9 +49,7 @@ pub(super) async fn run_agent_subprocess(
 }
 
 pub(super) fn tail_chars(text: &str, max_chars: usize) -> String {
-    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
-    chars.reverse();
-    chars.into_iter().collect()
+    tachi_dispatch::tail_chars(text, max_chars)
 }
 
 #[cfg(test)]

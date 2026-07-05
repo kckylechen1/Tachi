@@ -68,14 +68,27 @@ def main() -> int:
         "crates/memory-server/Cargo.toml",
         "crates/memory-server-params/Cargo.toml",
         "crates/memory-node/Cargo.toml",
+        "crates/tachi-dispatch/Cargo.toml",
     ]
     for path in cargo_files:
         require_match(path, cargo_version(path), expected, errors)
 
     lock_versions = cargo_lock_versions(
-        {"memory-core", "memory-server", "memory-server-params", "memory-node"}
+        {
+            "memory-core",
+            "memory-server",
+            "memory-server-params",
+            "memory-node",
+            "tachi-dispatch",
+        }
     )
-    for name in ["memory-core", "memory-server", "memory-server-params", "memory-node"]:
+    for name in [
+        "memory-core",
+        "memory-server",
+        "memory-server-params",
+        "memory-node",
+        "tachi-dispatch",
+    ]:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 
     json_files = [
