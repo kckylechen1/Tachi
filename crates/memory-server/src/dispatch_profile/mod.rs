@@ -10,13 +10,11 @@ use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
-    profile_matches_agent, profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk,
-    ResolvedDispatchProfile, RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout,
-    RoutePolicyRuleRecord, RouteSimulationSummary, RouteSubagentScore, DISPATCH_POLICY_PROPOSAL_NS,
-    DISPATCH_PROFILES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
+    profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk, ResolvedDispatchProfile,
+    RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord,
+    RouteSimulationSummary, RouteSubagentScore, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
     PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 
@@ -34,7 +32,6 @@ pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result
 mod cards;
 mod policy;
 mod routing;
-mod util;
 
 #[cfg(test)]
 mod tests;
@@ -42,16 +39,14 @@ mod tests;
 use self::cards::*;
 use self::policy::*;
 use self::routing::*;
-use self::util::*;
 
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
 pub(crate) use self::cards::{
-    profile_eval_feedback_json, profile_evidence_contract_json,
-    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
-    profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
-    profile_skill_loadout_json, profile_skill_loadout_json_for_server,
-    profile_weak_against_for_server,
+    profile_eval_feedback_json, profile_evidence_contract_json_for_server,
+    profile_evidence_required_for_server, profile_json, profile_json_for_server,
+    profile_required_skill_ids, profile_required_skill_ids_for_server,
+    profile_skill_loadout_json_for_server, profile_weak_against_for_server,
 };
 pub(crate) use self::policy::{
     handle_route_policy_apply, handle_route_policy_proposals, handle_route_policy_review,

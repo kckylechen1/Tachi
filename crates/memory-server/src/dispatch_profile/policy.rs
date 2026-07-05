@@ -1,7 +1,5 @@
 mod apply;
 mod handlers;
-mod loadout_evolution;
-mod proposals;
 mod rules;
 mod simulation;
 

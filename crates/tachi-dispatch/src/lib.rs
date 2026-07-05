@@ -5,6 +5,7 @@
 //! writes stay in `memory-server`.
 
 mod launcher;
+pub mod policy;
 mod profiles;
 mod registry;
 mod routing;
