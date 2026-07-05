@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
-pub(crate) struct Cli {
+pub struct Cli {
     /// Run as HTTP daemon instead of stdio transport
     #[arg(long)]
     pub daemon: bool,
@@ -51,13 +51,13 @@ mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
-pub(crate) use commands::Commands;
-pub(crate) use maintenance_actions::{
+pub use commands::Commands;
+pub use maintenance_actions::{
     CardAction, CleanAction, DaemonAction, DistillAction, FoundryAction, HarnessAction, HubAction,
     ManifestAction, PokeAction, QuarantineAction, RepairAction, RescueAction, SkillSurfaceAction,
-    WatcherAction, WikiAction,
+    WatcherAction, WikiAction, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
-pub(crate) use vault_actions::{EnvAction, VaultAction, VaultIntakeAction};
+pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction};
 
 #[cfg(test)]
 mod tests;

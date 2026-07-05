@@ -1,6 +1,6 @@
-use crate::cli::Commands;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::Commands;
 
 pub(super) async fn run_if_backfill_command(
     command: &Commands,

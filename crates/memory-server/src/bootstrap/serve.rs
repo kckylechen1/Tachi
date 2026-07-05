@@ -1,5 +1,4 @@
 use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
-use crate::cli::{Cli, Commands};
 use crate::hub_helpers::should_expose_skill_tool;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::filter_mcp_tools_by_permissions;
@@ -10,6 +9,7 @@ use memory_core::MemoryStore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tachi_bootstrap::cli::{Cli, Commands};
 
 mod backfill_commands;
 mod background;
@@ -369,7 +369,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Distill { action } = &command {
-        use crate::cli::DistillAction;
+        use tachi_bootstrap::cli::DistillAction;
         let DistillAction::Run { db } = action;
         let target_project = db
             .clone()

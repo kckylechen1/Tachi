@@ -40,7 +40,6 @@ mod bootstrap;
 mod builtins;
 mod capability_ops;
 mod capture_gate;
-mod cli;
 mod cli_client;
 mod complete_ops;
 mod continuity_ops;
@@ -96,6 +95,7 @@ mod repair;
 mod rescue;
 mod sandbox_ops;
 mod server_handler;
+mod server_instructions;
 mod server_methods;
 mod shared_defs;
 mod shell_ops;
@@ -117,10 +117,6 @@ mod workflow_closure;
 
 use crate::tool_params::*;
 
-use clap::Parser;
-
-use crate::cli::Cli;
-
 pub(crate) mod server_state;
 pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
 
@@ -138,14 +134,11 @@ pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServe
 // ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
 
 pub fn run_cli() {
-    let cli = Cli::parse();
-    if let Err(e) = bootstrap::run(cli) {
-        if let Some(exit) = e.downcast_ref::<repair::RepairExit>() {
-            std::process::exit(exit.code());
-        }
-        eprintln!("Fatal: {e}");
-        std::process::exit(1);
-    }
+    tachi_bootstrap::run_cli_with(bootstrap::run, |error| {
+        error
+            .downcast_ref::<repair::RepairExit>()
+            .map(|exit| exit.code())
+    });
 }
 
 #[cfg(test)]

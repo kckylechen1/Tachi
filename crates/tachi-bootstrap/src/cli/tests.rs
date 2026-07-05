@@ -101,3 +101,23 @@ fn backfill_vectors_rejects_db_and_project_together() {
     ]);
     assert!(parsed.is_err());
 }
+
+#[test]
+fn clean_sweep_uses_cli_default_max_age() {
+    let parsed =
+        Cli::try_parse_from(["tachi", "clean", "sweep"]).expect("clean sweep default should parse");
+    match parsed.command.expect("command") {
+        Commands::Clean {
+            action:
+                CleanAction::Sweep {
+                    max_age_days,
+                    dry_run,
+                    ..
+                },
+        } => {
+            assert_eq!(max_age_days, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS);
+            assert!(!dry_run);
+        }
+        other => panic!("unexpected command: {other:?}"),
+    }
+}

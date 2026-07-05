@@ -1,5 +1,5 @@
-use crate::cli::EnvAction;
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::EnvAction;
 
 use super::super::open_cli_store_read_only;
 use super::bindings::{build_project_env_plan, print_project_env_plan};

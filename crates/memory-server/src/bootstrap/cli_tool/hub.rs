@@ -1,9 +1,9 @@
-use crate::cli::HubAction;
 use crate::tool_params::{PackProjectParams, PackRegisterParams};
 use memory_core::HubCapability;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::HubAction;
 
 use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 

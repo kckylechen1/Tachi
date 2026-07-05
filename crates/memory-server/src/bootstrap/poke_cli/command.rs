@@ -1,6 +1,6 @@
-use crate::cli::PokeAction;
 use serde_json::Value;
 use std::path::Path;
+use tachi_bootstrap::cli::PokeAction;
 
 use super::super::print_pretty_json;
 use super::report::print_poke_summary;

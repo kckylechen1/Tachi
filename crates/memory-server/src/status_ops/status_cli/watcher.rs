@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::cli::WatcherAction;
+use tachi_bootstrap::cli::WatcherAction;
 
 pub(crate) async fn run_watcher(
     action: WatcherAction,

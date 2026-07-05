@@ -5,9 +5,9 @@ use super::output::{
     print_lease_output, vault_get_output,
 };
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
-use crate::cli::VaultAction;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::VaultAction;
 
 pub(super) async fn run_secret_action(
     global_db_path: &PathBuf,
