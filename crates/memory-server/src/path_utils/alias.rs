@@ -27,8 +27,34 @@ pub(crate) fn plan_c_dir_name_from_root(project_root: &Path) -> Option<String> {
         .unwrap_or_else(|_| project_root.to_path_buf())
         .to_string_lossy()
         .to_string();
-    let hash = crate::utils::stable_hash(&canonical);
+    let identity = plan_c_casefold_alias_identity(&canonical);
+    let hash = crate::utils::stable_hash(&identity);
     Some(format!("{base}-{}", &hash[..8]))
+}
+
+/// Normalize the canonical path before hashing so the Plan C alias identity
+/// is stable for case-only spelling differences on case-insensitive
+/// filesystems (issue #493).
+///
+/// `std::fs::canonicalize` resolves symlinks and `.`/`..` but does NOT fold
+/// letter case on macOS APFS / Windows NTFS defaults, so `/Users/x/Desktop/Repo`
+/// and `/Users/x/desktop/repo` — the same directory on such a filesystem —
+/// hashed to two different suffixes and split the project identity. Folding to
+/// lowercase on those platforms makes the hash depend only on the real path,
+/// not on how it was spelled.
+///
+/// This is a Plan C alias rule only: `stable_hash` itself is unchanged, the
+/// basename is left in its legacy casing, and case-sensitive platforms keep
+/// the exact prior behavior so cross-platform collision safety is preserved.
+fn plan_c_casefold_alias_identity(canonical: &str) -> String {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        canonical.to_ascii_lowercase()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        canonical.to_string()
+    }
 }
 
 /// Legacy (pre-hash) sanitized alias directory name: just the sanitized basename.
