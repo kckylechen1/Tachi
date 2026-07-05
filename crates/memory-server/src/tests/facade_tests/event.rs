@@ -29,3 +29,4 @@ mod emit_query;
 mod label_eval;
 mod metrics;
 mod project;
+mod route;

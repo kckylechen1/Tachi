@@ -1,15 +1,10 @@
 use crate::tool_params::{TachiDomainAdapterParams, TachiEventParams};
 use crate::MemoryServer;
+use memory_server_runtime::trim_opt;
 use serde_json::{json, Map, Value};
 
 fn json_string(value: &Value) -> Result<String, String> {
     serde_json::to_string(value).map_err(|e| format!("serialize domain adapter response: {e}"))
-}
-
-fn trim_opt(value: Option<String>) -> Option<String> {
-    value
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn string_field<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -114,16 +109,16 @@ async fn lorebook_import(
     if params.entries.is_empty() {
         return Err("entries is required when action='lorebook_import'".to_string());
     }
-    let project = trim_opt(params.project.clone());
-    let domain = trim_opt(params.domain.clone()).unwrap_or_else(|| "lorebook".to_string());
-    let actor = trim_opt(params.actor.clone()).unwrap_or_else(|| "domain_adapter".to_string());
-    let session_id = trim_opt(params.session_id.clone()).unwrap_or_else(|| {
+    let project = trim_opt(&params.project);
+    let domain = trim_opt(&params.domain).unwrap_or_else(|| "lorebook".to_string());
+    let actor = trim_opt(&params.actor).unwrap_or_else(|| "domain_adapter".to_string());
+    let session_id = trim_opt(&params.session_id).unwrap_or_else(|| {
         format!(
             "lorebook-import:{}",
             params.character.as_deref().unwrap_or("unscoped")
         )
     });
-    let character = trim_opt(params.character.clone());
+    let character = trim_opt(&params.character);
     let mut imported = Vec::new();
     for (idx, entry) in params.entries.iter().enumerate() {
         let payload = lorebook_payload(entry, character.as_deref())?;
