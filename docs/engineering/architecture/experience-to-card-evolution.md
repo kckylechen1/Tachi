@@ -75,3 +75,40 @@ Each signature has a stable id, a counter-clause, and a severity. The severe new
 ## Provenance
 
 Distilled from the 2026-07-05 multi-vendor campaign: 9 PRs merged to main across glm/codex/grok/sonnet-5 lanes with kimi/sonnet/codex cross-vendor adversarial review. glm failed vault security 4/4 (#541/#583/#600/#607) and falsified a clippy-clean report (#610); codex implemented every frozen-spec surgical task correctly one-shot (#594/#607/#588). The hand-written cards (`lane_card_glm_5_2.md`, `lane_card_codex.md`) are this doc's precursor — this spec is how they stop being hand-written.
+
+## Part II: the card as a model-router substrate (owner discussion, 2026-07-05 night)
+
+The end state is Tachi as a **model router**: given a task, Tachi picks the vendor AND ships the constraints that make that vendor safe for that task. This is the differentiator over benchmark-routers (OpenRouter/RouteLLM-class): they answer "which model is cheap and good"; they cannot answer "this vendor will falsify a clippy-clean checkbox under these conditions" — because benchmarks don't produce adjudication traces. Real dispatches + adversarial review do. **Router + immune system.**
+
+### Card ontology (four fields)
+
+1. **Capability** (擅长什么) — routing score per task-type; the hexagon's machine-readable form.
+2. **Failure modes** (哪会出错) — error signatures + risk gates. High-severity domains change routing *topology*, not just vendor choice: security work routes to "mandatory dual-track + cross-vendor adversarial review," never merely to a different model.
+3. **Constraint interface** (怎么约束) — the layered carriers, ordered by durability (proven 2026-07-05): prompt-layer (decays) < one-line config (`personality=pragmatic`) < packet clauses (per-dispatch injection from the card) < structural gates (scripts/CI — cannot be ignored).
+4. **Constraint efficacy** (约束有效性) — the novel field: *which constraint layer actually works for which failure mode, per vendor*. Evidence: glm's false-`Closes` is NOT prompt-fixable (the adjudication comment sat on the issue; it violated it anyway) — only structural gates (leader independent verification + review gate) catch it. codex's parking urge WAS prompt-fixable (remap mandate=ledger onto the base prompt's own end-to-end vocabulary). Same disease class, different models need different medicine layers — this mapping is the card's most valuable content.
+
+### Storage split (three layers, don't merge them)
+
+- **Declaration** (vendor, lanes, tool whitelist, forbidden domains) → TOML seed files (serde-native, commentable, matches `config.toml`/`agents/*.toml` precedent).
+- **Evidence** (eval rows, signatures, timestamps) → SQLite (append-only, temporal, `(vendor, role)`-queryable). Never a file.
+- **Projection** (hexagon, current top-N clauses) → computed at render/assembly time, never persisted as truth. The hexagon is for human routing intuition; the machine consumes signatures and clauses.
+
+TOML is the birth certificate, the DB is the medical record, the hexagon is the health report — the report is always computed from the record, never hand-edited.
+
+### Hexagon axes (grown from evidence, not invented)
+
+Six axes that actually discriminated lanes on 2026-07-05: **spec fidelity** (frozen-spec adherence vs. inventing alternatives), **self-report trust** (verbatim honesty vs. falsified CI), **test discipline** (unprompted discriminating tests), **equivalence-refactor strength**, **security-critical competence**, **speed/cost**. Reviewer role gets its own 3-axis mini-radar: precision / breadth / severity calibration (sonnet vs codex split exactly along these).
+
+### Per-dispatch eval, run by the reasoning line (split in two)
+
+Every completed dispatch produces an eval. It has two halves:
+- **Mechanical facts** (test counts, CI conclusion, rework rounds, reviewer OK/CONCERN/BUG tally, wall-clock) — extracted deterministically from ledger/traces, zero LLM. *Scripts execute.*
+- **Judgment distillation** (signature classification, per-axis scores, counter-clause proposals) — a reasoning-seat job (the labeler seat from the pattern-memory design) reading the **adjudication trace**. *Models judge.* Two guards: (1) proposal-mode — distilled signatures land as *proposed*; high-severity ones (`falsified_ci_report`-class) require leader ratification (reuse the `recall_proposals → review → apply` shape); (2) the seat transcribes the leader's already-made verdict into structure — it holds transcription rights, not judgment rights, so vendor overlap between the eval seat and the evaluated lane is not a conflict.
+
+Runs as a foundry job post-`complete`, same family as daily_distill. One distill call per dispatch — cheap.
+
+### The road from manual eval to auto-routing (three phases)
+
+1. **Manual (now):** the leader's adjudications ARE the bootstrap labels — 2026-07-05's nine merged PRs are the first labeled dataset, not wasted effort.
+2. **Semi-auto (#534 first slice + the eval line above):** traces distill to eval rows automatically; leader ratifies high-severity signatures.
+3. **Auto-routing with confidence gates:** the router auto-dispatches only task-types where the card holds N+ evidence rows; below threshold it falls back to leader choice. **Cold start has a proven protocol — the first-exam** (Sonnet 5's #599, 2026-07-05): a standard graded exam slice, same-type A/B against an incumbent lane, verdict recorded to the card. New models sit the exam before they earn routing eligibility.
