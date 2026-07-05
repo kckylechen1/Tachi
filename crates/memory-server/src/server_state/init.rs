@@ -231,6 +231,7 @@ impl MemoryServer {
                 tool_profile: Some(crate::profiles::default_tool_profile()),
                 handoff_memos: Vec::new(),
             })),
+            named_project_cache: Arc::new(StdMutex::new(HashMap::new())),
         };
 
         if background_workers_enabled() {
