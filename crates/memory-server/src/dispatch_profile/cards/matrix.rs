@@ -1,16 +1,5 @@
 use super::*;
 
-pub(in crate::dispatch_profile) fn profile_role_matches(
-    profile: &DispatchProfileDef,
-    role: &str,
-) -> bool {
-    role == profile.role
-        || (profile.role == "planner" && role == "architect")
-        || (profile.role == "architect" && role == "critic")
-        || (profile.role == "executor" && role == "implementer")
-        || (profile.role.contains("review") && role.contains("review"))
-}
-
 pub(in crate::dispatch_profile) fn sum_matrix_samples(rows: &[AgentPerformanceMatrixRow]) -> u32 {
     rows.iter().map(|row| row.samples).sum()
 }

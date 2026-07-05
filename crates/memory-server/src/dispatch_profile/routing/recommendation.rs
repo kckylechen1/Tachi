@@ -1,5 +1,5 @@
 use super::risk::classify_dispatch_risk;
-use super::scoring::{build_profile_fallback_chain, score_profile_candidate};
+use super::scoring::{route_eval_rows, route_performance_rows, route_subagent_scores};
 use super::*;
 
 pub(crate) fn handle_dispatch_recommendation(
@@ -15,29 +15,21 @@ pub(crate) fn handle_dispatch_recommendation(
     let performance_matrix = aggregate_performance_matrix(&rows);
     let route_policy_rules = load_route_policy_rule_loadout(server, &risk)?;
 
-    let mut candidates = DISPATCH_PROFILES
-        .iter()
-        .map(|profile| {
-            score_profile_candidate(
-                server,
-                profile,
-                &risk,
-                &rows,
-                &subagent_scores,
-                &performance_matrix,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    apply_route_policy_rules_to_candidates(&mut candidates, &route_policy_rules, &risk);
-    candidates
-        .sort_by(|a, b| compare_scores_desc(a.score, b.score).then(a.profile.cmp(&b.profile)));
+    let candidates = tachi_dispatch::recommend_dispatch_profile_candidates(
+        &risk,
+        &route_eval_rows(&rows),
+        &route_subagent_scores(&subagent_scores),
+        &route_performance_rows(&performance_matrix),
+        &route_policy_rules,
+        |profile| profile_weak_against_for_server(server, profile),
+    )?;
 
     let best = candidates
         .first()
         .ok_or_else(|| "no dispatch profiles configured".to_string())?;
     let best_profile = resolve_dispatch_profile(&best.profile)
         .ok_or_else(|| format!("internal missing profile {}", best.profile))?;
-    let fallback = build_profile_fallback_chain(best_profile, &candidates);
+    let fallback = tachi_dispatch::build_profile_fallback_chain(best_profile, &candidates);
     let live_matched_samples = candidates.iter().map(|c| c.live_samples).sum::<u32>();
     let performance_matrix_hits = candidates
         .iter()
