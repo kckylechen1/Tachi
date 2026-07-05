@@ -31,7 +31,10 @@ pub(crate) async fn handle_wiki_organize(
         std::env::current_dir().ok(),
         dirs::home_dir(),
         Some(std::env::temp_dir()),
-        server.global_db_path.parent().map(|p| p.to_path_buf()),
+        server
+            .global_db_path_buf()
+            .parent()
+            .map(|p| p.to_path_buf()),
     ]
     .iter()
     .filter_map(|opt| opt.as_ref().and_then(|p| p.canonicalize().ok()))

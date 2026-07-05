@@ -47,9 +47,10 @@ pub(crate) async fn maybe_forward_server_write<T: serde::Serialize>(
     tool_name: &str,
     params: &T,
 ) -> Result<Option<String>, String> {
+    let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
     maybe_forward_tool(
-        server.global_db_path.as_path(),
+        global_db_path.as_path(),
         project_db_path.as_deref(),
         tool_name,
         params,
@@ -85,9 +86,10 @@ pub(crate) async fn maybe_forward_server_read<T: serde::Serialize>(
     tool_name: &str,
     params: &T,
 ) -> Result<Option<String>, String> {
+    let global_db_path = server.global_db_path_buf();
     let project_db_path = server.project_db_path_buf();
     maybe_forward_read(
-        server.global_db_path.as_path(),
+        global_db_path.as_path(),
         project_db_path.as_deref(),
         tool_name,
         params,

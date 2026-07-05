@@ -1,7 +1,7 @@
 use super::print_pretty_json;
-use crate::cli::ManifestAction;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::ManifestAction;
 
 fn manifest_path(app_home: &Path) -> PathBuf {
     app_home.join("manifest.json")

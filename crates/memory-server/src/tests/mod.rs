@@ -14,6 +14,10 @@ fn ensure_test_env() {
         if std::env::var_os("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST").is_none() {
             std::env::set_var("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
         }
+        // Unit tests exercise local search semantics. Do not let a real or
+        // placeholder Voyage key turn those tests into network/provider-health
+        // tests; vector-specific tests pass explicit query vectors.
+        std::env::set_var("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
         std::env::set_var("TACHI_TEST_DISABLE_RECALL_CONFIG", "1");
         std::env::set_var("TACHI_WIKI_INGEST_ALLOW_ANY_LOCAL_FILE", "1");
         // close_loop's wiki drafting prefers a backend-model distill; force the

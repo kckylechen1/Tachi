@@ -1,4 +1,3 @@
-use crate::llm::LlmClient;
 use crate::provider_config::materialize_standalone;
 use crate::vector_backfill::{embed_and_write_batch, list_missing_vector_entries};
 use futures::{stream, StreamExt};
@@ -8,6 +7,7 @@ use std::fmt::Display;
 use std::io::{Error as IoError, ErrorKind};
 use std::path::PathBuf;
 use std::time::Duration;
+use tachi_llm::LlmClient;
 
 const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
 const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;

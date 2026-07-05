@@ -1,7 +1,7 @@
 use super::super::{FoundryMaintenanceItem, FOUNDRY_DISTILL_KEEP, FOUNDRY_DISTILL_SOURCE};
-use super::distill_helpers::build_foundry_distill_root;
 use super::store::{with_foundry_store, with_foundry_store_read};
 use crate::server_state::MemoryServer;
+use tachi_foundry::build_foundry_distill_root;
 
 pub(super) fn process_forget_sweep_job(
     server: &MemoryServer,

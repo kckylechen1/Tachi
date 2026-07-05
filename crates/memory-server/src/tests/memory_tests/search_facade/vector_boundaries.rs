@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn find_similar_memory_excludes_sft_training_rows_by_default() {
     let server = make_server();
-    if !server.global_vec_available {
+    if !server.global_vec_available() {
         return;
     }
     let mut query_vec = vec![0.0; 1024];
@@ -75,7 +75,7 @@ async fn find_similar_memory_excludes_sft_training_rows_by_default() {
 #[tokio::test]
 async fn find_similar_memory_excludes_recall_cache_rows_by_default() {
     let server = make_server();
-    if !server.global_vec_available {
+    if !server.global_vec_available() {
         return;
     }
     let mut query_vec = vec![0.0; 1024];

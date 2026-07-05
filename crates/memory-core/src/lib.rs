@@ -31,6 +31,8 @@ pub use db::foundry_jobs::{
     JobStatusHistogram, PersistedFoundryJob, RequeueOutcome,
 };
 pub use db::row_to_entry;
+pub use db::{CategoryPathPrefixMemoryRow, FoundryJobStatusCounts, PathPrefixMemoryRow};
+pub use db::{CategorySourceGroup, DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow};
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,

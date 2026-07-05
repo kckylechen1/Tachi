@@ -1,10 +1,13 @@
 mod agent_state;
 mod audit;
 mod common;
+mod daily_pipeline;
+mod doctor_probe;
 mod domain;
 mod event_ledger;
 pub mod foundry_config;
 pub mod foundry_jobs;
+mod gc_candidates;
 mod graph;
 mod hub_db;
 mod memory_crud;
@@ -24,8 +27,24 @@ pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
 pub(crate) use common::normalize_utc_iso;
 pub use common::{normalize_utc_iso_or_now, row_to_entry};
+pub use daily_pipeline::{
+    collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
+    count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
+    list_promotion_candidate_ids, promote_memory_to_durable, truth_maintenance_prune_stale,
+    truth_maintenance_self_heal_promote_raw, CategorySourceGroup, DailyHealthDbSnapshot,
+    DuplicateSummaryRow, EvalEvidenceRow,
+};
+pub use doctor_probe::{
+    checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
+    count_memories_vec_rows, foundry_job_status_counts, open_for_wal_checkpoint,
+    open_immutable_readonly, open_raw, schema_version, table_exists, FoundryJobStatusCounts,
+};
 pub use domain::{delete_domain, get_domain, list_domains, register_domain};
 pub use event_ledger::{continuity_metrics, insert_tachi_event, list_tachi_events};
+pub use gc_candidates::{
+    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
+    CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
+};
 pub use graph::{
     add_edge, avg_importance, count_same_topic, get_contradiction_count, get_edges,
     get_superseded_ids, graph_expand, remove_edge,
@@ -40,6 +59,7 @@ pub(crate) use memory_crud::record_access_with_updates;
 pub(crate) use memory_crud::search_fts_raw_match;
 #[cfg(test)]
 pub(crate) use memory_crud::AccessUpdate;
+pub(crate) use memory_crud::MEMORY_SELECT_COLUMNS;
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, find_active_wiki_entry_by_path_or_topic,
     get_access_times, get_all, list_by_path, list_wiki_duplicate_candidates, normalize_for_write,

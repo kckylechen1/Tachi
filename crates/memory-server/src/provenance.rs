@@ -24,19 +24,10 @@ fn current_agent_profile(server: &MemoryServer) -> Option<serde_json::Value> {
 
 fn current_db_path(server: &MemoryServer, target_db: DbScope) -> Option<String> {
     match target_db {
-        DbScope::Global => Some(server.global_db_path.display().to_string()),
-        DbScope::Project => {
-            if let Some(path) = server.project_db_path.as_ref() {
-                return Some(path.display().to_string());
-            }
-            let guard = server
-                .hot_project_db
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
-            guard
-                .as_ref()
-                .map(|state| state.db_path.display().to_string())
-        }
+        DbScope::Global => Some(server.global_db_path_buf().display().to_string()),
+        DbScope::Project => server
+            .project_db_path_buf()
+            .map(|path| path.display().to_string()),
     }
 }
 

@@ -12,6 +12,7 @@ mod recall_cache;
 pub(crate) mod wiki_evolver;
 
 pub(crate) use recall::rerank_rows_with_outcome;
+pub(crate) use tachi_foundry::FOUNDRY_DISTILL_SOURCE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RerankOutcome {
@@ -25,7 +26,6 @@ mod tests;
 
 const CAPTURE_DEDUP_THRESHOLD: f64 = 0.95;
 const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
-const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
 const FOUNDRY_RECALL_RERANK_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 const FOUNDRY_RELATED_LIMIT: usize = 4;
 const FOUNDRY_DISTILL_KEEP: usize = 6;

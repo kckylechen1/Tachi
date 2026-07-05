@@ -1,10 +1,10 @@
-use crate::hub_helpers::{capability_callable, capability_visibility_for_cap};
 use crate::tool_params::{HubDiscoverParams, HubFeedbackParams, HubGetParams};
 use crate::utils::redact_sensitive_value;
 use crate::MemoryServer;
 use memory_core::HubCapability;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
+use tachi_hub::{capability_callable, capability_visibility_for_cap};
 
 pub(crate) async fn handle_hub_discover(
     server: &MemoryServer,

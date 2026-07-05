@@ -45,4 +45,4 @@ use self::transport::*;
 
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::router::handle_tachi_gh;
-pub(crate) use self::safe_merge::{handle_github_safe_merge, CliGhClient};
+pub(crate) use self::safe_merge::{gh_client_for_server, handle_github_safe_merge};

@@ -1,6 +1,4 @@
 use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
-use crate::cli::{Cli, Commands};
-use crate::hub_helpers::should_expose_skill_tool;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::filter_mcp_tools_by_permissions;
 use crate::server_state::MemoryServer;
@@ -10,6 +8,8 @@ use memory_core::MemoryStore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tachi_bootstrap::cli::{Cli, Commands};
+use tachi_hub::should_expose_skill_tool;
 
 mod backfill_commands;
 mod background;
@@ -378,7 +378,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Distill { action } = &command {
-        use crate::cli::DistillAction;
+        use tachi_bootstrap::cli::DistillAction;
         let DistillAction::Run { db } = action;
         let target_project = db
             .clone()
@@ -517,7 +517,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .clone()
         .or_else(|| std::env::var("TACHI_PROFILE").ok());
     if let Some(raw_profile) = requested_tool_profile.as_deref() {
-        match crate::profiles::parse_tool_profile(raw_profile) {
+        match tachi_hub::parse_tool_profile(raw_profile) {
             Some(profile) => server.set_tool_profile(Some(profile)),
             None => eprintln!(
                 "Ignoring unknown tool profile '{}'; expected observe | remember | coordinate | operate | admin or a compatible host alias",
@@ -563,14 +563,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
     eprintln!(
         "Vector search: global={}, project={}",
-        server.global_vec_available, server.project_vec_available
+        server.global_vec_available(),
+        server.project_vec_available()
     );
     eprintln!(
         "Tool surface: {}",
         server
             .active_tool_profile()
             .map(|profile| profile.as_str())
-            .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str())
+            .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str())
     );
 
     if cli.daemon {

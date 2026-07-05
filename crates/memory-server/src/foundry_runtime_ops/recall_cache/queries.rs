@@ -1,8 +1,8 @@
 use super::super::helpers::dedup_strings;
-use super::super::maintenance::FoundryJobMetadata;
 use super::super::FoundryMaintenanceItem;
 use crate::server_state::MemoryServer;
 use memory_core::MemoryEntry;
+use tachi_foundry::FoundryJobMetadata;
 
 /// LLM prompt parameters for the query-generation step. Kept here (not
 /// in `mod.rs`) because nothing else needs them and tuning is local.

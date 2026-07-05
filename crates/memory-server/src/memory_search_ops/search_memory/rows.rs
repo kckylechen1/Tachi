@@ -175,8 +175,8 @@ pub(crate) async fn search_memory_rows_with_recall_config(
 
     if params.query_vec.is_none()
         && !parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
-        && (server.global_vec_available
-            || server.project_vec_available
+        && (server.global_vec_available()
+            || server.project_vec_available()
             || named_project_vec_available
             || default_wiki_vec_available)
     {

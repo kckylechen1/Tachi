@@ -295,8 +295,8 @@ pub(super) fn persist_capture_entry(
         })
     } else {
         let dest_path = match target_db {
-            DbScope::Global => Some(server.global_db_path.as_ref().clone()),
-            DbScope::Project => server.project_db_path.as_ref().map(|p| p.as_ref().clone()),
+            DbScope::Global => Some(server.global_db_path_buf()),
+            DbScope::Project => server.project_db_path_buf(),
         };
         let entry_to_write = if let Some(dest) = dest_path {
             let mut e = entry.clone();

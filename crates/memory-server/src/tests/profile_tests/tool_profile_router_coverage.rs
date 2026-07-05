@@ -1,0 +1,284 @@
+use std::collections::BTreeSet;
+use tachi_hub::{
+    tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
+    DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
+    REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
+};
+
+fn ensure_test_env() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
+        std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
+        std::env::set_var("SILICONFLOW_MODEL", "test-model");
+        std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+        std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
+    });
+}
+
+fn native_route_names() -> Vec<String> {
+    ensure_test_env();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("profiles test runtime");
+    let _guard = runtime.enter();
+    let db_path = std::env::temp_dir().join(format!(
+        "profiles-metadata-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
+    let mut names: Vec<String> = server
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|tool| tool.name.into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn bundle_count(tool_name: &str) -> usize {
+    [
+        ToolBundle::Observe,
+        ToolBundle::Remember,
+        ToolBundle::Coordinate,
+        ToolBundle::Operate,
+    ]
+    .into_iter()
+    .filter(|bundle| tool_matches_bundle(tool_name, *bundle))
+    .count()
+}
+
+const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
+    "add_edge",
+    "chain_skills",
+    "delete_domain",
+    "delete_memory",
+    "distill_trajectory",
+    "dlq_list",
+    "dlq_retry",
+    "get_domain",
+    "get_memory",
+    "get_state",
+    "hub_export_skills",
+    "hub_feedback",
+    "hub_get",
+    "hub_quick_add",
+    "hub_register",
+    "hub_review",
+    "hub_set_active_version",
+    "hub_set_enabled",
+    "hub_stats",
+    "ingest",
+    "ingest_source",
+    "list_domains",
+    "memory_gc",
+    "pack_get",
+    "pack_list",
+    "pack_project",
+    "pack_register",
+    "pack_remove",
+    "projection_list",
+    "register_domain",
+    "sandbox_check",
+    "sandbox_exec_audit",
+    "sandbox_get_policy",
+    "sandbox_list_policies",
+    "sandbox_set_policy",
+    "sandbox_set_rule",
+    "set_state",
+    "skill_evolve",
+    "tachi_audit_log",
+    "tachi_board",
+    "tachi_dispatch",
+    "tachi_init_project_db",
+    "tachi_wiki_organize",
+    "vault_get",
+    "vault_init",
+    "vault_list",
+    "vault_remove",
+    "vault_set",
+    "vault_set_api_key_pool",
+    "vault_lease_api_key",
+    "vault_record_key_result",
+    "vault_setup_rotation",
+    "vc_bind",
+    "vc_list",
+    "vc_register",
+    "vc_resolve",
+];
+
+const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
+    "archive_memory",
+    "capture_session",
+    "compact_rollup",
+    "compact_session_memory",
+    "extract_facts",
+    "handoff_check",
+    "handoff_leave",
+    "ingest_event",
+    "post_card",
+    "project_agent_profile",
+    "queue_agent_evolution",
+    "remember",
+    "review_agent_evolution_proposal",
+    "save_memory",
+    "sync_memories",
+    "synthesize_agent_evolution",
+    "tachi_complete",
+    "tachi_domain_adapter",
+    "tachi_handoff",
+    "tachi_memory",
+    "tachi_orchestrator",
+    "tachi_arena",
+    "tachi_verify",
+    "tachi_save",
+    "tachi_wiki_write",
+    "update_card",
+];
+
+const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    "cyberbrain_write",
+    "cyberbrain_search",
+    "section9_review",
+    "section9_audit_log",
+    "shell_set_policy",
+    "shell_get_policy",
+    "shell_list_policies",
+    "shell_exec_audit",
+    "tachi_plan",
+    "tachi_progress_check",
+    "wiki_browse",
+];
+
+const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory", "tachi_board", "tachi_dispatch"];
+
+#[test]
+fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    for name in STANDARD_MINIMAL_TOOL_PATTERNS
+        .iter()
+        .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
+    {
+        assert!(
+            route_names.contains(*name),
+            "minimal allow-list entry '{name}' is missing from the tool router"
+        );
+    }
+}
+
+#[test]
+fn every_bundle_wildcard_matches_a_real_tool() {
+    let route_names = native_route_names();
+    let wildcard_patterns: BTreeSet<&str> = OBSERVE_TOOL_PATTERNS
+        .iter()
+        .chain(REMEMBER_TOOL_PATTERNS.iter())
+        .chain(COORDINATE_TOOL_PATTERNS.iter())
+        .chain(OPERATE_TOOL_PATTERNS.iter())
+        .chain(STANDARD_MINIMAL_TOOL_PATTERNS.iter())
+        .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
+        .copied()
+        .filter(|pattern| pattern.contains('*'))
+        .collect();
+
+    for pattern in wildcard_patterns {
+        assert!(
+            route_names
+                .iter()
+                .any(|tool_name| tool_name_matches_pattern(tool_name, pattern)),
+            "wildcard pattern '{pattern}' matches no routed tool"
+        );
+    }
+}
+
+#[test]
+fn every_real_tool_is_either_bundled_or_explicitly_admin_only() {
+    let route_names = native_route_names();
+    let actual_admin_only: BTreeSet<String> = route_names
+        .iter()
+        .filter(|tool_name| bundle_count(tool_name) == 0)
+        .cloned()
+        .collect();
+    let expected_admin_only: BTreeSet<String> = ADMIN_ONLY_NATIVE_ROUTE_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+
+    assert_eq!(
+            actual_admin_only, expected_admin_only,
+            "new routed tools must either join a non-admin bundle or be explicitly classified as admin-only"
+        );
+}
+
+#[test]
+fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+
+    for tool_name in NON_ADMIN_WRITE_ROUTE_NAMES {
+        assert!(
+            route_names.contains(*tool_name),
+            "expected non-admin write tool '{tool_name}' to exist in the router"
+        );
+        assert!(
+            bundle_count(tool_name) > 0,
+            "non-admin write tool '{tool_name}' must belong to a bundle"
+        );
+        assert!(
+            crate::server_state::CACHE_INVALIDATING_TOOLS.contains(tool_name),
+            "non-admin write tool '{tool_name}' must invalidate the read cache"
+        );
+    }
+
+    assert!(!tool_matches_bundle("tachi_complete", ToolBundle::Observe));
+    assert!(tool_matches_bundle("tachi_complete", ToolBundle::Remember));
+}
+
+#[test]
+fn retired_native_aliases_stay_retired() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+    let cacheable: BTreeSet<&str> = crate::server_state::CACHEABLE_TOOLS
+        .iter()
+        .copied()
+        .collect();
+    let invalidating: BTreeSet<&str> = crate::server_state::CACHE_INVALIDATING_TOOLS
+        .iter()
+        .copied()
+        .collect();
+
+    for alias in RETIRED_NATIVE_ALIASES {
+        assert!(
+            !route_names.contains(*alias),
+            "retired native alias '{alias}' must not be reintroduced to the tool router"
+        );
+        assert!(
+            bundle_count(alias) == 0,
+            "retired native alias '{alias}' must not be included in tool profile bundles"
+        );
+        assert!(
+            !cacheable.contains(alias) && !invalidating.contains(alias),
+            "retired native alias '{alias}' must not remain in cache policy lists"
+        );
+    }
+}
+
+#[test]
+fn folded_native_compat_tools_stay_admin_only() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+
+    for tool_name in FOLDED_NATIVE_COMPAT_TOOLS {
+        assert!(
+            route_names.contains(*tool_name),
+            "folded compatibility tool '{tool_name}' should remain routable for admin/backcompat"
+        );
+        assert!(
+            bundle_count(tool_name) == 0,
+            "folded compatibility tool '{tool_name}' must not re-enter non-admin profile bundles"
+        );
+        assert!(
+            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
+                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
+            "folded compatibility tool '{tool_name}' must not be exposed through minimal profiles"
+        );
+    }
+}

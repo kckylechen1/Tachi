@@ -20,9 +20,9 @@ pub(super) use password::read_vault_password;
 pub(super) async fn run_vault_command(
     global_db_path: &PathBuf,
     app_home: &Path,
-    action: crate::cli::VaultAction,
+    action: tachi_bootstrap::cli::VaultAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::cli::VaultAction;
+    use tachi_bootstrap::cli::VaultAction;
 
     match action {
         action @ (VaultAction::Materialize { .. }

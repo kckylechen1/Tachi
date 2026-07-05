@@ -1,9 +1,9 @@
-use crate::cli::{VaultAction, VaultIntakeAction};
 use crate::provider_config::parse_vault_alias;
 use memory_core::vault::{SECRET_TYPE_API_KEY, SECRET_TYPE_JSON_BLOB};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::{VaultAction, VaultIntakeAction};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Candidate {

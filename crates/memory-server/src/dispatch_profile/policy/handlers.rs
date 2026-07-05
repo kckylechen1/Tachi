@@ -1,7 +1,9 @@
 use super::super::*;
-use super::loadout_evolution::build_loadout_evolution_proposals;
-use super::proposals::build_route_policy_proposals;
 use super::simulation::{route_simulation_caveats, simulate_route_policy};
+use tachi_dispatch::policy::{
+    build_loadout_evolution_proposals, build_route_policy_proposals, LoadoutEvalEntry,
+    ProfileCardRiskInputs, ProfilePositiveEvolutionInputs,
+};
 
 pub(crate) fn handle_route_simulation(
     server: &MemoryServer,
@@ -53,11 +55,23 @@ pub(crate) fn handle_route_policy_proposals(
         .iter()
         .map(|policy| simulate_route_policy(policy, &performance_matrix, None))
         .collect::<Vec<_>>();
-    let mut proposals = build_route_policy_proposals(&current, &variants, rows.len(), limit.max(1));
+    let generated_at = Utc::now().to_rfc3339();
+    let mut proposals =
+        build_route_policy_proposals(&current, &variants, rows.len(), limit.max(1), &generated_at);
+    let eval_entries = load_live_eval_entries(server, limit.max(1))?
+        .into_iter()
+        .map(|entry| LoadoutEvalEntry {
+            path: entry.path,
+            metadata: entry.metadata,
+        })
+        .collect::<Vec<_>>();
     proposals.extend(build_loadout_evolution_proposals(
-        server,
         &performance_matrix,
+        &eval_entries,
         limit.max(1),
+        &generated_at,
+        |profile| profile_card_risk_inputs(server, profile),
+        |profile| profile_positive_evolution_inputs(server, profile),
     )?);
 
     server.with_global_store(|store| {
@@ -193,4 +207,65 @@ pub(crate) fn handle_route_policy_review(
         "proposal": updated,
     }))
     .map_err(|e| format!("serialize route policy review response: {e}"))
+}
+
+fn load_live_eval_entries(
+    server: &MemoryServer,
+    limit: usize,
+) -> Result<Vec<memory_core::MemoryEntry>, String> {
+    let limit = limit.max(1);
+    let mut entries = server.with_global_store_read(|store| {
+        store
+            .list_by_path("/eval", limit, false)
+            .map_err(|e| format!("list global eval entries: {e}"))
+    })?;
+    if server.has_project_db() {
+        let mut project_entries = server.with_project_store_read(|store| {
+            store
+                .list_by_path("/eval", limit, false)
+                .map_err(|e| format!("list project eval entries: {e}"))
+        })?;
+        entries.append(&mut project_entries);
+    }
+    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.truncate(limit);
+    Ok(entries)
+}
+
+fn profile_card_risk_inputs(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<ProfileCardRiskInputs, String> {
+    Ok(ProfileCardRiskInputs {
+        existing_weak_against: profile_weak_against_for_server(server, profile)?
+            .into_iter()
+            .collect(),
+        existing_demotion_targets: profile_demotion_targets(server, profile)?
+            .into_iter()
+            .collect(),
+        profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
+    })
+}
+
+fn profile_positive_evolution_inputs(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+) -> Result<ProfilePositiveEvolutionInputs, String> {
+    Ok(ProfilePositiveEvolutionInputs {
+        profile_required_skills: profile_required_skill_ids_for_server(server, profile)?,
+        existing_passive_traits: profile_skill_loadout_json_for_server(server, profile)
+            .map(|loadout| {
+                loadout
+                    .get("passive_traits")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+            })?
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect(),
+        existing_evidence_required: profile_evidence_required_for_server(server, profile)?
+            .into_iter()
+            .collect(),
+    })
 }

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::cli::SkillSurfaceAction;
+use tachi_bootstrap::cli::SkillSurfaceAction;
 
 use super::print::{print_skill_source_report, print_skill_surface_report};
 use super::projection::{build_cc_switch_projection_status, read_cc_switch_skills};

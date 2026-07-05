@@ -1,38 +1,15 @@
 use chrono::Utc;
 use serde_json::json;
 
+use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 use crate::server_state::{DbScope, MemoryServer};
 use memory_core::{MemoryEdge, MemoryEntry, MemoryStore};
-
-use crate::foundry_runtime_ops::maintenance::{
-    plan_daily_distill_memory, plan_distill_edges, DailyDistillMemoryInput,
+use tachi_foundry::{
+    plan_daily_distill_memory, plan_distill_edges, should_archive_daily_distill_source,
+    DailyDistillMemoryInput,
 };
-use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 
 use super::types::{CandidateGroup, GroupPayload};
-
-const DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING: f64 = 0.85;
-
-fn should_archive_distilled_source(entry: &MemoryEntry) -> bool {
-    if entry.archived
-        || entry.source.eq_ignore_ascii_case(FOUNDRY_DISTILL_SOURCE)
-        || !entry.tier.eq_ignore_ascii_case("raw")
-        || entry.access_count > 0
-        || entry.recall_count > 0
-    {
-        return false;
-    }
-
-    if entry
-        .retention_policy
-        .as_deref()
-        .is_some_and(|policy| matches!(policy, "pinned" | "permanent"))
-    {
-        return false;
-    }
-
-    entry.importance < DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING
-}
 
 fn archive_distilled_sources(
     store: &mut MemoryStore,
@@ -43,7 +20,7 @@ fn archive_distilled_sources(
     let mut archived_count = 0;
     for source in source_entries
         .iter()
-        .filter(|entry| should_archive_distilled_source(entry))
+        .filter(|entry| should_archive_daily_distill_source(entry))
     {
         let edge = MemoryEdge {
             source_id: distill_entry.id.clone(),

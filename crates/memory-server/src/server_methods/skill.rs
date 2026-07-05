@@ -1,4 +1,3 @@
-use crate::hub_helpers::{build_skill_tool_from_cap, make_text_tool_result};
 use crate::hub_ops::{build_skill_execution_envelope, execute_registered_skill_prompt};
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::server_state::MemoryServer;
@@ -6,6 +5,7 @@ use crate::shared_defs::dlq_mutation_is_unsafe;
 use crate::utils::lock_or_recover;
 use memory_core::HubCapability;
 use serde_json::Value;
+use tachi_hub::{build_skill_tool_from_cap, make_text_tool_result};
 
 impl MemoryServer {
     pub(crate) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {

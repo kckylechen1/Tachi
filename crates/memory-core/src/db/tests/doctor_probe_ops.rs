@@ -1,0 +1,147 @@
+use super::*;
+use tempfile::tempdir;
+
+#[test]
+fn table_exists_true_for_present_table_false_for_missing() {
+    let conn = make_conn();
+    assert!(table_exists(&conn, "memories"));
+    assert!(!table_exists(&conn, "definitely_not_a_real_table"));
+}
+
+#[test]
+fn count_memories_rows_zero_then_nonzero() {
+    let mut conn = make_conn();
+    assert_eq!(count_memories_rows(&conn).unwrap(), 0);
+    upsert(&mut conn, &make_entry("m1", "first"), false).unwrap();
+    upsert(&mut conn, &make_entry("m2", "second"), false).unwrap();
+    assert_eq!(count_memories_rows(&conn).unwrap(), 2);
+}
+
+#[test]
+fn count_chunks_rows_reflects_legacy_table_contents() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE chunks (id TEXT PRIMARY KEY, text TEXT);
+         INSERT INTO chunks VALUES ('c1', 'legacy chunk');",
+    )
+    .unwrap();
+    assert_eq!(count_chunks_rows(&conn).unwrap(), 1);
+}
+
+#[test]
+fn count_memories_vec_rows_errors_when_table_missing() {
+    // A bare connection with only a `memories` table (no sqlite-vec virtual
+    // table) — mirrors a legacy/foreign DB doctor may scan.
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE memories (id TEXT PRIMARY KEY);")
+        .unwrap();
+    assert!(count_memories_vec_rows(&conn).is_err());
+}
+
+#[test]
+fn count_memories_vec_rows_zero_when_table_present_and_empty() {
+    let conn = make_conn();
+    if !table_exists(&conn, "memories_vec") {
+        // sqlite-vec extension unavailable on this platform/build — skip.
+        return;
+    }
+    assert_eq!(count_memories_vec_rows(&conn).unwrap(), 0);
+}
+
+#[test]
+fn count_memories_missing_domain_covers_null_and_empty_string_but_not_set() {
+    let mut conn = make_conn();
+    let mut null_domain = make_entry("null-domain", "no domain");
+    null_domain.domain = None;
+    upsert(&mut conn, &null_domain, false).unwrap();
+
+    let mut empty_domain = make_entry("empty-domain", "empty domain");
+    empty_domain.domain = Some(String::new());
+    upsert(&mut conn, &empty_domain, false).unwrap();
+
+    let mut set_domain = make_entry("set-domain", "has domain");
+    set_domain.domain = Some("trading".to_string());
+    upsert(&mut conn, &set_domain, false).unwrap();
+
+    assert_eq!(count_memories_missing_domain(&conn).unwrap(), 2);
+}
+
+#[test]
+fn foundry_job_status_counts_all_zero_when_table_missing() {
+    let conn = make_conn();
+    let counts = foundry_job_status_counts(&conn);
+    assert_eq!(counts, FoundryJobStatusCounts::default());
+}
+
+#[test]
+fn foundry_job_status_counts_tallies_by_status_case_insensitively() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE foundry_jobs (id TEXT, status TEXT);
+         INSERT INTO foundry_jobs VALUES
+             ('j1', 'completed'),
+             ('j2', 'Completed'),
+             ('j3', 'skipped'),
+             ('j4', 'FAILED'),
+             ('j5', 'pending'),
+             ('j6', 'running');",
+    )
+    .unwrap();
+
+    let counts = foundry_job_status_counts(&conn);
+    assert_eq!(counts.total, 6);
+    assert_eq!(counts.completed, 2, "case-insensitive match on status");
+    assert_eq!(counts.skipped, 1);
+    assert_eq!(counts.failed, 1);
+    assert_eq!(counts.pending, 1);
+    // 'running' isn't one of the tallied buckets — total still counts it,
+    // callers reconcile the "other" bucket themselves from total - known.
+}
+
+#[test]
+fn schema_version_fails_on_garbage_bytes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("garbage.db");
+    std::fs::write(&path, b"not a sqlite file at all, just junk bytes").unwrap();
+
+    let conn = open_raw(&path).unwrap();
+    assert!(schema_version(&conn).is_err());
+}
+
+#[test]
+fn schema_version_succeeds_on_a_real_database() {
+    let conn = Connection::open_in_memory().unwrap();
+    assert!(schema_version(&conn).is_ok());
+}
+
+#[test]
+fn open_immutable_readonly_round_trips_an_existing_database() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ro.db");
+    {
+        let conn = open_raw(&path).unwrap();
+        conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
+    }
+
+    let uri = format!("file:{}?mode=ro&immutable=1", path.display());
+    let conn = open_immutable_readonly(&uri).expect("open immutable readonly");
+    assert!(table_exists(&conn, "t"));
+}
+
+#[test]
+fn open_immutable_readonly_errors_on_missing_file() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("does-not-exist.db");
+    let uri = format!("file:{}?mode=ro&immutable=1", path.display());
+    assert!(open_immutable_readonly(&uri).is_err());
+}
+
+#[test]
+fn checkpoint_wal_truncate_is_a_harmless_noop_off_wal_mode() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("chk.db");
+    let conn = open_for_wal_checkpoint(path.to_str().unwrap()).expect("open for checkpoint");
+    conn.execute_batch("CREATE TABLE t (id INTEGER);").unwrap();
+    // Not in WAL mode here — PRAGMA wal_checkpoint is still a valid no-op.
+    checkpoint_wal_truncate(&conn).expect("checkpoint should not error off WAL mode");
+}

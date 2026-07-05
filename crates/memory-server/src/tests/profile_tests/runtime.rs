@@ -4,7 +4,7 @@ use super::*;
 async fn runtime_info_reports_identity_and_db_routing() {
     let server = make_server();
     server.set_tool_profile(Some(
-        crate::profiles::parse_tool_profile("openclaw").expect("openclaw profile should parse"),
+        tachi_hub::parse_tool_profile("openclaw").expect("openclaw profile should parse"),
     ));
 
     let info = server

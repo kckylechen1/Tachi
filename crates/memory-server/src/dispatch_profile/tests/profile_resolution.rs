@@ -1,4 +1,5 @@
 use super::*;
+use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS, WAZA_THINK};
 
 #[test]
 fn dispatch_profile_selects_backend_and_mcp_contract() {
@@ -24,8 +25,9 @@ fn dispatch_profile_selects_backend_and_mcp_contract() {
         .iter()
         .any(|skill| skill == CODING_ARCHITECTURE_DECISION));
     assert_eq!(
-        profile_skill_loadout_json(resolve_dispatch_profile("claude_plan").unwrap())
-            ["passive_traits"][0],
+        tachi_dispatch::profile_skill_loadout_json(
+            resolve_dispatch_profile("claude_plan").unwrap()
+        )["passive_traits"][0],
         json!("plan_before_execute")
     );
     let profile_payload = profile_json(resolve_dispatch_profile("claude_plan").unwrap());

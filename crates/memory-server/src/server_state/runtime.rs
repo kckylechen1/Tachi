@@ -1,8 +1,8 @@
 use crate::enrichment::EnrichmentItem;
 use crate::foundry_runtime_ops::{FoundryMaintenanceItem, FoundryWorkerStats};
-use crate::profiles::ToolProfile;
 use memory_server_runtime::{AgentProfile, HandoffMemo};
 use std::sync::Arc;
+use tachi_hub::ToolProfile;
 use tokio::sync::mpsc;
 
 #[derive(Debug)]

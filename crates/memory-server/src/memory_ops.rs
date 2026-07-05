@@ -171,11 +171,13 @@ pub(crate) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
     }
 
     let mut databases = serde_json::Map::new();
+    let global_db_path = server.global_db_path_buf();
+    let project_db_path = server.project_db_path_buf();
     databases.insert(
         "global".into(),
         json!({
-            "path": server.global_db_path.display().to_string(),
-            "vec_available": server.global_vec_available,
+            "path": global_db_path.display().to_string(),
+            "vec_available": server.global_vec_available(),
             "total": global_stats.total,
             "by_scope": global_stats.by_scope,
             "by_category": global_stats.by_category,
@@ -185,8 +187,8 @@ pub(crate) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
         databases.insert(
             "project".into(),
             json!({
-                "path": server.project_db_path.as_ref().map(|p| p.display().to_string()),
-                "vec_available": server.project_vec_available,
+                "path": project_db_path.as_ref().map(|p| p.display().to_string()),
+                "vec_available": server.project_vec_available(),
                 "total": ps.total,
                 "by_scope": ps.by_scope,
                 "by_category": ps.by_category,
@@ -208,7 +210,7 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
     let tool_profile = server
         .active_tool_profile()
         .map(|profile| profile.as_str())
-        .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str());
+        .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str());
     let requested_profile = std::env::var("TACHI_PROFILE").ok();
     let derivative_identity = std::env::var("TACHI_DERIVATIVE_IDENTITY")
         .ok()
@@ -219,20 +221,20 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
         .map(|path| path.display().to_string());
     let app_home = crate::status_ops::resolve_app_home();
     let global_db_path = server.global_db_path_buf();
+    let project_db_path = server.project_db_path_buf();
     let daemon = crate::status_ops::collect_daemon_status(&app_home, &global_db_path);
     let process =
         crate::status_ops::runtime_observability_json(server, &app_home, Some(&daemon), true);
 
-    let project = server.project_db_path.as_ref().map(|path| {
+    let project = project_db_path.as_ref().map(|path| {
         json!({
             "path": path.display().to_string(),
-            "vec_available": server.project_vec_available,
+            "vec_available": server.project_vec_available(),
         })
     });
-    let plan_c_split_brain = server
-        .project_db_path
+    let plan_c_split_brain = project_db_path
         .as_ref()
-        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_ref()));
+        .and_then(|path| crate::path_utils::plan_c_split_brain_for_local_db(path.as_path()));
 
     serde_json::to_string(&json!({
         "runtime": {
@@ -247,8 +249,8 @@ pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String,
         "process": process,
         "databases": {
             "global": {
-                "path": server.global_db_path.display().to_string(),
-                "vec_available": server.global_vec_available,
+                "path": global_db_path.display().to_string(),
+                "vec_available": server.global_vec_available(),
             },
             "project": project,
             "single_db_mode": !server.has_project_db(),

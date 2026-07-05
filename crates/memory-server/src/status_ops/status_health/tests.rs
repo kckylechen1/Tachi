@@ -366,7 +366,7 @@ fn provider_probe_client_loads_target_db_key_health() {
     let db_path = temp.path().join("global.db");
     const KEY: &str = "TACHI_TEST_ONLY_API_KEY_PROBE_HEALTH";
 
-    let writer = crate::llm::LlmClient::new_with_vault_db(Some(&db_path))
+    let writer = tachi_llm::LlmClient::new_with_vault_db(Some(&db_path))
         .expect("writer client should initialize");
     writer.record_provider_key_result_blocking(
         KEY,
@@ -381,7 +381,7 @@ fn provider_probe_client_loads_target_db_key_health() {
         .expect("probe client should initialize");
     probe.set_provider_secret_pool(
         KEY,
-        vec![crate::llm::ProviderSecret {
+        vec![tachi_llm::ProviderSecret {
             key_id: KEY.to_string(),
             value: "secret".to_string(),
         }],
