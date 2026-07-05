@@ -1,15 +1,14 @@
-use super::security_scan::{
-    merge_skill_scans, scan_skill_definition, scan_skill_definition_with_llm,
-};
-use crate::hub_helpers::{
-    capability_callable, capability_visibility_for_cap, should_expose_skill_tool,
-};
+use super::security_scan::scan_skill_definition_with_llm;
 use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
 use crate::tool_params::HubRegisterParams;
 use crate::utils::is_trusted_mcp_command;
 use crate::{DbScope, MemoryServer};
 use memory_core::{HubCapability, MemoryStore};
 use serde_json::json;
+use tachi_hub::{
+    capability_callable, capability_visibility_for_cap, merge_skill_scans, scan_skill_definition,
+    should_expose_skill_tool,
+};
 
 const MAX_HUB_DEFINITION_BYTES: usize = 256 * 1024;
 

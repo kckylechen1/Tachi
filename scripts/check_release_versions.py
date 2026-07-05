@@ -72,6 +72,7 @@ def main() -> int:
         "crates/tachi-bootstrap/Cargo.toml",
         "crates/tachi-dispatch/Cargo.toml",
         "crates/tachi-foundry/Cargo.toml",
+        "crates/tachi-hub/Cargo.toml",
         "crates/tachi-llm/Cargo.toml",
     ]
     for path in cargo_files:
@@ -87,6 +88,7 @@ def main() -> int:
             "tachi-bootstrap",
             "tachi-dispatch",
             "tachi-foundry",
+            "tachi-hub",
             "tachi-llm",
         }
     )
@@ -99,6 +101,7 @@ def main() -> int:
         "tachi-bootstrap",
         "tachi-dispatch",
         "tachi-foundry",
+        "tachi-hub",
         "tachi-llm",
     ]:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)

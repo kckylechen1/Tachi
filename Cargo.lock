@@ -1415,6 +1415,7 @@ dependencies = [
  "tachi-clean",
  "tachi-dispatch",
  "tachi-foundry",
+ "tachi-hub",
  "tachi-llm",
  "tempfile",
  "thiserror 2.0.18",
@@ -2474,6 +2475,16 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "tachi-hub"
+version = "1.6.2"
+dependencies = [
+ "chrono",
+ "memory-core",
+ "rmcp",
+ "serde_json",
 ]
 
 [[package]]

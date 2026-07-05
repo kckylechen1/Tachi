@@ -1,10 +1,10 @@
 use super::ResolvedCallTarget;
-use crate::hub_helpers::capability_callable;
 use crate::mcp_proxy::{resolve_mcp_tool_exposure, McpToolExposureMode};
 use crate::server_state::MemoryServer;
 use chrono::Utc;
 use memory_core::{HubCapability, VirtualCapabilityBinding};
 use serde_json::{json, Value};
+use tachi_hub::capability_callable;
 
 impl MemoryServer {
     pub(crate) fn get_capability(&self, cap_id: &str) -> Result<HubCapability, rmcp::ErrorData> {

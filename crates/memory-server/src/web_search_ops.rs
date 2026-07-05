@@ -6,9 +6,9 @@
 
 use serde_json::{json, Value};
 
-use crate::hub_helpers::capability_callable;
 use crate::tool_params::*;
 use crate::MemoryServer;
+use tachi_hub::capability_callable;
 
 fn first_text_blocks(result: &rmcp::model::CallToolResult) -> Vec<String> {
     result

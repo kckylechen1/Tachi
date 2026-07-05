@@ -1,5 +1,4 @@
 use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
-use crate::hub_helpers::should_expose_skill_tool;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::filter_mcp_tools_by_permissions;
 use crate::server_state::MemoryServer;
@@ -10,6 +9,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tachi_bootstrap::cli::{Cli, Commands};
+use tachi_hub::should_expose_skill_tool;
 
 mod backfill_commands;
 mod background;

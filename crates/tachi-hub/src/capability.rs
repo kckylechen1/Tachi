@@ -2,25 +2,14 @@ use memory_core::HubCapability;
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CapabilityVisibility {
+pub enum CapabilityVisibility {
     Listed,
     Discoverable,
     Hidden,
 }
 
 impl CapabilityVisibility {
-    pub(super) fn from_str(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "listed" | "public" | "show" => Some(Self::Listed),
-            "discoverable" | "on_demand" | "on-demand" | "call_only" | "call-only" => {
-                Some(Self::Discoverable)
-            }
-            "hidden" | "private" | "off" => Some(Self::Hidden),
-            _ => None,
-        }
-    }
-
-    pub(super) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Listed => "listed",
             Self::Discoverable => "discoverable",
@@ -29,18 +18,33 @@ impl CapabilityVisibility {
     }
 }
 
-pub(super) fn capability_visibility_from_definition(def: &Value) -> CapabilityVisibility {
+impl std::str::FromStr for CapabilityVisibility {
+    type Err = ();
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "listed" | "public" | "show" => Ok(Self::Listed),
+            "discoverable" | "on_demand" | "on-demand" | "call_only" | "call-only" => {
+                Ok(Self::Discoverable)
+            }
+            "hidden" | "private" | "off" => Ok(Self::Hidden),
+            _ => Err(()),
+        }
+    }
+}
+
+pub fn capability_visibility_from_definition(def: &Value) -> CapabilityVisibility {
     let raw = def
         .get("policy")
         .and_then(|p| p.get("visibility"))
         .and_then(|v| v.as_str())
         .or_else(|| def.get("visibility").and_then(|v| v.as_str()));
 
-    raw.and_then(CapabilityVisibility::from_str)
+    raw.and_then(|value| value.parse::<CapabilityVisibility>().ok())
         .unwrap_or(CapabilityVisibility::Listed)
 }
 
-pub(super) fn capability_visibility_for_cap(cap: &HubCapability) -> CapabilityVisibility {
+pub fn capability_visibility_for_cap(cap: &HubCapability) -> CapabilityVisibility {
     match serde_json::from_str::<Value>(&cap.definition) {
         Ok(def) => capability_visibility_from_definition(&def),
         Err(e) => {
@@ -53,27 +57,27 @@ pub(super) fn capability_visibility_for_cap(cap: &HubCapability) -> CapabilityVi
     }
 }
 
-pub(super) fn should_expose_skill_tool(cap: &HubCapability) -> bool {
+pub fn should_expose_skill_tool(cap: &HubCapability) -> bool {
     cap.enabled
         && cap.cap_type.eq_ignore_ascii_case("skill")
         && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
 }
 
-pub(super) fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
+pub fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
     cap.enabled
         && cap.cap_type.eq_ignore_ascii_case("mcp")
         && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
 }
 
-pub(super) fn review_status_allows_call(review_status: &str) -> bool {
+pub fn review_status_allows_call(review_status: &str) -> bool {
     review_status.eq_ignore_ascii_case("approved")
 }
 
-pub(super) fn health_status_allows_call(health_status: &str) -> bool {
+pub fn health_status_allows_call(health_status: &str) -> bool {
     !health_status.eq_ignore_ascii_case("open")
 }
 
-pub(super) fn capability_callable(cap: &HubCapability) -> bool {
+pub fn capability_callable(cap: &HubCapability) -> bool {
     if !cap.enabled {
         return false;
     }
@@ -96,7 +100,7 @@ pub(super) fn capability_callable(cap: &HubCapability) -> bool {
     }
 }
 
-pub(super) fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
+pub fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
     let raw = skill_id.strip_prefix("skill:")?;
     let mut output = String::from("tachi_skill_");
     for c in raw.chars() {
@@ -112,7 +116,7 @@ pub(super) fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
     Some(output.trim_end_matches('_').to_string())
 }
 
-pub(super) fn make_text_tool_result(
+pub fn make_text_tool_result(
     payload: &Value,
 ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
     let text = serde_json::to_string(payload)
@@ -124,7 +128,7 @@ pub(super) fn make_text_tool_result(
     .map_err(|e| rmcp::ErrorData::internal_error(format!("build MCP response: {e}"), None))
 }
 
-pub(super) fn build_skill_tool_from_cap(
+pub fn build_skill_tool_from_cap(
     cap: &HubCapability,
 ) -> Result<(String, rmcp::model::Tool), String> {
     let tool_name = sanitize_skill_tool_name(&cap.id)
@@ -155,4 +159,70 @@ pub(super) fn build_skill_tool_from_cap(
     }))
     .map_err(|e| format!("Build skill tool failed: {e}"))?;
     Ok((tool_name, tool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cap(id: &str, cap_type: &str, definition: &str) -> HubCapability {
+        HubCapability {
+            id: id.to_string(),
+            name: id.to_string(),
+            cap_type: cap_type.to_string(),
+            version: 1,
+            description: String::new(),
+            definition: definition.to_string(),
+            enabled: true,
+            review_status: "approved".to_string(),
+            health_status: "healthy".to_string(),
+            last_error: None,
+            last_success_at: None,
+            last_failure_at: None,
+            fail_streak: 0,
+            active_version: None,
+            exposure_mode: "direct".to_string(),
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn visibility_accepts_policy_field_and_defaults_to_listed() {
+        assert_eq!(
+            capability_visibility_from_definition(&json!({"policy": {"visibility": "hidden"}})),
+            CapabilityVisibility::Hidden
+        );
+        assert_eq!(
+            capability_visibility_from_definition(&json!({"visibility": "on-demand"})),
+            CapabilityVisibility::Discoverable
+        );
+        assert_eq!(
+            capability_visibility_from_definition(&json!({})),
+            CapabilityVisibility::Listed
+        );
+    }
+
+    #[test]
+    fn mcp_capability_requires_ready_discovery_to_be_callable() {
+        let ready = cap("mcp:ready", "mcp", r#"{"discovery_status":"ready"}"#);
+        let pending = cap("mcp:pending", "mcp", r#"{"discovery_status":"pending"}"#);
+
+        assert!(capability_callable(&ready));
+        assert!(!capability_callable(&pending));
+    }
+
+    #[test]
+    fn skill_tool_names_are_sanitized() {
+        assert_eq!(
+            sanitize_skill_tool_name("skill:Review/Fix-It"),
+            Some("tachi_skill_review_fix_it".to_string())
+        );
+        assert_eq!(sanitize_skill_tool_name("mcp:web-search"), None);
+    }
 }

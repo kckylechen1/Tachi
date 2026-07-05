@@ -272,7 +272,8 @@ graph TD
 |------|------------|
 | `crates/memory-core` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
 | `crates/tachi-bootstrap` | Shared CLI command contract and startup parsing for the Tachi server binary. |
-| `crates/memory-server` | MCP server/runtime implementation, profile filtering, Hub routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
+| `crates/tachi-hub` | Shared Hub capability policy, skill execution envelope, and security scan rules used by the server/runtime. |
+| `crates/memory-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `packages/tachi-cli` | TypeScript CLI and npm wrapper. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
