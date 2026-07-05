@@ -5,15 +5,16 @@ use crate::tool_params::TachiAgentEvalParams;
 use serde_json::Value;
 use std::path::Path;
 
-mod aggregate;
 mod fixture;
 mod live;
-mod types;
 
-pub(crate) use self::aggregate::*;
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
-pub(crate) use self::types::*;
+pub(crate) use tachi_dispatch::eval::{
+    aggregate_performance_matrix, aggregate_scores, aggregate_subagent_scores,
+    AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentEvalRow, SubagentTaskScore,
+    TaskType,
+};
 
 pub(crate) async fn handle_agent_eval(
     _server: &MemoryServer,

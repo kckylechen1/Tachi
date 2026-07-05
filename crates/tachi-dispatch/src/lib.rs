@@ -9,6 +9,7 @@ mod profiles;
 mod registry;
 mod routing;
 
+pub mod eval;
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, is_trusted_dispatch_command, resolve_permission_profile, tail_chars,
