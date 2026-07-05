@@ -1,0 +1,44 @@
+schema = "tachi-lane-card/v1"
+
+[identity]
+name = "sonnet-5"
+vendor = "anthropic"
+model_id = "claude-sonnet-5"
+transport = "agent-tool" # general-purpose subagent, model: sonnet
+roles = ["implementer-light", "reviewer(sonnet-family seat)"]
+
+[hexagon] # seed 2026-07-05 (single implementation exam — low-N, widen with more rows)
+spec_fidelity = 0.95
+self_report_trust = 0.95
+test_discipline = 0.98 # 17 unprompted equivalence-class tests
+equivalence_refactor = 0.90
+security_competence = 0.60 # unproven; no security task yet
+speed_cost = 0.35 # 18min/101 tools vs grok's 7min on same-type task
+
+[routing]
+route_to = ["test-dense-refactor", "judgment-dense-refactor", "work-needing-self-disclosure"]
+route_away = ["pure-fast-mechanical-sink (grok is 2.5x faster)", "security (unproven, exam first)"]
+
+[[failure_modes]]
+# none recorded yet — first exam was 6/6 clean. Watch: cost/latency is the tradeoff, not correctness.
+signature = "none_recorded"
+count = 0
+evidence = ["tachi#601 first exam: cleaner than the incumbent's first cut"]
+counter_clause = ""
+efficacy = ""
+
+[constraints.mandatory_clauses]
+all = ["standard workspace law", "verbatim test result lines"]
+
+[trust]
+self_report = "high" # caught the issue template's false 'worktree ready' claim; self-flagged its one behavior change with a Rejected: trailer
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#599/#601 first implementation exam (doctor/gc SQL sink)"
+score = 0.95
+verdict = "6/6 review checkpoints clean; 17 unprompted discriminating tests; distrusted a false spec claim; self-disclosed error-string collapse for adjudication"
+
+# Note: the patch-reviewer seat (sonnet-family) produced tonight's strongest review series
+# (#592/#594/#595/#600/#601/#606/#607/#610/#513) — precision-first, severity well-calibrated,
+# runs tests reliably. Reviewer-seat evidence tracked on that seat's lineage, not this card.
