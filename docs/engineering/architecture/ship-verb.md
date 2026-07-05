@@ -57,9 +57,11 @@ Nothing here is replaced. `ship` composes these; it invents no parallel infrastr
 
 - MCP: `tachi_gh(action='ship', issue=N, base?, wait?)` — the canonical surface.
 - CLI: `tachi ship <issue#> [--base goal/N] [--wait]`.
-- Harness shims: `codex-ship` becomes a ~3-line wrapper calling `tachi ship`,
-  keeping only its harness-specific stderr coaching lines. If Tachi is unreachable the
-  shim fails LOUDLY — record-keeping never dies silently.
+- Harnesses call `tachi ship` directly — no shims (owner 2026-07-05: a wrapper whose
+  only content is a pointer is a diverging wrapper waiting to happen). The coaching
+  lines every harness needs ("this contract's ceremony is DONE — if your mandate has
+  more contracts, start the next one now") live in ship's result text, shared by all
+  callers. If Tachi is unreachable, shipping fails LOUDLY — there is no fallback path.
 
 `ship` returns immediately with a `ship_id` (a flow-scoped run); `wait=true` blocks until
 terminal state. Review-lane callers that require inline verdicts (codex two-layer
@@ -107,7 +109,8 @@ A multi-contract campaign (umbrella issue) gets an integration branch `goal/<iss
 1. **Contract mode (deterministic core).** Extend `gh_ops/ship.rs`: when `pr_body` is
    absent, derive commits from `<base>..HEAD` and generate the body from the git log
    (adopt the codex-ship format verbatim); accept `base`; optional worktree reap.
-   No LLM, no new concepts. codex-ship retires to a shim the same day.
+   No LLM, no new concepts. codex-ship is DELETED the same day; the codex constitution
+   swaps `codex-ship <n>` for `tachi ship <n>`.
 2. **Pipeline (the one-button).** The ship skill SOP + cheap-worker dispatch profile
    (`ship_runner` card: delegate tool profile, no recursion, github_write only);
    ship.json state machine in the run dir; verify + review steps wired as above.
