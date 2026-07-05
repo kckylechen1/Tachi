@@ -43,14 +43,17 @@ impl Drop for EnvGuard {
     }
 }
 
+// Same worst-case ceiling as before (40 * 100ms = 200 * 20ms = 4s); a finer
+// poll interval lets the common fast-resolving case return sooner without
+// weakening the timeout safety margin (issue #682 busy-wait sweep).
 async fn wait_for_nonempty_file(path: &Path) -> String {
-    for _ in 0..40 {
+    for _ in 0..200 {
         if let Ok(raw) = std::fs::read_to_string(path) {
             if !raw.trim().is_empty() {
                 return raw;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     std::fs::read_to_string(path).unwrap_or_default()
 }

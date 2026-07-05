@@ -45,8 +45,14 @@ jobs:
           cargo install cargo-audit --quiet
           cargo audit --deny warnings
 
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nextest.rs/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      - name: Run doc tests
+        run: cargo test --workspace --locked --doc
 
   node:
     name: Node packages

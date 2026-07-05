@@ -254,8 +254,15 @@ impl Drop for EnvVarGuard {
     }
 }
 
-const DISPATCH_TEST_WAIT_ATTEMPTS: usize = 240;
-const DISPATCH_TEST_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+// Same worst-case ceiling as before (240 * 25ms = 1200 * 5ms = 6s), but a
+// finer poll interval so the (overwhelmingly common) fast-resolving case
+// returns ~5x sooner instead of always paying at least one 25ms tick.
+// Widely shared (16 call sites across 10 files, issue #682 busy-wait sweep):
+// shrinking typical latency here has outsized effect on suite wall clock
+// without weakening the timeout safety margin (a genuine hang still trips
+// at the same 6s ceiling).
+const DISPATCH_TEST_WAIT_ATTEMPTS: usize = 1200;
+const DISPATCH_TEST_WAIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 async fn wait_for_dispatch_result(run_dir: &std::path::Path) -> String {
     let result_path = run_dir.join("result.md");

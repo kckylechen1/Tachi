@@ -441,8 +441,8 @@ Live SQLite files should stay local. Sync encrypted bundles, append-only event l
 # Build release binary
 cargo build --release
 
-# Run all tests
-cargo test --all
+# Run all tests (nextest is what CI runs: per-test timeouts, see .config/nextest.toml)
+cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
 
 # Run the MCP server from source with the standard profile
 cargo run -p memory-server -- --profile standard
