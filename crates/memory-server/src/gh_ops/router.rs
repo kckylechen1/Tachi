@@ -151,7 +151,7 @@ pub(crate) async fn handle_tachi_gh(
                 params.merge_policy.as_deref(),
                 params.allow_umbrella_close,
             )?;
-            let client = CliGhClient { server };
+            let client = gh_client_for_server(server)?;
             let repo = required_repo(&params, "safe_merge")?;
             handle_github_safe_merge(
                 &client,
@@ -183,7 +183,7 @@ pub(crate) async fn handle_tachi_gh(
                 task_params.merge_policy.as_deref(),
                 task_params.allow_umbrella_close,
             )?;
-            let client = CliGhClient { server };
+            let client = gh_client_for_server(server)?;
             handle_github_safe_merge(
                 &client,
                 &target.repo,
