@@ -16,7 +16,7 @@ use rmcp::ServerHandler;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-fn current_exposed_tool_patterns() -> Option<Vec<String>> {
+pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
     CACHED
         .get_or_init(|| {

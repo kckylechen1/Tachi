@@ -11,6 +11,35 @@ use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key};
 
+fn normalize_agent_id(agent_id: Option<&str>) -> Option<String> {
+    agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub(super) fn resolve_vault_acl_agent_id(
+    server: &MemoryServer,
+    caller_agent_id: Option<&str>,
+) -> Result<Option<String>, String> {
+    let caller_agent_id = normalize_agent_id(caller_agent_id);
+    let Some(bound_agent_id) = server.bound_agent_id() else {
+        return Ok(caller_agent_id);
+    };
+
+    if caller_agent_id
+        .as_deref()
+        .is_some_and(|caller| caller != bound_agent_id)
+    {
+        return Err(
+            "Access denied: caller agent_id does not match server-bound TACHI_AGENT_ID."
+                .to_string(),
+        );
+    }
+
+    Ok(Some(bound_agent_id))
+}
+
 pub(super) fn ensure_agent_allowed(
     entry: &VaultEntry,
     agent_id: Option<&str>,
@@ -20,19 +49,13 @@ pub(super) fn ensure_agent_allowed(
     };
 
     let Some(agent_id) = agent_id.map(str::trim).filter(|agent| !agent.is_empty()) else {
-        return Err(format!(
-            "Access denied for secret '{}': agent_id is required.",
-            entry.name
-        ));
+        return Err("Access denied: agent_id is required for this restricted secret.".to_string());
     };
 
     if allowed_agents.iter().any(|allowed| allowed == agent_id) {
         Ok(())
     } else {
-        Err(format!(
-            "Access denied for agent '{}' to secret '{}'.",
-            agent_id, entry.name
-        ))
+        Err("Access denied: agent is not in the allowed list for this secret.".to_string())
     }
 }
 
@@ -41,9 +64,10 @@ pub(super) fn ensure_agent_allowed(
 pub(super) fn authorize_vault_mutation(
     server: &MemoryServer,
     target_name: &str,
-    agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_vault_unlocked(server)?;
+    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)?;
     let existing = server
         .with_global_store_read(|store| {
             store
@@ -52,7 +76,7 @@ pub(super) fn authorize_vault_mutation(
         })
         .map_err(|e| format!("Failed to resolve secret for authorization: {e}"))?;
     if let Some(entry) = existing {
-        ensure_agent_allowed(&entry, agent_id)?;
+        ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
     }
     Ok(())
 }
@@ -67,15 +91,16 @@ pub(super) fn authorize_vault_mutation(
 pub(super) fn authorize_vault_pool_mutation(
     server: &MemoryServer,
     prefix: &str,
-    agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_vault_unlocked(server)?;
+    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)?;
     let entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to list entries for authorization: {e}"))?;
     for entry in entries {
         if api_key_pool_member_index(&entry.name, prefix).is_some() {
-            ensure_agent_allowed(&entry, agent_id)?;
+            ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
         }
     }
     Ok(())
@@ -398,6 +423,7 @@ pub(crate) fn read_unlocked_vault_secret(
     agent_id: Option<&str>,
     auto_rotate: bool,
 ) -> Result<String, String> {
+    let effective_agent_id = resolve_vault_acl_agent_id(server, agent_id)?;
     with_vault_key(server, |key| {
         let params = VaultGetParams {
             name: name.to_string(),
@@ -406,7 +432,7 @@ pub(crate) fn read_unlocked_vault_secret(
         };
         let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())?;
+        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())?;
 
         let decrypted =
             crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;

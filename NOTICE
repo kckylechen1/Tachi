@@ -1,0 +1,35 @@
+# Third-Party Notices
+
+This project uses the following third-party libraries and tools.
+
+## Rust Dependencies
+
+Key crates (full list in `Cargo.lock`):
+
+- **rusqlite** — MIT
+- **serde / serde_json** — MIT/Apache-2.0
+- **tokio** — MIT
+- **axum** — MIT
+- **rmcp** (Model Context Protocol) — MIT
+- **reqwest** — MIT/Apache-2.0
+- **argon2** — MIT/Apache-2.0
+- **aes-gcm** — MIT/Apache-2.0
+- **clap** — MIT/Apache-2.0
+- **napi-rs** — MIT
+
+## Node Dependencies
+
+Key packages (full list in `package-lock.json`):
+
+- **@modelcontextprotocol/sdk** — MIT
+- **ink** — MIT
+- **ws** — MIT
+
+## Embedded Tools
+
+- **libsimple** (FTS5 CJK tokenizer) — MIT
+
+## License
+
+Tachi is licensed under AGPL-3.0-only. Third-party components retain their
+original licenses.
