@@ -1,4 +1,3 @@
-use crate::hub_helpers::should_expose_mcp_tools;
 use crate::mcp_proxy::{
     filter_mcp_tools_by_permissions, resolve_mcp_tool_exposure, McpToolExposureMode,
 };
@@ -15,6 +14,7 @@ use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::ServerHandler;
 use std::future::Future;
 use std::time::{Duration, Instant};
+use tachi_hub::should_expose_mcp_tools;
 
 fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     std::env::var("TACHI_EXPOSED_TOOLS")

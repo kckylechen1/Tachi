@@ -1,6 +1,6 @@
-use super::backend::{resolve_security_scan_backend, SecurityScanBackend};
 use crate::utils::parse_env_bool;
 use crate::MemoryServer;
+use tachi_hub::{resolve_security_scan_backend, SecurityScanBackend};
 
 pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
     server: &MemoryServer,

@@ -1,10 +1,10 @@
 use super::ChildConnection;
-use crate::hub_helpers::capability_callable;
 use crate::server_state::MemoryServer;
 use crate::utils::lock_or_recover;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tachi_hub::capability_callable;
 
 impl MemoryServer {
     pub(crate) async fn ensure_child_connected_with_context(

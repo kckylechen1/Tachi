@@ -8,6 +8,7 @@ members = [
     "crates/tachi-bootstrap",
     "crates/tachi-dispatch",
     "crates/tachi-foundry",
+    "crates/tachi-hub",
     "crates/tachi-llm",
     "tools/cleaner",
 ]
@@ -15,6 +16,7 @@ default-members = [
     "crates/memory-core",
     "crates/memory-server",
     "crates/tachi-bootstrap",
+    "crates/tachi-hub",
 ]
 resolver = "2"
 

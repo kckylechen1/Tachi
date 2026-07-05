@@ -1,5 +1,4 @@
 use super::{CircuitProbeDecision, CircuitState};
-use crate::hub_helpers::capability_callable;
 use crate::server_state::MemoryServer;
 use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
@@ -7,6 +6,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tachi_hub::capability_callable;
 
 impl MemoryServer {
     pub(crate) async fn proxy_call_internal(
