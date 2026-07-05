@@ -132,21 +132,78 @@ async fn g2_batch_record_receipt_lists_both_ids() {
     }
 }
 
-#[test]
-fn g5_record_receipt_default_under_600_bytes() {
-    let receipt = json!({
-        "ok": true,
-        "flow_id": "flow_g528-verify",
-        "check_id": "clippy",
-        "status": "failed",
-        "overall": "failed",
-    });
-    let raw = serde_json::to_string(&receipt).expect("serialize");
-    assert!(raw.len() < 600, "record receipt too large: {} bytes", raw.len());
+#[tokio::test]
+async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let server = test_server();
+    let mut params = verify_params("record");
+    params.commands = vec!["cargo test".to_string(), "cargo clippy".to_string()];
+    params.status = Some("passed".to_string());
+    let resp = handle_tachi_verify(&server, params)
+        .await
+        .expect("legacy commands record");
+    let receipt: Value = serde_json::from_str(&resp).expect("receipt JSON");
+    assert_eq!(receipt["check_ids"], json!(["cargo-test", "cargo-clippy"]));
+    assert_eq!(receipt["overall"], json!("passed"));
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+#[tokio::test]
+async fn g5_record_receipt_default_under_400_bytes() {
+    let _guard = crate::shell_ops::tachi_run_root_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let original = std::env::var_os("TACHI_RUN_ROOT");
+    std::env::set_var("TACHI_RUN_ROOT", tmp.path());
+
+    let server = test_server();
+    let mut params = verify_params("record");
+    params.kind = Some("clippy".to_string());
+    params.status = Some("failed".to_string());
+    let resp = handle_tachi_verify(&server, params)
+        .await
+        .expect("record receipt");
+    assert!(
+        resp.len() < 400,
+        "record receipt too large: {} bytes: {resp}",
+        resp.len()
+    );
+
+    if let Some(v) = original {
+        std::env::set_var("TACHI_RUN_ROOT", v);
+    } else {
+        std::env::remove_var("TACHI_RUN_ROOT");
+    }
+}
+
+fn strip_volatile_ledger_fields(mut ledger: Value) -> Value {
+    if let Some(obj) = ledger.as_object_mut() {
+        obj.remove("updated_at");
+        if let Some(items) = obj.get_mut("items").and_then(Value::as_array_mut) {
+            for item in items.iter_mut() {
+                if let Some(item_obj) = item.as_object_mut() {
+                    item_obj.remove("updated_at");
+                }
+            }
+        }
+    }
+    ledger
 }
 
 #[test]
-fn g6_verification_json_retains_required_fields() {
+fn g6_verification_json_matches_expected_structure() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -158,16 +215,28 @@ fn g6_verification_json_retains_required_fields() {
     let mut first = verify_params("record");
     first.kind = Some("gitleaks".to_string());
     first.status = Some("passed".to_string());
+    first.head_sha = Some("abc123".to_string());
     record_items(&first, "passed").expect("record");
 
     let path = ledger_path_for_flow(flow_id).expect("ledger path");
     let on_disk: Value =
         serde_json::from_str(&std::fs::read_to_string(path).expect("read ledger")).expect("ledger");
-    assert_eq!(on_disk["flow_id"], json!(flow_id));
-    assert!(on_disk.get("overall").is_some());
-    assert!(on_disk.get("items").and_then(Value::as_array).is_some());
-    assert!(on_disk["items"][0].get("id").is_some());
-    assert!(on_disk["items"][0].get("status").is_some());
+    let expected = json!({
+        "flow_id": flow_id,
+        "head_sha": "abc123",
+        "overall": "passed",
+        "items": [{
+            "id": "gitleaks",
+            "kind": "gitleaks",
+            "status": "passed",
+            "required": true,
+            "head_sha": "abc123",
+        }],
+    });
+    assert_eq!(
+        strip_volatile_ledger_fields(on_disk),
+        strip_volatile_ledger_fields(expected)
+    );
 
     if let Some(v) = original {
         std::env::set_var("TACHI_RUN_ROOT", v);

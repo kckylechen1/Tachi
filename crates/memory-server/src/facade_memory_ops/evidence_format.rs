@@ -18,7 +18,7 @@ pub(crate) fn wants_json(format: Option<&str>) -> bool {
         .as_deref()
     {
         Some("markdown" | "md" | "text" | "plain" | "human") => false,
-        Some("json" | "application/json" | "structured" | "machine" | "full") => true,
+        Some("json" | "application/json" | "structured" | "machine") => true,
         Some(_) => false,
         None => true,
     }
@@ -35,10 +35,7 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
     })
 }
 
-const SAVE_RECEIPT_KEYS: &[&str] = &[
-    "id", "path", "status", "enrichment", "warning", "note_file", "note_path", "db", "timestamp",
-    "saved", "secret_redactions", "capture_gate_warnings",
-];
+const SAVE_RECEIPT_KEYS: &[&str] = &["id", "path", "status", "enrichment"];
 
 pub(crate) fn save_receipt_value(value: &Value) -> Value {
     let mut receipt = serde_json::Map::new();
@@ -84,54 +81,57 @@ pub(crate) fn shape_save_facade_response(
     }
 }
 
-pub(crate) fn slim_eval_entry(value: Option<&Value>) -> Value {
+fn receipt_eval_entry(value: Option<&Value>) -> Value {
     let Some(value) = value else {
         return Value::Null;
     };
-    let status = value
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|status| compact_text_line(status, 24));
-    json!({
-        "id": value.get("id"),
-        "path": value.get("path"),
-        "status": status,
-    })
+    let mut entry = serde_json::Map::new();
+    for key in ["id", "path", "status", "enrichment"] {
+        if let Some(field) = value.get(key) {
+            if !field.is_null() {
+                entry.insert(key.to_string(), field.clone());
+            }
+        }
+    }
+    Value::Object(entry)
 }
 
-fn slim_next_steps(value: Option<&Value>) -> Value {
-    Value::Array(
-        value
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(|step| json!(compact_text_line(step, 30)))
-            .collect(),
-    )
-}
-
-fn slim_pipeline_step(value: &Value) -> Value {
+fn pipeline_stage_status(value: &Value) -> Option<Value> {
     match value {
-        Value::String(text) => json!(compact_text_line(text, 18)),
-        Value::Object(obj) => obj
-            .get("status")
-            .or_else(|| obj.get("recorded"))
-            .cloned()
-            .unwrap_or_else(|| json!("updated")),
-        Value::Array(items) => json!(items.len()),
-        other if other.is_null() => Value::Null,
-        other => other.clone(),
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => Some(value.clone()),
+        Value::Object(obj) => {
+            if let Some(status) = obj.get("status") {
+                return Some(status.clone());
+            }
+            if let Some(recorded) = obj.get("recorded") {
+                return Some(recorded.clone());
+            }
+            None
+        }
+        _ => None,
     }
 }
 
-pub(crate) fn slim_pipeline(value: Option<&Value>) -> Value {
+fn whole_pipeline(value: Option<&Value>) -> Value {
     let Some(map) = value.and_then(Value::as_object) else {
         return Value::Null;
     };
     Value::Object(
         map.iter()
-            .map(|(key, value)| (key.clone(), slim_pipeline_step(value)))
+            .filter_map(|(key, value)| {
+                pipeline_stage_status(value).map(|status| (key.clone(), status))
+            })
+            .collect(),
+    )
+}
+
+fn whole_next_steps(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .cloned()
             .collect(),
     )
 }
@@ -141,28 +141,25 @@ pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Va
         return bundle;
     }
     let mut receipt = serde_json::Map::new();
-    for key in [
-        "recorded",
-        "task_id",
-        "path",
-        "outcome",
-        "subagent_count",
-    ] {
-        if let Some(value) = bundle.get(key) {
-            receipt.insert(key.to_string(), value.clone());
+    if let Some(count) = bundle.get("subagent_count") {
+        receipt.insert("subagent_count".to_string(), count.clone());
+    }
+    if let Some(pr_ref) = bundle.get("pr_ref") {
+        if !pr_ref.is_null() {
+            receipt.insert("pr_ref".to_string(), pr_ref.clone());
         }
     }
     receipt.insert(
+        "eval_entry".to_string(),
+        receipt_eval_entry(bundle.get("eval_entry")),
+    );
+    receipt.insert(
         "next_steps".to_string(),
-        slim_next_steps(bundle.get("next_steps")),
+        whole_next_steps(bundle.get("next_steps")),
     );
     receipt.insert(
         "pipeline".to_string(),
-        slim_pipeline(bundle.get("pipeline")),
-    );
-    receipt.insert(
-        "eval_entry".to_string(),
-        slim_eval_entry(bundle.get("eval_entry")),
+        whole_pipeline(bundle.get("pipeline")),
     );
     Value::Object(receipt)
 }

@@ -27,11 +27,15 @@ pub(super) fn recorded_check_ids(params: &TachiVerifyParams) -> Vec<String> {
             .map(check_id_for_entry)
             .collect();
     }
-    let command = params
-        .command
-        .as_deref()
-        .or_else(|| params.commands.first().map(|s| s.as_str()));
-    vec![check_id_for(params, command)]
+    let commands = if params.commands.is_empty() {
+        vec![params.command.as_deref()]
+    } else {
+        params.commands.iter().map(|s| Some(s.as_str())).collect()
+    };
+    commands
+        .into_iter()
+        .map(|command| check_id_for(params, command))
+        .collect()
 }
 
 pub(super) fn shape_record_response(

@@ -62,9 +62,9 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
         .expect("tachi_complete should succeed");
 
     let bundle: serde_json::Value = serde_json::from_str(&resp).expect("bundle JSON");
-    assert_eq!(bundle["recorded"], serde_json::json!(true));
-    assert_eq!(bundle["task_id"], serde_json::json!("smoke-test-001"));
-    assert_eq!(bundle["outcome"], serde_json::json!("success"));
+    assert_eq!(bundle["subagent_count"], serde_json::json!(1));
+    assert!(bundle.get("recorded").is_none(), "receipt omits recorded");
+    assert!(bundle.get("task").is_none(), "receipt omits task echo");
     let next_steps = bundle["next_steps"].as_array().expect("next_steps array");
     assert!(
         next_steps.iter().any(|step| step
@@ -75,7 +75,9 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             })),
         "no-worktree completion should not imply approve_merge: {bundle:#}"
     );
-    let path = bundle["path"].as_str().expect("path present");
+    let path = bundle["eval_entry"]["path"]
+        .as_str()
+        .expect("eval_entry path present");
     assert!(
         path.starts_with("/eval/"),
         "eval entry path should be under /eval, got {path}"

@@ -282,6 +282,11 @@ pub(super) async fn handle_tachi_task_facade(
             params.action
         )),
     }?;
+    if action == "complete"
+        && crate::facade_memory_ops::wants_full_format(params.format.as_deref())
+    {
+        return Ok(raw);
+    }
     format_facade_response(
         &format!("Tachi task {}", action),
         &action,
