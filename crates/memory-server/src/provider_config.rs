@@ -229,9 +229,12 @@ pub fn materialize_provider_secrets(
                     })
                 })
                 .ok_or_else(|| {
+                    // Do NOT include the trimmed value — if the user wrote a literal
+                    // secret instead of a vault: alias, it would leak into the error.
                     format!(
-                        "{key}={trimmed} in config.env but Vault secret '{vault_name}' is missing or Vault is locked. \
-                         Run vault_unlock and vault_set, or store the key in Vault as '{vault_name}'."
+                        "Config key '{}' references Vault alias '{}' but the secret is missing or Vault is locked. \
+                         Run vault_unlock and vault_set, or store the key in Vault as '{}'.",
+                        key, vault_name, vault_name
                     )
             })?;
             resolved_pools.insert(key.clone(), pool);
@@ -351,6 +354,7 @@ pub fn auto_unlock_vault_from_keychain(server: &MemoryServer) -> Result<bool, St
 
     let loaded = server.refresh_llm_provider_secrets_from_vault()?;
     tracing::info!("[vault] auto-unlocked from Keychain ({loaded} provider key(s))");
+    server.requeue_auth_failed_enrichment_retries("Keychain auto-unlock");
     Ok(true)
 }
 

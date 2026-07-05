@@ -29,6 +29,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            format: None,
         }))
         .await
         .expect("tachi_save note should succeed");

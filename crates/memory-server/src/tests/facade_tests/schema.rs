@@ -1,5 +1,19 @@
 use super::*;
 
+fn enum_values(property: &Value, name: &str) -> Vec<String> {
+    property["enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{name} enum"))
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .unwrap_or_else(|| panic!("{name} enum value"))
+                .to_string()
+        })
+        .collect()
+}
+
 #[test]
 fn tachi_memory_action_schema_declares_enum_values() {
     let schema = rmcp::schemars::schema_for!(TachiMemoryParams);
@@ -35,6 +49,57 @@ fn tachi_memory_action_schema_declares_enum_values() {
         .as_array()
         .expect("action enum")
         .contains(&json!("apply_recall_proposals")));
+}
+
+#[test]
+fn tachi_memory_schema_declares_polymorphic_field_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiMemoryParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = &value["properties"];
+
+    assert_eq!(
+        enum_values(&properties["scope"], "scope"),
+        vec![
+            "all", "memory", "wiki", "patterns", "sft", "note", "user", "project", "general",
+            "global",
+        ]
+    );
+    assert_eq!(
+        enum_values(&properties["kind"], "kind"),
+        vec!["memory", "note", "wiki"]
+    );
+    assert_eq!(
+        enum_values(&properties["category"], "category"),
+        vec![
+            "fact",
+            "decision",
+            "experience",
+            "preference",
+            "entity",
+            "other",
+            "kanban",
+            "handoff",
+            "ghost",
+            "wiki",
+            "guide",
+            "eval",
+        ]
+    );
+    assert_eq!(
+        enum_values(&properties["retention_policy"], "retention_policy"),
+        vec!["ephemeral", "durable", "permanent", "pinned"]
+    );
+}
+
+#[test]
+fn tachi_search_schema_keeps_recall_scope_enum_values() {
+    let schema = rmcp::schemars::schema_for!(TachiSearchParams);
+    let value = serde_json::to_value(schema).expect("schema serializes");
+
+    assert_eq!(
+        enum_values(&value["properties"]["scope"], "scope"),
+        vec!["all", "memory", "wiki", "patterns", "sft"]
+    );
 }
 
 #[test]

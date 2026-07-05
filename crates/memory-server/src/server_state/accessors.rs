@@ -110,4 +110,16 @@ impl MemoryServer {
     pub(crate) fn agent_runtime_write(&self) -> std::sync::RwLockWriteGuard<'_, AgentRuntime> {
         write_or_recover(&self.agent_runtime, "agent_runtime")
     }
+
+    pub(crate) fn bound_agent_id(&self) -> Option<String> {
+        read_or_recover(&self.bound_agent_id, "bound_agent_id").clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_bound_agent_id_for_test(&self, agent_id: Option<&str>) {
+        *write_or_recover(&self.bound_agent_id, "bound_agent_id") = agent_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
 }

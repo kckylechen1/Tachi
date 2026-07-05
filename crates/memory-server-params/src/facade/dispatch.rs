@@ -420,4 +420,8 @@ pub struct TachiCompleteParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Response shape: default receipt, or "full" for the pre-change verbose review bundle.
+    #[serde(default, alias = "output_format")]
+    pub format: Option<String>,
 }

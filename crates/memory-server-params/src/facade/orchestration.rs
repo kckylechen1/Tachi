@@ -192,12 +192,40 @@ pub struct TachiArenaParams {
 // ─── Facade: tachi_verify (background verification ledger) ──────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct TachiVerifyCheckItem {
+    /// Stable check id, e.g. gitleaks, cargo-check, clippy.
+    pub check_id: String,
+
+    /// Check kind, e.g. gitleaks, cargo_check, clippy, cargo_test, custom.
+    pub kind: String,
+
+    /// Verification status: pending, running, passed, failed, skipped, or stale.
+    pub status: String,
+
+    /// Whether this check is required for safe_merge. Defaults true.
+    #[serde(default)]
+    pub required: Option<bool>,
+
+    /// Command recorded for this verification result.
+    #[serde(default)]
+    pub command: Option<String>,
+
+    /// Short result summary.
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Git head SHA this check result was produced for.
+    #[serde(default)]
+    pub head_sha: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiVerifyParams {
     /// Action: "start", "record", "status", or "board".
     #[schemars(schema_with = "tachi_verify_action_schema")]
     pub action: String,
 
-    /// Response shape: "markdown" (default, agent-readable) or "json" (automation).
+    /// Response shape: "markdown" (default receipt), "json" (automation receipt), or "full" (pre-change verbose payload).
     #[serde(default)]
     pub format: Option<String>,
 
@@ -262,6 +290,10 @@ pub struct TachiVerifyParams {
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"
     )]
     pub limit: Option<u32>,
+
+    /// Batch record/start payload. Cannot be combined with single-check fields (check_id/kind/command/commands).
+    #[serde(default)]
+    pub checks: Vec<TachiVerifyCheckItem>,
 }
 
 // ─── Facade: tachi_shell (skill-gated flow orchestration) ────────────────────

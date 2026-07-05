@@ -1,4 +1,5 @@
 use super::*;
+use crate::TachiVerifyCheckItem;
 
 pub(super) fn now() -> String {
     Utc::now().to_rfc3339()
@@ -48,6 +49,19 @@ pub(super) fn check_id_for(params: &TachiVerifyParams, command: Option<&str>) ->
         .as_deref()
         .or(params.kind.as_deref())
         .or(command)
+        .map(slugify_check_id)
+        .unwrap_or_else(|| "check".to_string())
+}
+
+pub(super) fn check_id_for_entry(entry: &TachiVerifyCheckItem) -> String {
+    let source = if !entry.check_id.trim().is_empty() {
+        Some(entry.check_id.as_str())
+    } else if !entry.kind.trim().is_empty() {
+        Some(entry.kind.as_str())
+    } else {
+        entry.command.as_deref()
+    };
+    source
         .map(slugify_check_id)
         .unwrap_or_else(|| "check".to_string())
 }

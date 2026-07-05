@@ -131,8 +131,10 @@ pub fn migrate_v9_relocate_and_drop_location(
     if !table_has_column(conn, "memories", "location")? {
         return Ok((0, 0));
     }
-    let relocated = relocate_location_rows(conn)?;
-    conn.execute("ALTER TABLE memories DROP COLUMN location", [])?;
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let relocated = relocate_location_rows(&tx)?;
+    tx.execute("ALTER TABLE memories DROP COLUMN location", [])?;
+    tx.commit()?;
     Ok((relocated, 1))
 }
 

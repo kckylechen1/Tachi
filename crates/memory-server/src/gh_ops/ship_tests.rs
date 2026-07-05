@@ -414,3 +414,189 @@ async fn ship_gb10_push_failure_after_commit_returns_partial_and_records_flow_ev
         std::env::remove_var("TACHI_RUN_ROOT");
     }
 }
+
+fn init_contract_repo(subjects: &[&str], branch: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("temp repo");
+    run_git(tmp.path(), &["init"]);
+    run_git(tmp.path(), &["config", "user.email", "ship@example.test"]);
+    run_git(tmp.path(), &["config", "user.name", "Ship Tester"]);
+    write_file(tmp.path(), "README.md", "seed\n");
+    run_git(tmp.path(), &["add", "--all"]);
+    run_git(tmp.path(), &["commit", "-m", "initial"]);
+    run_git(tmp.path(), &["branch", "-M", "main"]);
+    if branch != "main" {
+        run_git(tmp.path(), &["checkout", "-b", branch]);
+    }
+    for (index, subject) in subjects.iter().enumerate() {
+        write_file(tmp.path(), "file.txt", &format!("content {index}\n"));
+        run_git(tmp.path(), &["add", "--all"]);
+        run_git(tmp.path(), &["commit", "-m", subject]);
+    }
+    tmp
+}
+
+fn contract_params(repo: &Path, issue_ref: Option<&str>) -> TachiGhParams {
+    TachiGhParams {
+        action: "ship".to_string(),
+        cwd: Some(repo.to_string_lossy().to_string()),
+        issue_ref: issue_ref.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn setup_origin_remote(repo: &Path) -> tempfile::TempDir {
+    let remote = tempfile::tempdir().expect("bare remote");
+    run_git(remote.path(), &["init", "--bare"]);
+    run_git(
+        repo,
+        &[
+            "remote",
+            "add",
+            "origin",
+            remote.path().to_str().expect("utf8 remote path"),
+        ],
+    );
+    run_git(repo, &["push", "-u", "origin", "main"]);
+    remote
+}
+
+#[tokio::test]
+async fn ship_g2_contract_dry_run_discriminates_from_mechanical() {
+    let repo = init_contract_repo(
+        &["First contract commit", "Second contract commit"],
+        "feature/contract-g2",
+    );
+    let params = contract_params(repo.path(), Some("#521"));
+
+    let raw = handle_github_ship_inner(None, &params)
+        .await
+        .expect("contract dry-run ok");
+    let value: Value = serde_json::from_str(&raw).expect("contract dry-run JSON");
+
+    assert_eq!(value["status"], "dry_run");
+    assert_eq!(value["mode"], "contract");
+    assert_eq!(value["base"], "main");
+    assert_eq!(value["baseref"], "main");
+    assert_eq!(value["commit_count"], 2);
+    assert_eq!(value["pr_title"], "Second contract commit");
+    assert_eq!(value["pr_exists_check"], "deferred");
+    let preview = value["pr_body_preview"].as_str().expect("body preview");
+    assert!(preview.contains("Refs #521"), "{preview}");
+    assert!(preview.contains("First contract commit"), "{preview}");
+    assert!(preview.contains("Second contract commit"), "{preview}");
+    assert!(
+        preview.contains("_(not run — record the full-suite command via tests_run)_"),
+        "{preview}"
+    );
+}
+
+#[test]
+fn ship_g3_resolve_base_ref_prefers_origin_then_local_then_missing() {
+    let repo = init_contract_repo(&[], "feature/contract-g3");
+    let _remote = setup_origin_remote(repo.path());
+
+    let origin = resolve_base_ref(repo.path(), "main").expect("origin main");
+    assert_eq!(
+        origin,
+        ResolvedBase {
+            base: "main".to_string(),
+            baseref: "origin/main".to_string(),
+            base_pushed_needed: false,
+        }
+    );
+
+    let local_repo = init_contract_repo(&[], "feature/contract-g3-local");
+    let local = resolve_base_ref(local_repo.path(), "main").expect("local main");
+    assert_eq!(
+        local,
+        ResolvedBase {
+            base: "main".to_string(),
+            baseref: "main".to_string(),
+            base_pushed_needed: true,
+        }
+    );
+
+    let missing = resolve_base_ref(local_repo.path(), "goal/521").expect_err("missing base");
+    assert!(missing.starts_with("base_not_found:"), "{missing}");
+}
+
+#[tokio::test]
+async fn ship_g4_contract_mode_on_base_branch_is_refused() {
+    let repo = init_contract_repo(&["extra on main"], "main");
+    let params = contract_params(repo.path(), Some("#521"));
+
+    let err = handle_github_ship_inner(None, &params)
+        .await
+        .expect_err("contract on main should fail");
+
+    assert!(err.contains("protected_branch"), "{err}");
+}
+
+#[tokio::test]
+async fn ship_g4b_contract_mode_self_pr_refused() {
+    let repo = init_contract_repo(&["slice commit"], "goal/522");
+    let mut params = contract_params(repo.path(), Some("#522"));
+    params.pr_base = Some("goal/522".to_string());
+
+    let err = handle_github_ship_inner(None, &params)
+        .await
+        .expect_err("self-PR should fail");
+
+    assert!(err.starts_with("self_pr:"), "{err}");
+}
+
+#[tokio::test]
+async fn ship_g5_contract_mode_zero_commits_returns_nothing_to_ship() {
+    let repo = init_contract_repo(&[], "feature/contract-g5");
+    let params = contract_params(repo.path(), None);
+
+    let err = handle_github_ship_inner(None, &params)
+        .await
+        .expect_err("zero commits should fail");
+
+    assert!(err.starts_with("nothing_to_ship:"), "{err}");
+}
+
+#[test]
+fn ship_g6_build_contract_pr_body_section_order_and_placeholders() {
+    let with_issue = build_contract_pr_body(
+        Some("#521"),
+        &[
+            "abc1234 First commit".to_string(),
+            "def5678 Second commit".to_string(),
+        ],
+        &["cargo test -p memory-server".to_string()],
+    );
+    assert_eq!(
+        with_issue,
+        "Refs #521\n\n\
+## Commits (one bounded contract, batched)\n\
+- abc1234 First commit\n\
+- def5678 Second commit\n\
+\n\
+## Tested (full suite, once)\n\
+- cargo test -p memory-server\n\
+\n\
+## Not-tested\n\
+_fill honest gaps_\n"
+    );
+    assert!(with_issue.starts_with("Refs #521\n\n"));
+    assert!(with_issue.contains("## Commits (one bounded contract, batched)\n"));
+    assert!(with_issue.contains("- abc1234 First commit\n"));
+    assert!(with_issue.contains("- def5678 Second commit\n"));
+    assert!(with_issue.contains("## Tested (full suite, once)\n"));
+    assert!(with_issue.contains("- cargo test -p memory-server\n"));
+    assert!(with_issue.contains("## Not-tested\n"));
+    assert!(with_issue.contains("_fill honest gaps_\n"));
+
+    let without_tests =
+        build_contract_pr_body(Some("#521"), &["abc1234 Only commit".to_string()], &[]);
+    assert!(
+        without_tests.contains("_(not run — record the full-suite command via tests_run)_"),
+        "{without_tests}"
+    );
+
+    let without_issue = build_contract_pr_body(None, &["abc1234 Only commit".to_string()], &[]);
+    assert!(!without_issue.contains("Refs "));
+    assert!(without_issue.starts_with("## Commits (one bounded contract, batched)\n"));
+}

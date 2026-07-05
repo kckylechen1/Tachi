@@ -51,6 +51,7 @@ pub struct TachiSearchParams {
 
     /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "patterns" searches projected pattern memory, "all" searches both memory/wiki (default), "sft" searches training/distillation corpus.
     #[serde(default = "default_facade_search_scope")]
+    #[schemars(schema_with = "super::memory_scope_schema")]
     pub scope: String,
 
     /// Number of results to return (default: 6)
@@ -160,6 +161,7 @@ pub struct TachiSaveParams {
     /// What to save: "wiki" for wiki entry, "note" for a quick note, "memory" for full memory entry.
     /// If omitted, auto-detected: title present → wiki; short/casual text → note; otherwise → memory.
     #[serde(default)]
+    #[schemars(schema_with = "super::save_kind_schema")]
     pub kind: Option<String>,
 
     /// Title (required for wiki entries, ignored for notes)
@@ -183,6 +185,7 @@ pub struct TachiSaveParams {
 
     /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
     #[serde(default)]
+    #[schemars(schema_with = "super::memory_category_schema")]
     pub category: Option<String>,
 
     /// Tags for recall and FTS (modules, crates, topics)
@@ -209,6 +212,7 @@ pub struct TachiSaveParams {
 
     /// Retention policy: "ephemeral" | "durable" | "permanent" | "pinned"
     #[serde(default)]
+    #[schemars(schema_with = "super::retention_policy_schema")]
     pub retention_policy: Option<String>,
 
     /// Bypass noise filter
@@ -248,6 +252,10 @@ pub struct TachiSaveParams {
     #[serde(default)]
     #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
     pub files: Vec<String>,
+
+    /// Response shape: default receipt, or "full" for the pre-change verbose payload (includes echo).
+    #[serde(default, alias = "output_format")]
+    pub format: Option<String>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────
@@ -275,7 +283,8 @@ pub struct TachiMemoryParams {
     pub query: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\"."
+        schema_with = "super::tachi_memory_scope_schema",
+        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\". [action=save] \"note\" routes to the note writer; \"user\", \"project\", \"general\", and \"global\" select storage/routing scope."
     )]
     pub scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
@@ -296,6 +305,7 @@ pub struct TachiMemoryParams {
     pub error_context: Option<String>,
     #[serde(default)]
     #[schemars(
+        schema_with = "super::memory_category_schema",
         description = "[action=search|ask|save|checkpoint] Wiki category filter (search/ask), or the category for the saved/checkpointed entry."
     )]
     pub category: Option<String>,
@@ -365,10 +375,14 @@ pub struct TachiMemoryParams {
     #[schemars(description = "[action=save] Importance score 0.0–1.0 (default: 0.5).")]
     pub importance: Option<f64>,
     #[serde(default)]
-    #[schemars(description = "[action=save] Retention policy name.")]
+    #[schemars(
+        schema_with = "super::retention_policy_schema",
+        description = "[action=save] Retention policy name."
+    )]
     pub retention_policy: Option<String>,
     #[serde(default)]
     #[schemars(
+        schema_with = "super::save_kind_schema",
         description = "[action=save] Kind hint: memory, note, or wiki. If omitted, tachi_memory defaults to memory unless scope='note'; use tachi_save for title-based auto-detection."
     )]
     pub kind: Option<String>,

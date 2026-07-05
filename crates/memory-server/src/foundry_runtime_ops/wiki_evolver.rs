@@ -422,6 +422,7 @@ async fn save_wiki_draft(
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            format: None,
         }))
         .await;
 
