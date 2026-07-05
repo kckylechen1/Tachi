@@ -1,5 +1,5 @@
 use super::super::helpers::dedup_strings;
-use super::super::maintenance::job_metadata_value;
+use super::super::maintenance::FoundryJobMetadata;
 use super::super::FoundryMaintenanceItem;
 use crate::server_state::MemoryServer;
 use memory_core::MemoryEntry;
@@ -111,7 +111,8 @@ async fn generate_recall_cache_query_via_llm(
 }
 
 fn recall_cache_queries_from_metadata(metadata: &serde_json::Value) -> Vec<String> {
-    job_metadata_value(metadata, "queries")
+    FoundryJobMetadata::new(metadata)
+        .value("queries")
         .and_then(|value| value.as_array())
         .into_iter()
         .flatten()

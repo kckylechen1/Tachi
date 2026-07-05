@@ -13,12 +13,15 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Admin/backcompat route for direct dispatch to a delegate CLI agent or typed host adapter. Daily agents should prefer tachi_task(action='dispatch'), then call tachi_complete afterwards to record the eval."
+        description = "[DEPRECATED] Admin/backcompat route for direct dispatch. Use tachi_task(action='dispatch') instead. Automatically records eval on completion."
     )]
     pub(crate) async fn tachi_dispatch(
         &self,
         Parameters(params): Parameters<TachiDispatchParams>,
     ) -> Result<String, String> {
+        tracing::warn!(
+            "tachi_dispatch is a backcompat route; prefer tachi_task(action='dispatch')"
+        );
         crate::dispatch_ops::handle_tachi_dispatch(self, params).await
     }
 
@@ -33,12 +36,13 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Admin/backcompat route for viewing the dispatch task board. Daily agents should prefer tachi_task(action='board'). Returns tasks with their A2A state (WORKING, COMPLETED, FAILED, etc)."
+        description = "[DEPRECATED] Admin/backcompat route for viewing the dispatch task board. Use tachi_task(action='board') instead."
     )]
     pub(crate) async fn tachi_board(
         &self,
         Parameters(params): Parameters<TachiBoardParams>,
     ) -> Result<String, String> {
+        tracing::warn!("tachi_board is a backcompat route; prefer tachi_task(action='board')");
         crate::dispatch_ops::handle_tachi_board(self, params).await
     }
 

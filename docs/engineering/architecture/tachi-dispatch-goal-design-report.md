@@ -590,7 +590,7 @@ if goal.audit_required && outcome == "success" {
 - `crates/memory-server/src/dispatch_ops/prompt.rs` — Prompt 组装
 - `crates/memory-server/src/dispatch_ops/kanban_helpers.rs` — Kanban 状态管理
 - `crates/memory-server/src/dispatch_ops/subprocess.rs` — 子进程管理
-- `crates/memory-server/src/tool_params/facade.rs:291` — TachiDispatchParams 定义
+- `crates/memory-server-params/src/facade/dispatch.rs` — TachiDispatchParams 定义
 
 ### 本报告相关文件
 

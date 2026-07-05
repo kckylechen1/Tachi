@@ -1,5 +1,5 @@
 use crate::server_state::DbScope;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::sync::atomic::AtomicU64;
 
 mod capture;
@@ -85,19 +85,6 @@ struct CompactContextDraft {
     salient_topics: Vec<String>,
     #[serde(default)]
     durable_signals: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SectionArtifact {
-    section_id: String,
-    layer: String,
-    kind: String,
-    title: Option<String>,
-    cache_boundary: String,
-    estimated_tokens: usize,
-    item_count: usize,
-    source_refs: Vec<String>,
-    block: String,
 }
 
 #[derive(Debug, Clone)]

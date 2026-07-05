@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-use crate::dispatch_ops::subprocess::resolve_permission_profile;
+use crate::dispatch_ops::launcher::resolve_permission_profile;
 use crate::tool_params::TachiDispatchParams;
 
 use super::types::{

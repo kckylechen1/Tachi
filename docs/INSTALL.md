@@ -25,7 +25,7 @@ brew tap kckylechen1/tachi && brew install tachi
 ### macOS / Linux (Shell Installer)
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -49,7 +49,7 @@ to auto-spawn short-lived daemons.
 
 ```bash
 tachi --version
-# Expected: tachi 1.6.1 (or later)
+# Expected: tachi 1.6.2 (or later)
 
 tachi daemon status
 # Expected on macOS after the full installer: daemon running
@@ -87,6 +87,12 @@ release formula update script also emits a `service do` block so the tap can
 support `brew services restart tachi` once the formula is published with the
 service definition. The shell installer keeps the LaunchAgent fallback because
 older/private taps may not expose a trusted service block yet.
+
+When installing the OpenClaw plugin, the shell installer downloads the release
+tarball and its companion `.sha256` asset, verifies the archive before
+extraction, and fails closed if the checksum asset is missing or mismatched. Use
+`--skip-plugin` when installing a binary-only release that does not publish the
+plugin checksum.
 
 ---
 
@@ -315,7 +321,7 @@ After configuring, restart your agent and run:
 Search my memory for "test"
 ```
 
-If Tachi is working, you will see a response from `tachi_search` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
+If Tachi is working, you will see a response from `tachi_memory(action="search")` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
 
 1. The MCP config file path is correct for your agent
 2. The `tachi` binary is on your PATH
@@ -369,7 +375,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 If you use OpenClaw, the full installer configures both the binary and the plugin:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)"
 ```
 
 This will:
@@ -534,7 +540,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Facade & Delegation
 
-`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_unstick`, `tachi_browse`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_arena`, `tachi_verify`, `tachi_complete`
 
 *(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 

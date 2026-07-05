@@ -67,5 +67,6 @@ mod domain_adapter;
 mod event;
 mod memory_actions;
 mod memory_search;
+mod receipt_golden;
 mod schema;
 mod status;

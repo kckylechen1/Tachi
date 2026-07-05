@@ -1,0 +1,7 @@
+[package]
+name = "tachi-dispatch"
+version = "1.6.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]

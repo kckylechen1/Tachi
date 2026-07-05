@@ -33,26 +33,57 @@ fn distill_source_entry(id: &str, text: &str, category: &str) -> MemoryEntry {
     }
 }
 
+fn distill_bucket(entries: Vec<MemoryEntry>) -> tachi_foundry::DistillBucket {
+    tachi_foundry::DistillBucket {
+        bucket_key: "/project/tachi#topic:guide-layer".to_string(),
+        path_prefix: "/project/tachi".to_string(),
+        coherence_key: "topic:guide-layer".to_string(),
+        entries,
+        quality_flags: Vec::new(),
+    }
+}
+
 #[test]
 fn distill_guide_classifier_emits_supported_guide_types() {
     let source = vec![distill_source_entry("src", "context", "fact")];
     assert_eq!(
-        classify_distill_guide_type("Must not add a normal guide write tool.", &source),
+        plan_guide_distill_memory(
+            "codex",
+            &distill_bucket(source.clone()),
+            "Must not add a normal guide write tool.",
+            "20260101T000000"
+        )
+        .guide_type,
         "constraint"
     );
     assert_eq!(
-        classify_distill_guide_type("Fix linker error by rebuilding sqlite vec.", &source),
+        plan_guide_distill_memory(
+            "codex",
+            &distill_bucket(source.clone()),
+            "Fix linker error by rebuilding sqlite vec.",
+            "20260101T000000"
+        )
+        .guide_type,
         "fix_pattern"
     );
     assert_eq!(
-        classify_distill_guide_type(
+        plan_guide_distill_memory(
+            "codex",
+            &distill_bucket(source.clone()),
             "Decision: choose metadata fields over schema changes.",
-            &source
-        ),
+            "20260101T000000"
+        )
+        .guide_type,
         "decision"
     );
     assert_eq!(
-        classify_distill_guide_type("Runbook: 1. Inspect logs\n2. Re-run cargo test.", &source),
+        plan_guide_distill_memory(
+            "codex",
+            &distill_bucket(source),
+            "Runbook: 1. Inspect logs\n2. Re-run cargo test.",
+            "20260101T000000"
+        )
+        .guide_type,
         "runbook"
     );
 }
@@ -97,7 +128,22 @@ fn distill_edges_include_causal_guide_relations() {
         tier: "raw".to_string(),
     };
 
-    let relations = build_distill_edges(&guide, &sources, "fix_pattern", &guide.timestamp)
+    let plan = plan_guide_distill_memory(
+        "codex",
+        &distill_bucket(sources.clone()),
+        &guide.text,
+        "20260101T000000",
+    );
+    assert_eq!(plan.guide_type, "fix_pattern");
+    assert!(plan
+        .file_patterns
+        .contains(&"crates/memory-server/src/tools.rs".to_string()));
+    assert!(plan
+        .error_patterns
+        .iter()
+        .any(|line| line.contains("linker error")));
+
+    let relations = plan_distill_edges(&guide, &sources, "fix_pattern", &guide.timestamp)
         .into_iter()
         .map(|edge| edge.relation)
         .collect::<std::collections::HashSet<_>>();
@@ -105,10 +151,9 @@ fn distill_edges_include_causal_guide_relations() {
     assert!(relations.contains("fixed_by"));
     assert!(relations.contains("rejected_because"));
 
-    let constraint_relations =
-        build_distill_edges(&guide, &sources, "constraint", &guide.timestamp)
-            .into_iter()
-            .map(|edge| edge.relation)
-            .collect::<std::collections::HashSet<_>>();
+    let constraint_relations = plan_distill_edges(&guide, &sources, "constraint", &guide.timestamp)
+        .into_iter()
+        .map(|edge| edge.relation)
+        .collect::<std::collections::HashSet<_>>();
     assert!(constraint_relations.contains("causes"));
 }

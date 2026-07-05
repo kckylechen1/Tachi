@@ -3,9 +3,8 @@ use super::handlers::{
     extract_bracket_self_evolution_notes, matches_agent_tag, resolve_capture_target,
 };
 use super::maintenance::{
-    build_distill_edges, classify_distill_guide_type, coherence_bucket_key,
-    coherent_distill_buckets, infer_memory_insight, memory_claim_signature,
-    scheduled_distill_path_prefix,
+    collect_coherent_distill_buckets, infer_memory_insight, memory_claim_signature,
+    plan_distill_edges, plan_guide_distill_memory,
 };
 use super::recall::{parse_compact_context_response, parse_session_capture_response};
 use super::{FOUNDRY_DISTILL_SOURCE, FOUNDRY_RELATED_LIMIT};

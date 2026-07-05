@@ -82,7 +82,7 @@ impl MemoryStore {
 
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
-        db::delete(&mut self.conn, id, self.vec_available)
+        db::retry_memory_locked(|| db::delete(&mut self.conn, id, self.vec_available))
     }
 
     pub fn list_wiki_duplicate_candidates(

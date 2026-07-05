@@ -5,6 +5,18 @@ use crate::types::MemorySource;
 
 use super::now_utc_iso;
 
+const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
+
+fn auth_class_enrichment_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("auth_failed")
+        || lower.contains("401")
+        || lower.contains("403")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid api key")
+        || lower.contains("unusable")
+}
+
 /// Atomically try to claim an event for processing.
 /// Uses INSERT OR IGNORE: if the row didn't exist, it's inserted and we return true (claimed).
 /// If the row already existed, nothing happens and we return false (already processed).
@@ -224,7 +236,8 @@ pub fn update_enrichment_fields(
                    '$.enrichment.last_error', NULL
                  ),
                  '$.enrichment.failed_stage',
-                 '$.enrichment.last_failure_at'
+                 '$.enrichment.last_failure_at',
+                 '$.enrichment.retry'
                )
            WHERE id = ?3"#,
         params![status, &now, id],
@@ -241,18 +254,42 @@ pub fn record_enrichment_failure(
     error: &str,
 ) -> Result<(), MemoryError> {
     let now = now_utc_iso();
-    conn.execute(
-        r#"UPDATE memories
-           SET metadata = json_set(
-                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                 '$.enrichment.status', 'failed',
-                 '$.enrichment.failed_stage', ?1,
-                 '$.enrichment.last_error', ?2,
-                 '$.enrichment.last_failure_at', ?3
-               ),
-               updated_at = ?3
-           WHERE id = ?4"#,
-        params![stage, error, &now, id],
-    )?;
+    if auth_class_enrichment_error(error) {
+        conn.execute(
+            r#"UPDATE memories
+               SET metadata = json_set(
+                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                     '$.enrichment.status', 'failed',
+                     '$.enrichment.failed_stage', ?1,
+                     '$.enrichment.last_error', ?2,
+                     '$.enrichment.last_failure_at', ?3,
+                     '$.enrichment.retry.kind', 'auth',
+                     '$.enrichment.retry.attempts',
+                        COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
+                     '$.enrichment.retry.max_attempts', ?4,
+                     '$.enrichment.retry.next_retry_at', ?3
+                   ),
+                   updated_at = ?3
+               WHERE id = ?5"#,
+            params![stage, error, &now, ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS, id],
+        )?;
+    } else {
+        conn.execute(
+            r#"UPDATE memories
+               SET metadata = json_remove(
+                     json_set(
+                       CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                       '$.enrichment.status', 'failed',
+                       '$.enrichment.failed_stage', ?1,
+                       '$.enrichment.last_error', ?2,
+                       '$.enrichment.last_failure_at', ?3
+                     ),
+                     '$.enrichment.retry'
+                   ),
+                   updated_at = ?3
+               WHERE id = ?4"#,
+            params![stage, error, &now, id],
+        )?;
+    }
     Ok(())
 }

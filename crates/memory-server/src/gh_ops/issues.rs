@@ -61,8 +61,9 @@ pub(in crate::gh_ops) async fn handle_gh_issue_create(
         .args(["--repo", &params.repo])
         .args(["--title", &params.title]);
 
+    let mut _body_file = None;
     if let Some(ref body) = params.body {
-        cmd.args(["--body", body]);
+        _body_file = Some(attach_gh_body_file(&mut cmd, body)?);
     }
 
     for label in &params.labels {

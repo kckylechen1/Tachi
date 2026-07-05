@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use super::access::{
     authorize_vault_mutation, authorize_vault_pool_mutation, ensure_agent_allowed,
-    load_unlocked_api_key_secret_pool, record_successful_vault_access, select_vault_entry,
+    load_unlocked_api_key_secret_pool, record_successful_vault_access, resolve_vault_acl_agent_id,
+    select_vault_entry,
 };
 use super::audit::{record_vault_audit, result_with_vault_audit_warning};
 use super::env::attach_provider_refresh_warning;

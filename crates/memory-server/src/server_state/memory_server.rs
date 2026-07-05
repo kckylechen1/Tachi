@@ -1,13 +1,12 @@
 use super::cache::ToolDiscovery;
-use super::read_pool::ReadStorePool;
-use super::runtime::{
-    AgentRuntime, EnrichmentRuntime, FoundryRuntime, ProjectDbState, RateLimiter, VaultState,
-};
+use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
+use super::{ProjectDbState, RateLimiter, ReadStorePool, VaultState};
 use crate::claude_pool;
 use crate::llm;
 use crate::mcp_pool::McpClientPool;
 use memory_core::MemoryStore;
 use rmcp::handler::server::tool::ToolRouter;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
@@ -59,4 +58,8 @@ pub(crate) struct MemoryServer {
     // ─── Agent Runtime ───────────────────────────────────────────────────────
     /// Agent profile, tool profile, and handoff memos grouped together.
     pub(crate) agent_runtime: Arc<StdRwLock<AgentRuntime>>,
+    // ─── Vault ACL Runtime ───────────────────────────────────────────────────
+    /// Server-bound vault identity read once from `TACHI_AGENT_ID` at startup.
+    pub(crate) bound_agent_id: Arc<StdRwLock<Option<String>>>,
+    pub(crate) named_project_cache: Arc<StdMutex<HashMap<String, Arc<StdMutex<MemoryStore>>>>>,
 }

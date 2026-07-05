@@ -33,6 +33,7 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             issue_ref: None,
             pr_ref: None,
             project: None,
+            format: None,
         }))
         .await
         .expect("real eval should save");

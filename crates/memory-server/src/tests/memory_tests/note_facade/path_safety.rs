@@ -30,6 +30,7 @@ async fn tachi_save_note_rejects_paths_outside_notes_root() {
                 metadata: None,
                 emit_continuity: false,
                 files: Vec::new(),
+                format: None,
             }))
             .await
             .expect_err("invalid note path should be rejected");

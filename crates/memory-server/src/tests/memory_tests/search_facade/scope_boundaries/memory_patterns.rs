@@ -383,6 +383,7 @@ async fn tachi_complete_records_pattern_hit_from_evidence_ref() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("complete with pattern ref");

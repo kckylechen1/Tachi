@@ -1,4 +1,6 @@
-use super::super::super::helpers::{build_section_artifact, dedup_strings, estimate_token_count};
+use super::super::super::helpers::{
+    build_section_artifact, dedup_strings, estimate_token_count, SectionArtifactInput,
+};
 use super::super::super::recall::run_compaction_model;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CompactRollupParams;
@@ -82,16 +84,16 @@ pub(crate) async fn handle_compact_rollup(
         .filter_map(|item| item.window_id.clone().or_else(|| item.item_id.clone()))
         .collect::<Vec<_>>();
     let section = if params.build_section && !compacted_text.is_empty() {
-        Some(build_section_artifact(
-            "session",
-            "compact_rollup",
-            Some("Session Rollup"),
-            &compacted_text,
-            &draft.durable_signals,
-            "session",
-            &source_refs,
-            Some(params.target_tokens),
-        ))
+        Some(build_section_artifact(SectionArtifactInput {
+            layer: "session",
+            kind: "compact_rollup",
+            title: Some("Session Rollup"),
+            content: &compacted_text,
+            items: &draft.durable_signals,
+            cache_boundary: "session",
+            source_refs: &source_refs,
+            target_tokens: Some(params.target_tokens),
+        }))
     } else {
         None
     };

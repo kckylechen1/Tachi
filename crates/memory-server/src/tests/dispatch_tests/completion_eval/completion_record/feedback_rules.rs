@@ -33,6 +33,7 @@ async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
             diff_present: Some(false),
             scope: None,
             project: None,
+            format: None,
         }))
         .await
         .expect("completion should succeed");

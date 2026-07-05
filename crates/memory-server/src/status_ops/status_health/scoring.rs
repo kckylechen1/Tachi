@@ -79,7 +79,7 @@ pub(crate) fn calculate_health_deductions(
         "low vector coverage",
         (low_vector_dbs.len() * 10).min(25),
         format!(
-            "{} db(s) below 90% vector coverage: {}",
+            "{} db(s) below 99% vector coverage: {}",
             low_vector_dbs.len(),
             labels_for_refs(&low_vector_dbs)
         ),

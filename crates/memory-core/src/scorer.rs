@@ -17,7 +17,7 @@ pub use graph::{
 pub(crate) use text::generic_precision_multiplier_impl_with_config;
 pub use text::{
     entry_has_exact_query_token, generic_precision_multiplier, is_id_like_exact_query,
-    symbolic_score, tokenize, PrecisionMatcher,
+    symbolic_score, symbolic_score_entry, tokenize, PrecisionMatcher,
 };
 
 fn tier_half_life_with_config(tier: &str, recall_config: &RecallConfig) -> f64 {

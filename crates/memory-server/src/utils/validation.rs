@@ -117,43 +117,5 @@ pub(crate) fn is_trusted_mcp_command(cmd: &str) -> bool {
 /// caller already decided to run it. MCP auto-registration is the stricter
 /// path (see [`is_trusted_mcp_command`]).
 pub(crate) fn is_trusted_command(cmd: &str) -> bool {
-    let basename = std::path::Path::new(cmd)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(cmd);
-
-    const TRUSTED_BASENAMES: &[&str] = &[
-        "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup", "docker",
-        "podman", "tachi", "opencode", "acpx",
-    ];
-
-    if TRUSTED_BASENAMES.contains(&basename) {
-        return true;
-    }
-
-    // Allow absolute paths under Homebrew, nvm, cargo, common bin dirs
-    const TRUSTED_PREFIXES: &[&str] = &["/opt/homebrew/", "/usr/local/bin/", "/usr/bin/", "/bin/"];
-
-    for prefix in TRUSTED_PREFIXES {
-        if cmd.starts_with(prefix) {
-            return true;
-        }
-    }
-
-    // Allow paths under user's home .cargo/bin, .local/bin, .nvm
-    if let Ok(home) = std::env::var("HOME") {
-        let home_prefixes = [
-            format!("{}/.cargo/bin/", home),
-            format!("{}/.local/bin/", home),
-            format!("{}/.nvm/", home),
-            format!("{}/.bun/bin/", home),
-        ];
-        for prefix in &home_prefixes {
-            if cmd.starts_with(prefix.as_str()) {
-                return true;
-            }
-        }
-    }
-
-    false
+    tachi_dispatch::is_trusted_dispatch_command(cmd)
 }

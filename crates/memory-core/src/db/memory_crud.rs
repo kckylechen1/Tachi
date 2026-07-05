@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use std::sync::{Mutex, MutexGuard};
 
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
@@ -49,6 +50,14 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
 const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
 
+static FTS_SYNC_LOCK: Mutex<()> = Mutex::new(());
+
+fn acquire_fts_sync_lock() -> MutexGuard<'static, ()> {
+    FTS_SYNC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn sync_memories_fts(
     tx: &rusqlite::Transaction<'_>,
     id: &str,
@@ -58,6 +67,10 @@ fn sync_memories_fts(
     keywords_joined: &str,
     entities_joined: &str,
 ) -> Result<(), MemoryError> {
+    // The wangfenjin/simple tokenizer has process-global Pinyin state. Keep
+    // in-process FTS syncs single-file so parallel test/server writes do not
+    // stampede that tokenizer while preserving the same SQL effects.
+    let _fts_guard = acquire_fts_sync_lock();
     tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)

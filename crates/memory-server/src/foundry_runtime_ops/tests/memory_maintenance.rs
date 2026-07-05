@@ -108,7 +108,14 @@ fn test_memory_entry(id: &str, topic: &str, importance: f64, access_count: i64) 
 #[test]
 fn infer_memory_insight_marks_surprising_memory_high_priority() {
     let entry = test_memory_entry("insight-high", "rare-topic", 0.95, 0);
-    let insight = infer_memory_insight(&entry, 0.35, 2, 1, FOUNDRY_RELATED_LIMIT);
+    let insight = infer_memory_insight(
+        &entry,
+        0.35,
+        2,
+        1,
+        FOUNDRY_RELATED_LIMIT,
+        FOUNDRY_RELATED_LIMIT,
+    );
 
     assert_eq!(insight["kind"], json!("memory_insight"));
     assert_eq!(insight["priority"], json!("high"));
@@ -133,7 +140,7 @@ fn infer_memory_insight_marks_surprising_memory_high_priority() {
 #[test]
 fn infer_memory_insight_keeps_routine_memory_low_priority() {
     let entry = test_memory_entry("insight-low", "common-topic", 0.5, 3);
-    let insight = infer_memory_insight(&entry, 0.5, 0, 8, 1);
+    let insight = infer_memory_insight(&entry, 0.5, 0, 8, 1, FOUNDRY_RELATED_LIMIT);
 
     assert_eq!(insight["priority"], json!("low"));
     assert!(insight["surprise"].as_f64().unwrap() < 0.2);

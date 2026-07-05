@@ -27,6 +27,7 @@ pub mod enrichment;
 pub mod events;
 pub mod graph;
 pub mod hub;
+pub mod lessons;
 pub mod linking;
 pub mod llm_usage;
 pub mod maintenance;

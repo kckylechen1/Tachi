@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::{
     db::{get_access_times, get_superseded_ids},
     error::MemoryError,
-    scorer::{cosine_similarity, is_id_like_exact_query, symbolic_score},
+    scorer::{cosine_similarity, is_id_like_exact_query},
     types::{HybridScore, MemoryEntry, SearchResult},
 };
 
@@ -150,22 +150,10 @@ fn symbolic_scores(
     entries_map
         .iter()
         .map(|(id, entry)| {
-            let score = symbolic_score(
-                &symbolic_query,
-                &symbolic_match_text(entry),
-                &entry.keywords,
-                &entry.entities,
-            );
+            let score = crate::scorer::symbolic_score_entry(&symbolic_query, entry);
             (id.clone(), score)
         })
         .collect()
-}
-
-fn symbolic_match_text(entry: &MemoryEntry) -> String {
-    format!(
-        "{}\n{}\n{}\n{}\n{}",
-        entry.id, entry.path, entry.topic, entry.summary, entry.text
-    )
 }
 
 fn apply_precision_boosts(

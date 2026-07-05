@@ -3,6 +3,13 @@
 use crate::utils::compact_text_line;
 use serde_json::{json, Value};
 
+pub(crate) fn wants_full_format(format: Option<&str>) -> bool {
+    format
+        .map(str::trim)
+        .filter(|format| !format.is_empty())
+        .is_some_and(|format| format.eq_ignore_ascii_case("full"))
+}
+
 pub(crate) fn wants_json(format: Option<&str>) -> bool {
     match format
         .map(str::trim)
@@ -26,6 +33,159 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
         let preview: String = raw.chars().take(500).collect();
         json!({ "raw_preview": preview, "parse_error": true })
     })
+}
+
+const SAVE_BASE_RECEIPT_KEYS: &[&str] = &["id", "path", "status", "enrichment"];
+/// Per-route identity fields — kept whole when present, never echoed input text.
+const SAVE_VARIANT_ROUTE_KEYS: &[&str] =
+    &["wiki_path", "note_file", "note_path", "continuity_event"];
+
+pub(crate) fn save_receipt_value(value: &Value) -> Value {
+    let mut receipt = serde_json::Map::new();
+    receipt.insert("ok".to_string(), json!(true));
+    for key in SAVE_BASE_RECEIPT_KEYS
+        .iter()
+        .chain(SAVE_VARIANT_ROUTE_KEYS.iter())
+    {
+        if let Some(field) = value.get(*key) {
+            if !field.is_null() {
+                receipt.insert((*key).to_string(), field.clone());
+            }
+        }
+    }
+    if !receipt.contains_key("status") {
+        receipt.insert("status".to_string(), json!("saved"));
+    }
+    Value::Object(receipt)
+}
+
+pub(crate) fn shape_save_facade_response(
+    raw: &str,
+    format: Option<&str>,
+    echo: Option<&str>,
+    requested_path: Option<&str>,
+) -> Result<String, String> {
+    let mut value = parse_json_or_empty(raw.to_string());
+    if wants_full_format(format) {
+        if let (Some(obj), Some(echo_text)) = (
+            value.as_object_mut(),
+            echo.filter(|text| !text.trim().is_empty()),
+        ) {
+            obj.insert("echo".to_string(), json!(echo_text));
+        }
+        return json_string(&value);
+    }
+
+    let receipt = save_receipt_value(&value);
+    if wants_json(format) {
+        json_string(&receipt)
+    } else {
+        Ok(format_save_result(
+            &serde_json::to_string(&receipt).map_err(|e| format!("serialize save receipt: {e}"))?,
+            requested_path.or_else(|| receipt.get("path").and_then(Value::as_str)),
+        ))
+    }
+}
+
+fn receipt_eval_entry(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    let mut entry = serde_json::Map::new();
+    for key in ["id", "path", "status", "enrichment"] {
+        if let Some(field) = value.get(key) {
+            if !field.is_null() {
+                entry.insert(key.to_string(), field.clone());
+            }
+        }
+    }
+    Value::Object(entry)
+}
+
+/// Pipeline stages whose value is structured route output, not a single status scalar.
+const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] = &["pattern_feedback", "kanban_update"];
+
+fn pipeline_stage_status(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(_) | Value::Bool(_) | Value::Number(_) => Some(value.clone()),
+        Value::Object(obj) => {
+            if let Some(status) = obj.get("status") {
+                return Some(status.clone());
+            }
+            if let Some(recorded) = obj.get("recorded") {
+                return Some(recorded.clone());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn pipeline_stage_value(stage: &str, value: &Value) -> Option<Value> {
+    if value.is_null() {
+        return None;
+    }
+    if PIPELINE_VARIANT_OBJECT_STAGES.contains(&stage) {
+        return Some(value.clone());
+    }
+    pipeline_stage_status(value)
+}
+
+fn whole_pipeline(value: Option<&Value>) -> Value {
+    let Some(map) = value.and_then(Value::as_object) else {
+        return Value::Null;
+    };
+    Value::Object(
+        map.iter()
+            .filter_map(|(key, value)| {
+                pipeline_stage_value(key, value).map(|status| (key.clone(), status))
+            })
+            .collect(),
+    )
+}
+
+fn whole_next_steps(value: Option<&Value>) -> Value {
+    Value::Array(
+        value
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+    )
+}
+
+pub(crate) fn shape_complete_response(bundle: Value, format: Option<&str>) -> Value {
+    if wants_full_format(format) {
+        return bundle;
+    }
+    let mut receipt = serde_json::Map::new();
+    if let Some(count) = bundle.get("subagent_count") {
+        receipt.insert("subagent_count".to_string(), count.clone());
+    }
+    if let Some(pr_ref) = bundle.get("pr_ref") {
+        if !pr_ref.is_null() {
+            receipt.insert("pr_ref".to_string(), pr_ref.clone());
+        }
+    }
+    // Security signal, not an echo: the caller must see that its metadata
+    // contained secret-ish content and was scrubbed.
+    if let Some(redactions) = bundle.get("secret_redactions") {
+        receipt.insert("secret_redactions".to_string(), redactions.clone());
+    }
+    receipt.insert(
+        "eval_entry".to_string(),
+        receipt_eval_entry(bundle.get("eval_entry")),
+    );
+    receipt.insert(
+        "next_steps".to_string(),
+        whole_next_steps(bundle.get("next_steps")),
+    );
+    receipt.insert(
+        "pipeline".to_string(),
+        whole_pipeline(bundle.get("pipeline")),
+    );
+    Value::Object(receipt)
 }
 
 pub(crate) fn sections_to_evidence(sections: &[(String, Value)]) -> Result<Value, String> {
@@ -115,10 +275,11 @@ pub(crate) fn checkpoint_message(
     display_path: Option<&str>,
     already_formatted: bool,
     echo: Option<&str>,
+    format: Option<&str>,
 ) -> String {
     if already_formatted {
         raw.to_string()
-    } else {
+    } else if wants_full_format(format) {
         let mut msg = format_save_result(raw, display_path);
         if let Some(echo) = echo.filter(|text| !text.trim().is_empty()) {
             msg.push_str(&format!(
@@ -127,6 +288,8 @@ pub(crate) fn checkpoint_message(
             ));
         }
         msg
+    } else {
+        format_save_result(raw, display_path)
     }
 }
 

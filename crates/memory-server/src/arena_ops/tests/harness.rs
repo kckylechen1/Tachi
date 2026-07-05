@@ -14,6 +14,20 @@ impl EnvGuard {
         }
         Self { key, original }
     }
+
+    fn prepend_path(key: &'static str, dir: &Path) -> Self {
+        let original = std::env::var_os(key);
+        let mut paths = vec![dir.to_path_buf()];
+        if let Some(value) = original.as_ref() {
+            paths.extend(std::env::split_paths(value));
+        }
+        let joined = std::env::join_paths(paths).expect("join PATH");
+        // SAFETY: arena tests that use this helper hold tachi_arena_root_env_lock.
+        unsafe {
+            std::env::set_var(key, joined);
+        }
+        Self { key, original }
+    }
 }
 
 impl Drop for EnvGuard {
@@ -107,7 +121,7 @@ async fn arena_spawn_launches_opencode_dispatch_and_collects_result() {
         std::fs::set_permissions(&opencode_path, perms).expect("chmod fake opencode");
     }
     let _home = EnvGuard::set_path("TACHI_HOME", temp_home.path());
-    let _opencode = EnvGuard::set_path("TACHI_TEST_OPENCODE_BIN", &opencode_path);
+    let _path = EnvGuard::prepend_path("PATH", fake_bin.path());
 
     let server = server();
     let mut open = params("open");

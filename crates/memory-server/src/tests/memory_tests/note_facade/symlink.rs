@@ -35,6 +35,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            format: None,
         }))
         .await
         .expect_err("symlink note leaf should be rejected");
