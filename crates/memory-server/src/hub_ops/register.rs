@@ -225,11 +225,10 @@ pub(crate) async fn handle_hub_register(
             let cap_clone = cap;
             let desc_empty = params.description.is_empty();
             let db_path = match target_db {
-                DbScope::Global => server.global_db_path.clone(),
+                DbScope::Global => server.global_db_path_buf(),
                 DbScope::Project => server
-                    .project_db_path
-                    .clone()
-                    .unwrap_or_else(|| server.global_db_path.clone()),
+                    .project_db_path_buf()
+                    .unwrap_or_else(|| server.global_db_path_buf()),
             };
             let prompt_text = prompt_text.to_string();
 
