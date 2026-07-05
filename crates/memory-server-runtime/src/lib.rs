@@ -244,90 +244,28 @@ impl RateLimiter {
 pub struct DbRuntime {
     pub global_store: Arc<StdMutex<MemoryStore>>,
     pub global_read_pool: ReadStorePool,
-    pub project_store: Option<Arc<StdMutex<MemoryStore>>>,
-    pub project_read_pool: Option<ReadStorePool>,
     pub global_rw_gate: Arc<StdRwLock<()>>,
-    pub project_rw_gate: Option<Arc<StdRwLock<()>>>,
     pub global_db_path: Arc<PathBuf>,
-    pub project_db_path: Option<Arc<PathBuf>>,
     pub global_vec_available: bool,
-    pub project_vec_available: bool,
-    pub hot_project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
+    pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
 }
 
 impl DbRuntime {
     pub fn has_project_db(&self) -> bool {
-        if self.project_db_path.is_some() {
-            return true;
-        }
-        self.hot_project_db
+        self.project_db
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
     }
 
     pub fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
-        let db_str = db_path.to_str().ok_or_else(|| {
-            format!(
-                "Project DB path contains invalid UTF-8: {}",
-                db_path.display()
-            )
-        })?;
-        let project_label = db_path
-            .parent()
-            .and_then(|parent| parent.file_name())
-            .and_then(|os| os.to_str())
-            .unwrap_or("project")
-            .to_string();
-        let store = MemoryStore::open_with_label(db_str, &project_label)
+        let state = ProjectDbState::open(db_path, configured_memory_read_pool_size())
             .map_err(|e| format!("open project db: {e}"))?;
-        let read_pool = ReadStorePool::open_read_only(db_str, configured_memory_read_pool_size())
-            .map_err(|e| format!("open project read db: {e}"))?;
-        let state = ProjectDbState {
-            store: Arc::new(StdMutex::new(store)),
-            read_pool,
-            rw_gate: Arc::new(StdRwLock::new(())),
-            db_path: Arc::new(db_path),
-        };
 
-        let mut guard = self
-            .hot_project_db
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.project_db.write().unwrap_or_else(|e| e.into_inner());
         let was_none = guard.is_none();
         *guard = Some(state);
         Ok(was_none)
-    }
-
-    pub fn with_hot_project_store<T>(
-        &self,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let guard = self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let state = guard
-            .as_ref()
-            .ok_or_else(|| "No hot-swapped project database available".to_string())?;
-        let _gate = write_or_recover(&state.rw_gate, "hot_project_rw_gate");
-        let mut store = lock_or_recover(&state.store, "hot_project_store");
-        f(&mut store)
-    }
-
-    pub fn with_hot_project_store_read<T>(
-        &self,
-        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let guard = self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
-        let state = guard
-            .as_ref()
-            .ok_or_else(|| "No hot-swapped project database available".to_string())?;
-        let _gate = read_or_recover(&state.rw_gate, "hot_project_rw_gate");
-        state.read_pool.with_store("hot_project_read_pool", f)
     }
 
     pub fn with_path_store<T>(
@@ -398,47 +336,25 @@ impl DbRuntime {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        if self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
-            return self.with_hot_project_store(f);
-        }
-        if let Some(ref store_arc) = self.project_store {
-            let gate = self
-                .project_rw_gate
-                .as_ref()
-                .ok_or_else(|| "No project lock available".to_string())?;
-            let _gate = write_or_recover(gate, "project_rw_gate");
-            let mut store = lock_or_recover(store_arc, "project_store");
-            return f(&mut store);
-        }
-        Err("No project database available".to_string())
+        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| "No project database available".to_string())?;
+        let _gate = write_or_recover(&state.rw_gate, "project_rw_gate");
+        let mut store = lock_or_recover(&state.store, "project_store");
+        f(&mut store)
     }
 
     pub fn with_project_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        if self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
-            return self.with_hot_project_store_read(f);
-        }
-        if let Some(ref read_pool) = self.project_read_pool {
-            let gate = self
-                .project_rw_gate
-                .as_ref()
-                .ok_or_else(|| "No project lock available".to_string())?;
-            let _gate = read_or_recover(gate, "project_rw_gate");
-            return read_pool.with_store("project_read_pool", f);
-        }
-        Err("No project database available".to_string())
+        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| "No project database available".to_string())?;
+        let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
+        state.read_pool.with_store("project_read_pool", f)
     }
 
     pub fn with_store_for_scope<T>(
@@ -468,19 +384,23 @@ impl DbRuntime {
     }
 
     pub fn project_db_path_buf(&self) -> Option<PathBuf> {
-        if let Some(state) = self
-            .hot_project_db
+        self.project_db
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
-        {
-            return Some(state.db_path.as_ref().clone());
-        }
-        self.project_db_path.as_ref().map(|p| (**p).clone())
+            .map(|state| state.db_path.as_ref().clone())
     }
 
     pub fn global_read_pool_size(&self) -> usize {
         self.global_read_pool.len()
+    }
+
+    pub fn project_vec_available(&self) -> bool {
+        self.project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|state| state.vec_available)
     }
 }
 
@@ -503,6 +423,36 @@ pub struct ProjectDbState {
     pub read_pool: ReadStorePool,
     pub rw_gate: Arc<StdRwLock<()>>,
     pub db_path: Arc<PathBuf>,
+    pub vec_available: bool,
+}
+
+impl ProjectDbState {
+    pub fn open(db_path: PathBuf, read_pool_size: usize) -> Result<Self, String> {
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!(
+                "Project DB path contains invalid UTF-8: {}",
+                db_path.display()
+            )
+        })?;
+        let project_label = db_path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|os| os.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let store = MemoryStore::open_with_label(db_str, &project_label)
+            .map_err(|e| format!("open project db: {e}"))?;
+        let vec_available = store.vec_available;
+        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size)
+            .map_err(|e| format!("open project read db: {e}"))?;
+        Ok(Self {
+            store: Arc::new(StdMutex::new(store)),
+            read_pool,
+            rw_gate: Arc::new(StdRwLock::new(())),
+            db_path: Arc::new(db_path),
+            vec_available,
+        })
+    }
 }
 
 /// Agent profile registered via `agent_register`. Stored per-session (in-memory).

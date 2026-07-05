@@ -70,39 +70,10 @@ impl MemoryServer {
         let global_read_pool = ReadStorePool::open_read_only(global_db_str, read_pool_size)?;
         let global_vec_available = global_store.vec_available;
 
-        let (
-            project_store,
-            project_read_pool,
-            project_rw_gate,
-            project_db_path,
-            project_vec_available,
-        ) = if let Some(ref p) = project_db_path {
-            let project_db_str = p.to_str().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Project DB path contains invalid UTF-8: {}", p.display()),
-                )
-            })?;
-            // Derive project label from parent directory name
-            // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
-            let project_label = p
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|os| os.to_str())
-                .unwrap_or("project")
-                .to_string();
-            let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
-            let read_pool = ReadStorePool::open_read_only(project_db_str, read_pool_size)?;
-            let v = store.vec_available;
-            (
-                Some(Arc::new(StdMutex::new(store))),
-                Some(read_pool),
-                Some(Arc::new(StdRwLock::new(()))),
-                Some(Arc::new(p.clone())),
-                v,
-            )
+        let project_db_state = if let Some(ref p) = project_db_path {
+            Some(ProjectDbState::open(p.clone(), read_pool_size).map_err(std::io::Error::other)?)
         } else {
-            (None, None, None, None, false)
+            None
         };
 
         let llm = Arc::new(tachi_llm::LlmClient::new_with_vault_db(Some(
@@ -142,38 +113,13 @@ impl MemoryServer {
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
-        // Build hot-swap state before moving project_store into the struct
-        let hot_project_db = Arc::new(StdRwLock::new(
-            match (
-                project_store.as_ref(),
-                project_read_pool.as_ref(),
-                project_rw_gate.clone(),
-                project_db_path.clone(),
-            ) {
-                (Some(store), Some(read_pool), Some(rw_gate), Some(db_path)) => {
-                    Some(ProjectDbState {
-                        store: Arc::clone(store),
-                        read_pool: read_pool.clone(),
-                        rw_gate,
-                        db_path,
-                    })
-                }
-                _ => None,
-            },
-        ));
-
         let db = DbRuntime {
             global_store: Arc::new(StdMutex::new(global_store)),
             global_read_pool,
-            project_store,
-            project_read_pool,
             global_rw_gate: Arc::new(StdRwLock::new(())),
-            project_rw_gate,
             global_db_path: Arc::new(global_db_path),
-            project_db_path,
             global_vec_available,
-            project_vec_available,
-            hot_project_db,
+            project_db: Arc::new(StdRwLock::new(project_db_state)),
         };
 
         let server = Self {
@@ -334,6 +280,41 @@ fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::MemoryServer;
+    use chrono::Utc;
+    use memory_core::MemoryEntry;
+    use serde_json::json;
+
+    fn test_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/".to_string(),
+            summary: String::new(),
+            text: "test memory".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
 
     #[test]
     fn memory_server_new_creates_global_and_project_db_parents() {
@@ -348,5 +329,25 @@ mod tests {
         assert!(project_db.parent().expect("project parent").is_dir());
         assert_eq!(server.global_db_path_buf(), global_db);
         assert_eq!(server.project_db_path_buf(), Some(project_db));
+        assert!(server.has_project_db());
+
+        server
+            .with_project_store(|store| {
+                store
+                    .upsert(&test_entry("startup-project-read-visible"))
+                    .map_err(|e| format!("project upsert failed: {e}"))
+            })
+            .expect("startup project writer should be active");
+        let found = server
+            .with_project_store_read(|store| {
+                store
+                    .get("startup-project-read-visible")
+                    .map_err(|e| format!("project read get failed: {e}"))
+            })
+            .expect("startup project read pool should be active");
+        assert_eq!(
+            found.expect("project entry exists").id,
+            "startup-project-read-visible"
+        );
     }
 }

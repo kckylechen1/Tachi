@@ -38,6 +38,53 @@ async fn tachi_init_project_db_creates_expected_path() {
 }
 
 #[tokio::test]
+async fn tachi_init_project_db_activates_project_store_and_read_pool() {
+    let server = make_server();
+    let root = std::env::temp_dir().join(format!("tachi-project-runtime-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+
+    assert_eq!(server.project_db_path_buf(), None);
+
+    let response = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: ".tachi/memory.db".to_string(),
+        }))
+        .await
+        .expect("tachi_init_project_db should activate project state");
+    let json: serde_json::Value =
+        serde_json::from_str(&response).expect("tachi_init_project_db response should be JSON");
+    assert_eq!(json["active"], json!(true));
+
+    let db_path =
+        crate::path_utils::resolve_project_db_path(&root, std::path::Path::new(".tachi/memory.db"))
+            .expect("resolve project db path");
+    assert_eq!(server.project_db_path_buf(), Some(db_path));
+
+    server
+        .with_project_store(|store| {
+            store
+                .upsert(&make_entry("activated-project-read-visible"))
+                .map_err(|e| format!("project upsert failed: {e}"))
+        })
+        .expect("project writer should be active");
+
+    let found = server
+        .with_project_store_read(|store| {
+            store
+                .get("activated-project-read-visible")
+                .map_err(|e| format!("project read get failed: {e}"))
+        })
+        .expect("project read pool should be active");
+    assert_eq!(
+        found.expect("project entry exists").id,
+        "activated-project-read-visible"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn tachi_init_project_db_reports_plan_c_split_brain() {
     let (server, temp_home) = make_server_with_temp_home();
     let root = temp_home
