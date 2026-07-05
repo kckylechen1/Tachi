@@ -2,9 +2,11 @@
 //! what evidence a delegated agent must return. They are intentionally separate
 //! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
+#[cfg(test)]
+use crate::agent_eval::CompletionStatus;
 use crate::agent_eval::{
     aggregate_performance_matrix, aggregate_subagent_scores, load_live_eval_rows,
-    AgentPerformanceMatrixRow, CompletionStatus, EvalRow,
+    AgentPerformanceMatrixRow, EvalRow,
 };
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
@@ -13,9 +15,8 @@ use serde_json::{json, Value};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
     profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk, ResolvedDispatchProfile,
-    RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord,
-    RouteSimulationSummary, RouteSubagentScore, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    RoutePolicyRuleLoadout, RoutePolicyRuleRecord, RouteSimulationSummary,
+    DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 
 pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result<Value, String> {

@@ -1,5 +1,7 @@
 use serde::Serialize;
+use serde_json::{json, Value};
 
+use crate::eval::{AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentTaskScore};
 use crate::{
     fallback_chain, profile_matches_agent, DispatchProfileDef, DISPATCH_PROFILES,
     MIN_ROUTE_POLICY_RULE_SAMPLES, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
@@ -136,6 +138,62 @@ pub struct RouteSimulationChoice {
     pub avg_retry_count: f64,
     pub human_override_rate: f64,
     pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecommendationProfilePayload {
+    pub recommended_transport: String,
+    pub transport_readiness: Value,
+    pub evidence_required: Value,
+    pub evidence_contract: Value,
+    pub resolved_skills: Vec<String>,
+    pub resolved_skill_loadout: Value,
+    pub mbit_card: Value,
+}
+
+pub fn route_eval_rows(rows: &[EvalRow]) -> Vec<RouteEvalRow> {
+    rows.iter()
+        .map(|row| RouteEvalRow {
+            profile: row.profile.clone(),
+            completed: row.completion_status == CompletionStatus::Completed,
+            verification_present: row.verification_present,
+        })
+        .collect()
+}
+
+pub fn route_subagent_scores(rows: &[SubagentTaskScore]) -> Vec<RouteSubagentScore> {
+    rows.iter()
+        .map(|row| RouteSubagentScore {
+            role: row.role.clone(),
+            agent: row.agent.clone(),
+            task_type: row.task_type.clone(),
+            samples: row.samples,
+            useful_rate: row.useful_rate,
+            failure_count: row.failure_count,
+        })
+        .collect()
+}
+
+pub fn route_performance_rows(rows: &[AgentPerformanceMatrixRow]) -> Vec<RoutePerformanceRow> {
+    rows.iter()
+        .map(|row| RoutePerformanceRow {
+            scope: row.scope.clone(),
+            profile: row.profile.clone(),
+            role: row.role.clone(),
+            agent: row.agent.clone(),
+            task_type: row.task_type.clone(),
+            samples: row.samples,
+            success_rate: row.success_rate,
+            useful_rate: row.useful_rate,
+            verification_rate: row.verification_rate,
+            failure_count: row.failure_count,
+            human_override_rate: row.human_override_rate,
+            avg_retry_count: row.avg_retry_count,
+            avg_latency_ms: row.avg_latency_ms,
+            avg_cost_usd: row.avg_cost_usd,
+            avg_quality_score: row.avg_quality_score,
+        })
+        .collect()
 }
 
 pub fn classify_dispatch_risk(
@@ -518,6 +576,68 @@ pub fn build_profile_fallback_chain(
         }
     }
     out
+}
+
+pub fn build_dispatch_recommendation_response(
+    task: &str,
+    risk: &DispatchRisk,
+    best_profile: &DispatchProfileDef,
+    candidates: &[ProfileCandidate],
+    route_policy_rules: &RoutePolicyRuleLoadout,
+    row_count: usize,
+    profile_payload: RecommendationProfilePayload,
+) -> Result<Value, String> {
+    let best = candidates
+        .first()
+        .ok_or_else(|| "no dispatch profiles configured".to_string())?;
+    let fallback = build_profile_fallback_chain(best_profile, candidates);
+    let live_matched_samples = candidates
+        .iter()
+        .map(|candidate| candidate.live_samples)
+        .sum::<u32>();
+    let performance_matrix_hits = candidates
+        .iter()
+        .map(|candidate| candidate.performance_samples)
+        .sum::<u32>();
+    let evidence_note = if !route_policy_rules.applied.is_empty() {
+        "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
+    } else if live_matched_samples == 0 {
+        "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
+    } else {
+        "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
+    };
+
+    Ok(json!({
+        "task": task,
+        "task_type": &risk.task_type,
+        "risk": &risk.risk,
+        "risk_reasons": &risk.reasons,
+        "required_profiles": &risk.required_profiles,
+        "blocked_profiles": &risk.blocked_profiles,
+        "recommended_profile": &best.profile,
+        "recommended_agent": &best.agent,
+        "recommended_model": best_profile.model,
+        "recommended_transport": profile_payload.recommended_transport,
+        "transport_readiness": profile_payload.transport_readiness,
+        "role": &best.role,
+        "tool_profile": best_profile.tool_profile,
+        "evidence_required": profile_payload.evidence_required,
+        "evidence_contract": profile_payload.evidence_contract,
+        "resolved_skills": profile_payload.resolved_skills,
+        "resolved_skill_loadout": profile_payload.resolved_skill_loadout,
+        "fallback_chain": fallback,
+        "reason": &best.reasons,
+        "route_explanation": &best.reasons,
+        "evidence_note": evidence_note,
+        "live_eval": {
+            "row_count": row_count,
+            "matched_samples": live_matched_samples,
+            "performance_matrix_hits": performance_matrix_hits,
+        },
+        "route_policy_rules": route_policy_rules,
+        "mbit_card": profile_payload.mbit_card,
+        "candidates": candidates,
+    }))
 }
 
 pub fn build_route_policy_rule_loadout(

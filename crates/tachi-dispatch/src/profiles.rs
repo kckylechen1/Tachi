@@ -636,6 +636,23 @@ pub fn profile_required_skill_ids(profile: &DispatchProfileDef) -> Vec<String> {
     skills
 }
 
+pub fn profile_required_skill_ids_with_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let mut skills = profile
+        .common_skills
+        .iter()
+        .chain(profile.signature_skills.iter())
+        .map(|skill| skill.to_string())
+        .collect::<Vec<_>>();
+    skills.extend(profile_projected_signature_skills_from_overlay(
+        profile, overlay,
+    ));
+    dedupe_preserve_order(&mut skills);
+    skills
+}
+
 pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "common_skills": profile.common_skills,
@@ -650,12 +667,62 @@ pub fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
     })
 }
 
+pub fn profile_skill_loadout_json_with_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Value {
+    let projected_signature_skills =
+        profile_projected_signature_skills_from_overlay(profile, overlay);
+    let projected_passive_traits = profile_projected_passive_traits_from_overlay(profile, overlay);
+    let mut signature_skills = profile
+        .signature_skills
+        .iter()
+        .map(|skill| skill.to_string())
+        .collect::<Vec<_>>();
+    signature_skills.extend(projected_signature_skills.iter().cloned());
+    dedupe_preserve_order(&mut signature_skills);
+    let mut passive_traits = profile
+        .passive_traits
+        .iter()
+        .map(|trait_id| trait_id.to_string())
+        .collect::<Vec<_>>();
+    passive_traits.extend(projected_passive_traits.iter().cloned());
+    dedupe_preserve_order(&mut passive_traits);
+    let source_proposal_ids = overlay_source_proposal_ids(overlay);
+    json!({
+        "common_skills": profile.common_skills,
+        "signature_skills": signature_skills,
+        "projected_signature_skills": projected_signature_skills,
+        "passive_traits": passive_traits,
+        "projected_passive_traits": projected_passive_traits,
+        "forbidden_skills": profile.forbidden_skills,
+        "projection": {
+            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
+            "namespace": PROFILE_CARD_OVERLAY_NS,
+            "key": profile.name,
+            "source_proposal_ids": source_proposal_ids,
+        },
+    })
+}
+
 pub fn profile_evidence_required(profile: &DispatchProfileDef) -> Vec<String> {
     let mut evidence = profile
         .evidence_required
         .iter()
         .map(|item| item.to_string())
         .collect::<Vec<_>>();
+    dedupe_preserve_order(&mut evidence);
+    evidence
+}
+
+pub fn profile_evidence_required_with_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let mut evidence = profile_evidence_required(profile);
+    evidence.extend(profile_projected_evidence_required_from_overlay(
+        profile, overlay,
+    ));
     dedupe_preserve_order(&mut evidence);
     evidence
 }
@@ -670,12 +737,45 @@ pub fn profile_weak_against(profile: &DispatchProfileDef) -> Vec<String> {
     weak
 }
 
+pub fn profile_weak_against_with_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Vec<String> {
+    let mut weak = profile_weak_against(profile);
+    weak.extend(profile_projected_weak_against_from_overlay(
+        profile, overlay,
+    ));
+    dedupe_preserve_order(&mut weak);
+    weak
+}
+
 pub fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
     json!({
         "required": profile_evidence_required(profile),
         "projected_required": [],
         "projection": {
             "status": "baseline",
+        },
+    })
+}
+
+pub fn profile_evidence_contract_json_with_overlay(
+    profile: &DispatchProfileDef,
+    overlay: Option<&Value>,
+) -> Value {
+    let projected_required = profile_projected_evidence_required_from_overlay(profile, overlay);
+    let mut required = profile_evidence_required(profile);
+    required.extend(projected_required.iter().cloned());
+    dedupe_preserve_order(&mut required);
+    let source_proposal_ids = overlay_source_proposal_ids(overlay);
+    json!({
+        "required": required,
+        "projected_required": projected_required,
+        "projection": {
+            "status": if overlay.is_some() { "applied_overlay" } else { "baseline" },
+            "namespace": PROFILE_CARD_OVERLAY_NS,
+            "key": profile.name,
+            "source_proposal_ids": source_proposal_ids,
         },
     })
 }
@@ -688,6 +788,17 @@ pub fn profile_json(profile: &DispatchProfileDef) -> Value {
         profile_weak_against(profile),
         Vec::new(),
         Vec::new(),
+    )
+}
+
+pub fn profile_json_with_overlay(profile: &DispatchProfileDef, overlay: Option<&Value>) -> Value {
+    profile_json_with_loadout_and_evidence_contract(
+        profile,
+        profile_skill_loadout_json_with_overlay(profile, overlay),
+        profile_evidence_contract_json_with_overlay(profile, overlay),
+        profile_weak_against_with_overlay(profile, overlay),
+        profile_projected_weak_against_from_overlay(profile, overlay),
+        profile_demotion_targets_from_overlay(profile, overlay),
     )
 }
 
@@ -757,6 +868,14 @@ pub fn profile_json_with_loadout_and_evidence_contract(
             },
         }
     })
+}
+
+fn overlay_source_proposal_ids(overlay: Option<&Value>) -> Vec<Value> {
+    overlay
+        .and_then(|overlay| overlay.get("source_proposal_ids"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub fn profile_projected_signature_skills_from_overlay(
@@ -986,4 +1105,54 @@ pub fn profile_card_skill_ids_from_loadout(skill_loadout: &Value) -> Vec<String>
 pub fn dedupe_preserve_order(items: &mut Vec<String>) {
     let mut seen = HashSet::new();
     items.retain(|item| seen.insert(item.clone()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_projection_preserves_profile_card_payload_shape() {
+        let profile = resolve_dispatch_profile("opencode_builder").expect("profile");
+        let overlay = json!({
+            "add_signature_skills": ["skill:custom-fast-fix", "skill:custom-fast-fix"],
+            "add_passive_traits": ["evidence_backed_change_control"],
+            "add_evidence_required": ["regression_tests"],
+            "add_weak_against": ["research_request"],
+            "demotion_targets": [SUPERPOWER_EXECUTING_PLANS, "skill:not-in-profile"],
+            "source_proposal_ids": ["proposal-a"],
+        });
+
+        let loadout = profile_skill_loadout_json_with_overlay(profile, Some(&overlay));
+        assert_eq!(
+            loadout["projected_signature_skills"],
+            json!(["skill:custom-fast-fix"])
+        );
+        assert_eq!(
+            loadout["projection"]["source_proposal_ids"],
+            json!(["proposal-a"])
+        );
+
+        let evidence = profile_evidence_contract_json_with_overlay(profile, Some(&overlay));
+        assert_eq!(evidence["projected_required"], json!(["regression_tests"]));
+        assert_eq!(evidence["projection"]["status"], json!("applied_overlay"));
+
+        let card = profile_json_with_overlay(profile, Some(&overlay));
+        assert_eq!(
+            card["weak_against"],
+            json!([
+                "ambiguous_architecture",
+                "unbounded_refactor",
+                "research_request"
+            ])
+        );
+        assert_eq!(
+            card["mbit_card"]["projected_weak_against"],
+            json!(["research_request"])
+        );
+        assert_eq!(
+            card["mbit_card"]["demotion_targets"],
+            json!([SUPERPOWER_EXECUTING_PLANS])
+        );
+    }
 }

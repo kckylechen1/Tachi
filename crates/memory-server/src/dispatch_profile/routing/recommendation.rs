@@ -1,5 +1,4 @@
 use super::risk::classify_dispatch_risk;
-use super::scoring::{route_eval_rows, route_performance_rows, route_subagent_scores};
 use super::*;
 
 pub(crate) fn handle_dispatch_recommendation(
@@ -17,9 +16,9 @@ pub(crate) fn handle_dispatch_recommendation(
 
     let candidates = tachi_dispatch::recommend_dispatch_profile_candidates(
         &risk,
-        &route_eval_rows(&rows),
-        &route_subagent_scores(&subagent_scores),
-        &route_performance_rows(&performance_matrix),
+        &tachi_dispatch::route_eval_rows(&rows),
+        &tachi_dispatch::route_subagent_scores(&subagent_scores),
+        &tachi_dispatch::route_performance_rows(&performance_matrix),
         &route_policy_rules,
         |profile| profile_weak_against_for_server(server, profile),
     )?;
@@ -29,54 +28,32 @@ pub(crate) fn handle_dispatch_recommendation(
         .ok_or_else(|| "no dispatch profiles configured".to_string())?;
     let best_profile = resolve_dispatch_profile(&best.profile)
         .ok_or_else(|| format!("internal missing profile {}", best.profile))?;
-    let fallback = tachi_dispatch::build_profile_fallback_chain(best_profile, &candidates);
-    let live_matched_samples = candidates.iter().map(|c| c.live_samples).sum::<u32>();
-    let performance_matrix_hits = candidates
-        .iter()
-        .map(|c| c.performance_samples)
-        .sum::<u32>();
-    let evidence_note = if !route_policy_rules.applied.is_empty() {
-        "route_policy_weighted: recommendation used matching /eval evidence plus approved route-policy rules."
-    } else if live_matched_samples == 0 {
-        "low_sample_fallback: no matching live /eval profile/subagent evidence; deterministic MBIT/risk fit dominated."
-    } else {
-        "live_eval_weighted: recommendation used matching /eval profile/subagent evidence."
-    };
     let (recommended_transport, transport_readiness) =
         recommended_transport_for_profile(best_profile);
 
-    serde_json::to_string(&json!({
-        "task": task,
-        "task_type": risk.task_type,
-        "risk": risk.risk,
-        "risk_reasons": risk.reasons,
-        "required_profiles": risk.required_profiles,
-        "blocked_profiles": risk.blocked_profiles,
-        "recommended_profile": best.profile,
-        "recommended_agent": best.agent,
-        "recommended_model": best_profile.model,
-        "recommended_transport": recommended_transport,
-        "transport_readiness": transport_readiness,
-        "role": best.role,
-        "tool_profile": best_profile.tool_profile,
-        "evidence_required": profile_evidence_required_for_server(server, best_profile)?,
-        "evidence_contract": profile_evidence_contract_json_for_server(server, best_profile)?,
-        "resolved_skills": profile_required_skill_ids_for_server(server, best_profile)?,
-        "resolved_skill_loadout": profile_skill_loadout_json_for_server(server, best_profile)?,
-        "fallback_chain": fallback,
-        "reason": best.reasons,
-        "route_explanation": best.reasons,
-        "evidence_note": evidence_note,
-        "live_eval": {
-            "row_count": rows.len(),
-            "matched_samples": live_matched_samples,
-            "performance_matrix_hits": performance_matrix_hits,
+    let profile_json = profile_json_for_server(server, best_profile)?;
+    let payload = tachi_dispatch::build_dispatch_recommendation_response(
+        task,
+        &risk,
+        best_profile,
+        &candidates,
+        &route_policy_rules,
+        rows.len(),
+        tachi_dispatch::RecommendationProfilePayload {
+            recommended_transport,
+            transport_readiness,
+            evidence_required: json!(profile_evidence_required_for_server(server, best_profile)?),
+            evidence_contract: profile_evidence_contract_json_for_server(server, best_profile)?,
+            resolved_skills: profile_required_skill_ids_for_server(server, best_profile)?,
+            resolved_skill_loadout: profile_skill_loadout_json_for_server(server, best_profile)?,
+            mbit_card: profile_json
+                .get("mbit_card")
+                .cloned()
+                .unwrap_or(Value::Null),
         },
-        "route_policy_rules": route_policy_rules,
-        "mbit_card": profile_json_for_server(server, best_profile)?.get("mbit_card").cloned().unwrap_or(Value::Null),
-        "candidates": candidates,
-    }))
-    .map_err(|e| format!("serialize recommendation: {e}"))
+    )?;
+
+    serde_json::to_string(&payload).map_err(|e| format!("serialize recommendation: {e}"))
 }
 
 pub(in crate::dispatch_profile) fn recommended_transport_for_profile(
