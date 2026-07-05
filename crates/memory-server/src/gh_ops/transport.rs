@@ -1,4 +1,8 @@
 use super::*;
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
@@ -131,6 +135,46 @@ pub(in crate::gh_ops) fn preserve_gh_env(cmd: &mut Command) {
     }
 }
 
+pub(in crate::gh_ops) struct GhBodyFileGuard(pub(in crate::gh_ops) PathBuf);
+
+impl Drop for GhBodyFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn gh_body_temp_path() -> Result<PathBuf, String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| format!("system clock before UNIX_EPOCH: {err}"))?
+        .as_nanos();
+    Ok(std::env::temp_dir().join(format!("tachi-gh-body-{}-{nanos}.txt", std::process::id())))
+}
+
+/// Write `body` to a temp file and append `--body-file <path>` to `cmd`.
+/// The returned guard keeps the file alive until dropped (after `run_gh`).
+pub(in crate::gh_ops) fn attach_gh_body_file(
+    cmd: &mut Command,
+    body: &str,
+) -> Result<GhBodyFileGuard, String> {
+    let path = gh_body_temp_path()?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|err| format!("create gh body tempfile: {err}"))?;
+    file.write_all(body.as_bytes())
+        .map_err(|err| format!("write gh body tempfile: {err}"))?;
+    file.flush()
+        .map_err(|err| format!("flush gh body tempfile: {err}"))?;
+    drop(file);
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| "gh body tempfile path is not valid UTF-8".to_string())?;
+    cmd.args(["--body-file", path_str]);
+    Ok(GhBodyFileGuard(path))
+}
+
 /// Build a sanitized Command for `gh` with env_clear + vault token injection
 pub(in crate::gh_ops) fn build_gh_command(
     server: &MemoryServer,
@@ -206,4 +250,18 @@ pub(in crate::gh_ops) fn run_gh_json(mut cmd: Command, token: &str) -> Result<St
     }
 
     Ok(sanitized_stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_gh_body_file_writes_verbatim_body() {
+        let body = "line one\nline two\n\"quoted\"";
+        let mut cmd = Command::new("true");
+        let guard = attach_gh_body_file(&mut cmd, body).expect("attach body file");
+        let written = fs::read_to_string(&guard.0).expect("read body tempfile");
+        assert_eq!(written, body);
+    }
 }
