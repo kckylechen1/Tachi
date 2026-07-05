@@ -11,6 +11,16 @@ use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key};
 
+fn trusted_agent_id(server: &MemoryServer) -> Option<String> {
+    server
+        .agent_runtime
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .agent_profile
+        .as_ref()
+        .map(|p| p.agent_id.clone())
+}
+
 pub(super) fn ensure_agent_allowed(
     entry: &VaultEntry,
     agent_id: Option<&str>,
@@ -20,19 +30,13 @@ pub(super) fn ensure_agent_allowed(
     };
 
     let Some(agent_id) = agent_id.map(str::trim).filter(|agent| !agent.is_empty()) else {
-        return Err(format!(
-            "Access denied for secret '{}': agent_id is required.",
-            entry.name
-        ));
+        return Err("Access denied: agent_id is required for this restricted secret.".to_string());
     };
 
     if allowed_agents.iter().any(|allowed| allowed == agent_id) {
         Ok(())
     } else {
-        Err(format!(
-            "Access denied for agent '{}' to secret '{}'.",
-            agent_id, entry.name
-        ))
+        Err("Access denied: agent is not in the allowed list for this secret.".to_string())
     }
 }
 
@@ -41,9 +45,11 @@ pub(super) fn ensure_agent_allowed(
 pub(super) fn authorize_vault_mutation(
     server: &MemoryServer,
     target_name: &str,
-    agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_vault_unlocked(server)?;
+    let trusted = trusted_agent_id(server);
+    let effective_agent_id = trusted.as_deref().or(caller_agent_id);
     let existing = server
         .with_global_store_read(|store| {
             store
@@ -52,7 +58,7 @@ pub(super) fn authorize_vault_mutation(
         })
         .map_err(|e| format!("Failed to resolve secret for authorization: {e}"))?;
     if let Some(entry) = existing {
-        ensure_agent_allowed(&entry, agent_id)?;
+        ensure_agent_allowed(&entry, effective_agent_id)?;
     }
     Ok(())
 }
@@ -67,15 +73,17 @@ pub(super) fn authorize_vault_mutation(
 pub(super) fn authorize_vault_pool_mutation(
     server: &MemoryServer,
     prefix: &str,
-    agent_id: Option<&str>,
+    caller_agent_id: Option<&str>,
 ) -> Result<(), String> {
     ensure_vault_unlocked(server)?;
+    let trusted = trusted_agent_id(server);
+    let effective_agent_id = trusted.as_deref().or(caller_agent_id);
     let entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to list entries for authorization: {e}"))?;
     for entry in entries {
         if api_key_pool_member_index(&entry.name, prefix).is_some() {
-            ensure_agent_allowed(&entry, agent_id)?;
+            ensure_agent_allowed(&entry, effective_agent_id)?;
         }
     }
     Ok(())

@@ -331,8 +331,6 @@ impl MemoryServer {
             )
         })?;
 
-        // Use global rw_gate for write lock to avoid concurrent SQLITE_BUSY issues for named projects.
-        // It's a coarse lock, but named project writes are fast and this prevents concurrent overlaps.
         let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
         let mut store = MemoryStore::open_with_label(db_str, project_name)
             .map_err(|e| format!("open named project store: {e}"))?;

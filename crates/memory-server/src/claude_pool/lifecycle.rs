@@ -152,7 +152,7 @@ impl super::ClaudePool {
     pub(super) async fn run_claude_cli(&self, prompt: &str) -> Result<String, String> {
         let skip_perms = std::env::var("TACHI_CLAUDE_SKIP_PERMISSIONS")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            .unwrap_or_else(|_| !std::io::IsTerminal::is_terminal(&std::io::stdin()));
         let binary = self.binary.as_ref().map_err(|err| err.clone())?;
         let mut cmd = Command::new(binary);
         cmd.arg("-p").arg("--output-format").arg("json");

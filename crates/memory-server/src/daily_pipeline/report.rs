@@ -112,9 +112,11 @@ pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
             serde_json::from_str(&stripped[start..end])
         })
         .map_err(|e| {
+            // Do NOT embed raw LLM response — it may contain sensitive content
+            // or internal state that should not surface to callers.
             format!(
-                "parse daily health JSON: {e}; raw={}",
-                raw.chars().take(500).collect::<String>()
+                "parse daily health JSON failed: {e}; raw response length={} chars (check server logs for full payload)",
+                raw.len()
             )
         })
 }

@@ -280,9 +280,9 @@ async def main():
     print(f"Sessions found: {len(sessions)}", flush=True)
     print(f"Target DB: {db_path}", flush=True)
     print(f"Dry run: {args.dry_run}", flush=True)
-    print(f"Voyage key: {os.environ.get('VOYAGE_API_KEY', '')[:12]}...", flush=True)
+    print(f"Voyage key: {'configured' if os.environ.get('VOYAGE_API_KEY') else 'MISSING'}", flush=True)
     print(
-        f"SiliconFlow key: {os.environ.get('SILICONFLOW_API_KEY', '')[:12]}...",
+        f"SiliconFlow key: {'configured' if os.environ.get('SILICONFLOW_API_KEY') else 'MISSING'}",
         flush=True,
     )
     print(flush=True)
