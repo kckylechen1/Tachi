@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.6.2](#162---2026-07-05) — release drift and CI guardrails
 - [1.6.1](#161---2026-06-29) — Homebrew daemon startup and tap automation
 - [1.6.0](#160---2026-06-29) — continuity memory, lifecycle routing, and runtime hardening
 - [1.5.x](#156---2026-06-15) — repair and tidy cleanup UX
@@ -56,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `tachi_gh safe_merge` now records already-merged pull requests as `merge_state="merged"` instead of overwriting lifecycle state with a blocked merge attempt.
+
+## [1.6.2] - 2026-07-05 — release drift and CI guardrails
+
+Patch release for closing release-surface drift after `memory-server` moved to
+`1.6.2`.
+
+### Changed
+
+- Release-facing Cargo, npm, lockfile, installer, README, OpenClaw, prompt, and current-state version fields are aligned to `1.6.2`.
+- Full CI now runs automatically on pull requests and pushes to `main`, keeping the release version sync check live instead of manual-only.
+
+### Fixed
+
+- Native module platform package publishing now fails on `npm publish` errors instead of swallowing failed publishes.
 
 ## [1.6.1] - 2026-06-29 — Homebrew daemon startup and tap automation
 

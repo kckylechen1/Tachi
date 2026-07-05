@@ -5,19 +5,6 @@ use crate::memory_search_ops::handle_save_memory;
 use crate::tool_params::{SaveMemoryParams, TachiCompleteParams};
 use crate::MemoryServer;
 
-fn lesson_task_matches(text: &str, expected_task: &str) -> bool {
-    let expected = expected_task.trim();
-    if expected.is_empty() {
-        return false;
-    }
-
-    text.lines()
-        .next()
-        .and_then(|line| line.trim().strip_prefix("Task:"))
-        .map(|task| task.trim().eq_ignore_ascii_case(expected))
-        .unwrap_or(false)
-}
-
 pub(super) async fn run_lesson_post_complete_hook(
     server: &MemoryServer,
     params: &TachiCompleteParams,
@@ -42,85 +29,30 @@ pub(super) async fn run_lesson_post_complete_hook(
         .clone()
         .unwrap_or_else(|| "project".to_string());
     let (lesson_db, _) = server.resolve_write_scope(&lesson_scope_str);
-    let task_ref = safe_task.to_string();
-    let skills_set: std::collections::HashSet<&str> =
-        safe_skills_used.iter().map(|s| s.as_str()).collect();
-    let outcome_ref = outcome_norm.to_string();
 
-    let dedup_hit = server
-        .with_store_for_scope_read(lesson_db, |store| {
-            let conn = store.connection();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, text, metadata FROM memories \
-                     WHERE path LIKE '/eval/lessons/%' \
-                       AND id NOT LIKE 'foundry:%' \
-                     ORDER BY created_at DESC LIMIT 30",
-                )
-                .map_err(|e| format!("lesson dedup query: {e}"))?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .map_err(|e| format!("lesson dedup iter: {e}"))?;
-            for row in rows {
-                let (id, text, meta_str) = row.map_err(|e| format!("{e}"))?;
-                let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or(json!({}));
-                let same_outcome = meta
-                    .get("outcome")
-                    .and_then(|v| v.as_str())
-                    .map(|o| o == outcome_ref)
-                    .unwrap_or(false);
-                let task_match = lesson_task_matches(&text, &task_ref);
-                let skill_overlap = same_outcome
-                    && !skills_set.is_empty()
-                    && meta
-                        .get("skills_used")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str())
-                                .any(|s| skills_set.contains(s))
-                        })
-                        .unwrap_or(false);
-                if task_match || skill_overlap {
-                    return Ok(Some((id, meta)));
-                }
-            }
-            Ok(None)
-        })
-        .unwrap_or(None);
+    let dedup_hit = match server.with_store_for_scope(lesson_db, |store| {
+        store
+            .record_lesson_dedup_seen(
+                safe_task,
+                outcome_norm,
+                safe_skills_used,
+                &Utc::now().to_rfc3339(),
+                30,
+            )
+            .map_err(|e| format!("lesson dedup update: {e}"))
+    }) {
+        Ok(hit) => hit,
+        Err(e) => {
+            eprintln!("[tachi_complete/post_hook] lesson dedup update failed: {e}");
+            return json!(format!("lesson_dedup_failed: {e}"));
+        }
+    };
 
-    if let Some((existing_id, mut existing_meta)) = dedup_hit {
-        let count = existing_meta
-            .get("count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1)
-            + 1;
-        existing_meta["count"] = json!(count);
-        existing_meta["last_seen"] = json!(Utc::now().to_rfc3339());
-        let updated_meta = serde_json::to_string(&existing_meta).unwrap_or_default();
-        let eid = existing_id.clone();
-        let update_result = server.with_store_for_scope(lesson_db, |store| {
-            store
-                .connection()
-                .execute(
-                    "UPDATE memories SET metadata = ?1 WHERE id = ?2",
-                    rusqlite::params![updated_meta, eid],
-                )
-                .map_err(|e| format!("lesson dedup update: {e}"))
-        });
-        return match update_result {
-            Ok(_) => json!(format!("lesson_deduped (id={existing_id}, count={count})")),
-            Err(e) => {
-                eprintln!("[tachi_complete/post_hook] lesson dedup update failed: {e}");
-                json!(format!("lesson_dedup_failed: {e}"))
-            }
-        };
+    if let Some(update) = dedup_hit {
+        return json!(format!(
+            "lesson_deduped (id={}, count={})",
+            update.id, update.count
+        ));
     }
 
     let lesson_path = format!("/eval/lessons/{}/{}", date, task_id);

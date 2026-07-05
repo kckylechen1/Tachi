@@ -39,7 +39,7 @@ Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through 
 
 ### Current Release
 
-Current release: `v1.6.1`.
+Current release: `v1.6.2`.
 
 This line makes Tachi's project-cycle direction explicit:
 
@@ -116,7 +116,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer (also installs the OpenClaw plugin when detected):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)"
 ```
 
 On macOS the shell installer also installs/restarts a user LaunchAgent at
@@ -163,7 +163,7 @@ The server also loads `.env` from the project root automatically. Copy `.env.exa
 
 ### 3. Use
 
-These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/memory-server/src/tool_params/facade.rs`.
+These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/memory-server-params/src/facade.rs`.
 
 ```json
 // tachi_save — structured memory

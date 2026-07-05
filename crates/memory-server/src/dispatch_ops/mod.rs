@@ -5,6 +5,7 @@ mod dispatch;
 mod dispatch_v2;
 mod harness;
 mod kanban_helpers;
+mod launcher;
 mod mcp_config;
 mod merge;
 mod prompt;

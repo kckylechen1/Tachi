@@ -26,6 +26,7 @@ pub mod enrichment;
 pub mod events;
 pub mod graph;
 pub mod hub;
+pub mod lessons;
 pub mod open;
 pub mod pack;
 pub mod recall_cache;

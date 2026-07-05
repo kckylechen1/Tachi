@@ -1,7 +1,12 @@
 name: Full CI
 
 on:
-  # Keep full CI manual while GitHub Actions minutes are constrained.
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
