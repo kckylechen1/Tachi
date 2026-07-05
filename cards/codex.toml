@@ -1,0 +1,78 @@
+schema = "tachi-lane-card/v1"
+
+[identity]
+name = "codex"
+vendor = "openai"
+model_id = "gpt-5.5-codex"
+transport = "codex-exec-direct" # ~/bin/lane-run codex; plugin lane deprecated for implementation
+roles = ["implementer", "re-reviewer", "conflict-surgeon"]
+
+[hexagon] # seed 2026-07-05
+spec_fidelity = 0.95
+self_report_trust = 0.90
+test_discipline = 0.85
+equivalence_refactor = 0.85
+security_competence = 0.90 # WITH a frozen spec; not open-ended security design
+speed_cost = 0.55
+
+[routing]
+route_to = ["frozen-spec-surgery", "security-rework-per-adjudication", "conflict-resolution", "dependency-migration", "re-review"]
+route_away = ["open-ended-design"] # effort gradient only pays there — that's the opus seat
+
+[[failure_modes]]
+signature = "parking_after_contract"
+count = 6
+evidence = ["rollout-2026-07-05 trace: six user nudges to continue"]
+counter_clause = "MANDATE = the whole todo ledger; 'end to end within the current turn' = ledger drained."
+efficacy = "prompt-layer EFFECTIVE when phrased in the base prompt's own vocabulary (remap, don't oppose) + codex-ship stderr injection. Cured."
+
+[[failure_modes]]
+signature = "breadcrumb_violation"
+count = 17
+evidence = ["rollout-2026-07-05: 17 micro-slices against explicit instruction"]
+counter_clause = "Slice <150 lines with no cross-crate contract change merges into the previous slice."
+efficacy = "constitution executable threshold (base prompt is SILENT on PR granularity; RL default fills silence — needs a numeric gate, not prose)."
+
+[[failure_modes]]
+signature = "ceremony_overweight"
+count = 15
+evidence = ["codex-ship 501 ran 15x full-workspace in one campaign"]
+counter_clause = "goal/* slices ride targeted tests; full suite paid once at the integration→main PR."
+efficacy = "constitution tiering + codex-ship coaching + hardcoded shared CARGO_TARGET_DIR. Cured structurally."
+
+[[failure_modes]]
+signature = "inherited_base_commit"
+count = 2
+evidence = ["tachi#590 parallel-lineage clone", "grok #525 same class"]
+counter_clause = "No-network sandbox: leader supplies a verified base SHA in the contract; never self-derive."
+efficacy = "contract-clause (structural: the lane cannot fetch, so the packet must carry the SHA)."
+
+[constraints.mandatory_clauses]
+all = ["restate workspace law on every dispatch AND resume", "verbatim `test result:` lines", "shared CARGO_TARGET_DIR"]
+
+[trust]
+self_report = "high" # honest deviations ledger, verbatim gates, self-flagged judgment calls
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#594 vault ACL true rework"
+score = 0.95
+verdict = "frozen-spec surgical, pre-fix red evidence, one-shot"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#607 vault conflict surgery"
+score = 0.95
+verdict = "took #594 auth wholesale, layered typed-error shell, G1-G5 green, one-shot"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#588 re-review of kimi verdict"
+score = 0.95
+verdict = "confirmed CP2 + independently found CLI unwrap_or_default weakness"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "review PR #600 (vs sonnet on same basis)"
+score = 0.75
+verdict = "broader surface coverage than sonnet; severity over-escalates; test-leg blocked by shared-target ghosts"

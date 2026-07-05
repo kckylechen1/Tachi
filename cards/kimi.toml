@@ -1,0 +1,64 @@
+schema = "tachi-lane-card/v1"
+
+[identity]
+name = "kimi"
+vendor = "moonshot"
+model_id = "kimi-for-coding/k2p6"
+transport = "opencode"
+roles = ["auditor", "adversarial-reviewer", "topology-mapper"]
+
+[hexagon] # seed 2026-07-05 (reviewer-seat axes)
+spec_fidelity = 0.80
+self_report_trust = 0.75
+test_discipline = 0.70
+equivalence_refactor = 0.50 # unproven as implementer
+security_competence = 0.85  # as FINDER (audit), not fixer
+speed_cost = 0.70
+
+[hexagon_reviewer]
+precision = 0.90 # phenomena layer: ~90%+ true-positive on #586 spot-checks, 0 suspected-FP in triage
+breadth = 0.95   # whole-repo audits, merge-stack topology nobody else drew
+severity_calibration = 0.60 # one CRITICAL-level false positive from tool miscalibration
+
+[routing]
+route_to = ["whole-repo-audit", "merge-stack-topology", "adversarial-claim-refutation"]
+route_away = ["implementation (unproven)", "mechanism/root-cause verdicts without leader re-verification"]
+
+[[failure_modes]]
+signature = "tool_miscalibration_fp"
+count = 1
+evidence = ["tachi#680: git apply --check used as mergeability test → false CRITICAL 'crates missing on main'"]
+counter_clause = "Mechanism claims must state WHICH tool produced them; cross-check GitHub's own mergeability before declaring merge blockers."
+efficacy = "packet-clause + leader re-verification of mechanism-layer claims. Phenomena layer (ordering, collisions) usable directly."
+
+[[failure_modes]]
+signature = "misfiled_tracker"
+count = 1
+evidence = ["~40 Quant/Hyperion audit issues (#625-#677) opened in the tachi repo"]
+counter_clause = "Target repo pinned explicitly in the contract; batch filings post ONE probe issue for leader verification before the rest."
+efficacy = "packet-clause (delivery discipline, not capability)."
+
+[constraints.mandatory_clauses]
+all = ["state the tool behind each mechanism claim", "acceptance criteria + file anchors on every finding"]
+issue_filing = ["explicit --repo on every gh call", "first-one-probe before batch"]
+
+[trust]
+self_report = "medium-high" # findings honest; mechanism layer needs re-derivation
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#586 whole-repo audit (30 sub-issues)"
+score = 0.95
+verdict = "0 suspected-FP after triage; structured, file-anchored, acceptance criteria"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#680 PR-stack topology review"
+score = 0.80
+verdict = "ordering/collision map fully correct (unique); one CRITICAL-level mechanism FP"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#588 adversarial review"
+score = 0.90
+verdict = "refuted the commit's 'proves state change' claim — true positive, codex-confirmed"
