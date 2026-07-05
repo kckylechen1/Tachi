@@ -25,6 +25,7 @@ pub mod derived;
 pub mod domain;
 pub mod enrichment;
 pub mod events;
+pub mod gc_candidates;
 pub mod graph;
 pub mod hub;
 pub mod lessons;

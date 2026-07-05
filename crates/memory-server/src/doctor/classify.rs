@@ -1,4 +1,3 @@
-use rusqlite::OpenFlags;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -60,12 +59,11 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     // 3. Try a read-only, immutable open (no WAL writes).
     //    URI form: file:<path>?mode=ro&immutable=1
     let uri = make_immutable_uri(path);
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
 
     // Register sqlite-vec extension before opening so vec_version()/virtual table reads work.
     memory_core::db::register_sqlite_vec();
 
-    let conn = match rusqlite::Connection::open_with_flags(&uri, flags) {
+    let conn = match memory_core::db::open_immutable_readonly(&uri) {
         Ok(c) => c,
         Err(e) => {
             return DoctorFinding {
@@ -88,7 +86,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     // Validate this is actually a SQLite file before any further probing.
     // pragma schema_version is cheap and fails immediately on garbage bytes
     // ("file is not a database" / "not a database").
-    if let Err(e) = conn.query_row("pragma schema_version", [], |r| r.get::<_, i64>(0)) {
+    if let Err(e) = memory_core::db::schema_version(&conn) {
         return DoctorFinding {
             path: path_str,
             classification: DbClassification::Corrupt,
@@ -105,9 +103,9 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     }
 
     // Detect schema kind.
-    let has_memories = table_exists(&conn, "memories");
-    let has_chunks = table_exists(&conn, "chunks");
-    let has_memories_vec = table_exists(&conn, "memories_vec");
+    let has_memories = memory_core::db::table_exists(&conn, "memories");
+    let has_chunks = memory_core::db::table_exists(&conn, "chunks");
+    let has_memories_vec = memory_core::db::table_exists(&conn, "memories_vec");
 
     let schema_kind = if has_memories {
         "tachi"
@@ -123,9 +121,9 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     // produces "stepping, SQL logic error" which is a FALSE positive for corruption.
     // We fall back to a simple SELECT count(*) on the canonical table.
     let count_result = if has_memories {
-        scalar_count(&conn, "select count(*) from memories")
+        memory_core::db::count_memories_rows(&conn)
     } else if has_chunks {
-        scalar_count(&conn, "select count(*) from chunks")
+        memory_core::db::count_chunks_rows(&conn)
     } else {
         Ok(0)
     };
@@ -179,7 +177,7 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     let mut vec_rowid_count: Option<usize> = None;
     let mut classification = DbClassification::Healthy;
     if has_memories_vec {
-        match scalar_count(&conn, "select count(*) from memories_vec") {
+        match memory_core::db::count_memories_vec_rows(&conn) {
             Ok(n) => vec_rowid_count = Some(n),
             Err(e) => {
                 let msg = format!("{e}").to_ascii_lowercase();
@@ -208,12 +206,8 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     }
 
     // Detail probes (best-effort, all errors swallowed).
-    let none_domain_count = scalar_count(
-        &conn,
-        "select count(*) from memories where domain is null or domain=''",
-    )
-    .ok();
-    let jobs = job_breakdown(&conn);
+    let none_domain_count = memory_core::db::count_memories_missing_domain(&conn).ok();
+    let jobs = job_breakdown_from_counts(memory_core::db::foundry_job_status_counts(&conn));
 
     DoctorFinding {
         path: path_str,
@@ -246,43 +240,18 @@ pub(crate) fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn table_exists(conn: &rusqlite::Connection, name: &str) -> bool {
-    conn.query_row(
-        "select 1 from sqlite_master where type in ('table','view') and name = ?1",
-        [name],
-        |_| Ok(()),
-    )
-    .is_ok()
-}
-
-fn scalar_count(conn: &rusqlite::Connection, sql: &str) -> rusqlite::Result<usize> {
-    let n: i64 = conn.query_row(sql, [], |row| row.get(0))?;
-    Ok(n.max(0) as usize)
-}
-
-fn job_breakdown(conn: &rusqlite::Connection) -> JobBreakdown {
-    let mut b = JobBreakdown::default();
-    if !table_exists(conn, "foundry_jobs") {
-        return b;
+/// Convert memory-core's raw status tally into the report-shaping
+/// `JobBreakdown` (which additionally derives the `other` bucket).
+fn job_breakdown_from_counts(counts: memory_core::db::FoundryJobStatusCounts) -> JobBreakdown {
+    let known = counts.completed + counts.skipped + counts.failed + counts.pending;
+    JobBreakdown {
+        total: counts.total,
+        completed: counts.completed,
+        skipped: counts.skipped,
+        failed: counts.failed,
+        pending: counts.pending,
+        other: counts.total.saturating_sub(known),
     }
-    if let Ok(total) = scalar_count(conn, "select count(*) from foundry_jobs") {
-        b.total = total;
-    }
-    let by_status = |status: &str| -> usize {
-        conn.query_row(
-            "select count(*) from foundry_jobs where lower(status) = ?1",
-            [status],
-            |row| row.get::<_, i64>(0).map(|n| n.max(0) as usize),
-        )
-        .unwrap_or(0)
-    };
-    b.completed = by_status("completed");
-    b.skipped = by_status("skipped");
-    b.failed = by_status("failed");
-    b.pending = by_status("pending");
-    let known = b.completed + b.skipped + b.failed + b.pending;
-    b.other = b.total.saturating_sub(known);
-    b
 }
 
 pub(crate) fn scope_hint_for(path: &Path) -> String {

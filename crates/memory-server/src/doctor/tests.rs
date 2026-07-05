@@ -1,10 +1,9 @@
 use super::*;
-use rusqlite::Connection;
 use std::{fs, path::Path};
 use tempfile::tempdir;
 
 fn make_healthy_db(path: &Path) {
-    let conn = Connection::open(path).unwrap();
+    let conn = memory_core::db::open_raw(path).unwrap();
     conn.execute_batch(
             "CREATE TABLE memories (id TEXT PRIMARY KEY, text TEXT, archived INT DEFAULT 0, domain TEXT);
              INSERT INTO memories (id, text) VALUES ('a','hello');
@@ -16,7 +15,7 @@ fn make_healthy_db(path: &Path) {
 }
 
 fn make_legacy_db(path: &Path) {
-    let conn = Connection::open(path).unwrap();
+    let conn = memory_core::db::open_raw(path).unwrap();
     conn.execute_batch(
         "CREATE TABLE chunks (id TEXT PRIMARY KEY, text TEXT);
              INSERT INTO chunks VALUES ('c1','legacy');",
