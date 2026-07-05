@@ -1,7 +1,7 @@
-use crate::hub_helpers::CapabilityVisibility;
 use memory_core::HubCapability;
 use serde::Serialize;
 use serde_json::Value;
+use tachi_hub::CapabilityVisibility;
 
 #[derive(Debug, Clone)]
 pub(super) struct CapabilityRecord {

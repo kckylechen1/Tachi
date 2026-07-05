@@ -341,7 +341,7 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 .enable_tools()
                 .build(),
         )
-        .with_instructions(crate::bootstrap::mcp_server_instructions())
+        .with_instructions(crate::server_instructions::mcp_server_instructions())
     }
 
     fn list_tools(

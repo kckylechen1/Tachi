@@ -3,9 +3,9 @@ use super::keys::vault_config_exists_cli;
 use super::output::print_vault_list_output;
 use super::password::{read_vault_init_password, read_vault_password};
 use crate::bootstrap::{open_cli_store, open_cli_store_read_only};
-use crate::cli::VaultAction;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use std::path::{Path, PathBuf};
+use tachi_bootstrap::cli::VaultAction;
 
 pub(super) async fn run_session_action(
     global_db_path: &PathBuf,

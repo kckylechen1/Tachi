@@ -58,11 +58,11 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
     server.llm.set_provider_secret_pool(
         "VOYAGE_API_KEY",
         vec![
-            crate::llm::ProviderSecret {
+            tachi_llm::ProviderSecret {
                 key_id: "VOYAGE_API_KEY_1".to_string(),
                 value: "voyage-secret-one".to_string(),
             },
-            crate::llm::ProviderSecret {
+            tachi_llm::ProviderSecret {
                 key_id: "VOYAGE_API_KEY_2".to_string(),
                 value: "voyage-secret-two".to_string(),
             },

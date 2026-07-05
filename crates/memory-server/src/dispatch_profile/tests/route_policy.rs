@@ -37,18 +37,97 @@ fn route_policy_simulation_sinks_non_finite_scores() {
 }
 
 #[test]
-fn compare_scores_desc_keeps_non_finite_scores_last() {
-    let mut scores = [
-        ("nan", f64::NAN),
-        ("best", 42.0),
-        ("worst_finite", -1.0),
-        ("positive_inf", f64::INFINITY),
-        ("negative_inf", f64::NEG_INFINITY),
-    ];
+fn load_route_policy_rule_loadout_classifies_persisted_rules() {
+    let db_path = std::env::temp_dir().join(format!(
+        "dispatch-route-policy-test-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = MemoryServer::new(db_path, None).expect("test memory server");
+    let min_samples = tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES;
 
-    scores.sort_by(|a, b| compare_scores_desc(a.1, b.1).then(a.0.cmp(b.0)));
+    for (id, task_type, prefer_profile, samples) in [
+        (
+            "route_policy:fix_request:opencode_builder",
+            "fix_request",
+            "opencode_builder",
+            min_samples,
+        ),
+        (
+            "route_policy:review_request:codex_55_review",
+            "review_request",
+            "codex_55_review",
+            min_samples,
+        ),
+        (
+            "route_policy:fix_request:glm_51_impl_sparse",
+            "fix_request",
+            "glm_51_impl",
+            0,
+        ),
+        (
+            "route_policy:fix_request:codex_53_fast_blocked",
+            "fix_request",
+            "codex_53_fast",
+            min_samples,
+        ),
+    ] {
+        let rule = serde_json::json!({
+            "proposal_id": id,
+            "kind": "route_policy",
+            "status": "applied",
+            "review": {
+                "status": "approved",
+            },
+            "policy": "cost_sensitive",
+            "task_type": task_type,
+            "proposed_profile": prefer_profile,
+            "score_delta": 12.5,
+            "policy_rule": {
+                "when_task_type": task_type,
+                "prefer_profile": prefer_profile,
+                "policy": "cost_sensitive",
+                "fallback_to_current_profile": "claude_plan",
+            },
+            "evidence": {
+                "source": "test",
+                "proposed": {
+                    "samples": samples,
+                },
+            },
+        });
+        server
+            .with_global_store(|store| {
+                store
+                    .set_state(ROUTE_POLICY_RULE_NS, id, &rule.to_string())
+                    .map_err(|err| err.to_string())
+            })
+            .expect("seed route policy rule");
+    }
 
-    assert_eq!(scores[0], ("best", 42.0));
-    assert_eq!(scores[1], ("worst_finite", -1.0));
-    assert!(scores[2..].iter().all(|(_, score)| !score.is_finite()));
+    let risk = DispatchRisk {
+        task_type: "fix_request".to_string(),
+        risk: "critical".to_string(),
+        reasons: vec!["test fixture".to_string()],
+        required_profiles: Vec::new(),
+        blocked_profiles: vec!["codex_53_fast".to_string()],
+    };
+
+    let loadout = load_route_policy_rule_loadout(&server, &risk).expect("load route policy rules");
+
+    assert_eq!(loadout.applied.len(), 1, "{loadout:#?}");
+    assert_eq!(
+        loadout.applied[0].proposal_id,
+        "route_policy:fix_request:opencode_builder"
+    );
+    assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
+        == "route_policy:review_request:codex_55_review"
+        && rule.reason.contains("task_type_mismatch:review_request")));
+    assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
+        == "route_policy:fix_request:glm_51_impl_sparse"
+        && rule.reason.contains("insufficient_samples:0<")));
+    assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
+        == "route_policy:fix_request:codex_53_fast_blocked"
+        && rule
+            .reason
+            .contains("blocked_by_risk_classifier:codex_53_fast")));
 }

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::cli::DaemonAction;
+use tachi_bootstrap::cli::DaemonAction;
 
 pub(crate) async fn run_daemon(
     action: DaemonAction,

@@ -5,7 +5,6 @@ mod tests;
 mod vault;
 mod wizard;
 
-pub(crate) use agent_rules::mcp_server_instructions;
 pub(super) use wizard::run_interactive_wizard;
 
 /// Result of a wizard run, returned to the dispatcher in `setup.rs`.

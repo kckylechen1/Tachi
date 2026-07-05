@@ -1,4 +1,3 @@
-use crate::llm;
 use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{SearchMemoryParams, SynthesizeAgentEvolutionParams};
@@ -204,7 +203,7 @@ pub(super) fn build_synthesis_payload(
 pub(super) fn parse_synthesis_response(
     raw: &str,
 ) -> Result<memory_core::AgentEvolutionSynthesis, String> {
-    let json_str = llm::LlmClient::strip_code_fence(raw);
+    let json_str = tachi_llm::LlmClient::strip_code_fence(raw);
     serde_json::from_str(json_str).map_err(|e| {
         format!(
             "Failed to parse agent evolution synthesis JSON: {e} — response was: {}",

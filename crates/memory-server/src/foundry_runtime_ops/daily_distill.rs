@@ -34,7 +34,7 @@ pub use types::DistillBatchReport;
 pub(crate) use parser::parse_distill_response;
 
 #[cfg(test)]
-use candidates::{collect_candidate_groups, sanitize_id_segment};
+use candidates::collect_candidate_groups;
 #[cfg(test)]
 use config::{
     resolve_batch_size, resolve_candidate_scan_limit, resolve_distill_backend,

@@ -1,5 +1,5 @@
-use crate::cli::CleanAction;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::CleanAction;
 use tachi_clean::sweep::SweepOptions;
 use tachi_clean::tachi_clean::TachiCleanOptions;
 use tachi_clean::target_clean::TargetCleanOptions;

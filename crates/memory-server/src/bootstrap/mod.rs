@@ -1,9 +1,9 @@
-use crate::cli::Cli;
 use crate::utils::is_trusted_mcp_command;
 use memory_core::MemoryStore;
 use serde::Serialize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::Cli;
 
 mod backfill;
 mod clean_cli;
@@ -20,7 +20,6 @@ mod skill_surface_cli;
 mod tidy;
 mod vault_sync;
 
-pub(crate) use setup_wizard::mcp_server_instructions;
 mod vault_cli;
 
 // Re-exports preserving the legacy public surface so external callers

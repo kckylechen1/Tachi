@@ -1,4 +1,4 @@
-use crate::gh_ops::CliGhClient;
+use crate::gh_ops::gh_client_for_server;
 use crate::gh_safe_merge::GhClient;
 use crate::server_state::{HandoffMemo, MemoryServer};
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
@@ -427,6 +427,6 @@ pub(crate) async fn handle_handoff_promote_issue(
     server: &MemoryServer,
     params: HandoffPromoteIssueParams,
 ) -> Result<String, String> {
-    let client = CliGhClient { server };
+    let client = gh_client_for_server(server)?;
     promote_handoff_issue_with_client(server, &client, params).await
 }

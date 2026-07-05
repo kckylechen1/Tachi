@@ -69,8 +69,11 @@ def main() -> int:
         "crates/memory-server-params/Cargo.toml",
         "crates/memory-server-runtime/Cargo.toml",
         "crates/memory-node/Cargo.toml",
+        "crates/tachi-bootstrap/Cargo.toml",
         "crates/tachi-dispatch/Cargo.toml",
         "crates/tachi-foundry/Cargo.toml",
+        "crates/tachi-hub/Cargo.toml",
+        "crates/tachi-llm/Cargo.toml",
     ]
     for path in cargo_files:
         require_match(path, cargo_version(path), expected, errors)
@@ -82,8 +85,11 @@ def main() -> int:
             "memory-server-params",
             "memory-server-runtime",
             "memory-node",
+            "tachi-bootstrap",
             "tachi-dispatch",
             "tachi-foundry",
+            "tachi-hub",
+            "tachi-llm",
         }
     )
     for name in [
@@ -92,8 +98,11 @@ def main() -> int:
         "memory-server-params",
         "memory-server-runtime",
         "memory-node",
+        "tachi-bootstrap",
         "tachi-dispatch",
         "tachi-foundry",
+        "tachi-hub",
+        "tachi-llm",
     ]:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 

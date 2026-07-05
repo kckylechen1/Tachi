@@ -1,12 +1,12 @@
 use super::types::{CapabilityRecommendation, CapabilityRecord};
-use crate::hub_helpers::{
-    capability_callable, capability_visibility_for_cap, sanitize_skill_tool_name,
-    CapabilityVisibility,
-};
 use crate::MemoryServer;
 use memory_core::{HubCapability, MemoryEntry};
 use serde_json::Value;
 use std::collections::HashSet;
+use tachi_hub::{
+    capability_callable, capability_visibility_for_cap, sanitize_skill_tool_name,
+    CapabilityVisibility,
+};
 
 #[derive(Debug, Clone)]
 struct PatternSignal {

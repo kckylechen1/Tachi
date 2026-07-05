@@ -226,7 +226,7 @@ pub(super) async fn serve_http_daemon(
                             store.stats(false).map(|_| true).map_err(|e| e.to_string())
                         })
                         .is_ok();
-                    let vec_available = health_server.global_vec_available;
+                    let vec_available = health_server.global_vec_available();
                     let status = if db_ok { "ok" } else { "degraded" };
                     let code = if db_ok {
                         axum::http::StatusCode::OK

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use chrono::Utc;
 use serde_json::json;
 
-use crate::llm::LlmClient;
 use crate::server_state::MemoryServer;
+use tachi_llm::LlmClient;
 
 use super::candidates::collect_candidate_groups;
 use super::config::{resolve_batch_size, resolve_distill_backend, DistillBackend};

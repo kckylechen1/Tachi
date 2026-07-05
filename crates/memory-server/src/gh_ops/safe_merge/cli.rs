@@ -53,6 +53,10 @@ impl<'a> GhClient for CliGhClient<'a> {
             .args(["--repo", repo])
             .args(["--json", "mergeCommit"]);
         let sha_raw = run_gh(cmd2, &token2).map_err(|e| classify_gh_error(&e))?;
+        // Independent proof of merge, symmetric to the HTTP path: a present,
+        // non-empty mergeCommit.oid is the only evidence the PR actually merged.
+        // An empty/missing oid means the re-fetch could not confirm the merge —
+        // fail closed rather than reporting success with an empty sha.
         let merge_sha = serde_json::from_str::<serde_json::Value>(&sha_raw)
             .ok()
             .and_then(|v| {
@@ -61,7 +65,12 @@ impl<'a> GhClient for CliGhClient<'a> {
                     .and_then(|o| o.as_str())
                     .map(|s| s.to_string())
             })
-            .unwrap_or_default();
+            .filter(|sha| !sha.trim().is_empty())
+            .ok_or_else(|| {
+                GhError::Sanitized(
+                    "independent merge verification failed: missing mergeCommit".to_string(),
+                )
+            })?;
         Ok(MergeResult {
             pr_number: number,
             merge_sha,

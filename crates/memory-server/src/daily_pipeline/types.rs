@@ -78,25 +78,7 @@ pub(crate) struct DatabaseStats {
     pub(crate) error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct CategorySourceCount {
-    pub(crate) count: i64,
-    pub(crate) category: String,
-    pub(crate) source: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct DuplicateSummary {
-    pub(crate) summary: String,
-    pub(crate) count: i64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct EvalEvidenceRow {
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) summary: String,
-    pub(crate) text: String,
-    pub(crate) metadata: Value,
-    pub(crate) created_at: String,
-}
+pub(crate) use memory_core::{
+    CategorySourceGroup as CategorySourceCount, DuplicateSummaryRow as DuplicateSummary,
+    EvalEvidenceRow,
+};

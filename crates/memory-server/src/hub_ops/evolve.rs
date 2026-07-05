@@ -130,7 +130,7 @@ Respond with ONLY a JSON object (no markdown fences, no commentary before or aft
     const EVOLVE_SYSTEM: &str = "You are a senior prompt engineer specializing in agentic skill optimization. Analyze telemetry, diagnose failure modes, and produce a strictly improved prompt. Output valid JSON only, no markdown fences.";
     let llm_for_fallback = server.llm.clone();
     let evolution_prompt_for_fallback = evolution_prompt.clone();
-    let (llm_response, source) = crate::claude_pool::pool_call_with_fallback(
+    let (llm_response, source) = tachi_llm::claude_pool::pool_call_with_fallback(
         &server.claude_pool,
         EVOLVE_SYSTEM,
         &evolution_prompt,

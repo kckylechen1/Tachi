@@ -1,6 +1,6 @@
 use memory_core::MemoryStore;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
@@ -135,6 +135,307 @@ pub struct RateLimiter {
     pub burst: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RateLimitRejection {
+    pub message: String,
+}
+
+impl RateLimiter {
+    pub fn check_tool_call(
+        &mut self,
+        tool_name: &str,
+        args_hash: &str,
+        session_id: &str,
+        rpm_override: Option<u64>,
+        burst_override: Option<u64>,
+    ) -> Result<Option<String>, RateLimitRejection> {
+        let now = Instant::now();
+        let effective_rpm = rpm_override.unwrap_or(self.rpm);
+        let effective_burst = burst_override.unwrap_or(self.burst);
+
+        if effective_rpm > 0 {
+            Self::reserve_entry_capacity(
+                &mut self.windows,
+                RATE_LIMIT_MAX_SESSIONS,
+                now - Duration::from_secs(120),
+                session_id,
+            );
+
+            let window = self.windows.entry(session_id.to_string()).or_default();
+            let cutoff = now - Duration::from_secs(60);
+            while let Some(&front) = window.front() {
+                if front < cutoff {
+                    window.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if window.len() as u64 >= effective_rpm {
+                let oldest = window.front().copied().unwrap_or(now);
+                let retry_after = Duration::from_secs(60)
+                    .checked_sub(now.duration_since(oldest))
+                    .unwrap_or(Duration::from_secs(1));
+                return Err(RateLimitRejection {
+                    message: format!(
+                        "Rate limited: {} calls/min exceeded (limit={}). Retry in {:.0}s.",
+                        window.len(),
+                        effective_rpm,
+                        retry_after.as_secs_f64()
+                    ),
+                });
+            }
+
+            window.push_back(now);
+        }
+
+        let mut soft_warning: Option<String> = None;
+        if effective_burst > 0 {
+            let burst_key = format!("{session_id}:{tool_name}:{args_hash}");
+            Self::reserve_entry_capacity(
+                &mut self.bursts,
+                RATE_LIMIT_MAX_BURST_KEYS,
+                now - RATE_LIMIT_BURST_WINDOW,
+                &burst_key,
+            );
+
+            let stamps = self.bursts.entry(burst_key).or_default();
+            let cutoff = now - RATE_LIMIT_BURST_WINDOW;
+            while let Some(&front) = stamps.front() {
+                if front < cutoff {
+                    stamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if stamps.len() as u64 >= effective_burst {
+                return Err(RateLimitRejection {
+                    message: format!(
+                        "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
+                         Stop before retrying the same path. Call tachi_unstick with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
+                        tool_name,
+                        stamps.len() + 1,
+                        RATE_LIMIT_BURST_WINDOW.as_secs(),
+                        effective_burst
+                    ),
+                });
+            }
+
+            let upcoming_count = stamps.len() as u64 + 1;
+            if upcoming_count >= STUCK_SOFT_WARN_THRESHOLD && upcoming_count < effective_burst {
+                soft_warning = Some(format!(
+                    "⚠️ stuck-detection: tool '{}' has been called {} times with identical arguments within {}s. \
+                     Hard block triggers at {} repeats. Consider calling tachi_unstick with the current task / attempts / latest error, \
+                     or searching prior solutions via tachi_wiki_search / tachi_task_brief before retrying the same path.",
+                    tool_name,
+                    upcoming_count,
+                    RATE_LIMIT_BURST_WINDOW.as_secs(),
+                    effective_burst
+                ));
+            }
+
+            stamps.push_back(now);
+        }
+
+        Ok(soft_warning)
+    }
+
+    pub fn entry_counts(&self) -> (usize, usize) {
+        (self.windows.len(), self.bursts.len())
+    }
+
+    fn reserve_entry_capacity(
+        map: &mut HashMap<String, VecDeque<Instant>>,
+        max_entries: usize,
+        stale_cutoff: Instant,
+        new_key: &str,
+    ) {
+        if max_entries == 0 || map.contains_key(new_key) {
+            return;
+        }
+
+        if map.len() >= max_entries {
+            map.retain(|_, deque| deque.back().is_some_and(|&t| t >= stale_cutoff));
+        }
+
+        while map.len() >= max_entries {
+            let Some(oldest_key) = map
+                .iter()
+                .min_by_key(|(_, deque)| deque.back().copied().unwrap_or(stale_cutoff))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            map.remove(&oldest_key);
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DbRuntime {
+    pub global_store: Arc<StdMutex<MemoryStore>>,
+    pub global_read_pool: ReadStorePool,
+    pub global_rw_gate: Arc<StdRwLock<()>>,
+    pub global_db_path: Arc<PathBuf>,
+    pub global_vec_available: bool,
+    pub project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
+}
+
+impl DbRuntime {
+    pub fn has_project_db(&self) -> bool {
+        self.project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    pub fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
+        let state = ProjectDbState::open(db_path, configured_memory_read_pool_size())
+            .map_err(|e| format!("open project db: {e}"))?;
+
+        let mut guard = self.project_db.write().unwrap_or_else(|e| e.into_inner());
+        let was_none = guard.is_none();
+        *guard = Some(state);
+        Ok(was_none)
+    }
+
+    pub fn with_path_store<T>(
+        &self,
+        db_path: &Path,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let label = db_path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|os| os.to_str())
+            .unwrap_or("path");
+        self.with_path_store_with_label(db_path, label, f)
+    }
+
+    pub fn with_path_store_read<T>(
+        &self,
+        db_path: &Path,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.with_path_store_read_with_label(db_path, "path", f)
+    }
+
+    pub fn with_path_store_with_label<T>(
+        &self,
+        db_path: &Path,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_str = db_path
+            .to_str()
+            .ok_or_else(|| format!("DB path contains invalid UTF-8: {}", db_path.display()))?;
+        let _gate = write_or_recover(&self.global_rw_gate, "path_db_rw_gate");
+        let mut store = MemoryStore::open_with_label(db_str, label)
+            .map_err(|e| format!("open path store {}: {e}", db_path.display()))?;
+        f(&mut store)
+    }
+
+    pub fn with_path_store_read_with_label<T>(
+        &self,
+        db_path: &Path,
+        label: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = read_or_recover(&self.global_rw_gate, "path_db_rw_gate");
+        let mut store = open_read_store(db_path, label)?;
+        f(&mut store)
+    }
+
+    pub fn with_global_store<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
+        let mut store = lock_or_recover(&self.global_store, "global_store");
+        f(&mut store)
+    }
+
+    pub fn with_global_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+        self.global_read_pool.with_store("global_read_pool", f)
+    }
+
+    pub fn with_project_store<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| "No project database available".to_string())?;
+        let _gate = write_or_recover(&state.rw_gate, "project_rw_gate");
+        let mut store = lock_or_recover(&state.store, "project_store");
+        f(&mut store)
+    }
+
+    pub fn with_project_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.project_db.read().unwrap_or_else(|e| e.into_inner());
+        let state = guard
+            .as_ref()
+            .ok_or_else(|| "No project database available".to_string())?;
+        let _gate = read_or_recover(&state.rw_gate, "project_rw_gate");
+        state.read_pool.with_store("project_read_pool", f)
+    }
+
+    pub fn with_store_for_scope<T>(
+        &self,
+        scope: DbScope,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match scope {
+            DbScope::Global => self.with_global_store(f),
+            DbScope::Project => self.with_project_store(f),
+        }
+    }
+
+    pub fn with_store_for_scope_read<T>(
+        &self,
+        scope: DbScope,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match scope {
+            DbScope::Global => self.with_global_store_read(f),
+            DbScope::Project => self.with_project_store_read(f),
+        }
+    }
+
+    pub fn global_db_path_buf(&self) -> PathBuf {
+        (*self.global_db_path).clone()
+    }
+
+    pub fn project_db_path_buf(&self) -> Option<PathBuf> {
+        self.project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|state| state.db_path.as_ref().clone())
+    }
+
+    pub fn global_read_pool_size(&self) -> usize {
+        self.global_read_pool.len()
+    }
+
+    pub fn project_vec_available(&self) -> bool {
+        self.project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|state| state.vec_available)
+    }
+}
+
 /// Default requests-per-minute limit per session (0 = unlimited)
 pub const DEFAULT_RATE_LIMIT_RPM: u64 = 0;
 /// Default max identical (tool+args) calls within the burst window (0 = unlimited)
@@ -154,6 +455,36 @@ pub struct ProjectDbState {
     pub read_pool: ReadStorePool,
     pub rw_gate: Arc<StdRwLock<()>>,
     pub db_path: Arc<PathBuf>,
+    pub vec_available: bool,
+}
+
+impl ProjectDbState {
+    pub fn open(db_path: PathBuf, read_pool_size: usize) -> Result<Self, String> {
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!(
+                "Project DB path contains invalid UTF-8: {}",
+                db_path.display()
+            )
+        })?;
+        let project_label = db_path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|os| os.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let store = MemoryStore::open_with_label(db_str, &project_label)
+            .map_err(|e| format!("open project db: {e}"))?;
+        let vec_available = store.vec_available;
+        let read_pool = ReadStorePool::open_read_only(db_str, read_pool_size)
+            .map_err(|e| format!("open project read db: {e}"))?;
+        Ok(Self {
+            store: Arc::new(StdMutex::new(store)),
+            read_pool,
+            rw_gate: Arc::new(StdRwLock::new(())),
+            db_path: Arc::new(db_path),
+            vec_available,
+        })
+    }
 }
 
 /// Agent profile registered via `agent_register`. Stored per-session (in-memory).
@@ -200,6 +531,43 @@ fn lock_or_recover<'a, T>(mutex: &'a StdMutex<T>, label: &str) -> std::sync::Mut
             poisoned.into_inner()
         }
     }
+}
+
+fn read_or_recover<'a, T>(
+    rwlock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    match rwlock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("WARNING: rwlock poisoned on read: {label}; recovering with inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_or_recover<'a, T>(
+    rwlock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    match rwlock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("WARNING: rwlock poisoned on write: {label}; recovering with inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn open_read_store(db_path: &Path, label: &str) -> Result<MemoryStore, String> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        format!(
+            "{} DB path contains invalid UTF-8: {}",
+            label,
+            db_path.display()
+        )
+    })?;
+    MemoryStore::open_read_only(db_str).map_err(|e| format!("open {label} read store: {e}"))
 }
 
 fn zero_key(key: &mut [u8; 32]) {

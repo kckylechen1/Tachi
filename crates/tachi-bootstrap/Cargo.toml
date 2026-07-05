@@ -1,0 +1,13 @@
+[package]
+name = "tachi-bootstrap"
+version = "1.6.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[lib]
+name = "tachi_bootstrap"
+path = "src/lib.rs"

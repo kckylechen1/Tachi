@@ -1,7 +1,7 @@
 use super::keys::{read_vault_config_for_key, read_verified_vault_key, run_vault_setup_keys};
 use crate::bootstrap::vault_sync;
-use crate::cli::VaultAction;
 use std::path::PathBuf;
+use tachi_bootstrap::cli::VaultAction;
 
 pub(super) fn run_sync_action(
     global_db_path: &PathBuf,
