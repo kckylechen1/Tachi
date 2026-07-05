@@ -248,6 +248,10 @@ pub struct TachiSaveParams {
     #[serde(default)]
     #[schemars(description = "Referenced source files, e.g. docs/SPEC.md, src/lib.rs.")]
     pub files: Vec<String>,
+
+    /// Response shape: default receipt, or "full" for the pre-change verbose payload (includes echo).
+    #[serde(default, alias = "output_format")]
+    pub format: Option<String>,
 }
 
 // ─── Facade: unified memory / agent session UX ───────────────────────────────

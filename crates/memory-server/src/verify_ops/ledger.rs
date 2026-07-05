@@ -1,7 +1,10 @@
+use super::receipt::validate_record_params;
 use super::storage::{
-    check_id_for, empty_ledger, ledger_path_for_flow, now, read_json, write_json,
+    check_id_for, check_id_for_entry, empty_ledger, ledger_path_for_flow, normalize_status, now,
+    read_json, write_json,
 };
 use super::*;
+use crate::TachiVerifyCheckItem;
 
 fn compute_overall(items: &[Value]) -> &'static str {
     let required: Vec<&Value> = items
@@ -66,6 +69,28 @@ fn upsert_item(ledger: &mut Value, item: Value) {
     }
 }
 
+fn base_item_from_check(entry: &TachiVerifyCheckItem, status: &str) -> Result<Value, String> {
+    let status = normalize_status(Some(&entry.status), status)?;
+    let id = check_id_for_entry(entry);
+    let mut item = json!({
+        "id": id,
+        "kind": entry.kind,
+        "status": status,
+        "required": entry.required.unwrap_or(true),
+        "updated_at": now(),
+    });
+    if let Some(command) = entry.command.as_deref().filter(|s| !s.trim().is_empty()) {
+        item["command"] = json!(command);
+    }
+    if let Some(head_sha) = entry.head_sha.as_deref().filter(|s| !s.trim().is_empty()) {
+        item["head_sha"] = json!(head_sha);
+    }
+    if let Some(summary) = entry.summary.as_deref().filter(|s| !s.trim().is_empty()) {
+        item["summary"] = json!(summary);
+    }
+    Ok(item)
+}
+
 fn base_item(params: &TachiVerifyParams, command: Option<&str>, status: &str) -> Value {
     let id = check_id_for(params, command);
     let mut item = json!({
@@ -101,6 +126,7 @@ fn read_or_new_ledger(flow_id: &str) -> Result<Value, String> {
 }
 
 pub(super) fn record_items(params: &TachiVerifyParams, status: &str) -> Result<Value, String> {
+    validate_record_params(params)?;
     let flow_id = params
         .flow_id
         .as_deref()
@@ -115,18 +141,24 @@ pub(super) fn record_items(params: &TachiVerifyParams, status: &str) -> Result<V
         ledger["head_sha"] = json!(head_sha);
     }
 
-    let commands = if params.commands.is_empty() {
-        vec![params.command.as_deref()]
-    } else {
-        params.commands.iter().map(|s| Some(s.as_str())).collect()
-    };
-    for command in commands {
-        if command.is_none() && params.check_id.is_none() && params.kind.is_none() {
-            return Err(
-                "command, kind, or check_id is required for tachi_verify start/record".into(),
-            );
+    if !params.checks.is_empty() {
+        for entry in &params.checks {
+            upsert_item(&mut ledger, base_item_from_check(entry, status)?);
         }
-        upsert_item(&mut ledger, base_item(params, command, status));
+    } else {
+        let commands = if params.commands.is_empty() {
+            vec![params.command.as_deref()]
+        } else {
+            params.commands.iter().map(|s| Some(s.as_str())).collect()
+        };
+        for command in commands {
+            if command.is_none() && params.check_id.is_none() && params.kind.is_none() {
+                return Err(
+                    "command, kind, or check_id is required for tachi_verify start/record".into(),
+                );
+            }
+            upsert_item(&mut ledger, base_item(params, command, status));
+        }
     }
     refresh_overall(&mut ledger);
     write_json(&path, &ledger)?;

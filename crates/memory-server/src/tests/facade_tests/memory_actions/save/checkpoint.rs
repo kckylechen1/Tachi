@@ -60,5 +60,8 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
     assert!(body.contains("Saved ->"));
     assert!(body.contains("status: saved"));
     assert!(body.contains("id: `"));
-    assert!(body.contains("Summary: Status diagnostics checkpoint"));
+    assert!(
+        !body.contains("Summary:"),
+        "default checkpoint receipt should not echo input summary"
+    );
 }

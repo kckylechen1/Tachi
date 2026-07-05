@@ -70,6 +70,7 @@ async fn tachi_skill_loadout_resolves_dispatch_profile_skills_and_bundle() {
             diff_present: Some(false),
             scope: Some("project".to_string()),
             project: None,
+            format: None,
         }))
         .await
         .expect("seed loadout eval row");

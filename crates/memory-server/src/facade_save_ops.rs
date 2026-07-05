@@ -5,6 +5,7 @@
 //! delegates to [`handle_tachi_save`].
 
 use crate::copilot_ops::handle_tachi_wiki_write;
+use crate::facade_memory_ops::shape_save_facade_response;
 use crate::memory_search_ops::{handle_remember, handle_save_memory};
 use crate::pipeline_ops::handle_extract_facts;
 use crate::tool_params::*;
@@ -190,6 +191,19 @@ pub(crate) async fn handle_tachi_save(
             handle_save_memory(server, mem_params).await
         }
     }
+}
+
+pub(crate) fn finalize_tachi_save_response(
+    params: &TachiSaveParams,
+    raw: &str,
+    echo: Option<&str>,
+) -> Result<String, String> {
+    shape_save_facade_response(
+        raw,
+        params.format.as_deref(),
+        echo.or(Some(params.text.as_str())),
+        params.path.as_deref(),
+    )
 }
 
 /// Merge explicit `files` plus any `spec:`-pointer paths parsed from `text`

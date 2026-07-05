@@ -94,6 +94,7 @@ pub(crate) async fn save_daily_health_wiki(
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            format: None,
         }))
         .await?;
     Ok(())
