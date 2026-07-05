@@ -1,4 +1,5 @@
 use super::*;
+use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS, WAZA_THINK};
 
 #[test]
 fn dispatch_profile_selects_backend_and_mcp_contract() {

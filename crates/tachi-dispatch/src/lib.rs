@@ -5,12 +5,25 @@
 //! writes stay in `memory-server`.
 
 mod launcher;
+mod profiles;
 mod registry;
 
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, is_trusted_dispatch_command, resolve_permission_profile, tail_chars,
     DispatchLaunchParams, LaunchCommand, PermissionProfile,
+};
+pub use profiles::{
+    profile_demotion_targets_from_overlay, profile_evidence_contract_json,
+    profile_evidence_required, profile_json, profile_json_with_loadout_and_evidence_contract,
+    profile_matches_agent, profile_projected_evidence_required_from_overlay,
+    profile_projected_passive_traits_from_overlay, profile_projected_signature_skills_from_overlay,
+    profile_projected_weak_against_from_overlay, profile_required_skill_ids,
+    profile_skill_loadout_json, profile_uses_opencode_adapter, profile_weak_against,
+    resolve_and_apply_dispatch_profile, resolve_dispatch_profile, DispatchProfileDef,
+    ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
+    MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,

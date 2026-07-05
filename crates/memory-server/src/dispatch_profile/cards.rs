@@ -6,14 +6,15 @@ mod loadout;
 mod matrix;
 mod render;
 
-use evidence::{profile_projected_weak_against, profile_weak_against};
+use evidence::profile_projected_weak_against;
 use loadout::load_profile_overlay;
 
 pub(in crate::dispatch_profile) use evidence::profile_demotion_targets;
+#[cfg(test)]
+pub(crate) use evidence::profile_evidence_required;
 pub(crate) use evidence::{
     profile_evidence_contract_json, profile_evidence_contract_json_for_server,
-    profile_evidence_required, profile_evidence_required_for_server,
-    profile_weak_against_for_server,
+    profile_evidence_required_for_server, profile_weak_against_for_server,
 };
 pub(crate) use feedback::profile_eval_feedback_json;
 pub(in crate::dispatch_profile) use loadout::{

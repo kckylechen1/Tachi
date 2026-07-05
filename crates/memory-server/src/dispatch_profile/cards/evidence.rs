@@ -1,13 +1,7 @@
 use super::*;
 
 pub(crate) fn profile_evidence_required(profile: &DispatchProfileDef) -> Vec<String> {
-    let mut evidence = profile
-        .evidence_required
-        .iter()
-        .map(|item| item.to_string())
-        .collect::<Vec<_>>();
-    crate::skill_policy::dedupe_preserve_order(&mut evidence);
-    evidence
+    tachi_dispatch::profile_evidence_required(profile)
 }
 
 pub(crate) fn profile_evidence_required_for_server(
@@ -25,13 +19,7 @@ pub(crate) fn profile_evidence_required_for_server(
 }
 
 pub(super) fn profile_weak_against(profile: &DispatchProfileDef) -> Vec<String> {
-    let mut weak = profile
-        .weak_against
-        .iter()
-        .map(|item| item.to_string())
-        .collect::<Vec<_>>();
-    crate::skill_policy::dedupe_preserve_order(&mut weak);
-    weak
+    tachi_dispatch::profile_weak_against(profile)
 }
 
 pub(crate) fn profile_weak_against_for_server(
@@ -71,13 +59,7 @@ pub(in crate::dispatch_profile) fn profile_demotion_targets(
 }
 
 pub(crate) fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
-    json!({
-        "required": profile_evidence_required(profile),
-        "projected_required": [],
-        "projection": {
-            "status": "baseline",
-        },
-    })
+    tachi_dispatch::profile_evidence_contract_json(profile)
 }
 
 pub(crate) fn profile_evidence_contract_json_for_server(
