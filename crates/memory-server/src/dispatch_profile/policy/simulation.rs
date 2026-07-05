@@ -12,8 +12,6 @@ pub(in crate::dispatch_profile) fn simulate_route_policy(
     )
 }
 
-pub(super) use tachi_dispatch::sanitize_policy_key;
-
 pub(super) fn route_simulation_caveats(
     rows: &[EvalRow],
     performance_matrix: &[AgentPerformanceMatrixRow],

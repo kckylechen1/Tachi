@@ -58,10 +58,6 @@ pub(in crate::dispatch_profile) fn profile_demotion_targets(
     ))
 }
 
-pub(crate) fn profile_evidence_contract_json(profile: &DispatchProfileDef) -> Value {
-    tachi_dispatch::profile_evidence_contract_json(profile)
-}
-
 pub(crate) fn profile_evidence_contract_json_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,

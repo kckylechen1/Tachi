@@ -19,10 +19,6 @@ pub(crate) fn profile_required_skill_ids_for_server(
     Ok(skills)
 }
 
-pub(crate) fn profile_skill_loadout_json(profile: &DispatchProfileDef) -> Value {
-    tachi_dispatch::profile_skill_loadout_json(profile)
-}
-
 pub(crate) fn profile_skill_loadout_json_for_server(
     server: &MemoryServer,
     profile: &DispatchProfileDef,
