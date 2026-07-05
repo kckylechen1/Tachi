@@ -609,6 +609,11 @@ async fn handle_contract_ship(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("main");
+    if branch == base_name {
+        return Err(format!(
+            "self_pr: branch '{branch}' equals pr_base; pick a different pr_base or branch"
+        ));
+    }
     let resolved = resolve_base_ref(repo_root, base_name)?;
     let log_lines = collect_commits_oneline(repo_root, &resolved.baseref)?;
     let commit_count = log_lines.len();

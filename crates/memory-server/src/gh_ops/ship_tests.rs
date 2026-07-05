@@ -475,7 +475,10 @@ async fn ship_g2_contract_dry_run_discriminates_from_mechanical() {
 
     assert_eq!(value["status"], "dry_run");
     assert_eq!(value["mode"], "contract");
+    assert_eq!(value["base"], "main");
+    assert_eq!(value["baseref"], "main");
     assert_eq!(value["commit_count"], 2);
+    assert_eq!(value["pr_title"], "Second contract commit");
     assert_eq!(value["pr_exists_check"], "deferred");
     let preview = value["pr_body_preview"].as_str().expect("body preview");
     assert!(preview.contains("Refs #521"), "{preview}");
@@ -530,6 +533,19 @@ async fn ship_g4_contract_mode_on_base_branch_is_refused() {
 }
 
 #[tokio::test]
+async fn ship_g4b_contract_mode_self_pr_refused() {
+    let repo = init_contract_repo(&["slice commit"], "goal/522");
+    let mut params = contract_params(repo.path(), Some("#522"));
+    params.pr_base = Some("goal/522".to_string());
+
+    let err = handle_github_ship_inner(None, &params)
+        .await
+        .expect_err("self-PR should fail");
+
+    assert!(err.starts_with("self_pr:"), "{err}");
+}
+
+#[tokio::test]
 async fn ship_g5_contract_mode_zero_commits_returns_nothing_to_ship() {
     let repo = init_contract_repo(&[], "feature/contract-g5");
     let params = contract_params(repo.path(), None);
@@ -550,6 +566,19 @@ fn ship_g6_build_contract_pr_body_section_order_and_placeholders() {
             "def5678 Second commit".to_string(),
         ],
         &["cargo test -p memory-server".to_string()],
+    );
+    assert_eq!(
+        with_issue,
+        "Refs #521\n\n\
+## Commits (one bounded contract, batched)\n\
+- abc1234 First commit\n\
+- def5678 Second commit\n\
+\n\
+## Tested (full suite, once)\n\
+- cargo test -p memory-server\n\
+\n\
+## Not-tested\n\
+_fill honest gaps_\n"
     );
     assert!(with_issue.starts_with("Refs #521\n\n"));
     assert!(with_issue.contains("## Commits (one bounded contract, batched)\n"));
