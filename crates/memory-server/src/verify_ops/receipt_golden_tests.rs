@@ -32,6 +32,7 @@ fn verify_params(action: &str) -> TachiVerifyParams {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn g1_record_single_check_receipt_ignores_other_checks() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
@@ -72,6 +73,7 @@ async fn g1_record_single_check_receipt_ignores_other_checks() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn g2_batch_record_receipt_lists_both_ids() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
@@ -133,6 +135,7 @@ async fn g2_batch_record_receipt_lists_both_ids() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
@@ -160,6 +163,7 @@ async fn g2b_legacy_commands_receipt_lists_both_derived_ids() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn g5_record_receipt_default_under_400_bytes() {
     let _guard = crate::shell_ops::tachi_run_root_env_lock()
         .lock()
