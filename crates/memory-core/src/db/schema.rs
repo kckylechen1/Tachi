@@ -307,7 +307,6 @@ fn normalize_memory_validity_columns(conn: &Connection) -> Result<(), MemoryErro
 /// The standalone `memories_fts` virtual table is independent of the rebuild
 /// and is preserved across the rename.
 fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
-    // Check if CHECK constraints already exist by scanning sqlite_master.
     let existing_sql: Option<String> = conn
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
@@ -320,7 +319,6 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         let has_latest_category_values = sql.contains("'eval'");
         let has_latest_source_values = sql.contains("'foundry_recall_rerank_cache'");
         if has_source_check && has_latest_category_values && has_latest_source_values {
-            // Already migrated; nothing to do.
             return Ok(());
         }
     }
@@ -328,201 +326,218 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     let migration_result = (|| -> Result<(), MemoryError> {
         let conn = &tx;
-        // ── Step 1: Normalize source ────────────────────────────────────────────
-        // Empty/NULL → 'manual'
-        conn.execute(
-            "UPDATE memories SET source = 'manual'
-         WHERE source IS NULL OR trim(source) = ''",
-            [],
-        )?;
-        // Common legacy aliases
-        conn.execute(
-            "UPDATE memories SET source = 'manual'
-         WHERE lower(source) IN ('test', 'unit_test')",
-            [],
-        )?;
+        normalize_source(conn)?;
+        normalize_category(conn)?;
+        normalize_scope(conn)?;
+        normalize_retention_policy(conn)?;
+        backfill_retention_defaults(conn)?;
+        rebuild_memories_with_check_constraints(conn)?;
+        Ok(())
+    })();
 
-        // ghost:<publisher> → 'ghost' + move publisher into metadata.ghost.publisher
-        // Only mutate metadata when it parses as JSON; otherwise just collapse source.
-        loop {
-            let rows = fetch_ghost_source_batch(conn, 500)?;
-            if rows.is_empty() {
-                break;
-            }
-            for (id, source, metadata) in rows {
-                let publisher = source
-                    .strip_prefix("ghost:")
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let new_meta = match serde_json::from_str::<serde_json::Value>(&metadata) {
-                    Ok(mut v) => {
-                        if !publisher.is_empty() {
-                            let obj = v.as_object_mut();
-                            if let Some(map) = obj {
-                                let ghost_entry = map
-                                    .entry("ghost".to_string())
-                                    .or_insert_with(|| serde_json::json!({}));
-                                if let Some(g) = ghost_entry.as_object_mut() {
-                                    g.insert(
-                                        "publisher".to_string(),
-                                        serde_json::Value::String(publisher.clone()),
-                                    );
-                                }
+    migration_result?;
+    tx.commit()?;
+    Ok(())
+}
+
+const CANONICAL_SOURCES: &[&str] = &[
+    "manual",
+    "extraction",
+    "migration",
+    "auto",
+    "foundry_distill",
+    "foundry_recall_rerank_cache",
+    "handoff",
+    "kanban",
+    "wiki",
+    "ghost",
+    "ingest_event",
+];
+
+fn normalize_source(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE memories SET source = 'manual'
+         WHERE source IS NULL OR trim(source) = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET source = 'manual'
+         WHERE lower(source) IN ('test', 'unit_test')",
+        [],
+    )?;
+
+    loop {
+        let rows = fetch_ghost_source_batch(conn, 500)?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, source, metadata) in rows {
+            let publisher = source
+                .strip_prefix("ghost:")
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let new_meta = match serde_json::from_str::<serde_json::Value>(&metadata) {
+                Ok(mut v) => {
+                    if !publisher.is_empty() {
+                        let obj = v.as_object_mut();
+                        if let Some(map) = obj {
+                            let ghost_entry = map
+                                .entry("ghost".to_string())
+                                .or_insert_with(|| serde_json::json!({}));
+                            if let Some(g) = ghost_entry.as_object_mut() {
+                                g.insert(
+                                    "publisher".to_string(),
+                                    serde_json::Value::String(publisher.clone()),
+                                );
                             }
                         }
-                        Some(v.to_string())
                     }
-                    Err(_) => None, // leave metadata untouched
-                };
-                match new_meta {
-                    Some(m) => {
-                        conn.execute(
-                            "UPDATE memories SET source='ghost', metadata=?1 WHERE id=?2",
-                            rusqlite::params![m, id],
-                        )?;
-                    }
-                    None => {
-                        conn.execute(
-                            "UPDATE memories SET source='ghost' WHERE id=?1",
-                            rusqlite::params![id],
-                        )?;
-                    }
+                    Some(v.to_string())
+                }
+                Err(_) => None,
+            };
+            match new_meta {
+                Some(m) => {
+                    conn.execute(
+                        "UPDATE memories SET source='ghost', metadata=?1 WHERE id=?2",
+                        rusqlite::params![m, id],
+                    )?;
+                }
+                None => {
+                    conn.execute(
+                        "UPDATE memories SET source='ghost' WHERE id=?1",
+                        rusqlite::params![id],
+                    )?;
                 }
             }
         }
+    }
 
-        // Lowercase canonical sources so case-variants match the CHECK list.
-        conn.execute(
+    conn.execute(
         "UPDATE memories SET source = lower(source)
          WHERE source IN ('Manual','Extraction','Migration','Auto','FoundryDistill','Handoff','Kanban','Wiki','Ghost','IngestEvent')
             OR source GLOB '*[A-Z]*'",
         [],
     )?;
 
-        // Anything still not canonical (and not already external:) → external:<sanitized>
-        let canonical_list = [
-            "manual",
-            "extraction",
-            "migration",
-            "auto",
-            "foundry_distill",
-            "foundry_recall_rerank_cache",
-            "handoff",
-            "kanban",
-            "wiki",
-            "ghost",
-            "ingest_event",
-        ];
-        loop {
-            let rows = fetch_noncanonical_source_batch(conn, 500)?;
-            if rows.is_empty() {
-                break;
-            }
-            let mut changed = 0usize;
-            for (id, source) in rows {
-                if canonical_list.contains(&source.as_str()) {
-                    continue;
-                }
-                if let Some(suffix) = source.strip_prefix("external:") {
-                    // Re-sanitize suffix to be safe
-                    let sanitized = sanitize_source_suffix_sql(suffix);
-                    let new_val = format!("external:{}", sanitized);
-                    if new_val != source {
-                        conn.execute(
-                            "UPDATE memories SET source=?1 WHERE id=?2",
-                            rusqlite::params![new_val, id],
-                        )?;
-                        changed += 1;
-                    }
-                    continue;
-                }
-                let sanitized = sanitize_source_suffix_sql(&source);
-                let new_val = format!("external:{}", sanitized);
-                conn.execute(
-                    "UPDATE memories SET source=?1 WHERE id=?2",
-                    rusqlite::params![new_val, id],
-                )?;
-                changed += 1;
-            }
-            if changed == 0 {
-                break;
-            }
+    loop {
+        let rows = fetch_noncanonical_source_batch(conn, 500)?;
+        if rows.is_empty() {
+            break;
         }
+        let mut changed = 0usize;
+        for (id, source) in rows {
+            if CANONICAL_SOURCES.contains(&source.as_str()) {
+                continue;
+            }
+            if let Some(suffix) = source.strip_prefix("external:") {
+                let sanitized = sanitize_source_suffix_sql(suffix);
+                let new_val = format!("external:{}", sanitized);
+                if new_val != source {
+                    conn.execute(
+                        "UPDATE memories SET source=?1 WHERE id=?2",
+                        rusqlite::params![new_val, id],
+                    )?;
+                    changed += 1;
+                }
+                continue;
+            }
+            let sanitized = sanitize_source_suffix_sql(&source);
+            let new_val = format!("external:{}", sanitized);
+            conn.execute(
+                "UPDATE memories SET source=?1 WHERE id=?2",
+                rusqlite::params![new_val, id],
+            )?;
+            changed += 1;
+        }
+        if changed == 0 {
+            break;
+        }
+    }
 
-        // ── Step 2: Normalize category ──────────────────────────────────────────
-        conn.execute(
-            "UPDATE memories SET category = lower(category) WHERE category IS NOT NULL",
-            [],
-        )?;
-        conn.execute(
+    Ok(())
+}
+
+fn normalize_category(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE memories SET category = lower(category) WHERE category IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
         "UPDATE memories SET category = 'other'
          WHERE category IS NULL OR category = ''
             OR category NOT IN ('fact','decision','experience','preference','entity','other','kanban','handoff','ghost','wiki','guide','eval')",
         [],
     )?;
+    Ok(())
+}
 
-        // ── Step 3: Normalize scope ─────────────────────────────────────────────
-        conn.execute(
-            "UPDATE memories SET scope = lower(scope) WHERE scope IS NOT NULL",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE memories SET scope = 'general'
+fn normalize_scope(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE memories SET scope = lower(scope) WHERE scope IS NOT NULL",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET scope = 'general'
          WHERE scope IS NULL OR scope NOT IN ('user','project','general')",
-            [],
-        )?;
+        [],
+    )?;
+    Ok(())
+}
 
-        // ── Step 4: Normalize retention_policy ──────────────────────────────────
-        conn.execute(
-            "UPDATE memories SET retention_policy = lower(retention_policy)
+fn normalize_retention_policy(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE memories SET retention_policy = lower(retention_policy)
          WHERE retention_policy IS NOT NULL",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE memories SET retention_policy = NULL
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = NULL
          WHERE retention_policy IS NOT NULL
            AND retention_policy NOT IN ('ephemeral','durable','permanent','pinned')",
-            [],
-        )?;
+        [],
+    )?;
+    Ok(())
+}
 
-        // ── Step 5: Backfill retention defaults ─────────────────────────────────
-        conn.execute(
-            "UPDATE memories SET retention_policy = 'pinned'
+fn backfill_retention_defaults(conn: &Connection) -> Result<(), MemoryError> {
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'pinned'
          WHERE retention_policy IS NULL
            AND (path LIKE '/handoff%' OR path LIKE '/kanban%')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE memories SET retention_policy = 'permanent'
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'permanent'
          WHERE retention_policy IS NULL AND (path LIKE '/wiki%' OR path LIKE '/guide%')",
-            [],
-        )?;
-        conn.execute(
-            "UPDATE memories SET retention_policy = 'permanent'
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET retention_policy = 'permanent'
          WHERE retention_policy IS NULL AND source = 'foundry_distill'",
-            [],
-        )?;
+        [],
+    )?;
+    Ok(())
+}
 
-        // ── Step 6: Rebuild table with CHECK constraints ────────────────────────
-        // Some legacy DBs can enter this migration without lifecycle columns. Use
-        // literals for absent columns so the rebuild can also repair that shape.
-        let recall_count_expr = if has_column(conn, "memories", "recall_count")? {
-            "COALESCE(recall_count, 0)"
-        } else {
-            "0"
-        };
-        let query_diversity_expr = if has_column(conn, "memories", "query_diversity")? {
-            "COALESCE(query_diversity, 0)"
-        } else {
-            "0"
-        };
-        let tier_expr = if has_column(conn, "memories", "tier")? {
-            "COALESCE(tier, 'raw')"
-        } else {
-            "'raw'"
-        };
-        let rebuild_sql = r#"
+fn rebuild_memories_with_check_constraints(conn: &Connection) -> Result<(), MemoryError> {
+    let recall_count_expr = if has_column(conn, "memories", "recall_count")? {
+        "COALESCE(recall_count, 0)"
+    } else {
+        "0"
+    };
+    let query_diversity_expr = if has_column(conn, "memories", "query_diversity")? {
+        "COALESCE(query_diversity, 0)"
+    } else {
+        "0"
+    };
+    let tier_expr = if has_column(conn, "memories", "tier")? {
+        "COALESCE(tier, 'raw')"
+    } else {
+        "'raw'"
+    };
+    let rebuild_sql = r#"
         CREATE TABLE memories_new (
             id           TEXT PRIMARY KEY,
             path         TEXT NOT NULL DEFAULT '/',
@@ -595,13 +610,7 @@ fn migrate_enum_constraints(conn: &Connection) -> Result<(), MemoryError> {
         .replace("__RECALL_COUNT_EXPR__", recall_count_expr)
         .replace("__QUERY_DIVERSITY_EXPR__", query_diversity_expr)
         .replace("__TIER_EXPR__", tier_expr);
-        conn.execute_batch(&rebuild_sql)?;
-
-        Ok(())
-    })();
-
-    migration_result?;
-    tx.commit()?;
+    conn.execute_batch(&rebuild_sql)?;
     Ok(())
 }
 
