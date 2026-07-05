@@ -87,10 +87,85 @@ pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 type MetadataExtractionResult = (usize, Result<(Vec<String>, Vec<String>), String>);
 
 impl MemoryServer {
-    pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) {
+    pub(super) fn enqueue_enrichment(&self, item: EnrichmentItem) -> bool {
         if let Err(err) = self.enrichment_lock().enrich_tx.try_send(item) {
             tracing::warn!("[enrichment-batcher] failed to queue enrichment item: {err}");
+            return false;
         }
+        true
+    }
+
+    pub(crate) fn requeue_auth_failed_enrichment_retries(&self, trigger: &str) -> usize {
+        const LIMIT_PER_DB: usize = 64;
+        let mut total = 0usize;
+
+        match self.with_global_store(|store| {
+            let candidates = store
+                .claim_auth_failed_enrichment_retries(LIMIT_PER_DB)
+                .map_err(|e| format!("claim global auth-failed enrichment retries: {e}"))?;
+            Ok(self.enqueue_retry_candidates(candidates, DbScope::Global, None, None))
+        }) {
+            Ok(count) => total += count,
+            Err(err) => tracing::warn!(
+                "[enrichment-batcher] failed to requeue global auth-failed rows after {trigger}: {err}"
+            ),
+        }
+
+        if self.project_db_path_buf().is_some() {
+            match self.with_project_store(|store| {
+                let candidates = store
+                    .claim_auth_failed_enrichment_retries(LIMIT_PER_DB)
+                    .map_err(|e| format!("claim project auth-failed enrichment retries: {e}"))?;
+                Ok(self.enqueue_retry_candidates(candidates, DbScope::Project, None, None))
+            }) {
+                Ok(count) => total += count,
+                Err(err) => tracing::warn!(
+                    "[enrichment-batcher] failed to requeue project auth-failed rows after {trigger}: {err}"
+                ),
+            }
+        }
+
+        if total > 0 {
+            tracing::info!(
+                "[enrichment-batcher] requeued {total} auth-failed enrichment row(s) after {trigger}"
+            );
+        }
+        total
+    }
+
+    fn enqueue_retry_candidates(
+        &self,
+        candidates: Vec<memory_core::store::enrichment::EnrichmentRetryCandidate>,
+        target_db: DbScope,
+        named_project: Option<String>,
+        db_path: Option<PathBuf>,
+    ) -> usize {
+        let mut queued = 0usize;
+        for candidate in candidates {
+            if !candidate.needs_embedding && !candidate.needs_summary && !candidate.needs_metadata {
+                continue;
+            }
+            let item = EnrichmentItem {
+                id: candidate.id,
+                text: candidate.text,
+                summary: candidate.summary,
+                keywords: candidate.keywords,
+                entities: candidate.entities,
+                needs_embedding: candidate.needs_embedding,
+                needs_summary: candidate.needs_summary,
+                needs_metadata: candidate.needs_metadata,
+                target_db,
+                named_project: named_project.clone(),
+                db_path: db_path.clone(),
+                foundry_agent_id: None,
+                foundry_path_prefix: None,
+                revision: candidate.revision,
+            };
+            if self.enqueue_enrichment(item) {
+                queued += 1;
+            }
+        }
+        queued
     }
 
     /// Background worker that batches enrichment requests (embedding + summary).

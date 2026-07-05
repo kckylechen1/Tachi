@@ -339,7 +339,7 @@ async fn handle_tachi_status_detail(
     let low_coverage: Vec<serde_json::Value> = snapshot
         .dbs
         .iter()
-        .filter(|d| d.memory_total > 0 && d.vector_coverage < 0.9)
+        .filter(|d| low_vector_coverage(d))
         .map(|d| {
             json!({
                 "label": d.label,

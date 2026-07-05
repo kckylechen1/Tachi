@@ -1,4 +1,6 @@
 use super::*;
+use crate::store::enrichment::ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS;
+use crate::MemoryStore;
 
 #[test]
 fn upsert_folds_persons_into_entities_without_persisting_persons_column() {
@@ -52,7 +54,13 @@ fn update_enrichment_fields_clears_stale_failure_metadata() {
             "status": "failed",
             "failed_stage": "embedding",
             "last_error": "Voyage 429",
-            "last_failure_at": "2026-06-01T00:00:00Z"
+            "last_failure_at": "2026-06-01T00:00:00Z",
+            "retry": {
+                "kind": "auth",
+                "attempts": 2,
+                "max_attempts": 3,
+                "next_retry_at": "2026-06-01T00:05:00Z"
+            }
         }
     });
     upsert(&mut conn, &entry, false).unwrap();
@@ -84,6 +92,101 @@ fn update_enrichment_fields_clears_stale_failure_metadata() {
     );
     assert!(metadata["enrichment"].get("failed_stage").is_none());
     assert!(metadata["enrichment"].get("last_failure_at").is_none());
+    assert!(metadata["enrichment"].get("retry").is_none());
+}
+
+#[test]
+fn record_auth_failed_enrichment_failure_carries_bounded_retry_metadata() {
+    let mut conn = make_conn();
+    let entry = make_entry(
+        "auth-retry",
+        "auth failed enrichment retry should be bounded",
+    );
+    upsert(&mut conn, &entry, false).unwrap();
+
+    record_enrichment_failure(
+        &conn,
+        "auth-retry",
+        "embedding",
+        "API key unavailable for [VOYAGE_API_KEY]: all configured provider keys are unusable (auth_failed: 2)",
+    )
+    .unwrap();
+
+    let metadata: String = conn
+        .query_row(
+            "SELECT metadata FROM memories WHERE id='auth-retry'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(metadata["enrichment"]["status"], "failed");
+    assert_eq!(metadata["enrichment"]["retry"]["kind"], "auth");
+    assert_eq!(metadata["enrichment"]["retry"]["attempts"], 0);
+    assert_eq!(
+        metadata["enrichment"]["retry"]["max_attempts"],
+        ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS
+    );
+    assert!(
+        metadata["enrichment"]["retry"]["next_retry_at"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "auth-class failure should be immediately retry-eligible after unlock: {metadata:?}"
+    );
+}
+
+#[test]
+fn auth_failed_enrichment_retry_claim_respects_backoff_and_attempt_cap() {
+    let dir = tempfile::tempdir().expect("temp db dir");
+    let db = dir.path().join("memory.db");
+    let mut store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
+    let mut entry = make_entry("auth-claim", "auth failed row should retry after unlock");
+    entry.summary.clear();
+    entry.keywords.clear();
+    entry.entities.clear();
+    store.upsert(&entry).expect("insert retry row");
+    store
+        .record_enrichment_failure(
+            "auth-claim",
+            "embedding",
+            "Voyage batch API error: 401 Unauthorized",
+        )
+        .expect("record auth failure");
+
+    let first = store
+        .claim_auth_failed_enrichment_retries(10)
+        .expect("claim retry");
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, "auth-claim");
+    assert_eq!(first[0].attempts, 0);
+    assert!(first[0].max_attempts >= 1);
+    assert!(first[0].needs_embedding);
+    assert!(first[0].needs_summary);
+    assert!(first[0].needs_metadata);
+
+    let blocked = store
+        .claim_auth_failed_enrichment_retries(10)
+        .expect("backoff should block immediate reclain");
+    assert!(
+        blocked.is_empty(),
+        "retry should honor next_retry_at backoff"
+    );
+
+    store
+        .connection()
+        .execute(
+            "UPDATE memories
+             SET metadata = json_set(metadata,
+                 '$.enrichment.retry.attempts', ?1,
+                 '$.enrichment.retry.next_retry_at', '1970-01-01T00:00:00.000Z')
+             WHERE id = 'auth-claim'",
+            rusqlite::params![ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS],
+        )
+        .unwrap();
+    let capped = store
+        .claim_auth_failed_enrichment_retries(10)
+        .expect("claim capped retry");
+    assert!(capped.is_empty(), "max retry attempts must stop storms");
 }
 
 #[test]
