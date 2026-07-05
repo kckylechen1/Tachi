@@ -36,11 +36,14 @@ leases), decided before spawn. Nothing a worker reads at runtime can widen them.
 
 **T1 — Injected worker exfiltrates secrets.** A worker's packet includes repo/web
 content; a hostile string says "print $OPENAI_API_KEY / read the vault".
-Stance: workers NEVER get a vault read surface (delegate ToolProfile already omits
-vault tools — keep as invariant). Keys reach workers only as **scoped leases**: the
-dispatch layer injects exactly the whitelisted env vars the card names, nothing else
-(#458 broker's job). Memory recall served to workers passes the same redaction the
-save path enforces (no raw secrets in memory is already save-side law).
+Stance (strengthened 2026-07-05, worker-class doctrine): workers never mount ANY
+Tachi surface — not just vault, the entire OS control plane. Contract workers speak
+a file protocol: packet in (instruction.md with pre-baked briefing), artifacts out
+(result.md / run-dir drops); the pipeline does all ledger writes. Capability READS
+(codegraph, context7) are card-issued and seat-scoped, ≤2-3 per flash-tier worker
+(#476). Keys reach workers only as **scoped leases**: the dispatch layer injects
+exactly the whitelisted env vars the card names (#458 broker's job). With no recall
+surface, memory-based exfiltration probing is structurally gone.
 Residual risk: a leased key is exfiltratable by the worker that legitimately holds
 it → leases are per-dispatch, audit-logged, and the card whitelist keeps them minimal.
 
@@ -87,14 +90,18 @@ with `confirm=true` human application — the scheduler learns, but the owner ra
 
 ## Invariants (freeze these; violating = BUG in any review)
 
-1. Workers have no vault read surface; secrets reach them only as card-whitelisted,
-   per-dispatch, audit-logged leases.
+1. Workers mount no Tachi surface at all (packet in, artifacts out); secrets reach
+   them only as card-whitelisted, per-dispatch, audit-logged leases.
 2. Trust is minted only at the owner's local CLI; no MCP-surface path may
    auto-approve capabilities, keys, or route changes.
 3. Nothing merges to a default branch without different-vendor review evidence and
    verification checks (goal/* included at campaign close).
 4. Every GitHub write and every key lease is attributable in the audit log.
 5. Review/verify gates fail CLOSED (missing/stale/unparseable evidence = blocked).
+6. Open-web read and write authority never coexist on one worker: research
+   retrievers read the world and write nothing; implementers hold the pen and read
+   only the closed world (local index + curated docs) — the injected-instruction →
+   malicious-patch path is severed structurally.
 
 ## Known gaps (tracked, not hidden)
 
