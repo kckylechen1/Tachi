@@ -11,6 +11,42 @@ use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key};
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) enum VaultOpsError {
+    VaultLocked,
+    AgentRequired,
+    AgentDenied,
+    AgentIdentityMismatch(String),
+    SecretNotFound,
+    NoRotationKeys,
+    InvalidInput(String),
+    Internal(String),
+}
+
+impl std::fmt::Display for VaultOpsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::VaultLocked => write!(f, "Vault is locked"),
+            Self::AgentRequired => write!(
+                f,
+                "Access denied: agent_id is required for this restricted secret"
+            ),
+            Self::AgentDenied => write!(
+                f,
+                "Access denied: agent is not in the allowed list for this secret"
+            ),
+            Self::AgentIdentityMismatch(msg) => write!(f, "{msg}"),
+            Self::SecretNotFound => write!(f, "Secret not found"),
+            Self::NoRotationKeys => write!(f, "No keys found for rotation prefix"),
+            Self::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
+            Self::Internal(msg) => write!(f, "Vault error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for VaultOpsError {}
+
 fn normalize_agent_id(agent_id: Option<&str>) -> Option<String> {
     agent_id
         .map(str::trim)
@@ -43,19 +79,19 @@ pub(super) fn resolve_vault_acl_agent_id(
 pub(super) fn ensure_agent_allowed(
     entry: &VaultEntry,
     agent_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), VaultOpsError> {
     let Some(allowed_agents) = entry.allowed_agents.as_ref() else {
         return Ok(());
     };
 
     let Some(agent_id) = agent_id.map(str::trim).filter(|agent| !agent.is_empty()) else {
-        return Err("Access denied: agent_id is required for this restricted secret.".to_string());
+        return Err(VaultOpsError::AgentRequired);
     };
 
     if allowed_agents.iter().any(|allowed| allowed == agent_id) {
         Ok(())
     } else {
-        Err("Access denied: agent is not in the allowed list for this secret.".to_string())
+        Err(VaultOpsError::AgentDenied)
     }
 }
 
@@ -65,16 +101,17 @@ pub(super) fn authorize_vault_mutation(
     server: &MemoryServer,
     target_name: &str,
     caller_agent_id: Option<&str>,
-) -> Result<(), String> {
-    ensure_vault_unlocked(server)?;
-    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)?;
+) -> Result<(), VaultOpsError> {
+    ensure_vault_unlocked(server).map_err(|_| VaultOpsError::VaultLocked)?;
+    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)
+        .map_err(VaultOpsError::AgentIdentityMismatch)?;
     let existing = server
         .with_global_store_read(|store| {
             store
                 .vault_get_entry(target_name)
                 .map_err(|e| e.to_string())
         })
-        .map_err(|e| format!("Failed to resolve secret for authorization: {e}"))?;
+        .map_err(|e| VaultOpsError::Internal(format!("Failed to resolve secret: {e}")))?;
     if let Some(entry) = existing {
         ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
     }
@@ -92,12 +129,13 @@ pub(super) fn authorize_vault_pool_mutation(
     server: &MemoryServer,
     prefix: &str,
     caller_agent_id: Option<&str>,
-) -> Result<(), String> {
-    ensure_vault_unlocked(server)?;
-    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)?;
+) -> Result<(), VaultOpsError> {
+    ensure_vault_unlocked(server).map_err(|_| VaultOpsError::VaultLocked)?;
+    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)
+        .map_err(VaultOpsError::AgentIdentityMismatch)?;
     let entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to list entries for authorization: {e}"))?;
+        .map_err(|e| VaultOpsError::Internal(format!("Failed to list entries: {e}")))?;
     for entry in entries {
         if api_key_pool_member_index(&entry.name, prefix).is_some() {
             ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
@@ -432,7 +470,8 @@ pub(crate) fn read_unlocked_vault_secret(
         };
         let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())?;
+        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
 
         let decrypted =
             crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;

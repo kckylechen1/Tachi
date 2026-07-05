@@ -54,6 +54,31 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
     Ok(runtime)
 }
 
+fn load_env_files(
+    home: &Path,
+    app_home: &Path,
+    load_project_local_env: bool,
+    git_root: Option<&Path>,
+) {
+    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+
+    if load_project_local_env {
+        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
+        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let _ = dotenvy::from_path(cwd.join(".env"));
+            if let Some(root) = git_root {
+                if root != cwd.as_path() {
+                    let _ = dotenvy::from_path(root.join(".env"));
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
@@ -102,28 +127,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
 
-    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
-    let _ = dotenvy::from_path_override(app_home.join("config.env"));
-    // Backward compatibility with old Sigil paths
-    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
-
-    // Project-local dotenv support (non-overriding):
-    // - current working directory .env
-    // - git root .env (if different from cwd)
-    if load_project_local_env {
-        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
-        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
-    }
-    if load_project_local_env {
-        if let Ok(cwd) = std::env::current_dir() {
-            let _ = dotenvy::from_path(cwd.join(".env"));
-            if let Some(root) = git_root.as_ref() {
-                if root != &cwd {
-                    let _ = dotenvy::from_path(root.join(".env"));
-                }
-            }
-        }
-    }
+    load_env_files(
+        &home,
+        &app_home,
+        load_project_local_env,
+        git_root.as_deref(),
+    );
 
     // Resolve global DB path
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
