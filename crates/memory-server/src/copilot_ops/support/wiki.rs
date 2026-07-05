@@ -119,7 +119,7 @@ pub(in crate::copilot_ops) fn default_named_project_available(
     else {
         return false;
     };
-    server.global_db_path.starts_with(app_home)
+    server.global_db_path_buf().starts_with(app_home)
 }
 
 /// Identify and supersede wiki entries that duplicate the newly written entry.

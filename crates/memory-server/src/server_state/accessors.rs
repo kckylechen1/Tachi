@@ -23,7 +23,7 @@ impl MemoryServer {
 
     #[cfg(test)]
     pub(crate) fn global_read_pool_size_for_tests(&self) -> usize {
-        self.global_read_pool.len()
+        self.db.global_read_pool_size()
     }
 
     pub(crate) fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
@@ -87,20 +87,20 @@ impl MemoryServer {
 
     /// Path to this server's global memory DB (canonicalized at boot).
     pub(crate) fn global_db_path_buf(&self) -> PathBuf {
-        (*self.global_db_path).clone()
+        self.db.global_db_path_buf()
     }
 
     /// Path to this server's project memory DB, when one is bound.
     pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
-        if let Some(state) = self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return Some(state.db_path.as_ref().clone());
-        }
-        self.project_db_path.as_ref().map(|p| (**p).clone())
+        self.db.project_db_path_buf()
+    }
+
+    pub(crate) fn global_vec_available(&self) -> bool {
+        self.db.global_vec_available
+    }
+
+    pub(crate) fn project_vec_available(&self) -> bool {
+        self.db.project_vec_available
     }
 
     pub(crate) fn agent_runtime_read(&self) -> std::sync::RwLockReadGuard<'_, AgentRuntime> {

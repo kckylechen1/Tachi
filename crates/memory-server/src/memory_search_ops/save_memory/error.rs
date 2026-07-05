@@ -29,10 +29,9 @@ pub(in crate::memory_search_ops::save_memory) fn format_save_error(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| format!("<named project: {name}>")),
         None => match target_db {
-            DbScope::Global => server.global_db_path.display().to_string(),
+            DbScope::Global => server.global_db_path_buf().display().to_string(),
             DbScope::Project => server
-                .project_db_path
-                .as_ref()
+                .project_db_path_buf()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "<no project DB configured>".to_string()),
         },

@@ -116,7 +116,7 @@ pub(crate) async fn handle_post_card(
 
     let classify_enabled = parse_env_bool("KANBAN_CLASSIFY_ENABLED").unwrap_or(false);
     if classify_enabled {
-        let db_path = server.global_db_path.clone();
+        let db_path = std::sync::Arc::new(server.global_db_path_buf());
         let card_id_clone = card_id.clone();
         let body_clone = body;
         let title_clone = title;

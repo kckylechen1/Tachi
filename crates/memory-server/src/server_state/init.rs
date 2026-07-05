@@ -5,8 +5,8 @@ use super::runtime::{
     FOUNDRY_CHANNEL_CAPACITY,
 };
 use super::{
-    configured_memory_read_pool_size, DbScope, ProjectDbState, RateLimiter, ReadStorePool,
-    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
+    configured_memory_read_pool_size, DbRuntime, DbScope, ProjectDbState, RateLimiter,
+    ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{
@@ -162,7 +162,7 @@ impl MemoryServer {
             },
         ));
 
-        let server = Self {
+        let db = DbRuntime {
             global_store: Arc::new(StdMutex::new(global_store)),
             global_read_pool,
             project_store,
@@ -174,6 +174,10 @@ impl MemoryServer {
             global_vec_available,
             project_vec_available,
             hot_project_db,
+        };
+
+        let server = Self {
+            db,
             llm,
             claude_pool,
             pipeline_enabled,

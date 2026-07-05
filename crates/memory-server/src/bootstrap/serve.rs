@@ -554,7 +554,8 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
     eprintln!(
         "Vector search: global={}, project={}",
-        server.global_vec_available, server.project_vec_available
+        server.global_vec_available(),
+        server.project_vec_available()
     );
     eprintln!(
         "Tool surface: {}",
