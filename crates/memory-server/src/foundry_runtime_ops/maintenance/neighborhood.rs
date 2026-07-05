@@ -140,6 +140,7 @@ pub(super) async fn process_memory_neighborhood_job(
             contradiction_count,
             same_topic_count,
             related.len(),
+            FOUNDRY_RELATED_LIMIT,
         );
 
         let metadata = merge_foundry_metadata(

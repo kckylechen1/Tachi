@@ -4,8 +4,7 @@ use serde_json::json;
 use crate::server_state::{DbScope, MemoryServer};
 use memory_core::{MemoryEdge, MemoryEntry, MemoryStore};
 
-use crate::foundry_runtime_ops::helpers::dedup_strings;
-use crate::foundry_runtime_ops::maintenance::{build_distill_edges, build_foundry_distill_root};
+use crate::foundry_runtime_ops::maintenance::{plan_daily_distill_memory, plan_distill_edges};
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 
 use super::types::{CandidateGroup, GroupPayload};
@@ -86,7 +85,7 @@ fn write_distill_entry(
     store
         .upsert(entry)
         .map_err(|e| format!("upsert distill memory: {e}"))?;
-    for edge in build_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
+    for edge in plan_distill_edges(entry, source_entries, "daily_batch", &entry.timestamp) {
         store
             .add_edge(&edge)
             .map_err(|e| format!("add distill edge: {e}"))?;
@@ -122,22 +121,28 @@ pub(crate) fn persist_distill_memory(
         .as_ref()
         .map(|p| p.agent_id.clone())
         .unwrap_or_else(|| "tachi_scheduler".to_string());
-    let distill_root = build_foundry_distill_root(&agent_id);
     let timestamp = Utc::now().to_rfc3339();
+    let timestamp_segment = Utc::now().format("%Y%m%dT%H%M%S").to_string();
     let memory_id = uuid::Uuid::new_v4().to_string();
-    let source_ids: Vec<String> = group.entries.iter().map(|e| e.id.clone()).collect();
-
-    let bucket_key = format!("{}#{}", group.path_prefix, group.coherence_key);
-    let namespace_key = group.path_prefix.clone();
+    let plan = plan_daily_distill_memory(
+        &agent_id,
+        &group.path_prefix,
+        &group.coherence_key,
+        &group.entries,
+        &payload.summary,
+        &payload.text,
+        &payload.keywords,
+        &timestamp_segment,
+    );
 
     let metadata = crate::provenance::inject_provenance(
         server,
         json!({
-            "source_memory_ids": source_ids,
+            "source_memory_ids": plan.source_memory_ids,
             "source_path_prefix": group.path_prefix,
-            "namespace_key": namespace_key,
+            "namespace_key": plan.namespace_key,
             "coherence_key": group.coherence_key,
-            "bucket_key": bucket_key,
+            "bucket_key": plan.bucket_key,
             "batch_run_id": batch_run_id,
             "group_id": group.group_id,
             "backend": backend,
@@ -153,30 +158,10 @@ pub(crate) fn persist_distill_memory(
         }),
     );
 
-    let summary = if payload.summary.trim().is_empty() {
-        payload.text.chars().take(100).collect::<String>()
-    } else {
-        payload.summary.clone()
-    };
-
-    let mut keywords = vec!["foundry".to_string(), "distill".to_string()];
-    keywords.extend(payload.keywords.iter().cloned());
-    for entry in &group.entries {
-        keywords.extend(entry.keywords.iter().cloned());
-    }
-    let keywords = dedup_strings(keywords);
-    let entities = dedup_strings(
-        group
-            .entries
-            .iter()
-            .flat_map(|e| e.entities.clone())
-            .collect(),
-    );
-
     let entry = MemoryEntry {
         id: memory_id.clone(),
-        path: format!("{distill_root}/{}", Utc::now().format("%Y%m%dT%H%M%S")),
-        summary,
+        path: plan.path,
+        summary: plan.summary,
         text: payload.text.clone(),
         importance: 0.75,
         timestamp,
@@ -184,9 +169,9 @@ pub(crate) fn persist_distill_memory(
         valid_until: None,
         category: "other".to_string(),
         topic: "foundry_distill".to_string(),
-        keywords,
+        keywords: plan.keywords,
         persons: Vec::new(),
-        entities,
+        entities: plan.entities,
         location: String::new(),
         source: FOUNDRY_DISTILL_SOURCE.to_string(),
         scope: "project".to_string(),

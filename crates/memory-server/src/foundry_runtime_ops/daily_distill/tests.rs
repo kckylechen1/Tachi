@@ -204,13 +204,20 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
     server
         .with_project_store_read(|store| {
             let conn = store.connection();
-            let (retention, domain): (Option<String>, Option<String>) = conn
+            let (path, retention, domain, metadata_raw): (
+                String,
+                Option<String>,
+                Option<String>,
+                String,
+            ) = conn
                 .query_row(
-                    "SELECT retention_policy, domain FROM memories WHERE id=?1",
+                    "SELECT path, retention_policy, domain, metadata FROM memories WHERE id=?1",
                     rusqlite::params![&memory_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
                 .map_err(|e| e.to_string())?;
+            let metadata: serde_json::Value =
+                serde_json::from_str(&metadata_raw).map_err(|e| e.to_string())?;
             let edge_count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM memory_edges WHERE source_id=?1 OR target_id=?1",
@@ -242,8 +249,23 @@ fn persist_distill_memory_writes_graph_and_derived_item() {
                 )
                 .map_err(|e| e.to_string())?;
 
+            assert!(
+                path.starts_with("/foundry/agents/tachi_scheduler/distilled/"),
+                "distill path should come from the foundry plan: {path}"
+            );
             assert_eq!(retention.as_deref(), Some("permanent"));
             assert_eq!(domain.as_deref(), Some("foundry"));
+            assert_eq!(metadata["source_path_prefix"], json!("/project/bounded"));
+            assert_eq!(metadata["namespace_key"], json!("/project/bounded"));
+            assert_eq!(metadata["coherence_key"], json!("bounded-scan"));
+            assert_eq!(
+                metadata["bucket_key"],
+                json!("/project/bounded#bounded-scan")
+            );
+            assert_eq!(
+                metadata["source_memory_ids"],
+                json!(["candidate-0", "candidate-1", "candidate-2"])
+            );
             assert!(
                 edge_count >= 3,
                 "expected at least one distill edge per source, got {edge_count}"
