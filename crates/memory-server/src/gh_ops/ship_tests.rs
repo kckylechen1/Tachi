@@ -589,11 +589,8 @@ _fill honest gaps_\n"
     assert!(with_issue.contains("## Not-tested\n"));
     assert!(with_issue.contains("_fill honest gaps_\n"));
 
-    let without_tests = build_contract_pr_body(
-        Some("#521"),
-        &["abc1234 Only commit".to_string()],
-        &[],
-    );
+    let without_tests =
+        build_contract_pr_body(Some("#521"), &["abc1234 Only commit".to_string()], &[]);
     assert!(
         without_tests.contains("_(not run — record the full-suite command via tests_run)_"),
         "{without_tests}"

@@ -130,10 +130,9 @@ pub(in crate::gh_ops) async fn handle_github_ship_inner(
                             .map(str::trim)
                             .filter(|value| !value.is_empty())
                             .unwrap_or("main");
-                        let title = params
-                            .pr_title
-                            .as_deref()
-                            .ok_or_else(|| "pr_title missing after pr_requested gate".to_string())?;
+                        let title = params.pr_title.as_deref().ok_or_else(|| {
+                            "pr_title missing after pr_requested gate".to_string()
+                        })?;
                         let body = params
                             .pr_body
                             .as_deref()
@@ -500,10 +499,7 @@ fn git_ref_exists(repo: &Path, ref_name: &str) -> bool {
 
 fn collect_commits_oneline(repo: &Path, baseref: &str) -> Result<Vec<String>, String> {
     let range = format!("{baseref}..HEAD");
-    let output = run_git(
-        repo,
-        &["log", "--oneline", "--no-merges", range.as_str()],
-    )?;
+    let output = run_git(repo, &["log", "--oneline", "--no-merges", range.as_str()])?;
     let lines: Vec<String> = output
         .lines()
         .map(str::trim)
@@ -586,10 +582,8 @@ async fn find_open_pr_for_head(
         cmd.args(["--repo", repo]);
     }
     let raw = run_gh(cmd, &token).map_err(|err| format!("pr_exists_check_failed: {err}"))?;
-    let parsed: Vec<Value> =
-        serde_json::from_str(raw.trim()).map_err(|err| {
-            format!("pr_exists_check_failed: parse gh pr list JSON: {err}")
-        })?;
+    let parsed: Vec<Value> = serde_json::from_str(raw.trim())
+        .map_err(|err| format!("pr_exists_check_failed: parse gh pr list JSON: {err}"))?;
     Ok(parsed.first().and_then(|entry| {
         let number = entry.get("number")?.as_u64()?;
         let url = entry.get("url")?.as_str()?.to_string();
@@ -815,7 +809,8 @@ async fn handle_contract_ship(
     if server.is_none() {
         response["pr_exists_check"] = json!("deferred");
     }
-    serde_json::to_string(&response).map_err(|err| format!("serialize contract ship response: {err}"))
+    serde_json::to_string(&response)
+        .map_err(|err| format!("serialize contract ship response: {err}"))
 }
 
 async fn create_pull_request(
