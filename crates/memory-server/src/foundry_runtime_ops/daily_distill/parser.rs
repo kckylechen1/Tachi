@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::llm::LlmClient;
+use tachi_llm::LlmClient;
 
 use super::types::GroupPayload;
 

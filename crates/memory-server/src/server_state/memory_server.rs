@@ -1,8 +1,6 @@
 use super::cache::ToolDiscovery;
 use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
 use super::{ProjectDbState, RateLimiter, ReadStorePool, VaultState};
-use crate::claude_pool;
-use crate::llm;
 use crate::mcp_pool::McpClientPool;
 use memory_core::MemoryStore;
 use rmcp::handler::server::tool::ToolRouter;
@@ -27,11 +25,11 @@ pub(crate) struct MemoryServer {
     /// Hot-swappable project DB state — allows `tachi_init_project_db` to activate
     /// a project database on a running daemon without restart.
     pub(crate) hot_project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
-    pub(crate) llm: Arc<llm::LlmClient>,
+    pub(crate) llm: Arc<tachi_llm::LlmClient>,
     /// Bounded Claude CLI pool used by the daily batch distill (Phase 1).
     /// Falls back to LlmClient on call errors — see
     /// `foundry_runtime_ops::maintenance::run_daily_batch_distill`.
-    pub(crate) claude_pool: Arc<claude_pool::ClaudePool>,
+    pub(crate) claude_pool: Arc<tachi_llm::claude_pool::ClaudePool>,
     pub(crate) pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
     pub(crate) tool_discovery: Arc<ToolDiscovery>,

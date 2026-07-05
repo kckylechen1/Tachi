@@ -1,5 +1,4 @@
 use super::backend::{resolve_security_scan_backend, SecurityScanBackend};
-use crate::llm;
 use crate::utils::parse_env_bool;
 use crate::MemoryServer;
 
@@ -34,7 +33,7 @@ pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
             let llm_for_fallback = server.llm.clone();
             let payload_for_fallback = payload.clone();
             let model_for_fallback = model.clone();
-            crate::claude_pool::pool_call_with_fallback(
+            tachi_llm::claude_pool::pool_call_with_fallback(
                 &server.claude_pool,
                 crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
                 &payload,
@@ -70,15 +69,17 @@ pub(in crate::hub_ops) async fn scan_skill_definition_with_llm(
 
     match llm_call_result {
         Ok((raw, source)) => {
-            let parsed: serde_json::Value =
-                serde_json::from_str(llm::LlmClient::strip_code_fence(&raw)).unwrap_or_else(|_| {
-                    serde_json::json!({
-                        "risk": "medium",
-                        "blocked": false,
-                        "findings": ["Failed to parse LLM security scan JSON output"],
-                        "reason": raw
-                    })
-                });
+            let parsed: serde_json::Value = serde_json::from_str(
+                tachi_llm::LlmClient::strip_code_fence(&raw),
+            )
+            .unwrap_or_else(|_| {
+                serde_json::json!({
+                    "risk": "medium",
+                    "blocked": false,
+                    "findings": ["Failed to parse LLM security scan JSON output"],
+                    "reason": raw
+                })
+            });
             Some(serde_json::json!({
                 "status": "ok",
                 "model": model,

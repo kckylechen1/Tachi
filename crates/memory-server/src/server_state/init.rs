@@ -9,11 +9,9 @@ use super::{
     VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
-use crate::claude_pool;
 use crate::foundry_runtime_ops::{
     run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
 };
-use crate::llm;
 use crate::mcp_pool::McpClientPool;
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::utils::parse_env_u64;
@@ -107,14 +105,14 @@ impl MemoryServer {
             (None, None, None, None, false)
         };
 
-        let llm = Arc::new(llm::LlmClient::new_with_vault_db(Some(
+        let llm = Arc::new(tachi_llm::LlmClient::new_with_vault_db(Some(
             global_db_path.as_path(),
         ))?);
         let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(claude_pool::DEFAULT_MAX_CONCURRENT);
-        let claude_pool = Arc::new(claude_pool::ClaudePool::new(claude_pool_max));
+            .unwrap_or(tachi_llm::claude_pool::DEFAULT_MAX_CONCURRENT);
+        let claude_pool = Arc::new(tachi_llm::claude_pool::ClaudePool::new(claude_pool_max));
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);

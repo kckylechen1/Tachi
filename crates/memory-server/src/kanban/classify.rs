@@ -58,7 +58,7 @@ pub(super) async fn classify_kanban_message(
         })
         .ok_or_else(|| "classifier payload missing response text".to_string())?;
 
-    let cleaned = llm::LlmClient::strip_code_fence(payload_text)
+    let cleaned = tachi_llm::LlmClient::strip_code_fence(payload_text)
         .trim()
         .to_string();
     serde_json::from_str::<KanbanClassification>(&cleaned)

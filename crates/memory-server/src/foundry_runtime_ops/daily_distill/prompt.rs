@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::llm::LlmClient;
+use tachi_llm::LlmClient;
 
 use super::config::{scrub_agent_noise, MAX_BATCH_PAYLOAD_CHARS};
 use super::types::{CandidateGroup, GroupPayload};

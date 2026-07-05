@@ -28,10 +28,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 use super::scrub_agent_noise;
-use crate::llm::LlmClient;
 use crate::server_state::MemoryServer;
 use crate::tool_params::TachiSaveParams;
 use memory_core::types::MemoryEntry;
+use tachi_llm::LlmClient;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 

@@ -41,7 +41,9 @@ pub(super) async fn write_run_status_file_blocking(
     status: Value,
 ) -> Result<(), String> {
     let display = run_dir.display().to_string();
-    tokio::task::spawn_blocking(move || crate::utils::write_run_status_file(&run_dir, &status))
-        .await
-        .map_err(|error| format!("status write task failed for {display}: {error}"))?
+    tokio::task::spawn_blocking(move || {
+        crate::runtime_files::write_run_status_file(&run_dir, &status)
+    })
+    .await
+    .map_err(|error| format!("status write task failed for {display}: {error}"))?
 }

@@ -19,12 +19,12 @@ mod types;
 pub(super) use self::state::{
     ProviderHealthPersistState, ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
 };
-pub(crate) use self::types::ProviderSecret;
+pub use self::types::ProviderSecret;
 pub(super) use self::types::{
     ChatLane, ChatLaneConfig, ClaudeCliFailure, ClaudeCliFailureKind, ClaudeCliSkip,
     KeyAvailability, KeyRetryStatus, SelectedProviderSecret,
 };
-pub(crate) use self::types::{ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus};
+pub use self::types::{ProviderHealthStatus, ProviderKeyCooldownStatus, ProviderPoolStatus};
 
 pub(super) const HEALTH_OK: &str = "ok";
 pub(super) const HEALTH_COOLDOWN: &str = "cooldown";

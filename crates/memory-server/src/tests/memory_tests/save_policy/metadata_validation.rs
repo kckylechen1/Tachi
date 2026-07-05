@@ -139,7 +139,7 @@ async fn save_memory_noise_rejection_returns_structured_json() {
 #[test]
 fn strip_code_fence_uses_last_closing_fence() {
     let raw = "```json\n{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}\n```";
-    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    let stripped = tachi_llm::LlmClient::strip_code_fence(raw);
     assert_eq!(
         stripped,
         "{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}"

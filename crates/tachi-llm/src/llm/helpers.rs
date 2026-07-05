@@ -28,10 +28,10 @@ impl super::LlmClient {
     /// Remove ```json markdown code fences from response
     pub fn strip_code_fence(text: &str) -> &str {
         let text = text.trim();
-        let inner = if text.starts_with("```json") {
-            text[7..].trim()
-        } else if text.starts_with("```") {
-            &text[3..]
+        let inner = if let Some(stripped) = text.strip_prefix("```json") {
+            stripped.trim()
+        } else if let Some(stripped) = text.strip_prefix("```") {
+            stripped
         } else {
             return text;
         };

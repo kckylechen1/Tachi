@@ -285,7 +285,7 @@ async fn extract_ingest_metadata(
             .call_extract_llm(system, &user, None, 0.2, 800)
             .await
         {
-            Ok(response) => match crate::llm::LlmClient::extract_json_payload(&response)
+            Ok(response) => match tachi_llm::LlmClient::extract_json_payload(&response)
                 .ok()
                 .and_then(|payload| serde_json::from_str::<Value>(payload).ok())
             {

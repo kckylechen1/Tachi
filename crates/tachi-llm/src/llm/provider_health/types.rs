@@ -8,39 +8,39 @@ pub(in crate::llm) struct ChatLaneConfig {
 }
 
 #[derive(Clone)]
-pub(crate) struct ProviderSecret {
-    pub(crate) key_id: String,
-    pub(crate) value: String,
+pub struct ProviderSecret {
+    pub key_id: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ProviderKeyCooldownStatus {
-    pub(crate) key_id: String,
-    pub(crate) remaining_seconds: u64,
+pub struct ProviderKeyCooldownStatus {
+    pub key_id: String,
+    pub remaining_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ProviderPoolStatus {
-    pub(crate) logical_name: String,
-    pub(crate) total_keys: usize,
-    pub(crate) available_keys: usize,
-    pub(crate) rate_limited_keys: Vec<ProviderKeyCooldownStatus>,
-    pub(crate) current_index: usize,
-    pub(crate) strategy: &'static str,
+pub struct ProviderPoolStatus {
+    pub logical_name: String,
+    pub total_keys: usize,
+    pub available_keys: usize,
+    pub rate_limited_keys: Vec<ProviderKeyCooldownStatus>,
+    pub current_index: usize,
+    pub strategy: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct ProviderHealthStatus {
-    pub(crate) source_of_truth: &'static str,
-    pub(crate) reload_ttl_secs: u64,
-    pub(crate) last_attempt_at: Option<String>,
-    pub(crate) last_success_at: Option<String>,
-    pub(crate) last_success_age_secs: Option<u64>,
-    pub(crate) last_error: Option<String>,
-    pub(crate) persist_last_attempt_at: Option<String>,
-    pub(crate) persist_last_success_at: Option<String>,
-    pub(crate) persist_last_success_age_secs: Option<u64>,
-    pub(crate) persist_last_error: Option<String>,
+pub struct ProviderHealthStatus {
+    pub source_of_truth: &'static str,
+    pub reload_ttl_secs: u64,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_success_age_secs: Option<u64>,
+    pub last_error: Option<String>,
+    pub persist_last_attempt_at: Option<String>,
+    pub persist_last_success_at: Option<String>,
+    pub persist_last_success_age_secs: Option<u64>,
+    pub persist_last_error: Option<String>,
 }
 
 #[derive(Clone)]

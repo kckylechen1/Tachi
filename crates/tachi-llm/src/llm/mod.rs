@@ -1,4 +1,4 @@
-// llm.rs — LLM & Embedding client for memory server
+// llm.rs — LLM, embedding, and provider-health client for Tachi
 //
 // Uses raw reqwest for OpenAI-compatible chat completions.
 // SiliconFlow/Qwen still gets `enable_thinking: false` to avoid empty content.
@@ -11,7 +11,7 @@ mod embedding;
 mod helpers;
 mod provider_health;
 
-pub(crate) use provider_health::ProviderSecret;
+pub use provider_health::ProviderSecret;
 use provider_health::{
     ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
     ProviderState,

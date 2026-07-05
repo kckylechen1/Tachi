@@ -69,7 +69,7 @@ impl super::super::LlmClient {
                     return None;
                 }
                 Self::first_env(&[*key])
-                    .filter(|value| !crate::provider_config::is_vault_alias(value))
+                    .filter(|value| !crate::provider_names::is_vault_alias(value))
                     .map(|value| SelectedProviderSecret {
                         logical_name: (*key).to_string(),
                         key_id: (*key).to_string(),
@@ -79,7 +79,7 @@ impl super::super::LlmClient {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn first_secret(&self, keys: &[&str]) -> Option<String> {
         self.select_secret(keys).map(|selected| selected.value)
     }
@@ -95,7 +95,7 @@ impl super::super::LlmClient {
             .ok_or_else(|| self.provider_secret_unavailable_error(keys))
     }
 
-    pub(crate) fn has_configured_secret(&self, keys: &[&str]) -> bool {
+    pub fn has_configured_secret(&self, keys: &[&str]) -> bool {
         self.select_secret(keys).is_some()
     }
 
@@ -146,7 +146,7 @@ impl super::super::LlmClient {
 
             if let Some(value) = Self::first_env(&[*key])
                 .filter(|value| !value.trim().is_empty())
-                .filter(|value| !crate::provider_config::is_vault_alias(value))
+                .filter(|value| !crate::provider_names::is_vault_alias(value))
             {
                 if value.trim().is_empty() {
                     empty += 1;
@@ -278,7 +278,7 @@ impl super::super::LlmClient {
 
             if Self::first_env(&[*key])
                 .filter(|value| !value.trim().is_empty())
-                .is_some_and(|value| !crate::provider_config::is_vault_alias(&value))
+                .is_some_and(|value| !crate::provider_names::is_vault_alias(&value))
             {
                 saw_configured_key = true;
                 match self.key_retry_status(key, key, now, now_utc, &state) {
@@ -324,13 +324,15 @@ impl super::super::LlmClient {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn provider_key_id_for_tests(&self, keys: &[&str]) -> Option<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn provider_key_id_for_tests(&self, keys: &[&str]) -> Option<String> {
         self.select_secret(keys).map(|selected| selected.key_id)
     }
 
-    #[cfg(test)]
-    pub(crate) fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
         self.first_secret(keys)
     }
 }

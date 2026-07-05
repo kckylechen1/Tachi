@@ -64,10 +64,8 @@ fn cleanup_runs_dir_recursive(root: &Path, now: SystemTime, depth: usize) -> (us
             continue;
         };
         let max = if failed { failed_max } else { success_max };
-        if age > max {
-            if std::fs::remove_dir_all(&path).is_ok() {
-                removed += 1;
-            }
+        if age > max && std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
         }
     }
     (removed, scanned)

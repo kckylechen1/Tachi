@@ -7,7 +7,7 @@ use crate::hub_helpers::{
 use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
 use crate::tool_params::HubRegisterParams;
 use crate::utils::is_trusted_mcp_command;
-use crate::{llm, DbScope, MemoryServer};
+use crate::{DbScope, MemoryServer};
 use memory_core::{HubCapability, MemoryStore};
 use serde_json::json;
 
@@ -242,7 +242,7 @@ pub(crate) async fn handle_hub_register(
                 // reported in the audit log.
                 let prompt_for_fallback = prompt_text.clone();
                 let llm_for_fallback = llm.clone();
-                let pool_result = crate::claude_pool::pool_call_with_fallback(
+                let pool_result = tachi_llm::claude_pool::pool_call_with_fallback(
                     &claude_pool,
                     crate::prompts::SKILL_ANALYSIS_PROMPT,
                     &prompt_text,
@@ -264,7 +264,7 @@ pub(crate) async fn handle_hub_register(
                 match pool_result {
                     Ok((analysis_raw, source)) => {
                         let analysis_json: serde_json::Value = match serde_json::from_str(
-                            llm::LlmClient::strip_code_fence(&analysis_raw),
+                            tachi_llm::LlmClient::strip_code_fence(&analysis_raw),
                         ) {
                             Ok(parsed) => parsed,
                             Err(e) => {

@@ -6,7 +6,7 @@ impl super::super::LlmClient {
     /// LLM failures are returned to callers so enrichment/backfill can record a
     /// real failure instead of storing a truncated input as if it were a summary.
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
-        self.call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
+        self.call_summary_llm(crate::default_prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
             .await
     }
 
@@ -21,7 +21,7 @@ impl super::super::LlmClient {
     /// distill memories in the antigravity project DB after just two days.
     pub async fn generate_distill(&self, text: &str) -> Result<String, String> {
         let out = self
-            .call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.4, 400)
+            .call_summary_llm(crate::default_prompts::SUMMARY_PROMPT, text, None, 0.4, 400)
             .await?;
         let trimmed = out.trim();
         if trimmed.is_empty() {
@@ -46,7 +46,7 @@ impl super::super::LlmClient {
     pub async fn extract_metadata(&self, text: &str) -> Result<(Vec<String>, Vec<String>), String> {
         let response = self
             .call_extract_llm(
-                crate::prompts::METADATA_EXTRACTION_PROMPT,
+                crate::default_prompts::METADATA_EXTRACTION_PROMPT,
                 text,
                 None,
                 0.2,
@@ -92,7 +92,13 @@ impl super::super::LlmClient {
     /// Extract structured facts from text using EXTRACTION_PROMPT
     pub async fn extract_facts(&self, text: &str) -> Result<Vec<Value>, String> {
         let response = self
-            .call_extract_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000)
+            .call_extract_llm(
+                crate::default_prompts::EXTRACTION_PROMPT,
+                text,
+                None,
+                0.3,
+                2000,
+            )
             .await?;
         let json_str = Self::extract_json_payload(&response)?;
 

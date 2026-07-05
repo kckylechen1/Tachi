@@ -12,7 +12,7 @@ impl super::ClaudePool {
     /// `<tachi_home>/foundry-runs/`. Honours `CLAUDE_POOL_TIMEOUT_SECS`
     /// and `CLAUDE_BIN` env overrides.
     pub fn new(max_concurrent: usize) -> Self {
-        Self::new_in_app_home(max_concurrent, crate::path_utils::tachi_home())
+        Self::new_in_app_home(max_concurrent, crate::path::tachi_home())
     }
 
     pub(crate) fn new_in_app_home(max_concurrent: usize, app_home: impl Into<PathBuf>) -> Self {

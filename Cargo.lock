@@ -1414,6 +1414,7 @@ dependencies = [
  "tachi-clean",
  "tachi-dispatch",
  "tachi-foundry",
+ "tachi-llm",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2464,6 +2465,24 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "tachi-llm"
+version = "1.6.2"
+dependencies = [
+ "axum",
+ "chrono",
+ "dirs",
+ "memory-core",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

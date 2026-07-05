@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::llm::LlmClient;
 use crate::manifest::Manifest;
 use crate::vector_backfill;
+use tachi_llm::LlmClient;
 
 const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
 const DEFAULT_SWEEP_BATCH_PER_DB: usize = 32;

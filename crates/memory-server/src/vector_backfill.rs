@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use memory_core::MemoryStore;
 
-use crate::llm::LlmClient;
+use tachi_llm::LlmClient;
 
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 

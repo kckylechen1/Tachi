@@ -100,7 +100,7 @@ pub(crate) async fn save_daily_health_wiki(
 }
 
 pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
-    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    let stripped = tachi_llm::LlmClient::strip_code_fence(raw);
     serde_json::from_str(stripped)
         .or_else(|_| {
             let start = stripped.find('{').unwrap_or(0);

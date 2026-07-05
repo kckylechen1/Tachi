@@ -140,13 +140,10 @@ impl super::super::super::LlmClient {
         });
     }
 
-    #[cfg(test)]
-    pub(crate) fn mark_provider_key_rate_limited_for_tests(
-        &self,
-        key_id: &str,
-        retry_after: Option<u64>,
-    ) {
-        let logical_name = crate::provider_config::parse_rotation_member_name(key_id)
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn mark_provider_key_rate_limited_for_tests(&self, key_id: &str, retry_after: Option<u64>) {
+        let logical_name = crate::provider_names::parse_rotation_member_name(key_id)
             .map(|(prefix, _)| prefix)
             .unwrap_or(key_id);
         let selected = SelectedProviderSecret {
@@ -160,8 +157,9 @@ impl super::super::super::LlmClient {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
         let now = Self::now_utc();
         let past = now - chrono::Duration::seconds(1);
         let persisted = {
@@ -187,8 +185,9 @@ impl super::super::super::LlmClient {
         self.persist_key_health_now(&persisted);
     }
 
-    #[cfg(test)]
-    pub(crate) fn mark_provider_key_auth_failed_for_tests(&self, logical_name: &str, key_id: &str) {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn mark_provider_key_auth_failed_for_tests(&self, logical_name: &str, key_id: &str) {
         let selected = SelectedProviderSecret {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
@@ -200,12 +199,9 @@ impl super::super::super::LlmClient {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn expire_provider_key_auth_failure_for_tests(
-        &self,
-        logical_name: &str,
-        key_id: &str,
-    ) {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn expire_provider_key_auth_failure_for_tests(&self, logical_name: &str, key_id: &str) {
         let now = Self::now_utc();
         let stale = now - chrono::Duration::seconds(AUTH_FAILED_RETRY_TTL_SECS + 1);
         let persisted = {
@@ -231,7 +227,7 @@ impl super::super::super::LlmClient {
         self.persist_key_health_now(&persisted);
     }
 
-    pub(crate) fn record_provider_key_result(
+    pub fn record_provider_key_result(
         &self,
         logical_name: &str,
         key_id: &str,
@@ -277,7 +273,7 @@ impl super::super::super::LlmClient {
             })
     }
 
-    pub(crate) fn record_provider_key_result_blocking(
+    pub fn record_provider_key_result_blocking(
         &self,
         logical_name: &str,
         key_id: &str,
@@ -298,8 +294,9 @@ impl super::super::super::LlmClient {
         health
     }
 
-    #[cfg(test)]
-    pub(crate) fn force_provider_health_reload_due_for_tests(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn force_provider_health_reload_due_for_tests(&self) {
         let mut reload = self
             .provider_health_reload
             .write()
@@ -308,8 +305,9 @@ impl super::super::super::LlmClient {
             Instant::now().checked_sub(Self::KEY_HEALTH_RELOAD_TTL + Duration::from_secs(1));
     }
 
-    #[cfg(test)]
-    pub(crate) fn provider_key_health_for_tests(
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn provider_key_health_for_tests(
         &self,
         logical_name: &str,
         key_id: &str,

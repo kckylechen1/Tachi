@@ -335,7 +335,7 @@ fn foundry_runs_dir_is_created_with_0o700() {
 
 #[test]
 fn foundry_runs_dir_honors_tachi_home() {
-    let _guard = crate::utils::global_test_lock()
+    let _guard = crate::test_support::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let tmp = tempfile::tempdir().expect("temp home");

@@ -1,7 +1,8 @@
 use super::*;
 
 impl super::super::LlmClient {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
     pub fn set_provider_secret(&self, name: &str, value: &str) -> bool {
         let name = name.trim();
         let value = value.trim();
@@ -18,11 +19,7 @@ impl super::super::LlmClient {
         )
     }
 
-    pub(crate) fn set_provider_secret_pool(
-        &self,
-        name: &str,
-        entries: Vec<ProviderSecret>,
-    ) -> bool {
+    pub fn set_provider_secret_pool(&self, name: &str, entries: Vec<ProviderSecret>) -> bool {
         let name = name.trim();
         if name.is_empty() {
             return false;
@@ -44,7 +41,7 @@ impl super::super::LlmClient {
         true
     }
 
-    pub(crate) fn set_provider_secret_pools<I>(&self, pools: I) -> usize
+    pub fn set_provider_secret_pools<I>(&self, pools: I) -> usize
     where
         I: IntoIterator<Item = (String, Vec<ProviderSecret>)>,
     {
@@ -72,7 +69,7 @@ impl super::super::LlmClient {
             .len()
     }
 
-    pub(crate) fn provider_pool_statuses(&self) -> Vec<ProviderPoolStatus> {
+    pub fn provider_pool_statuses(&self) -> Vec<ProviderPoolStatus> {
         let now = Instant::now();
         let now_utc = Self::now_utc();
         let state = self
@@ -147,7 +144,7 @@ impl super::super::LlmClient {
         statuses
     }
 
-    pub(crate) fn provider_health_status(&self) -> ProviderHealthStatus {
+    pub fn provider_health_status(&self) -> ProviderHealthStatus {
         let reload = self
             .provider_health_reload
             .read()
@@ -179,7 +176,7 @@ impl super::super::LlmClient {
     /// This is used when loading API key pools so that tests (which may disable
     /// background persistence) still see health mutations made in the same
     /// process without requiring a DB round-trip.
-    pub(crate) fn provider_health_memory_snapshot(
+    pub fn provider_health_memory_snapshot(
         &self,
     ) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
         let state = self

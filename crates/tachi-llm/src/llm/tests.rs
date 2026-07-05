@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 // `#[test]` fns in parallel by default, so sharing a process-wide env var
 // causes ordering-dependent flakes (e.g. one test setting the var while
 // another asserts it's unset). See:
-//   crates/memory-server/src/tests.rs::home_test_lock for the pattern we
-//   use when an env var (HOME) genuinely cannot be uniquified.
+//   crate::test_support::global_test_lock for the pattern we use when an env
+//   var (HOME) genuinely cannot be uniquified.
 
 struct EnvRestore {
     key: &'static str,

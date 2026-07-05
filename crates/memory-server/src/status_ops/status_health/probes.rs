@@ -140,14 +140,14 @@ pub(crate) async fn run_provider_probe_report(global_db_path: &Path) -> Provider
     }
 }
 
-fn probe_llm_client(global_db_path: &Path) -> Result<crate::llm::LlmClient, String> {
-    crate::llm::LlmClient::new_with_vault_db(Some(global_db_path))
+fn probe_llm_client(global_db_path: &Path) -> Result<tachi_llm::LlmClient, String> {
+    tachi_llm::LlmClient::new_with_vault_db(Some(global_db_path))
 }
 
 #[cfg(test)]
 pub(crate) fn probe_llm_client_for_tests(
     global_db_path: &Path,
-) -> Result<crate::llm::LlmClient, String> {
+) -> Result<tachi_llm::LlmClient, String> {
     probe_llm_client(global_db_path)
 }
 
@@ -220,14 +220,14 @@ async fn probe_rotation_member(
     key_id: &str,
     value: String,
 ) -> (String, Option<String>) {
-    let client = match crate::llm::LlmClient::new() {
+    let client = match tachi_llm::LlmClient::new() {
         Ok(client) => client,
         Err(err) => return ("failed".to_string(), Some(err)),
     };
     client.clear_provider_secrets();
     client.set_provider_secret_pool(
         logical_name,
-        vec![crate::llm::ProviderSecret {
+        vec![tachi_llm::ProviderSecret {
             key_id: key_id.to_string(),
             value,
         }],

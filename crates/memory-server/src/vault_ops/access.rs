@@ -216,14 +216,14 @@ pub(super) fn load_unlocked_vault_secrets(
 
 pub(crate) fn load_unlocked_api_key_secret_pools(
     server: &MemoryServer,
-) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
+) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
     load_unlocked_api_key_secret_pools_filtered(server, None)
 }
 
 pub(super) fn load_unlocked_api_key_secret_pool(
     server: &MemoryServer,
     logical_name: &str,
-) -> Result<Vec<crate::llm::ProviderSecret>, String> {
+) -> Result<Vec<tachi_llm::ProviderSecret>, String> {
     load_unlocked_api_key_secret_pools_filtered(server, Some(logical_name))
         .map(|mut pools| pools.remove(logical_name).unwrap_or_default())
 }
@@ -231,7 +231,7 @@ pub(super) fn load_unlocked_api_key_secret_pool(
 fn load_unlocked_api_key_secret_pools_filtered(
     server: &MemoryServer,
     only_logical_name: Option<&str>,
-) -> Result<HashMap<String, Vec<crate::llm::ProviderSecret>>, String> {
+) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
     with_vault_key(server, |key| {
         let (entries, rotations, key_health_rows) = server
             .with_global_store(|store| {
@@ -277,7 +277,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
             }
         }
 
-        let mut pools: HashMap<String, Vec<crate::llm::ProviderSecret>> = HashMap::new();
+        let mut pools: HashMap<String, Vec<tachi_llm::ProviderSecret>> = HashMap::new();
         let mut rotation_members: HashSet<String> = HashSet::new();
 
         let is_unusable =
@@ -350,7 +350,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                     continue;
                 }
                 rotation_members.insert(entry.name.clone());
-                pool.push(crate::llm::ProviderSecret {
+                pool.push(tachi_llm::ProviderSecret {
                     key_id: entry.name,
                     value,
                 });
@@ -380,7 +380,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                 .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
             if !value.trim().is_empty() {
                 pools.entry(entry.name.clone()).or_insert_with(|| {
-                    vec![crate::llm::ProviderSecret {
+                    vec![tachi_llm::ProviderSecret {
                         key_id: entry.name,
                         value,
                     }]

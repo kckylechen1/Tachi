@@ -46,7 +46,7 @@ Respond ONLY with a JSON object. No markdown wrapping except the raw JSON conten
             .await
         {
             Ok(resp) => {
-                if let Ok(json_str) = crate::llm::LlmClient::extract_json_payload(&resp) {
+                if let Ok(json_str) = tachi_llm::LlmClient::extract_json_payload(&resp) {
                     if let Ok(val) = serde_json::from_str::<Value>(json_str) {
                         let category_path = val
                             .get("category_path")
