@@ -111,10 +111,11 @@ pub(crate) async fn handle_vault_get(
     params: VaultGetParams,
 ) -> Result<String, String> {
     let requested_name = params.name.clone();
+    let effective_agent_id = resolve_vault_acl_agent_id(server, params.agent_id.as_deref())?;
     let result = with_vault_key(server, |key| {
         let selected = server.with_global_store(|store| select_vault_entry(store, &params))?;
 
-        ensure_agent_allowed(&selected.entry, params.agent_id.as_deref())
+        ensure_agent_allowed(&selected.entry, effective_agent_id.as_deref())
             .map_err(|e| e.to_string())?;
 
         let decrypted =

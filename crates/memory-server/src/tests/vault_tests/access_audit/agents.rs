@@ -1,4 +1,5 @@
 use super::*;
+use crate::tool_params::AgentRegisterParams;
 
 async fn init_agent_acl_vault(password: &str) -> crate::tests::TestServer {
     let server = make_server();
@@ -77,38 +78,9 @@ async fn vault_get_respects_allowed_agents() {
 }
 
 #[tokio::test]
-async fn vault_set_new_entry_allows_agent_id() {
+async fn vault_acl_g1_bound_agent_allows_restricted_read_without_caller_id() {
     let server = init_agent_acl_vault("golden-g1-password").await;
-
-    server
-        .vault_set(Parameters(VaultSetParams {
-            name: "K1".to_string(),
-            value: "new-value".to_string(),
-            agent_id: Some("bob".to_string()),
-            secret_type: "api_key".to_string(),
-            description: "G1 new entry".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-        }))
-        .await
-        .expect("G1 set NEW K1 with agent_id=bob should succeed");
-
-    let got = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "K1".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await
-        .expect("G1 stored entry should be readable");
-    let got_json: serde_json::Value = serde_json::from_str(&got).expect("G1 get JSON");
-    assert_eq!(got_json["value"], json!("new-value"));
-}
-
-#[tokio::test]
-async fn vault_set_denies_overwrite_when_agent_not_allowed() {
-    let server = init_agent_acl_vault("golden-g2-password").await;
+    server.set_bound_agent_id_for_test(Some("alice"));
 
     server
         .vault_set(Parameters(VaultSetParams {
@@ -116,8 +88,39 @@ async fn vault_set_denies_overwrite_when_agent_not_allowed() {
             value: "alice-value".to_string(),
             agent_id: None,
             secret_type: "api_key".to_string(),
-            description: "G2 restricted seed".to_string(),
+            description: "G1 bound read seed".to_string(),
             allowed_agents: Some(vec!["alice".to_string()]),
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("G1 seed should succeed");
+
+    let got = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "K1".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await
+        .expect("G1 server-bound alice should satisfy restricted read without caller agent_id");
+    let got_json: serde_json::Value = serde_json::from_str(&got).expect("G1 get JSON");
+    assert_eq!(got_json["value"], json!("alice-value"));
+}
+
+#[tokio::test]
+async fn vault_acl_g2_bound_agent_rejects_mismatched_caller_on_read() {
+    let server = init_agent_acl_vault("golden-g2-password").await;
+    server.set_bound_agent_id_for_test(Some("alice"));
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "K1".to_string(),
+            value: "bob-value".to_string(),
+            agent_id: None,
+            secret_type: "api_key".to_string(),
+            description: "G2 spoofed read seed".to_string(),
+            allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
         }))
@@ -125,127 +128,105 @@ async fn vault_set_denies_overwrite_when_agent_not_allowed() {
         .expect("G2 seed should succeed");
 
     let denied = server
-        .vault_set(Parameters(VaultSetParams {
-            name: "K1".to_string(),
-            value: "bob-value".to_string(),
-            agent_id: Some("bob".to_string()),
-            secret_type: "api_key".to_string(),
-            description: "G2 denied overwrite".to_string(),
-            allowed_agents: Some(vec!["bob".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-        }))
-        .await
-        .expect_err("G2 overwrite by bob should be denied");
-    assert!(
-        denied.contains("Access denied"),
-        "G2 expected access denied error, got: {denied}"
-    );
-
-    let unchanged = server
         .vault_get(Parameters(VaultGetParams {
             name: "K1".to_string(),
-            agent_id: Some("alice".to_string()),
+            agent_id: Some("bob".to_string()),
             auto_rotate: false,
         }))
         .await
-        .expect("G2 original entry should remain readable by alice");
-    let unchanged_json: serde_json::Value = serde_json::from_str(&unchanged).expect("G2 get JSON");
-    assert_eq!(unchanged_json["value"], json!("alice-value"));
-    assert_eq!(unchanged_json["allowed_agents"], json!(["alice"]));
+        .expect_err("G2 caller bob must not override server-bound alice on read");
+    assert!(
+        denied.contains("server-bound TACHI_AGENT_ID"),
+        "G2 expected bound identity mismatch error, got: {denied}"
+    );
 }
 
 #[tokio::test]
-async fn vault_set_allows_overwrite_when_agent_allowed() {
+async fn vault_acl_g3_bound_agent_rejects_mismatched_caller_on_overwrite() {
     let server = init_agent_acl_vault("golden-g3-password").await;
+    server.set_bound_agent_id_for_test(Some("alice"));
 
     server
         .vault_set(Parameters(VaultSetParams {
             name: "K1".to_string(),
-            value: "old-value".to_string(),
+            value: "bob-value".to_string(),
             agent_id: None,
             secret_type: "api_key".to_string(),
-            description: "G3 restricted seed".to_string(),
-            allowed_agents: Some(vec!["alice".to_string()]),
+            description: "G3 spoofed overwrite seed".to_string(),
+            allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
         }))
         .await
         .expect("G3 seed should succeed");
 
-    server
+    let denied = server
         .vault_set(Parameters(VaultSetParams {
             name: "K1".to_string(),
-            value: "new-value".to_string(),
-            agent_id: Some("alice".to_string()),
+            value: "spoofed-value".to_string(),
+            agent_id: Some("bob".to_string()),
             secret_type: "api_key".to_string(),
-            description: "G3 allowed overwrite".to_string(),
-            allowed_agents: Some(vec!["alice".to_string()]),
+            description: "G3 denied spoofed overwrite".to_string(),
+            allowed_agents: Some(vec!["bob".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
         }))
         .await
-        .expect("G3 overwrite by alice should succeed");
+        .expect_err("G3 caller bob must not override server-bound alice on overwrite");
+    assert!(
+        denied.contains("server-bound TACHI_AGENT_ID"),
+        "G3 expected bound identity mismatch error, got: {denied}"
+    );
 
-    let got = server
+    let unchanged = server
         .vault_get(Parameters(VaultGetParams {
             name: "K1".to_string(),
-            agent_id: Some("alice".to_string()),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await
-        .expect("G3 overwritten entry should be readable");
-    let got_json: serde_json::Value = serde_json::from_str(&got).expect("G3 get JSON");
-    assert_eq!(got_json["value"], json!("new-value"));
+        .expect_err("G3 bound alice is not allowed to read bob-only seed");
+    assert!(
+        unchanged.contains("Access denied"),
+        "G3 expected original bob-only ACL to remain, got: {unchanged}"
+    );
 }
 
 #[tokio::test]
-async fn vault_set_allows_unrestricted_overwrite_with_agent_id() {
+async fn vault_acl_g4_unbound_server_preserves_legacy_caller_agent_id() {
     let server = init_agent_acl_vault("golden-g4-password").await;
+    server.set_bound_agent_id_for_test(None);
 
     server
         .vault_set(Parameters(VaultSetParams {
             name: "K2".to_string(),
-            value: "old-value".to_string(),
+            value: "alice-value".to_string(),
             agent_id: None,
             secret_type: "api_key".to_string(),
-            description: "G4 unrestricted seed".to_string(),
-            allowed_agents: None,
+            description: "G4 legacy caller seed".to_string(),
+            allowed_agents: Some(vec!["alice".to_string()]),
             enable_rotation: false,
             rotation_strategy: None,
         }))
         .await
         .expect("G4 seed should succeed");
 
-    server
-        .vault_set(Parameters(VaultSetParams {
-            name: "K2".to_string(),
-            value: "new-value".to_string(),
-            agent_id: Some("bob".to_string()),
-            secret_type: "api_key".to_string(),
-            description: "G4 unrestricted overwrite".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-        }))
-        .await
-        .expect("G4 unrestricted overwrite by bob should succeed");
-
     let got = server
         .vault_get(Parameters(VaultGetParams {
             name: "K2".to_string(),
-            agent_id: None,
+            agent_id: Some("alice".to_string()),
             auto_rotate: false,
         }))
         .await
-        .expect("G4 overwritten entry should be readable");
+        .expect("G4 unbound server should preserve caller-supplied agent_id behavior");
     let got_json: serde_json::Value = serde_json::from_str(&got).expect("G4 get JSON");
-    assert_eq!(got_json["value"], json!("new-value"));
+    assert_eq!(got_json["value"], json!("alice-value"));
 }
 
 #[tokio::test]
-async fn vault_remove_denies_restricted_entry_when_agent_not_allowed() {
+async fn vault_acl_g5_agent_register_is_not_a_vault_binding() {
     let server = init_agent_acl_vault("golden-g5-password").await;
+    server.set_bound_agent_id_for_test(None);
 
     server
         .vault_set(Parameters(VaultSetParams {
@@ -261,29 +242,30 @@ async fn vault_remove_denies_restricted_entry_when_agent_not_allowed() {
         .await
         .expect("G5 seed should succeed");
 
-    let denied = server
-        .vault_remove(Parameters(VaultRemoveParams {
-            name: "K1".to_string(),
-            agent_id: Some("bob".to_string()),
+    server
+        .agent_register(Parameters(AgentRegisterParams {
+            agent_id: "alice".to_string(),
+            display_name: None,
+            capabilities: Vec::new(),
+            tool_filter: None,
+            rate_limit_rpm: None,
+            rate_limit_burst: None,
         }))
         .await
-        .expect_err("G5 remove by bob should be denied");
-    assert!(
-        denied.contains("Access denied"),
-        "G5 expected access denied error, got: {denied}"
-    );
+        .expect("G5 agent_register should succeed");
 
-    let still_present = server
+    let denied = server
         .vault_get(Parameters(VaultGetParams {
             name: "K1".to_string(),
-            agent_id: Some("alice".to_string()),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await
-        .expect("G5 entry should still exist");
-    let still_present_json: serde_json::Value =
-        serde_json::from_str(&still_present).expect("G5 get JSON");
-    assert_eq!(still_present_json["value"], json!("alice-value"));
+        .expect_err("G5 agent_register must not satisfy vault ACL without TACHI_AGENT_ID");
+    assert!(
+        denied.contains("agent_id is required"),
+        "G5 expected missing caller agent_id error, got: {denied}"
+    );
 }
 
 #[tokio::test]

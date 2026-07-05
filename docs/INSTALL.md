@@ -321,7 +321,7 @@ After configuring, restart your agent and run:
 Search my memory for "test"
 ```
 
-If Tachi is working, you will see a response from `tachi_search` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
+If Tachi is working, you will see a response from `tachi_memory(action="search")` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
 
 1. The MCP config file path is correct for your agent
 2. The `tachi` binary is on your PATH
@@ -540,7 +540,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Facade & Delegation
 
-`tachi_search`, `tachi_web_search`, `tachi_save`, `tachi_handoff`, `tachi_unstick`, `tachi_browse`, `tachi_task`, `tachi_shell`, `approve_merge`, `tachi_complete`, `tachi_arena`, `tachi_verify`, `tachi_agent_eval`
+`tachi_memory`, `tachi_web_search`, `tachi_save`, `tachi_task`, `tachi_browse`, `tachi_unstick`, `tachi_arena`, `tachi_verify`, `tachi_complete`
 
 *(Compatibility/read-only helpers are kept behind the admin profile; daily agent surfaces should use the facade tools above.)*
 

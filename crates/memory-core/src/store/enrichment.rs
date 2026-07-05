@@ -56,16 +56,18 @@ impl MemoryStore {
             None
         };
 
-        db::update_with_revision(
-            &mut self.conn,
-            id,
-            new_text,
-            new_summary,
-            new_source,
-            &metadata_json,
-            vec_blob.as_deref(),
-            expected_revision,
-        )
+        db::retry_memory_locked(|| {
+            db::update_with_revision(
+                &mut self.conn,
+                id,
+                new_text,
+                new_summary,
+                new_source,
+                &metadata_json,
+                vec_blob.as_deref(),
+                expected_revision,
+            )
+        })
     }
 
     /// Update only enrichment fields (summary, vector, keywords, entities) with revision check.
@@ -84,15 +86,17 @@ impl MemoryStore {
         } else {
             None
         };
-        db::update_enrichment_fields(
-            &mut self.conn,
-            id,
-            new_summary,
-            vec_blob.as_deref(),
-            new_keywords,
-            new_entities,
-            expected_revision,
-        )
+        db::retry_memory_locked(|| {
+            db::update_enrichment_fields(
+                &mut self.conn,
+                id,
+                new_summary,
+                vec_blob.as_deref(),
+                new_keywords,
+                new_entities,
+                expected_revision,
+            )
+        })
     }
 
     /// Record an asynchronous enrichment failure on the memory metadata.

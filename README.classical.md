@@ -33,7 +33,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或颁此符诏：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)"
 ```
 
 ---
@@ -80,7 +80,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.5.4
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | IDE 灵核之默认，12 器门面集。 |
+| `standard` | IDE 灵核之默认，13+ 器门面集。 |
 | `coordinate` | 主尊调度，兼掌 ghost / kanban / handoff / dispatch / approve_merge。 |
 | `operate` | 运行时适配与 OpenClaw，兼掌 Foundry / Vault 会话。 |
 | `delegate` | 小弟偏师，极简 7 器，无派发、无交接。 |

@@ -37,6 +37,14 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run cargo audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit --deny warnings
+
       - name: Run workspace tests
         run: cargo test --workspace --locked
 
@@ -68,3 +76,7 @@ jobs:
       - name: Build
         working-directory: ${{ matrix.package }}
         run: npm run build
+
+      - name: Run npm audit
+        working-directory: ${{ matrix.package }}
+        run: npm audit --audit-level=high || true
