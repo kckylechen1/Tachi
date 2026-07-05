@@ -30,9 +30,8 @@ pub use common::{normalize_utc_iso_or_now, row_to_entry};
 pub use daily_pipeline::{
     collect_daily_health_snapshot, count_active_memories, count_consolidated_active_memories,
     count_distinct_access_days, list_eval_evidence, list_memory_ids_needing_embedding,
-    list_promotion_candidate_ids, promote_memory_to_durable, truth_maintenance_prune_stale,
-    truth_maintenance_self_heal_promote_raw, CategorySourceGroup, DailyHealthDbSnapshot,
-    DuplicateSummaryRow, EvalEvidenceRow,
+    list_promotion_candidate_ids, promote_memory_to_durable, CategorySourceGroup,
+    DailyHealthDbSnapshot, DuplicateSummaryRow, EvalEvidenceRow,
 };
 pub use doctor_probe::{
     checkpoint_wal_truncate, count_chunks_rows, count_memories_missing_domain, count_memories_rows,
