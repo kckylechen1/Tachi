@@ -12,8 +12,7 @@ pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
 pub(crate) use tachi_dispatch::eval::{
     aggregate_performance_matrix, aggregate_scores, aggregate_subagent_scores,
-    AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentEvalRow, SubagentTaskScore,
-    TaskType,
+    AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentEvalRow, TaskType,
 };
 
 pub(crate) async fn handle_agent_eval(
