@@ -4,7 +4,7 @@ use super::super::acp_native::{
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map};
 use super::super::dispatch_v2::{append_trajectory_event, write_status_json};
 use super::super::kanban_helpers::{get_kanban_state, should_cleanup_run, update_kanban_state};
-use super::super::subprocess::{run_agent_subprocess, tail_chars};
+use super::super::subprocess::{run_agent_subprocess, run_opencode_sop_subprocess, tail_chars};
 use super::dedupe::release_flow_dispatch_slot;
 use super::response_helpers::McpCleanup;
 use crate::credential_profile::cleanup_ephemeral_credential_materializations;
@@ -37,6 +37,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) harness_transport: String,
     pub(super) harness_server_url: Option<String>,
     pub(super) host_adapter: Option<String>,
+    pub(super) opencode_sop_label: Option<String>,
     pub(super) execution_backend_metadata: Option<Value>,
     pub(super) execution: DispatchExecution,
     pub(super) flow_dispatch_slot: Option<PathBuf>,
@@ -61,6 +62,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
     let harness_transport_for_spawn = ctx.harness_transport;
     let harness_server_url_for_spawn = ctx.harness_server_url;
     let host_adapter_for_spawn = ctx.host_adapter;
+    let opencode_sop_label_for_spawn = ctx.opencode_sop_label;
     let execution_backend_metadata_for_spawn = ctx.execution_backend_metadata;
     let execution_for_spawn = ctx.execution;
     let flow_dispatch_slot_for_spawn = ctx.flow_dispatch_slot;
@@ -88,6 +90,16 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         );
 
         let result = match execution_for_spawn {
+            DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => {
+                run_opencode_sop_subprocess(
+                    cmd,
+                    timeout,
+                    opencode_sop_label_for_spawn
+                        .as_deref()
+                        .unwrap_or("opencode_sop"),
+                )
+                .await
+            }
             DispatchExecution::Subprocess(cmd) => run_agent_subprocess(cmd, timeout).await,
             DispatchExecution::NativeAcp(spec) => {
                 run_native_acp_dispatch(
