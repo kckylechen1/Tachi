@@ -269,7 +269,10 @@ pub(crate) fn resolve_workspace_named_project() -> Option<String> {
 /// Explicit project pin from the `TACHI_PROJECT` env var. Returns `None` when
 /// unset/blank/unsafe so resolution falls back to the git-derived name.
 pub(crate) fn explicit_workspace_project() -> Option<String> {
-    normalize_pinned_project(&std::env::var("TACHI_PROJECT").ok()?)
+    static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| normalize_pinned_project(&std::env::var("TACHI_PROJECT").ok()?))
+        .clone()
 }
 
 /// Normalize a raw project pin. Mirrors the `project=` guard in

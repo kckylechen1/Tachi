@@ -36,6 +36,7 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
                 diff_present: Some(false),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed card risk eval row");

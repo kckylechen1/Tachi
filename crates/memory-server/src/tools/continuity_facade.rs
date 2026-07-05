@@ -145,6 +145,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<TachiSaveParams>,
     ) -> Result<String, String> {
-        crate::facade_save_ops::handle_tachi_save(self, params).await
+        let raw = crate::facade_save_ops::handle_tachi_save(self, params.clone()).await?;
+        crate::facade_save_ops::finalize_tachi_save_response(&params, &raw, None)
     }
 }

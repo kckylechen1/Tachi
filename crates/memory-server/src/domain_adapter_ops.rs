@@ -1,6 +1,6 @@
 use crate::tool_params::{TachiDomainAdapterParams, TachiEventParams};
-use crate::utils::trim_opt;
 use crate::MemoryServer;
+use memory_server_runtime::trim_opt;
 use serde_json::{json, Map, Value};
 
 fn json_string(value: &Value) -> Result<String, String> {

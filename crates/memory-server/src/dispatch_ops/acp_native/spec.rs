@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use super::super::subprocess::resolve_permission_profile;
+use super::super::launcher::resolve_permission_profile;
 use super::session::{native_acp_session_key, resolve_native_acp_session};
 use super::{NativeAcpRunMode, NativeAcpRunSpec, ACP_STREAM_FILE};
 use crate::tool_params::TachiDispatchParams;

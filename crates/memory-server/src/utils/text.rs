@@ -1,13 +1,5 @@
 use serde_json::Value;
 
-pub(crate) fn trim_opt(value: &Option<String>) -> Option<String> {
-    value
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 pub(crate) fn sanitize_safe_path_name(name: &str) -> String {
     let sanitized: String = name
         .trim()

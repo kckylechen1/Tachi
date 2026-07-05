@@ -2,8 +2,8 @@ use memory_core::{MemoryEntry, ProjectionKind};
 use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
-use crate::utils::{query_limit, trim_opt};
 use crate::MemoryServer;
+use memory_server_runtime::{query_limit, trim_opt};
 
 use super::emit::emit_pattern_seen_events;
 use super::feedback::pattern_ref_json;

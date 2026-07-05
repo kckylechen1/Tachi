@@ -35,6 +35,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             cwd: None,
             required: Some(true),
             limit: None,
+            checks: vec![],
         }))
         .await?;
     let status = server
@@ -55,6 +56,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             cwd: None,
             required: None,
             limit: None,
+            checks: vec![],
         }))
         .await?;
     let unrelated = server
@@ -75,6 +77,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_verify_ledger(
             cwd: None,
             required: None,
             limit: None,
+            checks: vec![],
         }))
         .await?;
     let record_json: Value =

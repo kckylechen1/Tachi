@@ -215,6 +215,14 @@ Design decision — split by cost:
 - **Hard, gated on Constraint 1:** automatic hit/miss from `fwd_return`. Until it exists,
   the cheap half at least honors a *human / cold-seat* miss instead of swallowing it.
 
+**Status update 2026-07-05: the cheap half LANDED** (commit `25b484b`). Code-verified:
+`_miss` is no longer discarded (`entry.rs` binds and consumes `miss`; `confidence` now
+derives from `hit + miss` feedback volume at `entry.rs:397-398` instead of author
+assertion), and both promotion gates read `seen >= 3 && hit > 0 && hit > miss`
+(`projection.rs`, `promotion.rs`). A falsified pattern no longer promotes or ranks as a
+confirmed one. The hard half is now unblocked by the work-domain answer to open
+question #1 below.
+
 **Store vs act (why the store must stop here).** Memory is necessary, not sufficient.
 Tachi's job is the *stored* half — an honest, live counter that brakes over-confident
 patterns. The *act* of invoking a pattern or 梗 well — timing, restraint, and the next
@@ -242,6 +250,31 @@ the territory is walked live.
 7. **A2A** — share evidence + open threads, keep a cold seat (Constraint 5).
 8. **Warm-carrier active delivery (callback timing)** — LAST, and only with the brake
    in the same commit (Constraint 2).
+
+### Revised buildable queue (2026-07-05 — work-domain first, labeler in parallel)
+
+The engineering work loop now produces DENSE externally-anchored outcome signals that
+did not exist when the phasing above was written: structured review verdicts
+(OK/CONCERN/BUG), verify-check pass/fail, safe-merge terminal states, discrimination
+checks, dogfood probes, eval rows. These are the work domain's `fwd_return` — exactly
+the `externally-anchored` label class Constraint 1 prefers. This does not overturn
+labeler-first for the CONVERSATION domain; it means the counter/promotion/injection
+machinery gets exercised on validated signals while the conversation labeler calibrates
+in parallel. Four wiring leaves (all substrate exists; issues open at dispatch time):
+
+- **Leaf A — outcome wiring:** review REFUTED → `miss` on attached patterns;
+  merged + dogfooded → `hit`. Rails half-exist: `tachi_complete` consumes
+  `pattern:<id>` evidence refs; `close_loop` records reviewed hits. Extend the ship
+  pipeline (#516 P2) to attach pattern refs so every ship feeds counters automatically.
+- **Leaf B — capture sources:** emit `tachi_event` candidates at the three outcome-
+  bearing chokepoints: review verdicts, `Rejected:` commit trailers, owner corrections.
+- **Leaf C — briefing serve + seen:** briefing surfaces top patterns WITH track record
+  ("survived 7 applications, refuted once 06-12") and records `seen`; same payload
+  becomes the "known potholes" section of dispatched workers' instruction packets.
+- **Leaf D — dogfood the pipeline flag:** enable `TACHI_CONTINUITY_PIPELINE=1` for the
+  owner's own sessions; owner-reviewed `session.outcome` labels accumulate into the
+  held-out corpus Constraint 1's calibration needs, as a byproduct instead of a
+  labeling campaign.
 
 ## Current implementation status
 
@@ -324,11 +357,10 @@ Still missing:
   callbacks update counters, `tachi_complete` consumes `pattern:<id>` evidence refs,
   and `close_loop` records reviewed attached patterns as `hit`; ordinary briefing use
   and outcome-backed automatic hit/miss classification are still missing.
-- The `miss` counter is stored but **inert on read** (Constraint 8): `_miss` is discarded
-  in `build_projection_entry` and the projection/review promotion gates are miss-blind
-  (`seen >= 3 && hit > 0`), so a set miss neither blocks promotion nor down-weights
-  recall/`confidence`. The cheap half of Constraint 8 (hit-rate promotion + `miss >= hit`
-  floor) is independent of the labeler and shippable now.
+- ~~The `miss` counter is stored but inert on read~~ — LANDED 2026-07-05 (`25b484b`):
+  miss-aware gates and feedback-derived `confidence` shipped (see the Constraint 8
+  status update above). What remains of Constraint 8's hard half is the automatic
+  hit/miss wiring from work-domain outcomes (leaves A/B in the revised queue below).
 - Maturity gates produce and can execute conservative review artifacts, but they do
   not yet promote drafts/candidates into final wiki, listed skills, or host Agent MD
   writes. External-validation / cold-seat readiness is exposed as gate status.
@@ -362,17 +394,61 @@ The shared abstraction is therefore not "roleplay memory" or "trading emotion." 
 `projection = candidate/event -> bounded read model`, with authority/effect metadata
 deciding what a downstream agent may do with it.
 
+## The relationship store (decided 2026-07-05)
+
+Owner decision: pattern/bonding/affect data about the DYAD moves out of the shared
+memory DBs into a dedicated **relationship store** — a separate database per trust
+domain, not per topic. This specifies the security/ownership model Constraint 6
+required before high-recall collection.
+
+- **Contents:** the user side (bonding lexicon, preferences, cognitive/judgment
+  patterns — the psychological profile) AND the agent side (emotional state, persona
+  continuity). Bonding is dyadic; both sides of the relationship live together.
+- **One dyad per Tachi instance; no persona key.** Isolation between personas comes
+  from deployment topology — Jayne, zeroclaw personas, and the engineering OS each run
+  their own Tachi instance/fork — which is structurally stronger than any schema key.
+  Cross-persona sharing of bonding material is a non-goal (persona bleed is an
+  anti-feature). Within the engineering instance, all engineering agents form one
+  "thinking buddy" dyad with the owner (归一教义: no named-character SOUL).
+- **Engine lives upstream in `memory-core`;** forks and product instances inherit the
+  schema, half-life config, and guardrails instead of reinventing them (hypermemory
+  already forked once — per-product relationship schemas would drift within months).
+  Emotional state needs no new machinery: mood = short-half-life tier decaying to
+  baseline; personality/persona traits = long-half-life pattern tier; the events →
+  projection pipeline is unchanged.
+- **Guardrails (structural, not filter-based):** affect/emotion colors tone ONLY
+  (`tone_and_reminder_only`, `execution_effect=none` — enforced at read sites);
+  delegate/worker recall paths never mount the store; A2A bundles never source from
+  it; the cold seat never reads it (it must not know the in-jokes to stay a
+  calibration reference); the over-fit brake reads it but lives outside it. The
+  promotion pipeline is the ONLY export: work-relevant preferences crystallize into
+  reviewed instructions/wiki (Agent MD, phase 6), so workers consume distilled rules
+  and never the raw profile.
+- **Ops policy:** separate encryption at rest; portability bundles exclude it by
+  default (explicit flag + its own passphrase to include); deletion = delete one file.
+
+The persistent-drift risk this store creates — a written-then-reloaded agent mood
+becoming a covert agreeableness loop — is exactly Constraint 2/3's territory; the
+brake and the cold seat are the counterweights, and warm-carrier delivery remains
+phase-LAST with the brake in the same commit.
+
 ## Open questions
 
-- What is the conversation-domain `fwd_return`? Candidates: did a cited fact survive
-  later verification; did a user prediction resolve; did a saved pattern's `hit` hold
-  on re-encounter. All are sparse. Without a real external label, the brake is ungrounded.
+- ~~What is the conversation-domain `fwd_return`?~~ **Answered 2026-07-05 for the WORK
+  domain:** review verdicts, verify checks, merge terminal states, discrimination
+  checks, and dogfood probes are dense, external, and already structured (see the
+  revised buildable queue). The CONVERSATION domain's `fwd_return` remains sparse —
+  original candidates stand (cited fact survives verification; user prediction
+  resolves; pattern `hit` holds on re-encounter) — which is why the conversation
+  labeler still calibrates against an owner-reviewed corpus (Leaf D) before its labels
+  feed counters.
 - Is "three agents" the right decomposition, or is it one capability with orthogonal
   `(carrier, honesty, bonding)` dials? The best bonding moment in review came from the
   cold agent on an abrasive carrier — suggesting modes, not separate agents.
-- Should user-level patterns live globally with project-scoped instances, or should
-  each project DB own its own pattern namespace and only selected patterns promote
-  globally?
+- ~~Should user-level patterns live globally or per project DB?~~ **Answered
+  2026-07-05:** user/dyad modeling → the relationship store (see above); engineering
+  patterns (work-domain decision rules) stay in global/project memory DBs where worker
+  briefings can consume them. The boundary is trust domain, not topic.
 - How should every CLI/IDE adapter consume the shared lifecycle contract:
   startup preload, in-session buffer, session-end capture, outcome label, pattern
   feedback, and profile refresh?

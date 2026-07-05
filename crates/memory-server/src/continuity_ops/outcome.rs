@@ -2,8 +2,8 @@ use memory_core::{OutcomeEvidenceBasis, SessionOutcomeKind, TachiEventRecord};
 use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
-use crate::utils::query_limit;
 use crate::MemoryServer;
+use memory_server_runtime::query_limit;
 
 use super::storage::read_events;
 use super::{event_query_from_params, target_from_event_params};

@@ -5,9 +5,7 @@ use serde_json::{json, Value};
 use crate::server_state::MemoryServer;
 use memory_core::{MemoryEntry, MemoryStore};
 
-use crate::foundry_runtime_ops::maintenance::{
-    coherence_bucket_key, coherent_distill_buckets, scheduled_distill_path_prefix,
-};
+use crate::foundry_runtime_ops::maintenance::collect_coherent_distill_buckets;
 use crate::foundry_runtime_ops::FOUNDRY_DISTILL_SOURCE;
 
 use super::config::{resolve_candidate_scan_limit, resolve_processed_scan_limit, MIN_BUCKET_SIZE};
@@ -133,36 +131,22 @@ pub(crate) fn collect_candidate_groups(
         return Ok(Vec::new());
     }
 
-    let buckets = coherent_distill_buckets(candidate_entries);
+    let buckets = collect_coherent_distill_buckets(candidate_entries);
     let mut groups = Vec::new();
-    for (bucket_key, entries) in buckets {
-        if entries.len() < MIN_BUCKET_SIZE {
+    for bucket in buckets {
+        if bucket.entries.len() < MIN_BUCKET_SIZE {
             continue;
         }
-        let (path_prefix, coherence_key) = bucket_key
-            .split_once('#')
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .unwrap_or_else(|| {
-                let path_prefix = entries
-                    .first()
-                    .map(|e| scheduled_distill_path_prefix(&e.path))
-                    .unwrap_or_else(|| "/".to_string());
-                let coherence_key = entries
-                    .first()
-                    .and_then(|e| coherence_bucket_key(&e.topic, &e.entities))
-                    .unwrap_or_else(|| "unknown".to_string());
-                (path_prefix, coherence_key)
-            });
         let group_id = format!(
             "{}|{}",
-            sanitize_id_segment(&path_prefix),
-            sanitize_id_segment(&coherence_key)
+            sanitize_id_segment(&bucket.path_prefix),
+            sanitize_id_segment(&bucket.coherence_key)
         );
         groups.push(CandidateGroup {
             group_id,
-            path_prefix,
-            coherence_key,
-            entries,
+            path_prefix: bucket.path_prefix,
+            coherence_key: bucket.coherence_key,
+            entries: bucket.entries,
         });
     }
     Ok(groups)

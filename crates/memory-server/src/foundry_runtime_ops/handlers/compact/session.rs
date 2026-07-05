@@ -1,7 +1,7 @@
 use super::super::super::capture::{persist_capture_entry, queue_capture_enrichment};
 use super::super::super::helpers::{
     build_entry_path, build_foundry_session_memory_root, build_section_artifact,
-    build_stable_foundry_memory_id, dedup_strings, normalize_scope,
+    build_stable_foundry_memory_id, dedup_strings, normalize_scope, SectionArtifactInput,
 };
 use super::super::super::maintenance::enqueue_capture_maintenance_jobs;
 use super::super::target::resolve_capture_target;
@@ -255,16 +255,16 @@ pub(crate) async fn handle_compact_session_memory(
         Vec::new()
     };
     let section = if !compacted_text.is_empty() {
-        Some(build_section_artifact(
-            "session",
-            "session_memory",
-            Some("Durable Session Memory"),
-            &compacted_text,
-            &durable_signals,
-            "session",
-            &[source_ref_id],
-            None,
-        ))
+        Some(build_section_artifact(SectionArtifactInput {
+            layer: "session",
+            kind: "session_memory",
+            title: Some("Durable Session Memory"),
+            content: &compacted_text,
+            items: &durable_signals,
+            cache_boundary: "session",
+            source_refs: &[source_ref_id],
+            target_tokens: None,
+        }))
     } else {
         None
     };

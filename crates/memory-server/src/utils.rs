@@ -19,12 +19,10 @@ pub(crate) use self::locks::global_test_lock;
 pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover};
 pub(crate) use self::text::{compact_text_line, sanitize_safe_path_name};
 pub(super) use self::text::{
-    redact_sensitive_value, render_skill_prompt_template, stable_hash, trim_opt,
-    value_to_template_text,
+    redact_sensitive_value, render_skill_prompt_template, stable_hash, value_to_template_text,
 };
 pub(super) use self::validation::{
     is_shell_env_name, is_trusted_command, is_trusted_mcp_command, normalize_supported_values,
-    query_limit,
 };
 #[allow(unused_imports)]
 pub(super) use self::workspace::find_git_root_from;

@@ -2,8 +2,8 @@ use memory_core::{AuthorityLevel, EffectScope, MemoryEntry, ProjectionKind, Tach
 use serde_json::{json, Value};
 
 use crate::tool_params::{TachiEventParams, TachiSkillParams, WikiWriteParams};
-use crate::utils::trim_opt;
 use crate::MemoryServer;
+use memory_server_runtime::trim_opt;
 
 use super::context::list_active_patterns;
 use super::feedback::pattern_ref_json;

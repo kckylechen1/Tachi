@@ -32,6 +32,7 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             metadata: None,
             emit_continuity: false,
             files: Vec::new(),
+            format: None,
         }))
         .await
         .expect("tachi_save wiki route should succeed");

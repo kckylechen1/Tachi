@@ -40,6 +40,7 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 diff_present: Some(false),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed loadout eval row");

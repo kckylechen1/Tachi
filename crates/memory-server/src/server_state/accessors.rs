@@ -1,13 +1,13 @@
 use super::cache::CachedResult;
 use super::memory_server::MemoryServer;
-use super::runtime::{
-    AgentRuntime, EnrichmentRuntime, EventDbRoute, FoundryRuntime, RateLimiter, VaultState,
-};
+use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
+use super::{RateLimiter, VaultState};
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::shared_defs::DeadLetter;
 use crate::utils::{lock_or_recover, read_or_recover, write_or_recover};
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
 use memory_core::MemoryStore;
+use memory_server_runtime::{event_db_route, EventDbRoute};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -114,13 +114,7 @@ impl MemoryServer {
     }
 
     pub(crate) fn event_db_route(&self, project: Option<&str>) -> EventDbRoute {
-        if let Some(project) = project.map(str::trim).filter(|value| !value.is_empty()) {
-            EventDbRoute::NamedProject(project.to_string())
-        } else if self.has_project_db() {
-            EventDbRoute::Project
-        } else {
-            EventDbRoute::Global
-        }
+        event_db_route(project, self.has_project_db())
     }
 
     pub(crate) fn with_event_route_store<T>(
@@ -145,5 +139,17 @@ impl MemoryServer {
             EventDbRoute::Project => self.with_project_store_read(f),
             EventDbRoute::Global => self.with_global_store_read(f),
         }
+    }
+
+    pub(crate) fn bound_agent_id(&self) -> Option<String> {
+        read_or_recover(&self.bound_agent_id, "bound_agent_id").clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_bound_agent_id_for_test(&self, agent_id: Option<&str>) {
+        *write_or_recover(&self.bound_agent_id, "bound_agent_id") = agent_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
     }
 }

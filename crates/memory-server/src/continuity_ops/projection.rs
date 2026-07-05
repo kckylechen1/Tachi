@@ -4,8 +4,8 @@ use memory_core::{
 use serde_json::{json, Value};
 
 use crate::tool_params::TachiEventParams;
-use crate::utils::query_limit;
 use crate::MemoryServer;
+use memory_server_runtime::query_limit;
 
 use super::storage::{
     add_memory_edge, get_projection_memory, read_events, upsert_projection_memory,

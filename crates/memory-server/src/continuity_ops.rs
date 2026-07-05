@@ -1,8 +1,8 @@
 use chrono::{SecondsFormat, Utc};
 use memory_core::TachiEventQuery;
+use memory_server_runtime::{query_limit, trim_opt};
 
 use crate::tool_params::TachiEventParams;
-use crate::utils::{query_limit, trim_opt};
 use crate::MemoryServer;
 
 mod context;

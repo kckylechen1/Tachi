@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use memory_core::{ContinuityMetrics, MemoryEdge, MemoryEntry, TachiEventQuery, TachiEventRecord};
+use memory_server_runtime::EventDbRoute;
 
-use crate::server_state::EventDbRoute;
 use crate::{DbScope, MemoryServer};
 
 #[derive(Debug, Clone)]

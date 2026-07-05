@@ -39,6 +39,7 @@ async fn tachi_task_proposals_requires_loadout_evolution_sample_threshold() {
                 diff_present: Some(false),
                 scope: Some("project".to_string()),
                 project: None,
+                format: None,
             }))
             .await
             .expect("seed below-threshold loadout eval row");

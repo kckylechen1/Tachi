@@ -7,12 +7,12 @@ use super::dispatch_v2::{
     plan_timeout_secs, run_plan_stage, v2_enabled_from_env, write_status_json, V2Decision,
 };
 use super::kanban_helpers::init_kanban_task;
-use super::mcp_config::generate_mcp_config;
-use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};
-use super::subprocess::{
+use super::launcher::{
     build_claude_command, build_codex_command, build_custom_command, build_grok_command,
     build_kimi_command,
 };
+use super::mcp_config::generate_mcp_config;
+use super::prompt::{assemble_prompt_with_trace, resolve_effective_skills};
 use crate::agent_registry::{
     dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent,

@@ -1,9 +1,9 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use memory_core::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventQuery, TachiEventRecord};
+use memory_server_runtime::query_limit;
 use serde_json::json;
 
 use crate::tool_params::TachiEventParams;
-use crate::utils::query_limit;
 use crate::MemoryServer;
 
 fn json_string(value: &serde_json::Value) -> Result<String, String> {

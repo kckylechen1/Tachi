@@ -74,6 +74,7 @@ mod handoff_ops;
 mod hub_cli;
 mod hub_helpers;
 mod hub_ops;
+mod i18n;
 mod kanban;
 mod llm;
 mod manifest;

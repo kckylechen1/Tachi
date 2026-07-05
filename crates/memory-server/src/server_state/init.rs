@@ -1,10 +1,12 @@
 use super::cache::{ToolDiscovery, DEFAULT_MCP_DISCOVERY_TIMEOUT_MS};
 use super::memory_server::MemoryServer;
-use super::read_pool::{configured_memory_read_pool_size, ReadStorePool};
 use super::runtime::{
-    AgentRuntime, DbScope, EnrichmentRuntime, FoundryRuntime, ProjectDbState, RateLimiter,
-    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM, ENRICH_CHANNEL_CAPACITY,
+    AgentRuntime, EnrichmentRuntime, FoundryRuntime, ENRICH_CHANNEL_CAPACITY,
     FOUNDRY_CHANNEL_CAPACITY,
+};
+use super::{
+    configured_memory_read_pool_size, DbScope, ProjectDbState, RateLimiter, ReadStorePool,
+    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
 };
 use crate::builtins::seed_builtin_capabilities;
 use crate::claude_pool;
@@ -43,6 +45,13 @@ fn background_workers_enabled() -> bool {
     {
         !embedded_mcp_facade()
     }
+}
+
+fn read_bound_agent_id_from_env() -> Option<String> {
+    std::env::var("TACHI_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 impl MemoryServer {
@@ -116,6 +125,12 @@ impl MemoryServer {
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let bound_agent_id = read_bound_agent_id_from_env();
+        if bound_agent_id.is_none() {
+            tracing::warn!(
+                "TACHI_AGENT_ID is not set; vault ACL falls back to caller-supplied agent_id"
+            );
+        }
         let mcp_discovery_timeout_ms = match parse_env_u64("MCP_DISCOVERY_TIMEOUT_MS") {
             Some(0) => {
                 eprintln!("MCP_DISCOVERY_TIMEOUT_MS must be >= 1; using 1ms");
@@ -231,6 +246,8 @@ impl MemoryServer {
                 tool_profile: Some(crate::profiles::default_tool_profile()),
                 handoff_memos: Vec::new(),
             })),
+            bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
+            named_project_cache: Arc::new(StdMutex::new(HashMap::new())),
         };
 
         if background_workers_enabled() {

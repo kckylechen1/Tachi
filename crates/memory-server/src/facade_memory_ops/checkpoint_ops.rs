@@ -1,7 +1,7 @@
 //! Checkpoint handler and Claude JSONL passive watcher.
 
 use super::evidence_format::{
-    checkpoint_message, checkpoint_saved_payload, json_string, merge_keywords, parse_json_or_empty,
+    checkpoint_message, checkpoint_saved_payload, merge_keywords, shape_save_facade_response,
     wants_json,
 };
 use crate::facade_save_ops::handle_tachi_save;
@@ -16,21 +16,28 @@ pub(crate) async fn handle_memory_checkpoint(
     server: &MemoryServer,
     params: TachiMemoryParams,
 ) -> Result<String, String> {
-    let return_json = wants_json(params.format.as_deref());
+    let format = params.format.clone();
     let (body, display_path, already_formatted, echo) =
         save_memory_checkpoint(server, params).await?;
-    if return_json {
-        let mut payload = parse_json_or_empty(body);
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert("echo".to_string(), json!(echo));
-        }
-        return json_string(&payload);
+    if already_formatted {
+        return Ok(body);
+    }
+    if wants_json(format.as_deref())
+        || crate::facade_memory_ops::wants_full_format(format.as_deref())
+    {
+        return shape_save_facade_response(
+            &body,
+            format.as_deref(),
+            echo.as_deref(),
+            display_path.as_deref(),
+        );
     }
     Ok(checkpoint_message(
         &body,
         display_path.as_deref(),
-        already_formatted,
+        false,
         echo.as_deref(),
+        format.as_deref(),
     ))
 }
 
@@ -104,9 +111,10 @@ pub(crate) async fn save_memory_checkpoint(
         metadata: params.metadata.take(),
         emit_continuity: false,
         files: Vec::new(),
+        format: params.format.clone(),
     };
-    let body = handle_tachi_save(server, save_params).await?;
-    Ok((body, display_path, false, echo))
+    let raw = handle_tachi_save(server, save_params).await?;
+    Ok((raw, display_path, false, echo))
 }
 
 pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
@@ -181,7 +189,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         "path": path,
         "saved": checkpoint_saved_payload(&saved, already_formatted),
         "echo": echo.clone(),
-        "message": checkpoint_message(&saved, display_path.as_deref(), already_formatted, echo.as_deref()),
+        "message": checkpoint_message(&saved, display_path.as_deref(), already_formatted, echo.as_deref(), None),
     })))
 }
 
@@ -354,7 +362,7 @@ mod tests {
         let body = "Saved -> `/agent/checkpoints/2026-05-31` (id: `cp-123`, status: saved)";
 
         assert_eq!(
-            checkpoint_message(body, None, true, Some("ignored forwarded echo")),
+            checkpoint_message(body, None, true, Some("ignored forwarded echo"), None),
             "Saved -> `/agent/checkpoints/2026-05-31` (id: `cp-123`, status: saved)"
         );
     }

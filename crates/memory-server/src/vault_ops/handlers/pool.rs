@@ -6,7 +6,8 @@ pub(crate) async fn handle_vault_setup_rotation(
 ) -> Result<String, String> {
     let rotation_prefix = params.prefix.clone();
     let result = (|| {
-        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())?;
+        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
 
         if params.total_keys < 2 {
             return Err("Rotation requires at least 2 keys".into());
@@ -86,7 +87,8 @@ pub(crate) async fn handle_vault_set_api_key_pool(
                 params.prefix
             ));
         }
-        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())?;
+        authorize_vault_pool_mutation(server, &params.prefix, params.agent_id.as_deref())
+            .map_err(|e| e.to_string())?;
         let values = params
             .values
             .iter()

@@ -76,7 +76,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或使用 shell 安装脚本（检测到 OpenClaw 时会自动安装插件）：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.1/scripts/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v1.6.2/scripts/install.sh)"
 ```
 
 验证：
@@ -112,7 +112,7 @@ tachi --version
 
 ### 3. 使用
 
-以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/memory-server/src/tool_params/facade.rs`。
+以下示例展示传给 MCP 工具的 JSON 参数。门面工具暴露的字段与其底层原生工具一致；完整 schema 见 `crates/memory-server-params/src/facade.rs` 及其 `facade/` 子模块。
 
 ```json
 // tachi_save —— 结构化记忆
