@@ -35,12 +35,18 @@ pub(crate) fn parse_json_or_empty(raw: String) -> Value {
     })
 }
 
-const SAVE_RECEIPT_KEYS: &[&str] = &["id", "path", "status", "enrichment"];
+const SAVE_BASE_RECEIPT_KEYS: &[&str] = &["id", "path", "status", "enrichment"];
+/// Per-route identity fields — kept whole when present, never echoed input text.
+const SAVE_VARIANT_ROUTE_KEYS: &[&str] =
+    &["wiki_path", "note_file", "note_path", "continuity_event"];
 
 pub(crate) fn save_receipt_value(value: &Value) -> Value {
     let mut receipt = serde_json::Map::new();
     receipt.insert("ok".to_string(), json!(true));
-    for key in SAVE_RECEIPT_KEYS {
+    for key in SAVE_BASE_RECEIPT_KEYS
+        .iter()
+        .chain(SAVE_VARIANT_ROUTE_KEYS.iter())
+    {
         if let Some(field) = value.get(*key) {
             if !field.is_null() {
                 receipt.insert((*key).to_string(), field.clone());
@@ -96,6 +102,9 @@ fn receipt_eval_entry(value: Option<&Value>) -> Value {
     Value::Object(entry)
 }
 
+/// Pipeline stages whose value is structured route output, not a single status scalar.
+const PIPELINE_VARIANT_OBJECT_STAGES: &[&str] = &["pattern_feedback", "kanban_update"];
+
 fn pipeline_stage_status(value: &Value) -> Option<Value> {
     match value {
         Value::String(_) | Value::Bool(_) | Value::Number(_) => Some(value.clone()),
@@ -112,6 +121,16 @@ fn pipeline_stage_status(value: &Value) -> Option<Value> {
     }
 }
 
+fn pipeline_stage_value(stage: &str, value: &Value) -> Option<Value> {
+    if value.is_null() {
+        return None;
+    }
+    if PIPELINE_VARIANT_OBJECT_STAGES.contains(&stage) {
+        return Some(value.clone());
+    }
+    pipeline_stage_status(value)
+}
+
 fn whole_pipeline(value: Option<&Value>) -> Value {
     let Some(map) = value.and_then(Value::as_object) else {
         return Value::Null;
@@ -119,7 +138,7 @@ fn whole_pipeline(value: Option<&Value>) -> Value {
     Value::Object(
         map.iter()
             .filter_map(|(key, value)| {
-                pipeline_stage_status(value).map(|status| (key.clone(), status))
+                pipeline_stage_value(key, value).map(|status| (key.clone(), status))
             })
             .collect(),
     )
