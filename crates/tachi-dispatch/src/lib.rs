@@ -7,6 +7,7 @@
 mod launcher;
 mod profiles;
 mod registry;
+mod routing;
 
 pub use launcher::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
@@ -29,4 +30,12 @@ pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
     resolve_dispatch_agent, select_agent_for_intent, select_agent_for_task, DispatchAgentDef,
     DispatchMcpSupport, DISPATCH_AGENTS,
+};
+pub use routing::{
+    build_profile_fallback_chain, build_route_policy_rule_loadout, classify_dispatch_risk,
+    profile_role_matches, recommend_dispatch_profile_candidates, route_simulation_caveats,
+    sanitize_policy_key, simulate_route_policy, AppliedRoutePolicyRule, DispatchRisk,
+    ProfileCandidate, RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout,
+    RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
+    SkippedRoutePolicyRule,
 };

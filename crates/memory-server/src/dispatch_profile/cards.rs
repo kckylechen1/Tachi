@@ -27,7 +27,7 @@ pub(crate) use loadout::{
     profile_skill_loadout_json_for_server,
 };
 pub(in crate::dispatch_profile) use matrix::{
-    profile_role_matches, sum_matrix_failures, sum_matrix_samples, summarize_matrix_rows,
-    weighted_matrix_rate,
+    sum_matrix_failures, sum_matrix_samples, summarize_matrix_rows, weighted_matrix_rate,
 };
 pub(crate) use render::{profile_json, profile_json_for_server};
+pub(in crate::dispatch_profile) use tachi_dispatch::profile_role_matches;

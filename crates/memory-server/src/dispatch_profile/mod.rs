@@ -9,15 +9,15 @@ use crate::agent_eval::{
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use chrono::Utc;
-use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
-    fallback_chain, profile_matches_agent, profile_uses_opencode_adapter, resolve_dispatch_profile,
-    ResolvedDispatchProfile, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
-    MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
+    profile_matches_agent, profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk,
+    ResolvedDispatchProfile, RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout,
+    RoutePolicyRuleRecord, RouteSimulationSummary, RouteSubagentScore, DISPATCH_POLICY_PROPOSAL_NS,
+    DISPATCH_PROFILES, MIN_CARD_RISK_EVOLUTION_SAMPLES, MIN_LOADOUT_EVOLUTION_SAMPLES,
+    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 
 pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result<Value, String> {
@@ -29,97 +29,6 @@ pub(crate) fn dispatch_profiles_json_for_server(server: &MemoryServer) -> Result
         "note": "DispatchProfile routes agents/context/evidence; ToolProfile gates visible tools.",
         "projection_namespace": PROFILE_CARD_OVERLAY_NS,
     }))
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct DispatchRisk {
-    task_type: String,
-    risk: String,
-    reasons: Vec<String>,
-    required_profiles: Vec<String>,
-    blocked_profiles: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProfileCandidate {
-    profile: String,
-    agent: String,
-    role: String,
-    model: Option<String>,
-    score: f64,
-    reasons: Vec<String>,
-    live_samples: u32,
-    useful_rate: Option<f64>,
-    failure_count: u32,
-    performance_samples: u32,
-    human_override_rate: Option<f64>,
-    avg_retry_count: Option<f64>,
-    avg_latency_ms: Option<f64>,
-    avg_cost_usd: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct AppliedRoutePolicyRule {
-    proposal_id: String,
-    policy: String,
-    task_type: String,
-    prefer_profile: String,
-    sample_count: u32,
-    score_delta: Option<f64>,
-    status: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SkippedRoutePolicyRule {
-    proposal_id: String,
-    reason: String,
-    policy: Option<String>,
-    task_type: Option<String>,
-    prefer_profile: Option<String>,
-    sample_count: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RoutePolicyRuleLoadout {
-    namespace: &'static str,
-    min_samples: u32,
-    applied: Vec<AppliedRoutePolicyRule>,
-    skipped: Vec<SkippedRoutePolicyRule>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RouteSimulationSummary {
-    policy: String,
-    selected_route_count: u32,
-    sample_count: u32,
-    estimated_success_rate: Option<f64>,
-    estimated_verification_rate: Option<f64>,
-    failure_count: u32,
-    avg_retry_count: Option<f64>,
-    avg_human_override_rate: Option<f64>,
-    avg_latency_ms: Option<f64>,
-    avg_cost_usd: Option<f64>,
-    total_cost_usd: Option<f64>,
-    score: f64,
-    route_choices: Vec<RouteSimulationChoice>,
-    caveats: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RouteSimulationChoice {
-    task_type: String,
-    profile: String,
-    agent: String,
-    samples: u32,
-    score: f64,
-    success_rate: Option<f64>,
-    verification_rate: f64,
-    failure_count: u32,
-    avg_latency_ms: Option<f64>,
-    avg_cost_usd: Option<f64>,
-    avg_retry_count: f64,
-    human_override_rate: f64,
-    reasons: Vec<String>,
 }
 
 mod cards;
