@@ -773,7 +773,13 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
-const MIGRATION_BACKUP_RETAIN: usize = 3;
+fn migration_backup_retain_count() -> usize {
+    std::env::var("TACHI_MIGRATION_BACKUP_RETAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .max(1)
+}
 
 fn migration_marker_path(db_path: &Path) -> PathBuf {
     let mut s = db_path.as_os_str().to_owned();
@@ -816,12 +822,14 @@ fn maybe_backup_before_migration(
     Ok(Some(backup_path))
 }
 
-fn remember_migration_fingerprint(
-    conn: &Connection,
-    db_path: &Path,
-) -> Result<(), MemoryError> {
+fn remember_migration_fingerprint(conn: &Connection, db_path: &Path) -> Result<(), MemoryError> {
     let fp = migration_schema_fingerprint(conn)?;
-    std::fs::write(migration_marker_path(db_path), fp)?;
+    if let Err(e) = std::fs::write(migration_marker_path(db_path), &fp) {
+        eprintln!(
+            "[migration] warning: failed to write migration marker: {e}; \
+             next startup will back up again"
+        );
+    }
     Ok(())
 }
 
@@ -845,7 +853,7 @@ fn retain_recent_migration_backups(db_path: &Path) {
     // Lexicographic descending = newest first (ISO 8601 timestamp in filename).
     backups.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
-    for old in backups.into_iter().skip(MIGRATION_BACKUP_RETAIN) {
+    for old in backups.into_iter().skip(migration_backup_retain_count()) {
         let _ = std::fs::remove_file(old.path());
     }
 }
