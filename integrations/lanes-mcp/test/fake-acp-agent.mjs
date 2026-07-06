@@ -32,6 +32,15 @@ let sessionCounter = 0;
 let cwd = process.cwd();
 /** pending prompt awaiting a cancel, keyed by sessionId */
 const pendingCancel = new Map();
+/** requests this agent sent to the client, awaiting a response, keyed by id */
+const pendingAgentRequests = new Map();
+let agentReqId = 1000;
+
+function sendRequest(method, params, onResult) {
+  const rid = ++agentReqId;
+  pendingAgentRequests.set(rid, onResult);
+  send({ jsonrpc: "2.0", id: rid, method, params });
+}
 
 function textBlock(text) {
   return { type: "text", text };
@@ -59,6 +68,52 @@ async function runPrompt(id, sessionId, promptText) {
       status: "in_progress",
     });
     pendingCancel.set(sessionId, id);
+    return;
+  }
+
+  if (p.includes("CRASH")) {
+    // Emit one event then exit mid-turn without responding (simulated crash).
+    update(sessionId, {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-crash",
+      title: "about to crash",
+      status: "in_progress",
+    });
+    setTimeout(() => process.exit(1), 30);
+    return;
+  }
+
+  if (p.includes("OVERFLOW")) {
+    // Emit many tool_calls so the accumulated digest exceeds the char budget.
+    for (let i = 0; i < 60; i++) {
+      update(sessionId, {
+        sessionUpdate: "tool_call",
+        toolCallId: `tc-of-${i}`,
+        title: `overflow tool call number ${i} with a deliberately longish title`,
+        status: "completed",
+      });
+    }
+    respond(id, { stopReason: "end_turn" });
+    return;
+  }
+
+  if (p.includes("PERMWRITE")) {
+    // Ask the client for permission with ONLY an allow option; the client's
+    // read-only gate must decline (cancelled) rather than approve.
+    sendRequest(
+      "session/request_permission",
+      {
+        sessionId,
+        toolCall: { toolCallId: "w1", title: "write to a file", kind: "edit", status: "pending" },
+        options: [{ optionId: "allow-1", name: "Allow", kind: "allow_once" }],
+      },
+      (result) => {
+        const outcome = result && result.outcome && result.outcome.outcome;
+        const text = outcome === "selected" ? "PERMISSION_GRANTED" : "PERMISSION_DENIED";
+        update(sessionId, { sessionUpdate: "agent_message_chunk", content: textBlock(text) });
+        respond(id, { stopReason: "end_turn" });
+      },
+    );
     return;
   }
 
@@ -110,6 +165,16 @@ rl.on("line", (line) => {
   try {
     msg = JSON.parse(trimmed);
   } catch {
+    return;
+  }
+
+  // Response to a request this agent sent (has id, no method).
+  if (msg.id !== undefined && msg.method === undefined) {
+    const cb = pendingAgentRequests.get(msg.id);
+    if (cb) {
+      pendingAgentRequests.delete(msg.id);
+      cb(msg.result, msg.error);
+    }
     return;
   }
 

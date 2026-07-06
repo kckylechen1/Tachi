@@ -179,6 +179,8 @@ export class LaneRun {
         break;
       }
       case "agent_thought_chunk": {
+        // CP4 invariant: the reasoning stream is disk-only. It must NEVER reach
+        // the digest (unlike agent_message_chunk, which may) — no pushDigest here.
         this.logChunk("thought", blockText(update.content));
         break;
       }

@@ -11,16 +11,10 @@ $ARGUMENTS
 
 Argument mapping (resolve these, then pass explicit parameters to the subagent):
 
-- **Model shortname** (first token if it is one of these, or a `--model` value) → full `provider/model` id, mapped exactly as the `oc-dispatch` skill does:
-  - `glm`  → `zhipuai-coding-plan/glm-5.2`
-  - `ds`   → `deepseek/deepseek-v4-pro`
-  - `kimi` → `kimi-for-coding/k2p6`
-  - `free` → `opencode/deepseek-v4-flash-free`
-  - A value already containing `/` is passed through unchanged.
-  - If no model token is given, default to `glm` → `zhipuai-coding-plan/glm-5.2`.
-- `--write` present → `read_only: false`. Absent (or `--read-only` present) → `read_only: true` (safe default; the lane cannot modify files).
-- `--effort <effort>` → `effort`. Note: the opencode ACP lane does not support a reasoning-effort override; the lane will return a warning and ignore it (surfaced verbatim).
+- **Model token** (first token if it is a shortname, or a `--model` value): pass it through as `model` **unchanged** — the server resolves shortnames from the single source in `src/constants.ts` (`OC_MODEL_ALIASES`). For reference, the current map is `glm → zhipuai-coding-plan/glm-5.2`, `ds → deepseek/deepseek-v4-pro`, `kimi → kimi-for-coding/k2p6`, `free → opencode/deepseek-v4-flash-free`; a value containing `/` is a full id. If no model token is given, default to `glm`.
+- `--write` present → `read_only: false` **and a `worktree` is mandatory** (the server rejects a write without one). If the user did not name a branch, generate a default `worktree` like `lanes/oc-<short-timestamp>`. Absent `--write` (or `--read-only` present) → `read_only: true` (safe default; no worktree needed).
+- `--effort <effort>` → `effort`. Note: the opencode ACP lane does not support a reasoning-effort override; the lane returns a warning and ignores it (surfaced verbatim).
 - Everything that is not a recognized flag or the model token is the natural-language `prompt`. Do not forward the flags themselves as prompt text.
 - `--background`: this is an execution flag for you, not for the lane. If present, launch the `lanes:oc` subagent with the `Agent` tool in the background (run_in_background) so the bottom task line tracks it and you are notified on completion. If absent, run it in the foreground and block until it returns.
 
-Invoke the subagent with an instruction of the form: "Dispatch to your lane. prompt=<task>. read_only=<bool>. model=<resolved provider/model>. effort=<effort or omit>. Follow your relay protocol." Relay the subagent's final result verbatim.
+Invoke the subagent with an instruction of the form: "Dispatch to your lane. prompt=<task>. read_only=<bool>. worktree=<branch or omit>. model=<token, e.g. glm or zhipuai-coding-plan/glm-5.2>. effort=<effort or omit>. Follow your relay protocol." Relay the subagent's final result verbatim.

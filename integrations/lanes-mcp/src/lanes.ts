@@ -19,6 +19,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { resolveOcModel } from "./constants.js";
 import type { LaneName, LaneRequestOptions, SpawnSpec } from "./types.js";
 
 interface LaneCapabilities {
@@ -67,11 +68,14 @@ export function buildSpawnSpec(
 
     case "opencode": {
       const args = ["acp"];
-      if (opts.model) {
+      // Shortnames (glm/ds/kimi/free) resolve to full provider/model ids from the
+      // single source in constants.ts; full ids pass through unchanged.
+      const model = resolveOcModel(opts.model);
+      if (model) {
         const cfgPath = path.join(runDir, "opencode-config.json");
         fs.writeFileSync(
           cfgPath,
-          JSON.stringify({ $schema: "https://opencode.ai/config.json", model: opts.model }, null, 2),
+          JSON.stringify({ $schema: "https://opencode.ai/config.json", model }, null, 2),
         );
         env.OPENCODE_CONFIG = cfgPath;
       }

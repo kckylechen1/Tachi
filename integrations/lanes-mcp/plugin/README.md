@@ -54,6 +54,20 @@ To uninstall later: `claude plugin uninstall lanes@lanes-mcp` and
 window.** They are retired only at Step 4 (spec §9), after this plugin has been
 dogfooded for a week. Both sets of entrypoints can coexist meanwhile.
 
+## Read-only and write isolation (the real safety boundary)
+
+`read_only: true` (the default for `/lanes:*` without `--write`) is enforced at the
+client layer: the server's `session/request_permission` handler declines any permissioned
+operation (it never auto-selects an `allow*` option under read-only), and the client
+`fs/write_text_file` handler refuses writes unconditionally. **codex** additionally runs
+with its native `INITIAL_AGENT_MODE=read-only`; **grok** and **opencode** have **no native
+read-only ACP mode**, so for them read-only is only the client-side gate.
+
+Because native read-only is not uniform, **the real isolation boundary for writes is the
+worktree**: a `--write` dispatch (`read_only: false`) is *required* to run in a
+server-created git worktree cut from `origin/main`, and the server rejects a write whose
+`cwd` resolves inside the primary checkout. Writes never touch the main working tree.
+
 ## Caveat: MCP tool names in agent frontmatter
 
 The ignition agents restrict `tools:` to `mcp__lanes__lane_dispatch_start` and

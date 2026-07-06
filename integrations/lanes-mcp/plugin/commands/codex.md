@@ -11,10 +11,10 @@ $ARGUMENTS
 
 Argument mapping (resolve these, then pass explicit parameters to the subagent):
 
-- `--write` present → `read_only: false`. Absent (or `--read-only` present) → `read_only: true` (safe default; the lane cannot modify files).
+- `--write` present → `read_only: false` **and a `worktree` is mandatory** (the server rejects a write without one — writes must be isolated from the primary checkout). If the user did not name a branch, generate a default `worktree` like `lanes/codex-<short-timestamp>`. Absent `--write` (or `--read-only` present) → `read_only: true` (safe default; the lane cannot modify files, no worktree needed).
 - `--model <model>` → `model` (passed through verbatim; codex maps it via CODEX_CONFIG).
 - `--effort <effort>` → `effort` (codex reasoning effort).
 - Everything that is not a recognized flag is the natural-language `prompt`. Do not forward the flags themselves as prompt text.
 - `--background`: this is an execution flag for you, not for the lane. If present, launch the `lanes:codex` subagent with the `Agent` tool in the background (run_in_background) so the bottom task line tracks it and you are notified on completion. If absent, run it in the foreground and block until it returns.
 
-Invoke the subagent with an instruction of the form: "Dispatch to your lane. prompt=<task>. read_only=<bool>. model=<model or omit>. effort=<effort or omit>. Follow your relay protocol." Relay the subagent's final result verbatim.
+Invoke the subagent with an instruction of the form: "Dispatch to your lane. prompt=<task>. read_only=<bool>. worktree=<branch or omit>. model=<model or omit>. effort=<effort or omit>. Follow your relay protocol." Relay the subagent's final result verbatim.

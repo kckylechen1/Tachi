@@ -16,8 +16,10 @@ import {
   BASE_REPO,
   DEFAULT_STALL_THRESHOLD_MS,
   DEFAULT_WAIT_MS,
+  HANDSHAKE_TIMEOUT_MS,
   MAX_WAIT_MS,
   RUNS_ROOT,
+  TURN_TIMEOUT_MS,
 } from "./constants.js";
 import { buildSpawnSpec } from "./lanes.js";
 import { LaneRun } from "./run.js";
@@ -72,6 +74,10 @@ export interface LaneManagerOptions {
   resolveSpec?: SpecResolver;
   stallThresholdMs?: number;
   sessionTtlMs?: number;
+  /** Hard per-turn ceiling before the turn is forced to terminal error. */
+  turnTimeoutMs?: number;
+  /** Handshake timeout passed to LaneConnection.connect. */
+  handshakeTimeoutMs?: number;
   baseRepo?: string;
   /** Disable the background reaper (tests drive reaping manually). */
   disableReaper?: boolean;
@@ -85,8 +91,12 @@ export class LaneManager {
   private readonly resolveSpec: SpecResolver;
   private readonly stallThresholdMs: number;
   private readonly sessionTtlMs: number;
+  private readonly turnTimeoutMs: number;
+  private readonly handshakeTimeoutMs: number;
   private readonly baseRepo: string;
   private readonly warningsById = new Map<string, string[]>();
+  /** CP6: at most one active lane_wait per id (single-consumer contract). */
+  private readonly activeWaits = new Set<string>();
   private reaperTimer: NodeJS.Timeout | null = null;
   private counter = 0;
 
@@ -94,6 +104,8 @@ export class LaneManager {
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+    this.turnTimeoutMs = opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
     if (!opts.disableReaper) {
       const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
@@ -112,6 +124,25 @@ export class LaneManager {
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
     }
+    const readOnly = params.readOnly ?? false;
+
+    // CP2: write dispatches are forced into an isolated worktree, never the
+    // primary checkout. No env escape hatch.
+    if (!readOnly && !params.worktree) {
+      throw new Error(
+        "write dispatch (read_only=false) must run in an isolated worktree: pass `worktree` (a branch name). Reads may run in-place.",
+      );
+    }
+    if (!readOnly && params.cwd) {
+      const resolved = path.resolve(params.cwd);
+      const base = path.resolve(this.baseRepo);
+      if (resolved === base || resolved.startsWith(base + path.sep)) {
+        throw new Error(
+          `write dispatch cwd '${resolved}' is inside the primary checkout '${base}'; writes must be isolated to a worktree`,
+        );
+      }
+    }
+
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path.join(RUNS_ROOT, id);
     fs.mkdirSync(runDir, { recursive: true });
@@ -126,7 +157,7 @@ export class LaneManager {
     const opts: LaneRequestOptions = {
       model: params.model,
       effort: params.effort,
-      readOnly: params.readOnly ?? false,
+      readOnly,
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -136,7 +167,7 @@ export class LaneManager {
       lane: params.lane,
       cwd,
       runDir,
-      readOnly: opts.readOnly ?? false,
+      readOnly,
       worktreeBranch: params.worktree,
       worktreePath,
     });
@@ -171,6 +202,7 @@ export class LaneManager {
         cwd: run.cwd,
         readOnly: run.readOnly,
         onFileWritten: (p) => run.recordFileWritten(p),
+        handshakeTimeoutMs: this.handshakeTimeoutMs,
       });
     } catch (e) {
       run.failTurn(errMessage(e));
@@ -181,25 +213,68 @@ export class LaneManager {
     await this.runTurn(run, conn, prompt);
   }
 
-  /** Drive one prompt turn to completion, projecting events into run state. */
+  /**
+   * Drive one prompt turn to completion, projecting events into run state.
+   *
+   * CP1: every wait races three outcomes — the next ACP update, subprocess exit,
+   * and a hard per-turn timeout — so a turn always reaches a terminal state.
+   * suspected_stall stays a warning; this loop is the guaranteed terminal path.
+   */
   private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string): Promise<void> {
     run.beginTurn(prompt);
     const promptPromise = conn.session.prompt(prompt);
     promptPromise.catch(() => {
-      /* rejection surfaced via nextUpdate / awaited below */
+      /* rejection surfaced via the race / awaited below */
     });
+    const turnTimer = createTimeout(this.turnTimeoutMs);
     try {
       for (;;) {
-        const msg = await conn.session.nextUpdate();
-        if (msg.kind === "stop") {
-          await this.finalizeTurn(run, msg.stopReason);
-          break;
+        const nextP = conn.session.nextUpdate();
+        const outcome = await Promise.race([
+          // The onRejected handler both handles a losing update's late rejection
+          // and turns a closed stream into a `closed` outcome (no unhandled reject).
+          nextP.then(
+            (m) => ({ kind: "msg" as const, m }),
+            (err: unknown) => ({ kind: "closed" as const, err }),
+          ),
+          conn.exited.then((info) => ({ kind: "exit" as const, info })),
+          turnTimer.promise.then(() => ({ kind: "timeout" as const })),
+        ]);
+        if (outcome.kind === "timeout") {
+          throw new Error(
+            `turn exceeded LANES_TURN_TIMEOUT_MS (${this.turnTimeoutMs}ms) with no completion; killing the lane`,
+          );
         }
-        run.onUpdate(msg.update);
+        if (outcome.kind === "exit" || outcome.kind === "closed") {
+          // Prefer the concrete exit info (code/signal/stderr); the ACP stream
+          // often closes a beat before the exit event, so wait briefly for it.
+          const info =
+            outcome.kind === "exit"
+              ? outcome.info
+              : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
+          if (info) {
+            const { code, signal, stderr } = info;
+            throw new Error(
+              `lane process exited mid-turn (code=${code} signal=${signal})${stderr.trim() ? `; stderr: ${stderr.trim().slice(-400)}` : ""}`,
+            );
+          }
+          throw new Error(
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}`,
+          );
+        }
+        if (outcome.m.kind === "stop") {
+          await this.finalizeTurn(run, outcome.m.stopReason);
+          return;
+        }
+        run.onUpdate(outcome.m.update);
       }
-      await promptPromise;
     } catch (e) {
       run.failTurn(errMessage(e));
+      // A turn that ended on exit/timeout means the session is unusable — close
+      // it (kills the process, cleans the worktree) so it is not reused.
+      await this.close(run.id);
+    } finally {
+      turnTimer.cancel();
     }
   }
 
@@ -225,14 +300,23 @@ export class LaneManager {
   async wait(id: string, timeoutMs?: number): Promise<WaitResult> {
     const run = this.runs.get(id);
     if (!run) throw new Error(`run '${id}' not found`);
-    const budget = clampWait(timeoutMs);
-    const deadline = Date.now() + budget;
-
-    while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      await run.waitForSignal(Math.min(remaining, 1_000));
+    // CP6: single-consumer contract — a concurrent lane_wait on the same id would
+    // race the shared digest cursor, so reject it outright.
+    if (this.activeWaits.has(id)) {
+      throw new Error(`lane_wait already in progress for '${id}' (one waiter per run)`);
     }
-    return this.buildWaitResult(run);
+    this.activeWaits.add(id);
+    try {
+      const budget = clampWait(timeoutMs);
+      const deadline = Date.now() + budget;
+      while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        await run.waitForSignal(Math.min(remaining, 1_000));
+      }
+      return this.buildWaitResult(run);
+    } finally {
+      this.activeWaits.delete(id);
+    }
   }
 
   /** Blocking convenience: start + loop wait until the first turn is terminal. */
@@ -360,6 +444,16 @@ export class LaneManager {
 
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** A cancelable timeout whose promise resolves after `ms`. */
+function createTimeout(ms: number): { promise: Promise<void>; cancel: () => void } {
+  let handle: NodeJS.Timeout;
+  const promise = new Promise<void>((resolve) => {
+    handle = setTimeout(resolve, ms);
+    handle.unref?.();
+  });
+  return { promise, cancel: () => clearTimeout(handle) };
 }
 
 function dedupe(items: string[]): string[] {

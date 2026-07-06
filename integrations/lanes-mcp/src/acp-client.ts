@@ -21,6 +21,7 @@ import type {
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from "@agentclientprotocol/sdk";
+import { HANDSHAKE_TIMEOUT_MS } from "./constants.js";
 import type { SpawnSpec } from "./types.js";
 
 /** Minimal promise-with-resolvers helper (Node's Promise.withResolvers exists on 22+ but kept explicit). */
@@ -36,12 +37,47 @@ class Deferred<T> {
   }
 }
 
+export interface ExitInfo {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderr: string;
+}
+
+/** Permission option shape we depend on (subset of ACP PermissionOption). */
+export interface PermissionChoice {
+  optionId: string;
+  kind?: string;
+}
+
+/**
+ * Decide a `session/request_permission` outcome.
+ *
+ * CP5 invariant: a read-only lane NEVER auto-approves. If the agent offers no
+ * `reject*` option, we decline with `cancelled` rather than falling back to an
+ * `allow*` option (the previous `options[0]` fallback could approve a write).
+ */
+export function choosePermissionOption(
+  options: readonly PermissionChoice[],
+  readOnly: boolean,
+): RequestPermissionResponse {
+  if (options.length === 0) return { outcome: { outcome: "cancelled" } };
+  if (readOnly) {
+    const reject = options.find((o) => (o.kind ?? "").startsWith("reject"));
+    if (reject) return { outcome: { outcome: "selected", optionId: reject.optionId } };
+    return { outcome: { outcome: "cancelled" } };
+  }
+  const allow = options.find((o) => (o.kind ?? "").startsWith("allow")) ?? options[0];
+  return { outcome: { outcome: "selected", optionId: allow.optionId } };
+}
+
 export interface LaneConnectionOptions {
   spec: SpawnSpec;
   cwd: string;
   readOnly: boolean;
   /** Invoked when the agent routes a write through the client fs capability. */
   onFileWritten?: (absPath: string) => void;
+  /** Handshake timeout override (ms). */
+  handshakeTimeoutMs?: number;
 }
 
 /**
@@ -52,9 +88,12 @@ export interface LaneConnectionOptions {
  */
 export class LaneConnection {
   readonly session: ActiveSession;
+  /** Resolves when the subprocess exits (drives the run to a terminal state). */
+  readonly exited: Promise<ExitInfo>;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly ctx: ClientContext;
   private readonly shutdown: Deferred<void>;
+  private readonly getStderr: () => string;
   private closed = false;
 
   private constructor(
@@ -62,16 +101,16 @@ export class LaneConnection {
     child: ChildProcessWithoutNullStreams,
     ctx: ClientContext,
     shutdown: Deferred<void>,
+    exited: Promise<ExitInfo>,
     stderrRef: () => string,
   ) {
     this.session = session;
     this.child = child;
     this.ctx = ctx;
     this.shutdown = shutdown;
+    this.exited = exited;
     this.getStderr = stderrRef;
   }
-
-  private getStderr: () => string;
 
   get sessionId(): string {
     return this.session.sessionId;
@@ -108,11 +147,12 @@ export class LaneConnection {
 
   /**
    * Spawn the lane subprocess and complete the ACP handshake. Resolves once the
-   * session is created and ready to prompt; rejects if the subprocess exits or
-   * the handshake fails before then.
+   * session is created and ready to prompt; rejects if the subprocess exits, the
+   * spawn fails, or the handshake exceeds `handshakeTimeoutMs`.
    */
   static async connect(options: LaneConnectionOptions): Promise<LaneConnection> {
     const { spec, cwd, readOnly, onFileWritten } = options;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
 
     const child = spawn(spec.command, spec.args, {
       cwd,
@@ -128,13 +168,31 @@ export class LaneConnection {
 
     const ready = new Deferred<LaneConnection>();
     const shutdown = new Deferred<void>();
+    const exited = new Deferred<ExitInfo>();
     let resolvedReady = false;
+
+    const hsTimer = setTimeout(() => {
+      if (!resolvedReady) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* noop */
+        }
+        ready.reject(new Error(`handshake timed out after ${handshakeTimeoutMs}ms for '${spec.command}'`));
+      }
+    }, handshakeTimeoutMs);
+    hsTimer.unref?.();
+    void ready.promise.then(
+      () => clearTimeout(hsTimer),
+      () => clearTimeout(hsTimer),
+    );
 
     child.on("error", (err) => {
       if (!resolvedReady) ready.reject(new Error(`failed to spawn '${spec.command}': ${err.message}`));
     });
     child.on("exit", (code, signal) => {
       shutdown.resolve();
+      exited.resolve({ code, signal, stderr: stderrTail });
       if (!resolvedReady) {
         ready.reject(
           new Error(
@@ -148,15 +206,8 @@ export class LaneConnection {
     const output = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
     const stream = acp.ndJsonStream(input, output);
 
-    const handlePermission = (params: RequestPermissionRequest): RequestPermissionResponse => {
-      const options_ = params.options ?? [];
-      if (options_.length === 0) {
-        return { outcome: { outcome: "cancelled" } };
-      }
-      const wanted = readOnly ? "reject" : "allow";
-      const chosen = options_.find((o) => (o.kind ?? "").startsWith(wanted)) ?? options_[0];
-      return { outcome: { outcome: "selected", optionId: chosen.optionId } };
-    };
+    const handlePermission = (params: RequestPermissionRequest): RequestPermissionResponse =>
+      choosePermissionOption(params.options ?? [], readOnly);
 
     const handleReadTextFile = (params: ReadTextFileRequest): ReadTextFileResponse => {
       try {
@@ -168,6 +219,8 @@ export class LaneConnection {
     };
 
     const handleWriteTextFile = (params: WriteTextFileRequest): WriteTextFileResponse => {
+      // CP5: read-only refuses writes unconditionally, independent of the
+      // permission flow above.
       if (readOnly) {
         throw new Error(`write rejected: lane is read-only (path=${params.path})`);
       }
@@ -189,7 +242,7 @@ export class LaneConnection {
           clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
         });
         const session = await ctx.buildSession(cwd).start();
-        const conn = new LaneConnection(session, child, ctx, shutdown, () => stderrTail);
+        const conn = new LaneConnection(session, child, ctx, shutdown, exited.promise, () => stderrTail);
         resolvedReady = true;
         ready.resolve(conn);
         await shutdown.promise;

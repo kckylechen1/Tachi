@@ -27743,6 +27743,8 @@ var StdioServerTransport = class {
 import os from "node:os";
 import path from "node:path";
 var DEFAULT_STALL_THRESHOLD_MS = envInt("LANES_STALL_THRESHOLD_MS", 3e5);
+var HANDSHAKE_TIMEOUT_MS = envInt("LANES_HANDSHAKE_TIMEOUT_MS", 3e4);
+var TURN_TIMEOUT_MS = envInt("LANES_TURN_TIMEOUT_MS", 27e5);
 var DEFAULT_WAIT_MS = envInt("LANES_WAIT_DEFAULT_MS", 3e4);
 var MAX_WAIT_MS = envInt("LANES_WAIT_MAX_MS", 55e3);
 var DIGEST_CHAR_BUDGET = envInt("LANES_DIGEST_CHAR_BUDGET", 2e3);
@@ -27753,6 +27755,16 @@ var WORKTREES_ROOT = process.env.LANES_WORKTREES_ROOT ?? path.join(os.homedir(),
 var BASE_REPO = process.env.LANES_MCP_BASE_REPO ?? process.cwd();
 var SERVER_NAME = "lanes-mcp-server";
 var SERVER_VERSION = "0.1.0";
+var OC_MODEL_ALIASES = {
+  glm: "zhipuai-coding-plan/glm-5.2",
+  ds: "deepseek/deepseek-v4-pro",
+  kimi: "kimi-for-coding/k2p6",
+  free: "opencode/deepseek-v4-flash-free"
+};
+function resolveOcModel(model) {
+  if (!model) return model;
+  return OC_MODEL_ALIASES[model] ?? model;
+}
 function envInt(name, fallback) {
   const raw = process.env[name];
   if (raw === void 0) return fallback;
@@ -31137,20 +31149,33 @@ var Deferred = class {
     });
   }
 };
+function choosePermissionOption(options, readOnly) {
+  if (options.length === 0) return { outcome: { outcome: "cancelled" } };
+  if (readOnly) {
+    const reject = options.find((o) => (o.kind ?? "").startsWith("reject"));
+    if (reject) return { outcome: { outcome: "selected", optionId: reject.optionId } };
+    return { outcome: { outcome: "cancelled" } };
+  }
+  const allow = options.find((o) => (o.kind ?? "").startsWith("allow")) ?? options[0];
+  return { outcome: { outcome: "selected", optionId: allow.optionId } };
+}
 var LaneConnection = class _LaneConnection {
   session;
+  /** Resolves when the subprocess exits (drives the run to a terminal state). */
+  exited;
   child;
   ctx;
   shutdown;
+  getStderr;
   closed = false;
-  constructor(session, child, ctx, shutdown, stderrRef) {
+  constructor(session, child, ctx, shutdown, exited, stderrRef) {
     this.session = session;
     this.child = child;
     this.ctx = ctx;
     this.shutdown = shutdown;
+    this.exited = exited;
     this.getStderr = stderrRef;
   }
-  getStderr;
   get sessionId() {
     return this.session.sessionId;
   }
@@ -31180,11 +31205,12 @@ var LaneConnection = class _LaneConnection {
   }
   /**
    * Spawn the lane subprocess and complete the ACP handshake. Resolves once the
-   * session is created and ready to prompt; rejects if the subprocess exits or
-   * the handshake fails before then.
+   * session is created and ready to prompt; rejects if the subprocess exits, the
+   * spawn fails, or the handshake exceeds `handshakeTimeoutMs`.
    */
   static async connect(options) {
     const { spec, cwd, readOnly, onFileWritten } = options;
+    const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     const child = spawn(spec.command, spec.args, {
       cwd,
       env: { ...process.env, ...spec.env },
@@ -31197,12 +31223,28 @@ var LaneConnection = class _LaneConnection {
     });
     const ready = new Deferred();
     const shutdown = new Deferred();
+    const exited = new Deferred();
     let resolvedReady = false;
+    const hsTimer = setTimeout(() => {
+      if (!resolvedReady) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+        ready.reject(new Error(`handshake timed out after ${handshakeTimeoutMs}ms for '${spec.command}'`));
+      }
+    }, handshakeTimeoutMs);
+    hsTimer.unref?.();
+    void ready.promise.then(
+      () => clearTimeout(hsTimer),
+      () => clearTimeout(hsTimer)
+    );
     child.on("error", (err) => {
       if (!resolvedReady) ready.reject(new Error(`failed to spawn '${spec.command}': ${err.message}`));
     });
     child.on("exit", (code, signal) => {
       shutdown.resolve();
+      exited.resolve({ code, signal, stderr: stderrTail });
       if (!resolvedReady) {
         ready.reject(
           new Error(
@@ -31214,15 +31256,7 @@ var LaneConnection = class _LaneConnection {
     const input = Writable.toWeb(child.stdin);
     const output = Readable.toWeb(child.stdout);
     const stream = ndJsonStream(input, output);
-    const handlePermission = (params) => {
-      const options_ = params.options ?? [];
-      if (options_.length === 0) {
-        return { outcome: { outcome: "cancelled" } };
-      }
-      const wanted = readOnly ? "reject" : "allow";
-      const chosen = options_.find((o) => (o.kind ?? "").startsWith(wanted)) ?? options_[0];
-      return { outcome: { outcome: "selected", optionId: chosen.optionId } };
-    };
+    const handlePermission = (params) => choosePermissionOption(params.options ?? [], readOnly);
     const handleReadTextFile = (params) => {
       try {
         const content = fs.readFileSync(params.path, "utf8");
@@ -31245,7 +31279,7 @@ var LaneConnection = class _LaneConnection {
         clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
       });
       const session = await ctx.buildSession(cwd).start();
-      const conn = new _LaneConnection(session, child, ctx, shutdown, () => stderrTail);
+      const conn = new _LaneConnection(session, child, ctx, shutdown, exited.promise, () => stderrTail);
       resolvedReady = true;
       ready.resolve(conn);
       await shutdown.promise;
@@ -31288,11 +31322,12 @@ function buildSpawnSpec(lane, opts, runDir) {
     }
     case "opencode": {
       const args = ["acp"];
-      if (opts.model) {
+      const model = resolveOcModel(opts.model);
+      if (model) {
         const cfgPath = path2.join(runDir, "opencode-config.json");
         fs2.writeFileSync(
           cfgPath,
-          JSON.stringify({ $schema: "https://opencode.ai/config.json", model: opts.model }, null, 2)
+          JSON.stringify({ $schema: "https://opencode.ai/config.json", model }, null, 2)
         );
         env.OPENCODE_CONFIG = cfgPath;
       }
@@ -31681,14 +31716,20 @@ var LaneManager = class {
   resolveSpec;
   stallThresholdMs;
   sessionTtlMs;
+  turnTimeoutMs;
+  handshakeTimeoutMs;
   baseRepo;
   warningsById = /* @__PURE__ */ new Map();
+  /** CP6: at most one active lane_wait per id (single-consumer contract). */
+  activeWaits = /* @__PURE__ */ new Set();
   reaperTimer = null;
   counter = 0;
   constructor(opts = {}) {
     this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
     this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
     this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+    this.turnTimeoutMs = opts.turnTimeoutMs ?? TURN_TIMEOUT_MS;
+    this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
     this.baseRepo = opts.baseRepo ?? BASE_REPO;
     if (!opts.disableReaper) {
       const period = Math.max(5e3, Math.floor(this.sessionTtlMs / 10));
@@ -31705,6 +31746,21 @@ var LaneManager = class {
     if (!LANE_NAMES.includes(params.lane)) {
       throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
     }
+    const readOnly = params.readOnly ?? false;
+    if (!readOnly && !params.worktree) {
+      throw new Error(
+        "write dispatch (read_only=false) must run in an isolated worktree: pass `worktree` (a branch name). Reads may run in-place."
+      );
+    }
+    if (!readOnly && params.cwd) {
+      const resolved = path5.resolve(params.cwd);
+      const base = path5.resolve(this.baseRepo);
+      if (resolved === base || resolved.startsWith(base + path5.sep)) {
+        throw new Error(
+          `write dispatch cwd '${resolved}' is inside the primary checkout '${base}'; writes must be isolated to a worktree`
+        );
+      }
+    }
     const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
     const runDir = path5.join(RUNS_ROOT, id);
     fs5.mkdirSync(runDir, { recursive: true });
@@ -31717,7 +31773,7 @@ var LaneManager = class {
     const opts = {
       model: params.model,
       effort: params.effort,
-      readOnly: params.readOnly ?? false
+      readOnly
     };
     const spec = this.resolveSpec(params.lane, opts, runDir);
     this.warningsById.set(id, spec.warnings);
@@ -31726,7 +31782,7 @@ var LaneManager = class {
       lane: params.lane,
       cwd,
       runDir,
-      readOnly: opts.readOnly ?? false,
+      readOnly,
       worktreeBranch: params.worktree,
       worktreePath
     });
@@ -31757,7 +31813,8 @@ var LaneManager = class {
         spec,
         cwd: run.cwd,
         readOnly: run.readOnly,
-        onFileWritten: (p) => run.recordFileWritten(p)
+        onFileWritten: (p) => run.recordFileWritten(p),
+        handshakeTimeoutMs: this.handshakeTimeoutMs
       });
     } catch (e) {
       run.failTurn(errMessage(e));
@@ -31767,24 +31824,60 @@ var LaneManager = class {
     run.sessionId = conn.sessionId;
     await this.runTurn(run, conn, prompt);
   }
-  /** Drive one prompt turn to completion, projecting events into run state. */
+  /**
+   * Drive one prompt turn to completion, projecting events into run state.
+   *
+   * CP1: every wait races three outcomes — the next ACP update, subprocess exit,
+   * and a hard per-turn timeout — so a turn always reaches a terminal state.
+   * suspected_stall stays a warning; this loop is the guaranteed terminal path.
+   */
   async runTurn(run, conn, prompt) {
     run.beginTurn(prompt);
     const promptPromise = conn.session.prompt(prompt);
     promptPromise.catch(() => {
     });
+    const turnTimer = createTimeout(this.turnTimeoutMs);
     try {
       for (; ; ) {
-        const msg2 = await conn.session.nextUpdate();
-        if (msg2.kind === "stop") {
-          await this.finalizeTurn(run, msg2.stopReason);
-          break;
+        const nextP = conn.session.nextUpdate();
+        const outcome = await Promise.race([
+          // The onRejected handler both handles a losing update's late rejection
+          // and turns a closed stream into a `closed` outcome (no unhandled reject).
+          nextP.then(
+            (m) => ({ kind: "msg", m }),
+            (err) => ({ kind: "closed", err })
+          ),
+          conn.exited.then((info) => ({ kind: "exit", info })),
+          turnTimer.promise.then(() => ({ kind: "timeout" }))
+        ]);
+        if (outcome.kind === "timeout") {
+          throw new Error(
+            `turn exceeded LANES_TURN_TIMEOUT_MS (${this.turnTimeoutMs}ms) with no completion; killing the lane`
+          );
         }
-        run.onUpdate(msg2.update);
+        if (outcome.kind === "exit" || outcome.kind === "closed") {
+          const info = outcome.kind === "exit" ? outcome.info : await Promise.race([conn.exited, createTimeout(500).promise.then(() => null)]);
+          if (info) {
+            const { code, signal, stderr } = info;
+            throw new Error(
+              `lane process exited mid-turn (code=${code} signal=${signal})${stderr.trim() ? `; stderr: ${stderr.trim().slice(-400)}` : ""}`
+            );
+          }
+          throw new Error(
+            `ACP connection closed mid-turn: ${outcome.kind === "closed" ? errMessage(outcome.err) : "process exited"}`
+          );
+        }
+        if (outcome.m.kind === "stop") {
+          await this.finalizeTurn(run, outcome.m.stopReason);
+          return;
+        }
+        run.onUpdate(outcome.m.update);
       }
-      await promptPromise;
     } catch (e) {
       run.failTurn(errMessage(e));
+      await this.close(run.id);
+    } finally {
+      turnTimer.cancel();
     }
   }
   async finalizeTurn(run, stopReason) {
@@ -31805,13 +31898,21 @@ var LaneManager = class {
   async wait(id, timeoutMs) {
     const run = this.runs.get(id);
     if (!run) throw new Error(`run '${id}' not found`);
-    const budget = clampWait(timeoutMs);
-    const deadline = Date.now() + budget;
-    while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      await run.waitForSignal(Math.min(remaining, 1e3));
+    if (this.activeWaits.has(id)) {
+      throw new Error(`lane_wait already in progress for '${id}' (one waiter per run)`);
     }
-    return this.buildWaitResult(run);
+    this.activeWaits.add(id);
+    try {
+      const budget = clampWait(timeoutMs);
+      const deadline = Date.now() + budget;
+      while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
+        const remaining = deadline - Date.now();
+        await run.waitForSignal(Math.min(remaining, 1e3));
+      }
+      return this.buildWaitResult(run);
+    } finally {
+      this.activeWaits.delete(id);
+    }
   }
   /** Blocking convenience: start + loop wait until the first turn is terminal. */
   async dispatchBlocking(params, onProgress) {
@@ -31925,6 +32026,14 @@ var LaneManager = class {
 };
 function errMessage(e) {
   return e instanceof Error ? e.message : String(e);
+}
+function createTimeout(ms) {
+  let handle;
+  const promise2 = new Promise((resolve) => {
+    handle = setTimeout(resolve, ms);
+    handle.unref?.();
+  });
+  return { promise: promise2, cancel: () => clearTimeout(handle) };
 }
 function dedupe(items) {
   return [...new Set(items)];

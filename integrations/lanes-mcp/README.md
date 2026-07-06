@@ -48,8 +48,8 @@ lanes MCP server (resident, one process)
 
 | Tool | Purpose |
 |---|---|
-| `lane_dispatch_start(lane, prompt, cwd?, worktree?, model?, effort?, read_only?)` | Start a turn, return `{id}` immediately. |
-| `lane_wait(id, timeout_ms?)` | Long-poll (default 30s, cap 55s). Returns `{status, digest, plan_summary, last_event_age_ms, suspected_stall}`; when terminal also `{final_message, touched_files, plan_final}`. |
+| `lane_dispatch_start(lane, prompt, cwd?, worktree?, model?, effort?, read_only?)` | Start a turn, return `{id}` immediately. A write dispatch (`read_only:false`) **requires** `worktree` and refuses a `cwd` inside the primary checkout. |
+| `lane_wait(id, timeout_ms?)` | Long-poll (default 30s, cap 55s). Returns `{status, digest, plan_summary, last_event_age_ms, suspected_stall}`; when terminal also `{final_message, touched_files, plan_final}`. One waiter per id (concurrent waits are rejected). |
 | `lane_dispatch(...)` | Convenience: start + loop wait until the turn completes (simple blocking path). |
 | `lane_prompt(id, prompt)` | New turn on an existing session (persistent-session reuse). |
 | `lane_status(id)` | Cheap snapshot: plan counts + current step, `tool_calls`, `last_event_age_ms`, `suspected_stall`. |
@@ -114,7 +114,9 @@ installed `codex-acp` / `opencode` / `grok` CLIs.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `LANES_STALL_THRESHOLD_MS` | 300000 | Silence before a running turn is `suspected_stall`. |
+| `LANES_STALL_THRESHOLD_MS` | 300000 | Silence before a running turn is `suspected_stall` (a warning). |
+| `LANES_TURN_TIMEOUT_MS` | 2700000 | Hard per-turn ceiling — the guaranteed terminal path: on hit the turn is forced to `error` and the subprocess killed. |
+| `LANES_HANDSHAKE_TIMEOUT_MS` | 30000 | Handshake timeout before a lane spawn is failed. |
 | `LANES_SESSION_TTL_MS` | 600000 | Idle-session TTL before the reaper closes it. |
 | `LANES_WAIT_DEFAULT_MS` / `LANES_WAIT_MAX_MS` | 30000 / 55000 | `lane_wait` window / cap. |
 | `LANES_PROGRESS_EXPERIMENTAL` | unset | `=1` enables channel one (`notifications/progress`) — experimental until Step 0's leader test. |
