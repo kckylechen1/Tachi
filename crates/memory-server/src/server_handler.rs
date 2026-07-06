@@ -295,7 +295,7 @@ impl ServerHandler for MemoryServer {
                     let exposure = self.tool_discovery.mcp_tool_exposure_mode;
                     if exposure == McpToolExposureMode::Gateway {
                         Err(rmcp::ErrorData::invalid_params(
-                            "Direct skill tools are disabled for gateway mode; use run_skill"
+                            "Direct skill tools are disabled for gateway mode; use tachi_skill(action='run')"
                                 .to_string(),
                             None,
                         ))

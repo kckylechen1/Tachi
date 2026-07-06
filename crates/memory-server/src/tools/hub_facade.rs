@@ -141,7 +141,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Execute a registered Skill from the Hub using the internal LLM pipeline."
+        description = "Standalone skill execution compatibility route. Prefer canonical tachi_skill(action='run') for new callers; this direct run_skill route remains callable for backcompat."
     )]
     pub(crate) async fn run_skill(
         &self,
@@ -201,7 +201,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Prepare a host-aware capability bundle for a task query. Returns the primary skill, supporting capabilities, relevant packs, suggested host-native tools, and a ready-to-inject bundle section. Standard agents may also use tachi_skill(action='bundle')."
+        description = "Standalone capability bundle preparation compatibility route. Prefer canonical tachi_skill(action='bundle') for new callers; this direct prepare_capability_bundle route remains callable for backcompat."
     )]
     pub(crate) async fn prepare_capability_bundle(
         &self,
