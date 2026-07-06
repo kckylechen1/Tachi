@@ -1,13 +1,11 @@
 pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
-    "tachi_task_brief",
     "tachi_wiki_search",
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
     "hub_discover",
-    "search_memory",
     "memory_graph",
     "list_memories",
     "memory_stats",
@@ -35,8 +33,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
 ];
 
 pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
-    "save_memory",
-    "remember",
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     "extract_facts",
@@ -58,11 +54,8 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
 ];
 
 pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
-    "check_inbox",
     "handoff_check",
     "handoff_leave",
-    "post_card",
-    "update_card",
     // Facade coordination tools
     "tachi_handoff",
     "tachi_workflow",

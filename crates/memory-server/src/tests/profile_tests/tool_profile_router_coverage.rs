@@ -53,6 +53,7 @@ fn bundle_count(tool_name: &str) -> usize {
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "add_edge",
     "chain_skills",
+    "check_inbox",
     "delete_domain",
     "delete_memory",
     "distill_trajectory",
@@ -80,19 +81,24 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "pack_register",
     "pack_remove",
     "projection_list",
+    "post_card",
     "register_domain",
+    "remember",
     "sandbox_check",
     "sandbox_exec_audit",
     "sandbox_get_policy",
     "sandbox_list_policies",
     "sandbox_set_policy",
     "sandbox_set_rule",
+    "save_memory",
+    "search_memory",
     "set_state",
     "skill_evolve",
     "tachi_audit_log",
     "tachi_board",
     "tachi_dispatch",
     "tachi_init_project_db",
+    "tachi_task_brief",
     "tachi_wiki_organize",
     "vault_get",
     "vault_init",
@@ -107,6 +113,7 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     "vc_list",
     "vc_register",
     "vc_resolve",
+    "update_card",
 ];
 
 const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
@@ -118,12 +125,9 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "handoff_check",
     "handoff_leave",
     "ingest_event",
-    "post_card",
     "project_agent_profile",
     "queue_agent_evolution",
-    "remember",
     "review_agent_evolution_proposal",
-    "save_memory",
     "sync_memories",
     "synthesize_agent_evolution",
     "tachi_complete",
@@ -135,7 +139,6 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "tachi_verify",
     "tachi_save",
     "tachi_wiki_write",
-    "update_card",
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
@@ -153,6 +156,16 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
 ];
 
 const FOLDED_NATIVE_COMPAT_TOOLS: &[&str] = &["get_memory", "tachi_board", "tachi_dispatch"];
+
+const PROFILE_RETIRED_DIRECT_TOOLS: &[&str] = &[
+    "check_inbox",
+    "post_card",
+    "remember",
+    "save_memory",
+    "search_memory",
+    "tachi_task_brief",
+    "update_card",
+];
 
 #[test]
 fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
@@ -279,6 +292,27 @@ fn folded_native_compat_tools_stay_admin_only() {
             !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
                 && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
             "folded compatibility tool '{tool_name}' must not be exposed through minimal profiles"
+        );
+    }
+}
+
+#[test]
+fn profile_retired_direct_tools_stay_admin_only() {
+    let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
+
+    for tool_name in PROFILE_RETIRED_DIRECT_TOOLS {
+        assert!(
+            route_names.contains(*tool_name),
+            "profile-retired direct tool '{tool_name}' should remain routable for admin/backcompat"
+        );
+        assert!(
+            bundle_count(tool_name) == 0,
+            "profile-retired direct tool '{tool_name}' must not re-enter non-admin profile bundles"
+        );
+        assert!(
+            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(tool_name)
+                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(tool_name),
+            "profile-retired direct tool '{tool_name}' must not be exposed through minimal profiles"
         );
     }
 }
