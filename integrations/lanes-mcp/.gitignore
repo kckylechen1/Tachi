@@ -1,0 +1,8 @@
+node_modules/
+/dist/
+*.log
+.test-tmp/
+# The plugin server bundle is a shipped artifact (see plugin/README.md); the repo
+# root .gitignore excludes all dist/, so re-include this one explicitly.
+!plugin/dist/
+!plugin/dist/lanes-mcp.mjs

@@ -1,0 +1,380 @@
+/**
+ * LaneManager — owns lane sessions across their whole lifecycle: spawn +
+ * handshake, per-turn prompt loops, plan/status projection, long-poll (lane_wait),
+ * cancel, persistent-session reuse (lane_prompt), worktree cleanup, and the
+ * idle-TTL reaper.
+ *
+ * The spawn recipe is resolved through an injectable `resolveSpec` so tests can
+ * point every lane at a scripted fake ACP agent while production uses the real
+ * lane registry.
+ */
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { LaneConnection } from "./acp-client.js";
+import {
+  BASE_REPO,
+  DEFAULT_STALL_THRESHOLD_MS,
+  DEFAULT_WAIT_MS,
+  MAX_WAIT_MS,
+  RUNS_ROOT,
+} from "./constants.js";
+import { buildSpawnSpec } from "./lanes.js";
+import { LaneRun } from "./run.js";
+import type {
+  LaneName,
+  LaneRequestOptions,
+  LaneStatusView,
+  RunFinal,
+  RunStatus,
+  SpawnSpec,
+} from "./types.js";
+import { LANE_NAMES } from "./types.js";
+import { changedFiles, createWorktree, isGitWorkTree, removeIfClean } from "./worktree.js";
+
+export interface DispatchParams extends LaneRequestOptions {
+  lane: LaneName;
+  prompt: string;
+  cwd?: string;
+  worktree?: string;
+}
+
+export interface WaitResult {
+  id: string;
+  lane: LaneName;
+  status: RunStatus;
+  digest: string;
+  plan_summary: string;
+  last_event_age_ms: number;
+  suspected_stall: boolean;
+  warnings?: string[];
+  // present when status is terminal
+  final_message?: string;
+  touched_files?: string[];
+  plan_final?: RunFinal["plan_final"];
+  worktree_retained?: string;
+  error?: string;
+}
+
+export interface LaneListEntry {
+  id: string;
+  lane: LaneName;
+  state: "working" | "idle" | "stalled" | "closed";
+  idle_ms: number;
+  turns_count: number;
+  plan_summary: string;
+  suspected_stall: boolean;
+}
+
+export type SpecResolver = (lane: LaneName, opts: LaneRequestOptions, runDir: string) => SpawnSpec;
+
+export interface LaneManagerOptions {
+  resolveSpec?: SpecResolver;
+  stallThresholdMs?: number;
+  sessionTtlMs?: number;
+  baseRepo?: string;
+  /** Disable the background reaper (tests drive reaping manually). */
+  disableReaper?: boolean;
+}
+
+const DEFAULT_SESSION_TTL_MS = envInt("LANES_SESSION_TTL_MS", 600_000);
+
+export class LaneManager {
+  private readonly runs = new Map<string, LaneRun>();
+  private readonly connections = new Map<string, LaneConnection>();
+  private readonly resolveSpec: SpecResolver;
+  private readonly stallThresholdMs: number;
+  private readonly sessionTtlMs: number;
+  private readonly baseRepo: string;
+  private readonly warningsById = new Map<string, string[]>();
+  private reaperTimer: NodeJS.Timeout | null = null;
+  private counter = 0;
+
+  constructor(opts: LaneManagerOptions = {}) {
+    this.resolveSpec = opts.resolveSpec ?? buildSpawnSpec;
+    this.stallThresholdMs = opts.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS;
+    this.sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+    this.baseRepo = opts.baseRepo ?? BASE_REPO;
+    if (!opts.disableReaper) {
+      const period = Math.max(5_000, Math.floor(this.sessionTtlMs / 10));
+      this.reaperTimer = setInterval(() => void this.reap(), period);
+      this.reaperTimer.unref?.();
+    }
+  }
+
+  // ---- dispatch -----------------------------------------------------------
+
+  /**
+   * Start a lane turn without blocking. Setup errors (unknown lane, worktree
+   * creation) throw here; runtime errors surface through lane_wait.
+   */
+  async dispatchStart(params: DispatchParams): Promise<{ id: string; warnings: string[] }> {
+    if (!LANE_NAMES.includes(params.lane)) {
+      throw new Error(`unknown lane '${params.lane}'; expected one of ${LANE_NAMES.join(", ")}`);
+    }
+    const id = `${params.lane}-${(++this.counter).toString(36)}${crypto.randomBytes(2).toString("hex")}`;
+    const runDir = path.join(RUNS_ROOT, id);
+    fs.mkdirSync(runDir, { recursive: true });
+
+    let cwd = params.cwd ?? this.baseRepo;
+    let worktreePath: string | undefined;
+    if (params.worktree) {
+      worktreePath = await createWorktree(params.worktree, this.baseRepo);
+      cwd = worktreePath;
+    }
+
+    const opts: LaneRequestOptions = {
+      model: params.model,
+      effort: params.effort,
+      readOnly: params.readOnly ?? false,
+    };
+    const spec = this.resolveSpec(params.lane, opts, runDir);
+    this.warningsById.set(id, spec.warnings);
+
+    const run = new LaneRun({
+      id,
+      lane: params.lane,
+      cwd,
+      runDir,
+      readOnly: opts.readOnly ?? false,
+      worktreeBranch: params.worktree,
+      worktreePath,
+    });
+    this.runs.set(id, run);
+
+    void this.driveNewSession(run, spec, params.prompt);
+    return { id, warnings: spec.warnings };
+  }
+
+  /** Start a new turn on an existing, still-open session. */
+  async promptExisting(id: string, prompt: string): Promise<{ id: string }> {
+    const run = this.runs.get(id);
+    if (!run || run.sessionClosed) {
+      throw new Error(`session '${id}' not found or already reaped; start a new dispatch`);
+    }
+    if (run.turnStatus === "running") {
+      throw new Error(`session '${id}' already has a turn in progress`);
+    }
+    const conn = this.connections.get(id);
+    if (!conn) {
+      throw new Error(`session '${id}' has no live connection`);
+    }
+    void this.runTurn(run, conn, prompt);
+    return { id };
+  }
+
+  private async driveNewSession(run: LaneRun, spec: SpawnSpec, prompt: string): Promise<void> {
+    let conn: LaneConnection;
+    try {
+      conn = await LaneConnection.connect({
+        spec,
+        cwd: run.cwd,
+        readOnly: run.readOnly,
+        onFileWritten: (p) => run.recordFileWritten(p),
+      });
+    } catch (e) {
+      run.failTurn(errMessage(e));
+      return;
+    }
+    this.connections.set(run.id, conn);
+    run.sessionId = conn.sessionId;
+    await this.runTurn(run, conn, prompt);
+  }
+
+  /** Drive one prompt turn to completion, projecting events into run state. */
+  private async runTurn(run: LaneRun, conn: LaneConnection, prompt: string): Promise<void> {
+    run.beginTurn(prompt);
+    const promptPromise = conn.session.prompt(prompt);
+    promptPromise.catch(() => {
+      /* rejection surfaced via nextUpdate / awaited below */
+    });
+    try {
+      for (;;) {
+        const msg = await conn.session.nextUpdate();
+        if (msg.kind === "stop") {
+          await this.finalizeTurn(run, msg.stopReason);
+          break;
+        }
+        run.onUpdate(msg.update);
+      }
+      await promptPromise;
+    } catch (e) {
+      run.failTurn(errMessage(e));
+    }
+  }
+
+  private async finalizeTurn(run: LaneRun, stopReason: string): Promise<void> {
+    // Compute git-detected changes for this turn's cwd (union with ACP signals).
+    let gitTouched: string[] = [];
+    try {
+      if (await isGitWorkTree(run.cwd)) gitTouched = await changedFiles(run.cwd);
+    } catch {
+      /* non-fatal: fall back to ACP-derived signals only */
+    }
+    const touched = dedupe([...gitTouched, ...run.toolTouchedFiles()]);
+    run.setFinalTouched(touched);
+    if (stopReason === "cancelled") {
+      run.cancelTurn();
+    } else {
+      run.completeTurn();
+    }
+  }
+
+  // ---- long-poll ----------------------------------------------------------
+
+  async wait(id: string, timeoutMs?: number): Promise<WaitResult> {
+    const run = this.runs.get(id);
+    if (!run) throw new Error(`run '${id}' not found`);
+    const budget = clampWait(timeoutMs);
+    const deadline = Date.now() + budget;
+
+    while (!run.isTerminalTurn() && !run.hasUnreported() && Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      await run.waitForSignal(Math.min(remaining, 1_000));
+    }
+    return this.buildWaitResult(run);
+  }
+
+  /** Blocking convenience: start + loop wait until the first turn is terminal. */
+  async dispatchBlocking(
+    params: DispatchParams,
+    onProgress?: (r: WaitResult) => void,
+  ): Promise<WaitResult> {
+    const { id } = await this.dispatchStart(params);
+    for (;;) {
+      const r = await this.wait(id, MAX_WAIT_MS);
+      onProgress?.(r);
+      if (r.status !== "running") return r;
+    }
+  }
+
+  private buildWaitResult(run: LaneRun): WaitResult {
+    const status = run.turnStatus;
+    const result: WaitResult = {
+      id: run.id,
+      lane: run.lane,
+      status,
+      digest: run.drainDigest(),
+      plan_summary: run.planSummary(),
+      last_event_age_ms: run.lastEventAgeMs(),
+      suspected_stall: run.suspectedStall(this.stallThresholdMs),
+    };
+    const warnings = this.warningsById.get(run.id);
+    if (warnings && warnings.length) result.warnings = warnings;
+    if (run.isTerminalTurn()) {
+      result.final_message = run.finalMessage();
+      result.touched_files = run.finalTouched();
+      result.plan_final = run.planState();
+      if (run.error) result.error = run.error;
+      if (run.worktreeRetained) result.worktree_retained = run.worktreeRetained;
+    }
+    return result;
+  }
+
+  // ---- cheap queries ------------------------------------------------------
+
+  status(id: string): LaneStatusView {
+    const run = this.runs.get(id);
+    if (!run) throw new Error(`run '${id}' not found`);
+    return {
+      id: run.id,
+      lane: run.lane,
+      status: run.turnStatus,
+      plan_summary: run.planSummary(),
+      plan: run.planState(),
+      tool_calls: run.toolCalls(),
+      last_event_age_ms: run.lastEventAgeMs(),
+      suspected_stall: run.suspectedStall(this.stallThresholdMs),
+      cwd: run.cwd,
+      ...(run.worktreePath ? { worktree: run.worktreePath } : {}),
+    };
+  }
+
+  list(): LaneListEntry[] {
+    const out: LaneListEntry[] = [];
+    for (const run of this.runs.values()) {
+      if (run.sessionClosed) continue;
+      out.push({
+        id: run.id,
+        lane: run.lane,
+        state: run.sessionState(this.stallThresholdMs),
+        idle_ms: run.idleMs(),
+        turns_count: run.turnsCount,
+        plan_summary: run.planSummary(),
+        suspected_stall: run.suspectedStall(this.stallThresholdMs),
+      });
+    }
+    return out;
+  }
+
+  // ---- cancel / close -----------------------------------------------------
+
+  async cancel(id: string): Promise<{ id: string; status: RunStatus }> {
+    const run = this.runs.get(id);
+    if (!run) throw new Error(`run '${id}' not found`);
+    const conn = this.connections.get(id);
+    if (conn) await conn.cancel();
+    return { id, status: run.turnStatus };
+  }
+
+  /** Close a session: dispose ACP session, kill subprocess, clean worktree. */
+  async close(id: string): Promise<void> {
+    const run = this.runs.get(id);
+    if (!run || run.sessionClosed) return;
+    const conn = this.connections.get(id);
+    conn?.close();
+    this.connections.delete(id);
+    if (run.worktreePath && run.worktreeBranch) {
+      try {
+        const removed = await removeIfClean(run.worktreePath, this.baseRepo);
+        if (!removed) run.worktreeRetained = run.worktreePath;
+      } catch {
+        run.worktreeRetained = run.worktreePath;
+      }
+    }
+    run.markClosed();
+  }
+
+  /** Reap idle sessions past TTL. Exposed for tests. */
+  async reap(): Promise<string[]> {
+    const reaped: string[] = [];
+    for (const run of [...this.runs.values()]) {
+      if (run.sessionClosed) continue;
+      if (run.turnStatus !== "running" && run.idleMs() > this.sessionTtlMs) {
+        await this.close(run.id);
+        reaped.push(run.id);
+      }
+    }
+    return reaped;
+  }
+
+  /** Tear down everything (server shutdown). */
+  async shutdown(): Promise<void> {
+    if (this.reaperTimer) clearInterval(this.reaperTimer);
+    this.reaperTimer = null;
+    for (const id of [...this.connections.keys()]) {
+      await this.close(id);
+    }
+  }
+}
+
+function errMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function dedupe(items: string[]): string[] {
+  return [...new Set(items)];
+}
+
+function clampWait(ms?: number): number {
+  if (ms === undefined) return DEFAULT_WAIT_MS;
+  if (!Number.isFinite(ms) || ms < 0) return DEFAULT_WAIT_MS;
+  return Math.min(ms, MAX_WAIT_MS);
+}
+
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
