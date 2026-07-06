@@ -134,6 +134,7 @@ pub(super) async fn run_cli_command(
             cards::run_card_command(action, db_path, project_db_path, app_home).await
         }
         Commands::Hub { action } => hub::run_hub_command(action, app_home).await,
+        Commands::Mcp { action } => hub::run_mcp_command(action, app_home).await,
         Commands::Doctor { .. } => {
             // Pre-handled above before run_cli_command dispatch.
             Ok(())

@@ -1,7 +1,7 @@
 use super::{
     CardAction, CleanAction, DaemonAction, DistillAction, EnvAction, FoundryAction, HarnessAction,
-    HubAction, ManifestAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction,
-    VaultAction, WatcherAction, WikiAction,
+    HubAction, ManifestAction, McpAction, PokeAction, RepairAction, RescueAction,
+    SkillSurfaceAction, VaultAction, WatcherAction, WikiAction,
 };
 use clap::Subcommand;
 use std::path::PathBuf;
@@ -105,6 +105,11 @@ pub enum Commands {
     Hub {
         #[command(subcommand)]
         action: HubAction,
+    },
+    /// Register upstream MCP servers in the Tachi Hub.
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
     },
     /// Inspect host instruction files projected from Tachi harness guidance
     Harness {
