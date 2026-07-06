@@ -1,5 +1,8 @@
 use super::*;
 
+const MAX_LABEL_LEN: usize = 48;
+const HASH_LEN: usize = 8;
+
 pub(super) fn sanitize_label(label: &str) -> String {
     let cleaned: String = label
         .chars()
@@ -13,10 +16,25 @@ pub(super) fn sanitize_label(label: &str) -> String {
         .collect();
     let trimmed = cleaned.trim_matches('_');
     if trimmed.is_empty() {
-        "run".to_string()
-    } else {
-        trimmed.chars().take(48).collect()
+        return "run".to_string();
     }
+    if trimmed.chars().count() <= MAX_LABEL_LEN {
+        return trimmed.to_string();
+    }
+    // Label exceeds the limit: keep a prefix and append a short hash of the
+    // full label so two distinct labels that share the first 48 chars don't
+    // collide on disk.
+    let prefix_len = MAX_LABEL_LEN - HASH_LEN - 1;
+    let prefix: String = trimmed.chars().take(prefix_len).collect();
+    format!("{}-{}", prefix, short_hash(label))
+}
+
+fn short_hash(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    format!("{:08x}", hasher.finish() as u32)
 }
 
 pub(super) async fn write_owner_only_file_blocking(

@@ -18,6 +18,26 @@ fn sanitize_label_replaces_unsafe_chars() {
 }
 
 #[test]
+fn sanitize_label_distinguishes_long_labels_with_shared_prefix() {
+    let common_prefix = "a".repeat(60);
+    let label_a = format!("{common_prefix}-suffix-A");
+    let label_b = format!("{common_prefix}-suffix-B");
+
+    let safe_a = sanitize_label(&label_a);
+    let safe_b = sanitize_label(&label_b);
+
+    assert_eq!(safe_a.len(), 48);
+    assert_eq!(safe_b.len(), 48);
+    assert_ne!(
+        safe_a, safe_b,
+        "distinct labels sharing a 48-char prefix must not collide"
+    );
+    let prefix_len = 39;
+    assert_eq!(&safe_a[..prefix_len], &safe_b[..prefix_len]);
+    assert_ne!(&safe_a[prefix_len..], &safe_b[prefix_len..]);
+}
+
+#[test]
 fn claude_binary_override_accepts_only_claude_executables() {
     let tmp = tempfile::tempdir().unwrap();
     let claude_path = tmp.path().join("claude");
