@@ -136,8 +136,46 @@ impl Manifest {
                 );
                 continue;
             }
-            let role = classify_role(f);
-            let owner = derive_owner(&f.scope_hint);
+            // #736: for a repo-local `<repo>/.tachi/memory.db` DB, derive the
+            // display/scope_hint identity FRESH from the project root every
+            // refresh, instead of trusting whichever alias directory this
+            // finding happened to be scanned under. `scope_hint_for` just
+            // echoes the literal on-disk alias dir name — if that dir
+            // predates a hash-derivation change (issue #736) or the scan
+            // never reaches a same-named alias at all, the stored hint goes
+            // stale and two dirs for the same DB can display two different
+            // names. Recomputing from the root makes the label a pure
+            // function of the canonical file's identity: one DB, one name,
+            // always current, regardless of alias-dir presence or scan order.
+            //
+            // This is a PURE in-memory relabel: it reads the project root
+            // path and re-derives the name, but never creates, deletes, or
+            // moves any alias directory or symlink. A plain `tachi status` /
+            // `doctor` / `manifest refresh` must not mutate the filesystem.
+            // Physical alias-dir retirement (adopting the new-name dir,
+            // retiring drifted old-hash dirs) is a separate `--fix`-gated
+            // operation tracked in #743.
+            let scope_hint = match crate::path_utils::plan_c_project_root_from_local_db(&canon) {
+                Some(project_root) => {
+                    let current_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+                        .or_else(|| {
+                            crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
+                        });
+                    match current_name {
+                        Some(name) => format!("project:{name}"),
+                        None => f.scope_hint.clone(),
+                    }
+                }
+                None => f.scope_hint.clone(),
+            };
+
+            // FIX-D (#736): derive role/owner from the CORRECTED scope hint,
+            // not the stale one on the finding. Otherwise a repo-local DB
+            // whose stored hint drifted to an old-hash name would show a
+            // `project:*` scope but `DbRole::Unknown` — a fresh mismatch this
+            // relabel would introduce. Scope and role must agree.
+            let role = classify_role(&scope_hint, &f.path);
+            let owner = derive_owner(&scope_hint);
             let allow_write = matches!(
                 f.classification,
                 DbClassification::Healthy | DbClassification::WalOrphan
@@ -149,6 +187,7 @@ impl Manifest {
                 .cloned()
                 .or_else(|| prior_notes.get(&f.path).cloned())
                 .unwrap_or_default();
+
             let entry = DbEntry {
                 path: canon_str.clone(),
                 role,
@@ -158,7 +197,7 @@ impl Manifest {
                 allow_write,
                 last_doctor_at: report.generated_at.clone(),
                 last_classification: f.classification.as_str().to_string(),
-                scope_hint: f.scope_hint.clone(),
+                scope_hint,
                 notes,
             };
             by_canon.insert(canon.clone(), entry);
@@ -300,15 +339,22 @@ fn should_record(f: &DoctorFinding) -> bool {
     class_ok && schema_ok
 }
 
-fn classify_role(f: &DoctorFinding) -> DbRole {
-    let s = f.scope_hint.as_str();
+/// Classify a DB's role from its scope hint and path.
+///
+/// Takes the scope hint as an explicit argument (rather than reading it off
+/// the `DoctorFinding`) so callers can pass the #736-corrected scope hint —
+/// a repo-local DB whose stored hint drifted to an old-hash name must end up
+/// with a role consistent with its CURRENT `project:*` label, not
+/// `DbRole::Unknown`.
+fn classify_role(scope_hint: &str, path: &str) -> DbRole {
+    let s = scope_hint;
     if s == "global" {
         DbRole::Global
     } else if s.starts_with("project:") {
         DbRole::Project
     } else if s.starts_with("openclaw-agent") {
         DbRole::Agent
-    } else if f.path.contains("/foundry/") || f.path.contains("/foundry.db") {
+    } else if path.contains("/foundry/") || path.contains("/foundry.db") {
         DbRole::Foundry
     } else if s.starts_with("antigravity") {
         // Antigravity DB is rescued in branch #6 → routed under projects/. Mark as project for now.

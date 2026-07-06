@@ -70,7 +70,15 @@ pub(crate) fn probe_db(path: &Path) -> Result<ProbeDbResult, String> {
     ))
 }
 
-const RECALL_CACHE_WHERE: &str = r#"
+/// The single "is this a non-durable recall-cache row" predicate, shared by
+/// every vector-coverage counting basis (`tachi status`'s health probe here,
+/// AND `tachi backfill-vectors`'s Total/Missing counters in
+/// `bootstrap/backfill.rs`) so the two surfaces never diverge on what counts
+/// as a "durable" memory row (#736 requirement 3: the two surfaces must
+/// agree, or state their basis explicitly — this makes them agree by
+/// construction instead of duplicating a narrower ad hoc filter).
+/// Unaliased form, for queries over a bare `memories` table.
+pub(crate) const RECALL_CACHE_WHERE: &str = r#"
     id = 'foundry_recall_rerank_cache'
     OR id LIKE 'foundry:recall-cache:%'
     OR source = 'foundry_recall_rerank_cache'
@@ -84,7 +92,9 @@ const RECALL_CACHE_WHERE: &str = r#"
     OR COALESCE(json_extract(metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
 "#;
 
-const RECALL_CACHE_WHERE_M: &str = r#"
+/// Same predicate as [`RECALL_CACHE_WHERE`], `m.`-qualified for queries that
+/// join `memories AS m` against another table (e.g. `memories_vec`).
+pub(crate) const RECALL_CACHE_WHERE_M: &str = r#"
     m.id = 'foundry_recall_rerank_cache'
     OR m.id LIKE 'foundry:recall-cache:%'
     OR m.source = 'foundry_recall_rerank_cache'
