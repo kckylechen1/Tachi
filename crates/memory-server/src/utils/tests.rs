@@ -1,6 +1,142 @@
 use super::file::MAX_APPEND_ONLY_JSONL_LINE_BYTES;
 use super::*;
 use serde_json::json;
+use std::path::{Path, PathBuf};
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set_path(key: &'static str, value: &Path) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests that use this helper hold global_test_lock.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+
+    fn unset(key: &'static str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests that use this helper hold global_test_lock.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: tests that use this helper hold global_test_lock.
+        unsafe {
+            if let Some(value) = self.original.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+struct CwdGuard {
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn set(path: &Path) -> Self {
+        let original = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(path).expect("set cwd");
+        Self { original }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        std::env::set_current_dir(&self.original).expect("restore cwd");
+    }
+}
+
+fn make_git_root(parent: &Path, name: &str) -> PathBuf {
+    let root = parent.join(name);
+    std::fs::create_dir_all(root.join(".git")).expect("create fake git root");
+    root
+}
+
+fn clear_workspace_root_env() -> Vec<EnvGuard> {
+    vec![
+        EnvGuard::unset("TACHI_PROJECT_ROOT"),
+        EnvGuard::unset("TACHI_WORKSPACE_ROOT"),
+        EnvGuard::unset("PROJECT_ROOT"),
+        EnvGuard::unset("WORKSPACE_ROOT"),
+        EnvGuard::unset("WORKSPACE"),
+        EnvGuard::unset("PWD"),
+    ]
+}
+
+#[test]
+fn find_project_git_root_prefers_real_cwd_over_stale_pwd() {
+    let _lock = global_test_lock().lock().expect("global test lock");
+    let _env = clear_workspace_root_env();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd_root = make_git_root(dir.path(), "cwd-repo");
+    let pwd_root = make_git_root(dir.path(), "stale-pwd-repo");
+    let nested = cwd_root.join("nested");
+    std::fs::create_dir_all(&nested).expect("create nested cwd");
+    let _cwd = CwdGuard::set(&nested);
+    let _pwd = EnvGuard::set_path("PWD", &pwd_root);
+
+    let resolved = find_project_git_root().expect("resolve project root");
+
+    assert_eq!(
+        resolved,
+        cwd_root.canonicalize().expect("canonical cwd root")
+    );
+}
+
+#[test]
+fn find_project_git_root_prefers_explicit_tachi_root_over_cwd_and_pwd() {
+    let _lock = global_test_lock().lock().expect("global test lock");
+    let _env = clear_workspace_root_env();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let explicit_root = make_git_root(dir.path(), "explicit-repo");
+    let cwd_root = make_git_root(dir.path(), "cwd-repo");
+    let pwd_root = make_git_root(dir.path(), "stale-pwd-repo");
+    let _cwd = CwdGuard::set(&cwd_root);
+    let _project = EnvGuard::set_path("TACHI_PROJECT_ROOT", &explicit_root);
+    let _pwd = EnvGuard::set_path("PWD", &pwd_root);
+
+    let resolved = find_project_git_root().expect("resolve project root");
+
+    assert_eq!(
+        resolved,
+        explicit_root
+            .canonicalize()
+            .expect("canonical explicit root")
+    );
+}
+
+#[test]
+fn find_git_root_from_linked_worktree_resolves_primary_checkout_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let primary = make_git_root(dir.path(), "primary");
+    let linked = dir.path().join("linked");
+    std::fs::create_dir_all(&linked).expect("create linked worktree");
+    let worktree_git_dir = primary.join(".git/worktrees/linked");
+    std::fs::create_dir_all(&worktree_git_dir).expect("create worktree git dir");
+    std::fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", worktree_git_dir.display()),
+    )
+    .expect("write linked .git file");
+    std::fs::write(worktree_git_dir.join("commondir"), "../..").expect("write commondir");
+
+    let resolved = find_git_root_from(&linked).expect("resolve linked worktree root");
+
+    assert_eq!(resolved, primary.canonicalize().expect("canonical primary"));
+}
 
 #[test]
 fn append_owner_only_jsonl_line_caps_size_and_restricts_file() {
