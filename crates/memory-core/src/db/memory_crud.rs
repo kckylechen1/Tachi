@@ -507,3 +507,26 @@ pub fn supersede_memory(
     )?;
     Ok(conn.changes() > 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::simple_query_input;
+
+    #[test]
+    fn simple_query_input_treats_fts_punctuation_as_separators() {
+        let cases = [
+            (")))", ""),
+            ("!!!", ""),
+            ("  foo  ", "foo"),
+            ("foo_bar-baz.qux", "foo_bar-baz.qux"),
+            ("don't \"panic\"", "don t panic"),
+            ("foo)))bar", "foo bar"),
+            ("spaced\twords\nok", "spaced words ok"),
+            ("模型（搜索）", "模型 搜索"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(simple_query_input(input), expected, "input={input:?}");
+        }
+    }
+}
