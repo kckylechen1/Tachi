@@ -80,6 +80,10 @@ fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&st
     }
 }
 
+fn external_llm_input(text: &str) -> String {
+    crate::memory_search_ops::scrub_secrets(text).0
+}
+
 /// Batch enrichment queue configuration.
 pub(super) const ENRICH_BATCH_MAX: usize = 32;
 pub(super) const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
@@ -230,7 +234,7 @@ impl MemoryServer {
             .filter(|(_, item)| item.needs_summary)
             .map(|(i, item)| {
                 let llm = self.llm.clone();
-                let text = item.text.clone();
+                let text = external_llm_input(&item.text);
                 async move { (i, llm.generate_summary(&text).await) }
             })
             .collect();
@@ -259,7 +263,7 @@ impl MemoryServer {
             .filter(|(_, item)| item.needs_metadata)
             .map(|(i, item)| {
                 let llm = self.llm.clone();
-                let text = item.text.clone();
+                let text = external_llm_input(&item.text);
                 async move { (i, llm.extract_metadata(&text).await) }
             })
             .collect();
@@ -561,7 +565,16 @@ fn derive_path_prefix(server: &MemoryServer, item: &EnrichmentItem) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::should_defer_enrichment_failure;
+    use super::{external_llm_input, should_defer_enrichment_failure};
+
+    #[test]
+    fn external_llm_input_scrubs_secret_patterns() {
+        let input = "extract metadata for api_key=sk-abcdefghijklmnopqrstuvwxyz123456";
+        let output = external_llm_input(input);
+
+        assert!(output.contains("[REDACTED]"));
+        assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+    }
 
     #[test]
     fn transient_provider_enrichment_errors_are_deferred() {
