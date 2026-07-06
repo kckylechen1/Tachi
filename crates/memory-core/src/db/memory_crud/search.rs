@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
 
-use super::{normalize_utc_iso, row_to_entry, serialize_f32, MEMORY_SELECT_COLUMNS};
+use super::{
+    normalize_utc_iso, row_to_entry, serialize_f32, simple_query_input, MEMORY_SELECT_COLUMNS,
+};
 
 /// KNN vector search via sqlite-vec.
 /// Returns (doc_id -> cosine_distance) for the top `top_k` results.
@@ -74,15 +76,9 @@ pub fn search_fts(
     path_prefix: Option<&str>,
     as_of: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    // Sanitise query: remove potentially dangerous characters
-    let safe_query: String = query
-        .chars()
-        .filter(|c| {
-            c.is_alphanumeric() || c.is_whitespace() || matches!(c, '"' | '\'' | '-' | '_' | '.')
-        })
-        .collect();
+    let safe_query = simple_query_input(query);
 
-    if safe_query.trim().is_empty() {
+    if safe_query.is_empty() {
         return Ok(HashMap::new());
     }
 

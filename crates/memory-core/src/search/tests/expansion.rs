@@ -132,6 +132,34 @@ fn fts_or_fallback_cjk_phrase_recovers_when_ascii_term_is_missing() {
 }
 
 #[test]
+fn hybrid_search_treats_unbalanced_parentheses_as_literal_noise() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "paren-noise-target",
+        "AbsentToken survives a search query with unbalanced parentheses.",
+        &["AbsentToken"],
+    );
+
+    let opts = SearchOptions {
+        top_k: 5,
+        candidates_per_channel: 10,
+        record_access: false,
+        ..Default::default()
+    };
+
+    let results = hybrid_search(&conn, "))) AbsentToken (((", &opts)
+        .expect("punctuation in user search text must not surface FTS5 syntax errors");
+
+    assert!(
+        results
+            .iter()
+            .any(|result| result.entry.id == "paren-noise-target"),
+        "sanitized query should still find the lexical token"
+    );
+}
+
+#[test]
 fn hybrid_recovers_candidate_starved_partial_coverage_target_through_or_fallback() {
     let mut conn = setup();
     let mut target = memory_entry(

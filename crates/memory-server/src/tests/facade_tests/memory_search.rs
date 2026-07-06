@@ -118,6 +118,58 @@ async fn tachi_memory_search_caps_large_top_k() {
 }
 
 #[tokio::test]
+async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parentheses() {
+    let server = make_server();
+    let mut entry = make_entry("direct-search-paren-noise");
+    entry.summary = "direct search parenthesis regression".to_string();
+    entry.text =
+        "ParenNoiseNeedle should survive unbalanced parentheses in search input.".to_string();
+    entry.keywords = vec!["ParenNoiseNeedle".to_string()];
+    server
+        .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("seed: {e}")))
+        .expect("seed paren regression entry");
+
+    let params = TachiSearchParams {
+        query: "))) ParenNoiseNeedle (((".to_string(),
+        scope: "memory".to_string(),
+        top_k: 5,
+        path_prefix: None,
+        project: None,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+    };
+
+    let (sections, _, _) =
+        crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
+    let memory_rows = sections
+        .iter()
+        .find(|(name, _)| name == "Memory")
+        .map(|(_, rows)| rows)
+        .expect("memory section");
+
+    assert!(
+        !memory_rows
+            .as_str()
+            .is_some_and(|rows| rows.contains("fts5: syntax error")),
+        "facade must not render FTS syntax errors as user-facing rows: {memory_rows}"
+    );
+    assert!(
+        memory_rows
+            .to_string()
+            .contains("direct-search-paren-noise"),
+        "sanitized query should still find the lexical token, got: {memory_rows}"
+    );
+}
+
+#[tokio::test]
 async fn direct_tachi_search_caps_large_top_k() {
     let server = make_server();
     server

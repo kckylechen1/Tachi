@@ -47,6 +47,25 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     }
 }
 
+fn simple_query_input(query: &str) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+
+    for ch in query.chars() {
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            if pending_space && !out.is_empty() {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(ch);
+        } else if ch.is_whitespace() || !out.is_empty() {
+            pending_space = true;
+        }
+    }
+
+    out
+}
+
 pub(crate) const MEMORY_SELECT_COLUMNS: &str = "id,path,summary,text,importance,timestamp,valid_from,valid_until,category,topic,keywords,'[]' AS persons,entities,'' AS location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain,recall_count,query_diversity,tier";
 const MEMORY_SELECT_COLUMNS_QUALIFIED: &str = "m.id,m.path,m.summary,m.text,m.importance,m.timestamp,m.valid_from,m.valid_until,m.category,m.topic,m.keywords,'[]' AS persons,m.entities,'' AS location,m.source,m.scope,m.archived,m.access_count,m.last_access,m.revision,m.metadata,m.retention_policy,m.domain,m.recall_count,m.query_diversity,m.tier";
 
@@ -185,12 +204,14 @@ pub fn upsert(
 
     if is_new {
         // Run FTS search for potential overlapping entries
-        let safe_query: String = entry
-            .text
-            .split_whitespace()
-            .take(12)
-            .collect::<Vec<_>>()
-            .join(" ");
+        let safe_query = simple_query_input(
+            &entry
+                .text
+                .split_whitespace()
+                .take(12)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         if !safe_query.is_empty() {
             let fts_candidates: Vec<(String, String)> = {
                 let mut stmt = tx.prepare(
@@ -485,4 +506,27 @@ pub fn supersede_memory(
         params![superseded_by, now, id],
     )?;
     Ok(conn.changes() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::simple_query_input;
+
+    #[test]
+    fn simple_query_input_treats_fts_punctuation_as_separators() {
+        let cases = [
+            (")))", ""),
+            ("!!!", ""),
+            ("  foo  ", "foo"),
+            ("foo_bar-baz.qux", "foo_bar-baz.qux"),
+            ("don't \"panic\"", "don t panic"),
+            ("foo)))bar", "foo bar"),
+            ("spaced\twords\nok", "spaced words ok"),
+            ("模型（搜索）", "模型 搜索"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(simple_query_input(input), expected, "input={input:?}");
+        }
+    }
 }
