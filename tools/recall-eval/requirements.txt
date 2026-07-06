@@ -1,0 +1,10 @@
+# Runtime dep for the recall-eval toolchain (tachi#708 Phase A).
+# build_cases.py + the MCP client + matrix/attribution drivers use only the
+# stdlib plus `requests` (streamable-HTTP MCP transport to the local daemon).
+# No paid external API is called; the only network target is the localhost
+# Tachi daemon (default http://127.0.0.1:6919/mcp).
+requests>=2.31
+
+# NOTE: zvec_column.py talks to the tools/zvec-shadow sidecar over HTTP and
+# needs no extra deps here; the sidecar itself pulls sqlite-vec/zvec/numpy from
+# tools/zvec-shadow/requirements.txt.

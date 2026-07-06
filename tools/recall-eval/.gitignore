@@ -1,0 +1,16 @@
+# The recall-eval toolchain reads the operator's REAL private Tachi memory.db
+# and emits labeled cases + reports that embed real query text and memory ids.
+# NONE of that may be committed (privacy line: aggregate numbers only, hand-
+# lifted into the PR/issue). Regenerate locally with build_cases.py etc.
+# Mirrors tools/zvec-shadow/.gitignore.
+cases.local.json
+cases*.local.json
+
+# All report artifacts -- detail (.local.jsonl) AND aggregate .md this round
+# (a human摘 the aggregate numbers into the umbrella issue by hand).
+reports/*.jsonl
+reports/*.md
+!reports/.gitkeep
+
+__pycache__/
+*.pyc
