@@ -203,6 +203,14 @@ async fn replace_stale_daemon_if_needed(app_home: &Path, global_db_path: &Path) 
     let Some(pid) = info.pid else {
         return;
     };
+    if trading_hours_kill_guard_enabled() && is_within_trading_hours() {
+        eprintln!(
+            "[auto-daemon] stale daemon pid={pid} v{} detected but trading hours guard active; \
+             deferring replacement to off-hours (after 15:30 Asia/Shanghai)",
+            info.version.as_deref().unwrap_or("?"),
+        );
+        return;
+    }
     eprintln!(
         "[auto-daemon] replacing stale daemon pid={pid} v{} (< v{})",
         info.version.as_deref().unwrap_or("?"),

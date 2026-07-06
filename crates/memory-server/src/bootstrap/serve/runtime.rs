@@ -135,3 +135,20 @@ pub(super) async fn sigterm() {
         std::future::pending::<()>().await;
     }
 }
+
+pub(super) fn trading_hours_kill_guard_enabled() -> bool {
+    std::env::var("TACHI_TRADING_HOURS_GUARD")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+pub(super) fn is_within_trading_hours() -> bool {
+    use chrono::{Datelike, TimeZone, Timelike};
+    let cst = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+    let now = cst.from_utc_datetime(&chrono::Utc::now().naive_utc());
+    if now.weekday().num_days_from_monday() >= 5 {
+        return false;
+    }
+    let hm = now.hour() * 100 + now.minute();
+    (900..1530).contains(&hm)
+}
