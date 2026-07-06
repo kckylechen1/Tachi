@@ -207,6 +207,10 @@ impl MemoryStore {
     }
 
     /// Like [`entries_missing_vectors`], but can exclude a source and cap row count.
+    ///
+    /// Excluding the recall-cache source applies the full recall-cache
+    /// namespace predicate, not just `source != ...`, so vector-selection rows
+    /// stay aligned with status/backfill coverage counts.
     pub fn entries_missing_vectors_filtered(
         &self,
         exclude_source: Option<&str>,
@@ -215,6 +219,29 @@ impl MemoryStore {
         let limit_val = limit.map(|l| l as i64).unwrap_or(-1);
         let mut out = Vec::new();
         match exclude_source {
+            Some(source)
+                if source.eq_ignore_ascii_case(crate::namespace::FOUNDRY_RECALL_CACHE_SOURCE) =>
+            {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT id, text, summary, revision FROM memories
+                     WHERE id NOT IN (SELECT id FROM memories_vec)
+                       AND NOT ({})
+                     ORDER BY rowid
+                     LIMIT ?1",
+                    crate::namespace::RECALL_CACHE_SQL_WHERE
+                ))?;
+                let rows = stmt.query_map(rusqlite::params![limit_val], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
             Some(source) => {
                 let mut stmt = self.conn.prepare(
                     "SELECT id, text, summary, revision FROM memories

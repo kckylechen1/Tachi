@@ -43,7 +43,8 @@ pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use namespace::{
     is_eval_entry, is_handoff_entry, is_kanban_entry, is_namespace_search_noise,
     is_recall_cache_entry, is_wiki_entry, path_contains_recall_cache, path_in_namespace,
-    path_prefix_opts_into_recall_cache, FOUNDRY_RECALL_CACHE_SOURCE,
+    path_prefix_opts_into_recall_cache, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE,
+    RECALL_CACHE_SQL_WHERE_M,
 };
 pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackOverlay};

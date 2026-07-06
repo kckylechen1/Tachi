@@ -3,11 +3,12 @@
 use std::path::Path;
 use std::time::Duration;
 
-use memory_core::MemoryStore;
+use memory_core::{
+    MemoryStore, FOUNDRY_RECALL_CACHE_SOURCE, RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M,
+};
 
 use tachi_llm::LlmClient;
 
-const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 pub(crate) const AUTO_BACKFILL_COVERAGE_THRESHOLD: f64 = 0.99;
 const DEFAULT_AUTO_BACKFILL_PENDING_THRESHOLD: usize = 0;
 
@@ -80,19 +81,21 @@ fn vector_counts_filtered(
     let total: i64 = store
         .connection()
         .query_row(
-            "SELECT COUNT(*) FROM memories WHERE source != ?1",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
+            &format!("SELECT COUNT(*) FROM memories WHERE NOT ({RECALL_CACHE_SQL_WHERE})"),
+            [],
             |row| row.get(0),
         )
         .map_err(|e| format!("vector total stats: {e}"))?;
     let with_vec: i64 = store
         .connection()
         .query_row(
-            "SELECT COUNT(DISTINCT v.id)
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE m.source != ?1",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
+            &format!(
+                "SELECT COUNT(DISTINCT v.id)
+                 FROM memories_vec v
+                 JOIN memories m ON m.id = v.id
+                 WHERE NOT ({RECALL_CACHE_SQL_WHERE_M})"
+            ),
+            [],
             |row| row.get(0),
         )
         .map_err(|e| format!("vector populated stats: {e}"))?;
@@ -173,7 +176,11 @@ pub(crate) async fn sweep_db_vectors(
 
 #[cfg(test)]
 mod tests {
-    use super::{auto_backfill_needed, embedding_input};
+    use super::{
+        auto_backfill_needed, embedding_input, list_missing_vector_entries, vector_counts_filtered,
+    };
+    use memory_core::MemoryStore;
+    use rusqlite::params;
 
     #[test]
     fn embedding_input_prefers_summary_for_long_text() {
@@ -204,5 +211,48 @@ mod tests {
         assert!(auto_backfill_needed(200, 197, 3, 10));
         assert!(!auto_backfill_needed(100, 100, 0, 0));
         assert!(!auto_backfill_needed(1000, 990, 10, 10));
+    }
+
+    fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories (
+                    id, path, summary, text, importance, timestamp, category, topic,
+                    keywords, entities, source, scope, archived,
+                    created_at, updated_at, access_count, revision, metadata
+                 ) VALUES (?1, '/p', '', 'body', 0.5, ?2, 'fact', ?3,
+                           '[]', '[]', ?4, 'project', 0,
+                           ?2, ?2, 0, 1, '{}')",
+                params![id, now, topic, source],
+            )
+            .expect("insert memory");
+    }
+
+    #[test]
+    fn vector_selection_matches_status_recall_cache_predicate() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("selection.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        insert_memory(&store, "durable-1", "manual", "note");
+        insert_memory(&store, "cache-topic", "auto", "recall_rerank_cache");
+
+        let (total, with_vec) = vector_counts_filtered(&store, true).expect("counts");
+        let selected =
+            list_missing_vector_entries(&store, true, None).expect("list missing vectors");
+        let selected_ids: Vec<_> = selected.iter().map(|(id, _, _, _)| id.as_str()).collect();
+
+        assert_eq!(
+            total, 1,
+            "count basis must exclude recall-cache-shaped rows"
+        );
+        assert_eq!(with_vec, 0);
+        assert_eq!(
+            selected_ids,
+            ["durable-1"],
+            "selection basis must match the durable count basis"
+        );
     }
 }
