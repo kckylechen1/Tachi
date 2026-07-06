@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, Transaction, TransactionBehavior};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::MemoryError;
@@ -13,13 +13,18 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 }
 
 /// Initialize schema and run data migrations with a known DB label and path.
+/// Backs up the DB file before migrating when the schema fingerprint has
+/// changed since the last successful init (see `maybe_backup_before_migration`).
 pub fn init_schema_with_label_mut(
     conn: &mut Connection,
     db_label: &str,
     current_db_path: &Path,
 ) -> Result<crate::db::migrations::MigrationReport, MemoryError> {
+    maybe_backup_before_migration(conn, current_db_path)?;
     init_schema_inner(conn)?;
-    crate::db::migrations::run_data_migrations(conn, db_label, current_db_path)
+    let report = crate::db::migrations::run_data_migrations(conn, db_label, current_db_path)?;
+    remember_migration_fingerprint(conn, current_db_path)?;
+    Ok(report)
 }
 
 fn init_schema_inner(conn: &Connection) -> Result<(), MemoryError> {
@@ -768,5 +773,100 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
     Ok(())
 }
 
+fn migration_backup_retain_count() -> usize {
+    std::env::var("TACHI_MIGRATION_BACKUP_RETAIN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+        .max(1)
+}
+
+fn migration_marker_path(db_path: &Path) -> PathBuf {
+    let mut s = db_path.as_os_str().to_owned();
+    s.push(".migration-marker");
+    PathBuf::from(s)
+}
+
+fn migration_schema_fingerprint(conn: &Connection) -> Result<String, MemoryError> {
+    let sv: i64 = conn.query_row("PRAGMA schema_version", [], |r| r.get(0))?;
+    Ok(format!("{}:{}", env!("CARGO_PKG_VERSION"), sv))
+}
+
+fn maybe_backup_before_migration(
+    conn: &Connection,
+    db_path: &Path,
+) -> Result<Option<PathBuf>, MemoryError> {
+    let current_fp = migration_schema_fingerprint(conn)?;
+    // schema_version == 0: the file was just created and has no schema yet.
+    // There is nothing to back up.
+    if current_fp.ends_with(":0") {
+        return Ok(None);
+    }
+
+    let marker = migration_marker_path(db_path);
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(current_fp.as_str()) {
+        return Ok(None);
+    }
+
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
+
+    {
+        let mut dst = Connection::open(&backup_path)?;
+        let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
+        backup.run_to_completion(128, Duration::from_millis(100), None)?;
+    }
+
+    retain_recent_migration_backups(db_path);
+
+    Ok(Some(backup_path))
+}
+
+fn remember_migration_fingerprint(conn: &Connection, db_path: &Path) -> Result<(), MemoryError> {
+    let fp = migration_schema_fingerprint(conn)?;
+    if let Err(e) = std::fs::write(migration_marker_path(db_path), &fp) {
+        eprintln!(
+            "[migration] warning: failed to write migration marker: {e}; \
+             next startup will back up again"
+        );
+    }
+    Ok(())
+}
+
+fn retain_recent_migration_backups(db_path: &Path) {
+    let Some(dir) = db_path.parent() else {
+        return;
+    };
+    let Some(name) = db_path.file_name() else {
+        return;
+    };
+    let prefix = format!("{}.migration-bak.", name.to_string_lossy());
+
+    let mut backups: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .collect(),
+        Err(_) => return,
+    };
+
+    // Lexicographic descending = newest first (ISO 8601 timestamp in filename).
+    backups.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+
+    for old in backups.into_iter().skip(migration_backup_retain_count()) {
+        let _ = std::fs::remove_file(old.path());
+    }
+}
+
+fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(".");
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
 #[cfg(test)]
 mod migration_tests;
+
+#[cfg(test)]
+mod migration_backup_tests;

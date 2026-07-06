@@ -39,12 +39,13 @@ impl MemoryStore {
         db::register_sqlite_vec();
         let _startup_guard = db::acquire_startup_lock();
         let mut conn = db::open_read_write(db_path)?;
-        if path_validation {
-            let p = std::path::PathBuf::from(db_path);
-            let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p)?;
-        } else {
-            db::init_schema(&conn)?;
-        }
+        // Both labelled and unlabelled opens run schema init + data migrations
+        // through init_schema_with_label_mut so the pre-migration backup and
+        // post-migration fingerprint marker apply uniformly. Previously the
+        // path_validation=false branch called init_schema directly, skipping
+        // backups for all CLI/open_cli_store paths (#597 CP1).
+        let p = std::path::PathBuf::from(db_path);
+        let _ = db::init_schema_with_label_mut(&mut conn, db_label, &p)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
