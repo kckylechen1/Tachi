@@ -65,7 +65,10 @@ pub(super) fn append_graph_expansion(
         get_superseded_ids(conn, &expanded_ids)?
     };
 
-    let mut new_entries: Vec<SearchResult> = expanded_entries
+    // Decorate each result with its parsed instant (epoch millis) once, then
+    // sort on the pre-parsed key — never re-parse in the comparator (tachi#718
+    // CP2/CP3).
+    let mut new_entries: Vec<(i64, SearchResult)> = expanded_entries
         .into_iter()
         .filter(|entry| {
             if include_superseded {
@@ -78,33 +81,29 @@ pub(super) fn append_graph_expansion(
             let activation = activations.get(&entry.id).copied().unwrap_or(0.0);
             let graph_boost =
                 min_score * (0.4 / (distance as f64 + 1.0) + 0.6 * activation).clamp(0.0, 1.0);
-            SearchResult {
-                entry,
-                score: HybridScore {
-                    vector: 0.0,
-                    fts: 0.0,
-                    symbolic: 0.0,
-                    decay: 0.0,
-                    final_score: graph_boost,
+            let ms = crate::scorer::timestamp_epoch_millis(&entry.timestamp);
+            (
+                ms,
+                SearchResult {
+                    entry,
+                    score: HybridScore {
+                        vector: 0.0,
+                        fts: 0.0,
+                        symbolic: 0.0,
+                        decay: 0.0,
+                        final_score: graph_boost,
+                    },
                 },
-            }
+            )
         })
         .collect();
     new_entries.sort_by(|a, b| {
         crate::scorer::cmp_recall_rank(
-            (
-                a.score.final_score,
-                a.entry.timestamp.as_str(),
-                a.entry.id.as_str(),
-            ),
-            (
-                b.score.final_score,
-                b.entry.timestamp.as_str(),
-                b.entry.id.as_str(),
-            ),
+            (a.1.score.final_score, a.0, a.1.entry.id.as_str()),
+            (b.1.score.final_score, b.0, b.1.entry.id.as_str()),
         )
     });
 
-    results.extend(new_entries);
+    results.extend(new_entries.into_iter().map(|(_, sr)| sr));
     Ok(())
 }

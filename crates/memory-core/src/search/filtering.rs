@@ -86,10 +86,17 @@ pub(super) fn newest_by_shared_entity(entries: &HashMap<String, &MemoryEntry>) -
         .filter_map(|items| {
             items
                 .into_iter()
-                // Tie-break by id so an exact-timestamp tie picks the same
-                // recency-boost target run to run (tachi#718); HashMap order
-                // fed this `max_by` before.
-                .max_by(|a, b| a.timestamp.cmp(&b.timestamp).then_with(|| a.id.cmp(&b.id)))
+                // Pick the newest by parsed instant, tie-broken by id, so an
+                // exact-time tie boosts the same target run to run (tachi#718);
+                // HashMap order fed this before, and a lexical timestamp compare
+                // would mis-order mixed formats (CP2). `max_by_key` evaluates the
+                // key once per element — no per-comparison parse.
+                .max_by_key(|entry| {
+                    (
+                        crate::scorer::timestamp_epoch_millis(&entry.timestamp),
+                        entry.id.clone(),
+                    )
+                })
                 .map(|entry| entry.id.clone())
         })
         .collect()
