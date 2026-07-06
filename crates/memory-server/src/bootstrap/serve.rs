@@ -544,15 +544,30 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         n => eprintln!("[provider] {n} provider key(s) ready for LLM/embed"),
     }
 
+    let background_shutdown = tokio_util::sync::CancellationToken::new();
+    let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if embedded_mcp_facade() {
         eprintln!("[embedded-mcp] owner background tasks disabled; forwarding to scoped daemon");
     } else {
-        spawn_idle_connection_cleanup(&server);
-        spawn_wal_checkpoint(&server);
-        spawn_background_gc(&server, gc_enabled, gc_initial_delay_secs, gc_interval_secs);
+        bg_handles.push(spawn_idle_connection_cleanup(
+            &server,
+            background_shutdown.clone(),
+        ));
+        bg_handles.push(spawn_wal_checkpoint(&server, background_shutdown.clone()));
+        bg_handles.push(spawn_background_gc(
+            &server,
+            gc_enabled,
+            gc_initial_delay_secs,
+            gc_interval_secs,
+            background_shutdown.clone(),
+        ));
         run_startup_integrity_checks(&server, project_db_path.is_some())?;
         load_cached_hub_tools(&server);
-        report_pipeline_and_spawn_daily_distill(&server, &app_home);
+        bg_handles.push(report_pipeline_and_spawn_daily_distill(
+            &server,
+            &app_home,
+            background_shutdown.clone(),
+        ));
     }
 
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
@@ -583,7 +598,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str())
     );
 
-    if cli.daemon {
+    let serve_result = if cli.daemon {
         serve_http_daemon(
             server,
             app_home.clone(),
@@ -591,11 +606,23 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
             project_db_path.clone(),
             cli.port,
         )
-        .await?;
+        .await
     } else {
-        serve_stdio(server).await?;
+        serve_stdio(server).await
+    };
+
+    background_shutdown.cancel();
+    if !bg_handles.is_empty() {
+        eprintln!(
+            "[shutdown] waiting for {} background task(s) to finish...",
+            bg_handles.len()
+        );
+        for handle in bg_handles {
+            let _ = handle.await;
+        }
     }
 
+    serve_result?;
     Ok(())
 }
 
