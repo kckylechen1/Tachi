@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.6.3](#163---2026-07-06) — recall quality overhaul and kernel reliability
 - [1.6.2](#162---2026-07-05) — release drift and CI guardrails
 - [1.6.1](#161---2026-06-29) — Homebrew daemon startup and tap automation
 - [1.6.0](#160---2026-06-29) — continuity memory, lifecycle routing, and runtime hardening
@@ -39,8 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+## [1.6.3] - 2026-07-06 — recall quality overhaul and kernel reliability
+
+Recall precision was measured at 8/20 on a fair corpus against its own memories while a plain BM25-OR baseline scored 20/20. This release diagnoses the causes, installs a permanent golden-corpus evaluation harness, and repairs the lexical channel — bringing fair-corpus recall to 20/20 — alongside a batch of kernel-reliability fixes.
+
 ### Added
 
+- **Recall quality architecture** (`docs/engineering/architecture/recall-quality-architecture.md`) and a permanent golden-corpus regression harness: a synthetic in-repo fixture with ratcheting recall@k/MRR floors plus a personal-corpus evaluation toolchain (`tools/recall-eval/`) driving `recall_simulate` variant matrices, per-miss attribution, and aggregate flip reports. Every future recall config or scoring change is now gated on this harness.
+- The FTS OR-fallback now handles CJK: contiguous CJK runs join as quoted phrases so partial-coverage Chinese queries recover candidates instead of being zeroed by conjunctive matching. The fallback is starvation-gated (fires only when the conjunctive expansion returns zero candidates) and enabled by default (`or_fallback_fts_score_factor` 0.55).
 - `CONTRIBUTING.md` and an automated governance workflow: pull requests opened by anyone other than `kckylechen1` are now automatically closed with a link to the contribution policy.
 - Missing `AGPL-3.0-only` license metadata was added to `packages/tachi-cli/package.json` and `tools/cleaner/Cargo.toml` so every shipped package consistently declares the project license.
 - `tachi vault intake discover` now reports redacted, read-only credential candidates from env-family files and Codex auth metadata without unlocking or mutating Vault.
@@ -58,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Recall ranking is now deterministic on score ties.** A missing stable secondary sort key let identical queries return different orderings across runs (polluting every eval metric and eroding recall trust); ranking now breaks ties by score → parsed-instant timestamp (newest first) → id, with mixed-timestamp-format correctness covered by tests.
+- **Kernel reliability (#520): stdio sessions no longer open the DB directly.** They proxy writes through the resident daemon (one writer per DB file), a time-based idle reaper reclaims abandoned direct-DB-holding stdio sessions, and a version-skew guard refuses/defers a resident daemon built from a stale binary (deferring during A-share trading hours). Together these close the `SQLITE_BUSY` lock-storm and process-pileup sources.
+- Schema migrations now back up the database file (via the SQLite Online Backup API) before the first migration write, replacing the previous rollback machinery.
+- Memory text is scrubbed of secret patterns before any external embedding/LLM call.
+- `claude-pool` slug labels are truncated at segment boundaries with a short hash suffix, preventing collisions and UTF-8 boundary panics.
 - `tachi_gh safe_merge` now records already-merged pull requests as `merge_state="merged"` instead of overwriting lifecycle state with a blocked merge attempt.
 
 ## [1.6.2] - 2026-07-05 — release drift and CI guardrails
