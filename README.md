@@ -476,6 +476,26 @@ Tachi's design is informed by prior work in agent long-term memory:
 
 ---
 
+## Contributing
+
+**Tachi is currently not accepting external contributions.**
+
+The project is maintained by a single author. Copyright is held by one owner,
+and outside pull requests are not accepted — they will be closed automatically
+by `.github/workflows/close-external-prs.yml`. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for details.
+
+You are welcome to use, fork, and study Tachi under the terms of the license
+below, in compliance with AGPL-3.0-only.
+
+---
+
 ## License
 
-[AGPLv3](LICENSE) © 2026 Tachi Authors.
+Tachi is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
+
+Copyright © 2026 Kyle Chen. All rights reserved where not granted under the
+AGPL-3.0-only license.
+
+Tachi does not accept external contributions; the single-maintainer model keeps
+the project's copyright and licensing direction unambiguous.

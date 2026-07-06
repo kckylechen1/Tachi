@@ -1,0 +1,36 @@
+name: Close External Pull Requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close-external-pr:
+    runs-on: ubuntu-latest
+    # Only run for PRs not opened by the repository owner.
+    if: github.event.pull_request.user.login != 'kckylechen1'
+    steps:
+      - name: Close pull request and post guidance
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            await github.rest.pulls.update({
+              owner,
+              repo,
+              pull_number: prNumber,
+              state: 'closed'
+            });
+
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: 'Thank you for your interest in Tachi. This project is maintained by a single author and does not accept external pull requests. See [CONTRIBUTING.md](https://github.com/' + owner + '/' + repo + '/blob/main/CONTRIBUTING.md) for details.'
+            });
