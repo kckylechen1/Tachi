@@ -34,6 +34,7 @@ async fn aggregate_live_filters_auto_synthesized_watchdog_rows() {
             pr_ref: None,
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("real eval should save");

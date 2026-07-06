@@ -26,10 +26,38 @@ pub(crate) fn profile_skill_loadout_json_for_server(
     profile: &DispatchProfileDef,
 ) -> Result<Value, String> {
     let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_skill_loadout_json_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
+    let mut loadout =
+        tachi_dispatch::profile_skill_loadout_json_with_overlay(profile, overlay.as_ref());
+    inject_self_report_trust(server, profile, &mut loadout)?;
+    Ok(loadout)
+}
+
+/// Surface the vendor-level `self_report_trust` flag (computed at read time,
+/// never persisted) on a profile's card/loadout when the vendor has an
+/// unresolved `falsified_ci_report` signature (#735 decision 5).
+fn inject_self_report_trust(
+    server: &MemoryServer,
+    profile: &DispatchProfileDef,
+    value: &mut Value,
+) -> Result<(), String> {
+    let vendor = tachi_dispatch::normalize_vendor(profile.backend, profile.model);
+    let Some(trust) = crate::signature_evidence::self_report_trust_for_vendor(server, &vendor)?
+    else {
+        return Ok(());
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "self_report_trust".to_string(),
+            serde_json::Value::String(trust.to_string()),
+        );
+    }
+    if let Some(card) = value.get_mut("mbit_card").and_then(|c| c.as_object_mut()) {
+        card.insert(
+            "self_report_trust".to_string(),
+            serde_json::Value::String(trust.to_string()),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -90,10 +118,9 @@ pub(crate) fn profile_json_for_server(
     profile: &DispatchProfileDef,
 ) -> Result<Value, String> {
     let overlay = load_profile_overlay(server, profile.name)?;
-    Ok(tachi_dispatch::profile_json_with_overlay(
-        profile,
-        overlay.as_ref(),
-    ))
+    let mut card = tachi_dispatch::profile_json_with_overlay(profile, overlay.as_ref());
+    inject_self_report_trust(server, profile, &mut card)?;
+    Ok(card)
 }
 
 pub(crate) fn profile_eval_feedback_json(

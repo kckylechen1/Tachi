@@ -41,6 +41,7 @@ async fn tachi_task_proposals_include_reviewable_loadout_evolution_candidates() 
                 scope: Some("project".to_string()),
                 project: None,
                 format: None,
+                signatures: Vec::new(),
             }))
             .await
             .expect("seed loadout eval row");

@@ -7,6 +7,7 @@ mod acp_transport;
 mod completion_eval;
 mod prompt_credentials_board;
 mod recommend_policy;
+mod signature_evidence;
 mod workflow_artifacts;
 
 fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
@@ -69,6 +70,7 @@ fn task_params(action: &str) -> TachiTaskParams {
         diff: None,
         subagents: Vec::new(),
         feedback_rules_applied: Vec::new(),
+        signatures: Vec::new(),
         evidence_refs: Vec::new(),
         tests_run: Vec::new(),
         diff_present: None,

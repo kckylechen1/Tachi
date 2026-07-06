@@ -435,4 +435,43 @@ pub struct TachiCompleteParams {
     /// Response shape: default receipt, or "full" for the pre-change verbose review bundle.
     #[serde(default, alias = "output_format")]
     pub format: Option<String>,
+
+    /// Adjudicated, vendor-keyed error signatures to record for this dispatch's
+    /// lane (#735). Additive and optional: omitting it leaves `complete`
+    /// byte-compatible with pre-existing callers.
+    #[serde(default)]
+    pub signatures: Vec<SignatureRecordParams>,
+}
+
+/// One leader-adjudicated error signature (or resolution) recorded at
+/// `complete`. Keyed onto the `(role, vendor)` lane derived from the dispatch's
+/// profile/agent unless `role`/`vendor` are supplied explicitly.
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+pub struct SignatureRecordParams {
+    /// Stable taxonomy id, e.g. `fake_security_fix`, `assertion_weakening`.
+    pub signature: String,
+
+    /// Severity override: low | medium | high | critical. Defaults to the
+    /// taxonomy severity for the signature id.
+    #[serde(default)]
+    pub severity: Option<String>,
+
+    /// Evidence reference (issue/PR/run id) backing this signature.
+    #[serde(default)]
+    pub evidence_ref: Option<String>,
+
+    /// When true, append a resolution row marking the signature resolved as of
+    /// now (evidence is append-only; nothing is deleted).
+    #[serde(default)]
+    pub resolved: bool,
+
+    /// Explicit role class override (implementer | reviewer | ...). Defaults to
+    /// the dispatch profile's role class.
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// Explicit vendor lane override. Defaults to the vendor derived from the
+    /// dispatch profile/agent.
+    #[serde(default)]
+    pub vendor: Option<String>,
 }

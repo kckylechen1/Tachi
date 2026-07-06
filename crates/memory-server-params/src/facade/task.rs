@@ -1,4 +1,6 @@
-use super::{string_enum_schema, DispatchMcpAccessParams, TachiSubagentEvalParams};
+use super::{
+    string_enum_schema, DispatchMcpAccessParams, SignatureRecordParams, TachiSubagentEvalParams,
+};
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
 
@@ -178,6 +180,11 @@ pub struct TachiTaskParams {
     /// [action=complete] Feedback/prompt-quality rule ids that were applied to this task.
     #[serde(default)]
     pub feedback_rules_applied: Vec<String>,
+    /// [action=complete] Adjudicated vendor-keyed error signatures to record for
+    /// this dispatch's lane (#735). Additive/optional — omitting it is
+    /// byte-compatible with existing callers.
+    #[serde(default)]
+    pub signatures: Vec<SignatureRecordParams>,
     /// [action=complete] Evidence references for verification.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
