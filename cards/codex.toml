@@ -38,7 +38,14 @@ signature = "ceremony_overweight"
 count = 15
 evidence = ["codex-ship 501 ran 15x full-workspace in one campaign"]
 counter_clause = "goal/* slices ride targeted tests; full suite paid once at the integration→main PR."
-efficacy = "constitution tiering + codex-ship coaching + hardcoded shared CARGO_TARGET_DIR. Cured structurally."
+efficacy = "constitution tiering + codex-ship coaching + shared CARGO_TARGET_DIR with reviewer isolation when colliding. Cured structurally."
+
+[[failure_modes]]
+signature = "shared_target_phantom_failures"
+count = 1
+evidence = ["tachi#727 / PR #725 review: same-crate concurrent worktrees collided on metadata-hashed test binaries"]
+counter_clause = "Shared CARGO_TARGET_DIR is speed-only; reviewer/discrimination runs use an isolated target dir when another lane may be building the same crate."
+efficacy = "packet-clause (#751 canon + AGENTS.md + this card)."
 
 [[failure_modes]]
 signature = "inherited_base_commit"
@@ -48,7 +55,12 @@ counter_clause = "No-network sandbox: leader supplies a verified base SHA in the
 efficacy = "contract-clause (structural: the lane cannot fetch, so the packet must carry the SHA)."
 
 [constraints.mandatory_clauses]
-all = ["restate workspace law on every dispatch AND resume", "verbatim `test result:` lines", "shared CARGO_TARGET_DIR"]
+all = [
+  "restate workspace law on every dispatch AND resume",
+  "verbatim `test result:` lines",
+  "shared CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target is a speed path, not a correctness guarantee",
+  "reviewer/discrimination runs use an isolated target dir when another lane may be building the same crate",
+]
 
 [trust]
 self_report = "high" # honest deviations ledger, verbatim gates, self-flagged judgment calls
