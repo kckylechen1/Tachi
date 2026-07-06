@@ -62,14 +62,15 @@ pub(super) async fn serve_stdio_proxy(
     };
     let transport = (stdin(), stdout());
     let running = rmcp::service::serve_server(proxy, transport).await?;
-    wait_for_stdio_shutdown(running).await;
+    wait_for_stdio_shutdown(running, None).await;
     Ok(())
 }
 
 pub(super) async fn serve_stdio(server: MemoryServer) -> Result<(), Box<dyn std::error::Error>> {
+    let idle_token = spawn_stdio_idle_reaper(&server);
     let transport = (stdin(), stdout());
     let running = rmcp::service::serve_server(server, transport).await?;
-    wait_for_stdio_shutdown(running).await;
+    wait_for_stdio_shutdown(running, idle_token).await;
     Ok(())
 }
 
@@ -78,12 +79,8 @@ async fn wait_for_stdio_shutdown(
         rmcp::service::RoleServer,
         impl rmcp::Service<rmcp::service::RoleServer>,
     >,
+    idle_token: Option<tokio_util::sync::CancellationToken>,
 ) {
-    // Graceful shutdown: MCP quit (stdin EOF / client disconnect), SIGINT,
-    // or parent-death. A well-behaved host closes stdin on disconnect so
-    // `running.waiting()` resolves; the parent-death branch is the backstop
-    // for hosts that leak the child (it gets reparented to init/launchd and
-    // would otherwise linger forever).
     tokio::select! {
         quit_reason = running.waiting() => {
             eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
@@ -97,7 +94,42 @@ async fn wait_for_stdio_shutdown(
         _ = wait_for_parent_death() => {
             eprintln!("[parent-death] host process exited; shutting down orphaned stdio server");
         }
+        _ = async {
+            match idle_token {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => {
+            eprintln!("[stdio-idle] idle timeout reached; shutting down abandoned stdio server");
+        }
     }
+}
+
+fn spawn_stdio_idle_reaper(server: &MemoryServer) -> Option<tokio_util::sync::CancellationToken> {
+    let timeout = stdio_idle_timeout()?;
+    let token = tokio_util::sync::CancellationToken::new();
+    let clock = server.activity_clock();
+    let cancel = token.clone();
+    let tick = Duration::from_secs(timeout.as_secs().clamp(60, 300));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tick);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let last = clock.load(std::sync::atomic::Ordering::Relaxed);
+            let idle_ms = chrono::Utc::now().timestamp_millis() - last;
+            if idle_ms >= timeout.as_millis() as i64 {
+                eprintln!(
+                    "[stdio-idle] no MCP activity for {}s (limit {}s); shutting down",
+                    idle_ms / 1000,
+                    timeout.as_secs()
+                );
+                cancel.cancel();
+                return;
+            }
+        }
+    });
+    Some(token)
 }
 
 fn auto_daemon_disabled() -> bool {
