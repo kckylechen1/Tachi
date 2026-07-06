@@ -44,7 +44,13 @@ data is at risk -- worst case, re-run the export+load.
             |  category/topic/importance/timestamp/created_at/archived/
             |  embedding (1024-dim, reused verbatim from the doc's own
             |  Voyage-4 vector already stored in memories_vec -- no
-            |  embedding API is called by anything in this directory)
+            |  embedding API is called by anything in this directory).
+            |  Exports ONLY Tachi-default-retrievable rows: superseded,
+            |  training-seed, recall-cache, eval, and namespace-noise
+            |  (wiki_log/kanban/handoff) rows are excluded, mirroring the
+            |  filters a default `tachi search` applies (per-line Rust
+            |  citations in tachi_default_retrievable()); per-reason
+            |  exclusion counts are printed in the export stats
             v
       sidecar.py  --snapshot snapshot.jsonl --port 8791
             |
@@ -109,11 +115,11 @@ against tachi, independent of #683).
 | # | Acceptance criterion (verbatim from the issue) | Status this PR |
 |---|---|---|
 | 1 | Sidecar shadow process + snapshot export path; zero changes to memory-server API or callers | **Done.** `export_snapshot.py` + `sidecar.py`; `git diff --stat origin/main` has zero `crates/` lines (see verification section of the PR). |
-| 2 | Flush/commit semantics characterized: what survives kill -9 after flush? Documented + tested | **Done.** `probe_flush.py` + `FINDINGS.md` G2: `flush()` is the sole, precise durability boundary; 3/3 scenarios pass. |
+| 2 | Flush/commit semantics characterized: what survives kill -9 after flush? Documented + tested | **Done.** `probe_flush.py` + `FINDINGS.md` G2: `flush()` is the sole, precise **process-crash-level** durability boundary; 3/3 scenarios pass. Explicitly NOT a power-loss/fsync-level guarantee (SIGKILL doesn't clear the OS page cache) -- see the scope-limit paragraph in FINDINGS.md G2. |
 | 3 | Rust binding (zvec-ai/zvec-rust) builds and passes the same smoke on this machine | **Partially done.** Builds and runs cleanly at pinned tag `v0.5.0` (`FINDINGS.md` G1) -- but this ran the crate's own bundled `basic` example, not a line-for-line Rust port of `~/.cache/zvec-spike/smoke.py`'s 2k-doc Chinese/English + latency-percentile suite. Porting that specific smoke test to Rust was judged out of scope for a 45-minute-boxed G1 feasibility check; flag as a follow-up if criterion 3 is read strictly. |
 | 4 | Golden set encoded as `recall_simulate` cases; zvec variant beats or ties current backend on Recall@10/MRR; vector-score non-zero rate >95% | **Deferred to Phase 1** (explicit in the frozen spec for this PR). `compare.py` is a simpler stand-in: 20 summary-derived queries, hit@10/overlap@10/latency, not wired to `recall_simulate`. See "Phase 1 integration path" below. |
 | 5 | Rebuild-from-SQLite-metadata drill: full rebuild then all goldens still pass | **Mechanism proven, goldens not yet frozen.** Every `sidecar.py` run *is* a full rebuild from SQLite-exported metadata (no persistent zvec state carried between runs); this PR exercised that rebuild path successfully end-to-end (see compare reports). Formal "goldens" don't exist yet -- they arrive with criterion 4's `recall_simulate` integration. |
-| 6 | p95 latency <100ms at 10k records (headroom check) | **Not re-verified at 10k in this PR.** The live global DB only has 345 non-archived memories; this PR's own numbers (sidecar server-side query latency: ~1.5-4ms FTS, low ms hybrid, on 345 docs) are consistent with the original spike's 2k-doc dense p50=0.26ms, but nobody generated a 10k-record snapshot here to re-confirm headroom at that scale. |
+| 6 | p95 latency <100ms at 10k records (headroom check) | **Not re-verified at 10k in this PR.** The live global DB only yields 257 default-retrievable memories; this PR's own numbers (sidecar server-side query latency: ~1.5-4ms FTS, low ms hybrid, on 257 docs) are consistent with the original spike's 2k-doc dense p50=0.26ms, but nobody generated a 10k-record snapshot here to re-confirm headroom at that scale. |
 | 7 | Gate flag: shadow results never reach user-visible output until explicitly opened | **N/A by construction.** There is no integration point into memory-server yet (zero `crates/` changes), so there is nothing for a gate flag to gate. This becomes relevant only once Phase 1 wires a `VectorBackend` trait into a real query path. |
 
 ## Phase 1 (explicitly NOT in this PR)

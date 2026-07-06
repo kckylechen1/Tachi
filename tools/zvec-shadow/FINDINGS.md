@@ -70,7 +70,7 @@ Done!
   deps for the example) -- not a representative steady-state number, just
   evidence the pipeline works end-to-end.
 
-## G2 -- flush()/kill -9 durability semantics: **flush() is a precise, synchronous durability boundary**
+## G2 -- flush()/kill -9 durability semantics: **flush() is a precise, synchronous PROCESS-CRASH-level durability boundary**
 
 Script: `tools/zvec-shadow/probe_flush.py` (self-contained, re-runnable,
 uses only scratch collections -- never touches a live Tachi DB). Each
@@ -87,10 +87,10 @@ Results (`tools/zvec-shadow/FINDINGS-flush.json`, this run):
 | B | insert 50 -> SIGKILL (no flush) | 0 survive | doc_count=0 | yes |
 | C | insert 50 -> `flush()` -> insert 50 more -> SIGKILL | exactly `d0..d49` survive, `d50..d99` absent | doc_count=50, exactly `d0..d49` | yes |
 
-**Conclusion:** `flush()` is the one and only durability boundary zvec
-exposes (there is no separate `commit()` -- `Collection.flush` is the whole
-API surface for it, confirmed via `dir(zvec.Collection)`). Everything
-written before the last successful `flush()` call survives a hard kill;
+**Conclusion:** `flush()` is the one and only durability API zvec exposes
+(there is no separate `commit()` -- `Collection.flush` is the whole API
+surface for it, confirmed via `dir(zvec.Collection)`). Everything written
+before the last successful `flush()` call survives a hard process kill;
 everything written after it is entirely gone, with no partial/torn state
 observed in three runs. This matches the tachi#683 spike's earlier
 real-world observation (96k docs evaporating on an unflushed kill -9) and
@@ -101,6 +101,19 @@ sidecar, that only matters at initial load time (`sidecar.py` calls
 `col.flush()` once after loading the full snapshot); the sidecar takes no
 further writes at query time, so there is no ongoing durability exposure
 during normal operation.
+
+**Scope limit (adjudication CP2 -- do not over-read this result):** the
+probe characterizes a **process-crash-level** boundary only. SIGKILL
+terminates the process but does not drop the OS page cache, so data
+`flush()` handed to the kernel survives the kill even if it was never
+fsync'd to stable storage. These results therefore say NOTHING about
+power-loss / kernel-panic durability -- whether `flush()` fsyncs is
+uncharacterized here and would need a different rig (e.g. VM with forced
+power-off, or dm-flakey-style write-loss injection) to test. Since zvec is
+a rebuildable derived index and SQLite remains the sole system of record,
+power-loss durability is a non-goal for this architecture anyway; the
+scope limit matters only if someone later tries to promote zvec to a
+source of truth.
 
 ## Operational quirks found while building G3/G4 (worth carrying into Phase 1 planning)
 
@@ -142,24 +155,67 @@ during normal operation.
    constructor rejects the literal `:` character (`ValueError: Invalid doc:
    ... contains invalid characters`). `sidecar.py` sanitizes to a zvec-safe
    id and carries the real Tachi id in a stored `tachi_id` field, which is
-   what query results report back as `id`.
+   what query results report back as `id`. (After the CP1/CP3 corpus
+   alignment those specific handoff rows are no longer exported at all --
+   they are namespace search noise -- but the sanitizer stays as defense
+   for any future id shape that trips zvec's character rules.)
+
+## Snapshot corpus alignment (adjudication CP1/CP3)
+
+The first version of `export_snapshot.py` filtered only `archived = 0`.
+Codex's adversarial review of PR #700 correctly flagged that this is NOT
+equivalent to Tachi's default retrievable corpus: a default `tachi search`
+also excludes superseded rows
+(`crates/memory-core/src/search.rs:74-92` SearchOptions::default
+`include_superseded=false`, enforced in SQL at
+`crates/memory-core/src/db/memory_crud/search.rs:30-35`), training-seed /
+recall-cache / eval rows
+(`crates/memory-server/src/memory_search_ops/search_memory/rows.rs:359-366`),
+and -- one layer deeper, in core ranking
+(`crates/memory-core/src/search/ranking.rs:57` via
+`crates/memory-core/src/namespace.rs:88-99`) -- wiki_log/kanban/handoff
+namespace-noise rows. The last group was not in the adjudication's cited
+set but is required by its own labeled-set invariant ("expected hits must
+all be Tachi-default-retrievable"): the live DB has 59 kanban + 6 handoff
+non-archived rows a default search can never return.
+
+`export_snapshot.py` now implements all of these exclusions as a
+predicate-by-predicate Python translation of the Rust source (each helper
+carries its file:line citation -- see `tachi_default_retrievable()`).
+Effect on the live global DB at rework time: 345 non-archived rows ->
+**257 exported** (excluded: 12 superseded, 11 eval, 65 namespace-noise;
+this DB has no training-seed or recall-cache rows). Both the sidecar
+corpus and the compare labeled set are drawn from the aligned snapshot,
+so every expected id in the labeled set is now retrievable by a default
+`tachi search`.
 
 ## G4 -- compare.py end-to-end run (aggregate numbers only)
 
-Ran against a real snapshot of `~/.tachi/global/memory.db` (345 non-archived
-memories at the time of this run) with 20 queries derived from real
-memories' own summaries (expected hit = the originating memory). Full
-per-query detail (including the query text and memory ids, which are real
-private content) is intentionally **not** committed -- see
+Ran against a corpus-aligned snapshot of `~/.tachi/global/memory.db`
+(257 default-retrievable memories at the time of this run) with 20 queries
+derived from real memories' own summaries (expected hit = the originating
+memory; all expected ids verified default-retrievable by construction).
+Full per-query detail (including the query text and memory ids, which are
+real private content) is intentionally **not** committed -- see
 `tools/zvec-shadow/.gitignore` and the README's privacy note; regenerate
 locally with `compare.py` to see the per-query table.
 
 | Mode | tachi hit@10 | sidecar hit@10 | mean overlap@10 | mean tachi latency | mean sidecar latency |
 |---|---|---|---|---|---|
-| FTS-only (sidecar has no query embedding) | 7/20 | 18/20 | 1.40 / 10 | 1714.4 ms | 2.2 ms |
-| Hybrid (sidecar reuses each memory's own stored embedding as query vector) | 7/20 | 20/20 | 2.05 / 10 | 1233.4 ms | 2.2 ms |
+| FTS-only (sidecar has no query embedding) | 8/20 | 20/20 | 2.00 / 10 | 1024.8 ms | 2.8 ms |
+| Hybrid (sidecar reuses each memory's own stored embedding as query vector) | 8/20 | 20/20 | 2.70 / 10 | 651.1 ms | 3.5 ms |
 
 Reading these numbers honestly:
+- **tachi hit@10 stayed low after the corpus fix (7/20 pre-fix -> 8/20
+  post-fix).** The superseded/eval/noise artifact the review flagged was
+  real but small on this DB; the remaining misses are genuine signal about
+  this (deliberately easy, summary-derived) query set: on 12 of 20
+  queries, Tachi's default top-10 does not contain the memory whose own
+  summary the query was built from, while the sidecar's FTS-over-
+  summary+text does. Worth investigating in the Phase 1 recall_simulate
+  pass rather than hand-waving here -- candidate causes include Tachi's
+  decay/quality multipliers demoting older rows and hybrid-rank dilution
+  from wiki rows, but neither was verified in this PR.
 - **Latency is not apples-to-apples.** The "tachi" number is a full CLI
   subprocess round trip (process spawn + daemon IPC + the daemon's own
   embedding-API call for the query text); the "sidecar" number is a
@@ -167,7 +223,7 @@ Reading these numbers honestly:
   collection. The original spike's raw dense-query numbers (p50=0.26ms at
   2k docs) are the more honest zvec-vs-zvec comparison point; this table's
   latency gap mostly reflects CLI/process overhead, not a claim that zvec
-  queries are literally ~1000x faster than Tachi's whole search stack.
+  queries are literally ~300x faster than Tachi's whole search stack.
 - **Low overlap@10 between tachi and sidecar is expected, not a red flag.**
   Tachi's ranking blends vector + FTS + symbolic + recency-decay; the FTS-only
   sidecar mode is a single-signal baseline by design (query-side embeddings

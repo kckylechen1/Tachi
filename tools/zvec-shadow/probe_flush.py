@@ -6,6 +6,14 @@ kill (SIGKILL, i.e. no atexit/finalizer/WAL-checkpoint-on-close chance to
 run) preserve the flushed data? And conversely, is data inserted *after*
 the last flush lost on the same kill?
 
+Scope limit (do not over-read the result): SIGKILL terminates the process
+but does NOT drop the OS page cache -- data flush() handed to the kernel
+survives the kill even if it was never fsync'd to stable storage. So this
+probe characterizes flush() as a **process-crash-level** durability
+boundary only. It says NOTHING about power-loss / kernel-panic durability
+(whether flush() fsyncs is uncharacterized here and would need a different
+rig -- e.g. a VM with forced power-off -- to test).
+
 Method: each scenario runs a fresh **child process** that does exactly the
 prescribed sequence of insert()/flush() calls and then sends SIGKILL to
 itself (`os.kill(os.getpid(), signal.SIGKILL)`) as its very last action —
@@ -143,7 +151,7 @@ def main() -> int:
         r = run_child(py, db_a, "insert_batch(50)\ncol.flush()\n")
         rb = read_back(py, db_a, 50) if r["killed_by_sigkill"] else {"skipped": True}
         results["A_insert_then_flush_then_kill"] = {
-            "expect": "all 50 docs survive (flush() is the durability boundary)",
+            "expect": "all 50 docs survive (flush() is the process-crash durability boundary)",
             "child": r,
             "readback": rb,
             "pass": r["killed_by_sigkill"] and rb.get("doc_count") == 50 and len(rb.get("present_ids", [])) == 50,

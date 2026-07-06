@@ -11,8 +11,8 @@ is the expected hit), fires each query at:
      worktree checkout, which routes to an empty per-project DB instead of
      the ~/.tachi/global/memory.db this snapshot was exported from (observed
      directly during this spike: identical query returned real hits from
-     $HOME but `{"rows": []}` from inside the worktree cwd -- see README.md
-     "CLI scope quirk").
+     $HOME but `{"rows": []}` from inside the worktree cwd -- see
+     FINDINGS.md "Operational quirks" item 1).
   2. the zvec-shadow sidecar's POST /query endpoint (FTS-only by default;
      pass --hybrid to additionally send each query memory's own stored
      embedding, reusing doc-side vectors as a smoke test of the dense path
@@ -100,8 +100,8 @@ def query_tachi(query_text: str, top_k: int, timeout_s: float = 20.0) -> dict:
     # apparently under a different execution path (daemon burst/loop-detection
     # fallback to in-process execution was seen in the CLI's stderr log at the
     # same time). Skip anything that isn't the expected shape rather than
-    # crashing the whole comparison run -- see README.md "CLI response-shape
-    # flakiness" for the verbatim evidence.
+    # crashing the whole comparison run -- see FINDINGS.md "Operational
+    # quirks" item 2 for the verbatim evidence.
     for section in data.get("sections", []):
         if not isinstance(section, dict) or section.get("name") != "Memory":
             continue

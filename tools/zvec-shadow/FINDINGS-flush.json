@@ -1,10 +1,10 @@
 {
   "A_insert_then_flush_then_kill": {
-    "expect": "all 50 docs survive (flush() is the durability boundary)",
+    "expect": "all 50 docs survive (flush() is the process-crash durability boundary)",
     "child": {
       "returncode": -9,
       "killed_by_sigkill": true,
-      "wall_s": 0.476,
+      "wall_s": 0.471,
       "stdout": "",
       "stderr": ""
     },
@@ -70,7 +70,7 @@
     "child": {
       "returncode": -9,
       "killed_by_sigkill": true,
-      "wall_s": 0.347,
+      "wall_s": 0.356,
       "stdout": "",
       "stderr": ""
     },
@@ -85,7 +85,7 @@
     "child": {
       "returncode": -9,
       "killed_by_sigkill": true,
-      "wall_s": 0.465,
+      "wall_s": 0.469,
       "stdout": "",
       "stderr": ""
     },

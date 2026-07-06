@@ -94,10 +94,32 @@ def build_schema() -> "CollectionSchema":
     )
 
 
+# Ownership marker dropped inside every collection dir this tool creates.
+# load_snapshot() refuses to rmtree a pre-existing directory that does not
+# contain it, so a mistyped --collection-dir (e.g. pointing at a real data
+# directory) errors out instead of being silently deleted (PR #700
+# adjudication, CP4).
+OWNERSHIP_MARKER = ".zvec-shadow-owned"
+
+
 def load_snapshot(collection_dir: str, snapshot_path: str, chunk_size: int = 500) -> "zvec.Collection":
+    marker = os.path.join(collection_dir, OWNERSHIP_MARKER)
+    zvec_dir = os.path.join(collection_dir, "collection")
     if os.path.exists(collection_dir):
-        shutil.rmtree(collection_dir)
-    col = create_and_open(collection_dir, build_schema())
+        if os.path.isfile(marker):
+            shutil.rmtree(collection_dir)  # our own previous run's data
+        elif os.listdir(collection_dir):
+            raise SystemExit(
+                f"refusing to delete {collection_dir}: it exists, is non-empty, "
+                f"and has no {OWNERSHIP_MARKER} marker, so it was not created by "
+                "this tool. Pass a fresh directory (or remove it yourself if you "
+                "are sure)."
+            )
+        # else: exists but empty (e.g. freshly mkdtemp'd) -- safe to adopt.
+    os.makedirs(collection_dir, exist_ok=True)
+    with open(marker, "w") as f:
+        f.write("created by tools/zvec-shadow/sidecar.py; safe to delete\n")
+    col = create_and_open(zvec_dir, build_schema())
 
     docs = []
     n_total = 0
@@ -164,24 +186,46 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/query":
             self._send_json({"error": "not found"}, code=404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
+        # All request parsing/validation stays inside error handling: any
+        # malformed input must produce a 4xx JSON response, never an
+        # unhandled exception in the handler thread (PR #700 adjudication,
+        # CP4).
         try:
+            length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError as e:
-            self._send_json({"error": f"invalid JSON: {e}"}, code=400)
+        except (ValueError, json.JSONDecodeError) as e:
+            self._send_json({"error": f"invalid request body: {e}"}, code=400)
+            return
+        if not isinstance(body, dict):
+            self._send_json({"error": "request body must be a JSON object"}, code=400)
             return
 
         text = body.get("text", "")
-        top_k = int(body.get("top_k", 10))
+        if not isinstance(text, str):
+            self._send_json({"error": "'text' must be a string"}, code=400)
+            return
+        try:
+            top_k = int(body.get("top_k", 10))
+        except (TypeError, ValueError):
+            self._send_json({"error": "'top_k' must be an integer"}, code=400)
+            return
+        if not (1 <= top_k <= 1000):
+            self._send_json({"error": "'top_k' must be between 1 and 1000"}, code=400)
+            return
         embedding = body.get("embedding")
 
         t0 = time.perf_counter()
         try:
             if embedding is not None:
-                if len(embedding) != EMBEDDING_DIM:
-                    self._send_json({"error": f"embedding must have {EMBEDDING_DIM} dims, got {len(embedding)}"}, code=400)
+                if not isinstance(embedding, list) or len(embedding) != EMBEDDING_DIM:
+                    got = len(embedding) if isinstance(embedding, list) else type(embedding).__name__
+                    self._send_json({"error": f"embedding must be a list of {EMBEDDING_DIM} numbers, got {got}"}, code=400)
                     return
-                qvec = np.array(embedding, dtype=np.float32)
+                try:
+                    qvec = np.array(embedding, dtype=np.float32)
+                except (TypeError, ValueError) as e:
+                    self._send_json({"error": f"embedding must contain only numbers: {e}"}, code=400)
+                    return
                 results = self.collection.query(
                     queries=[
                         Query(field_name="embedding", vector=qvec),
