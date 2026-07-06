@@ -113,6 +113,14 @@ impl super::super::LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
+        let breaker_key = format!("chat:{}", lane.as_str());
+        if !self.circuit_breakers.allow(&breaker_key) {
+            return Err(format!(
+                "Circuit breaker open for {} lane — provider is failing, fast-rejecting. Retry in ~30s.",
+                lane.as_str()
+            ));
+        }
+
         let lane_cfg = self.lane(lane);
         let model = model_override.unwrap_or(&lane_cfg.model);
 
@@ -163,6 +171,7 @@ impl super::super::LlmClient {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
+                    self.circuit_breakers.record_failure(&breaker_key);
                     return Err(last_err);
                 }
             };
@@ -189,6 +198,9 @@ impl super::super::LlmClient {
                         tokio::time::sleep(Self::retry_delay(attempt)).await;
                         continue;
                     }
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        self.circuit_breakers.record_failure(&breaker_key);
+                    }
                     return Err(last_err);
                 }
             };
@@ -200,6 +212,7 @@ impl super::super::LlmClient {
                 if attempt < Self::MAX_ATTEMPTS {
                     continue;
                 }
+                self.circuit_breakers.record_failure(&breaker_key);
                 return Err(last_err);
             }
             if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -233,6 +246,7 @@ impl super::super::LlmClient {
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                self.circuit_breakers.record_failure(&breaker_key);
                 return Err(last_err);
             }
 
@@ -258,6 +272,7 @@ impl super::super::LlmClient {
 
             if let Some(text) = content {
                 self.mark_secret_success(&selected);
+                self.circuit_breakers.record_success(&breaker_key);
                 self.record_successful_llm_usage(
                     lane,
                     model,
@@ -296,6 +311,7 @@ impl super::super::LlmClient {
             }
         }
 
+        self.circuit_breakers.record_failure(&breaker_key);
         Err(last_err)
     }
 

@@ -180,6 +180,7 @@ impl super::super::LlmClient {
             provider_health_reload: Arc::new(RwLock::new(provider_health_reload)),
             provider_health_persist: Arc::new(RwLock::new(ProviderHealthPersistState::default())),
             claude_cli_failure: Arc::new(RwLock::new(None)),
+            circuit_breakers: super::super::CircuitBreakerRegistry::new(),
         })
     }
 

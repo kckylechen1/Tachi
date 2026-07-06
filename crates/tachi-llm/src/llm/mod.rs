@@ -7,10 +7,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 mod chat_lanes;
+mod circuit_breaker;
 mod embedding;
 mod helpers;
 mod provider_health;
 
+pub(crate) use circuit_breaker::CircuitBreakerRegistry;
 pub use provider_health::ProviderSecret;
 use provider_health::{
     ChatLaneConfig, ClaudeCliFailure, ProviderHealthPersistState, ProviderHealthReloadState,
@@ -31,6 +33,7 @@ pub struct LlmClient {
     provider_health_reload: Arc<RwLock<ProviderHealthReloadState>>,
     provider_health_persist: Arc<RwLock<ProviderHealthPersistState>>,
     claude_cli_failure: Arc<RwLock<Option<ClaudeCliFailure>>>,
+    pub(crate) circuit_breakers: CircuitBreakerRegistry,
 }
 
 #[cfg(test)]
