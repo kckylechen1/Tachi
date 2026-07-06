@@ -110,18 +110,21 @@ async fn collect_pipe(task: tokio::task::JoinHandle<Vec<u8>>) -> Result<String, 
 
 async fn reap_timed_out_child(child: &mut tokio::process::Child, child_pid: Option<u32>) {
     terminate_process_group(child_pid, libc::SIGTERM);
-    match tokio::time::timeout(PROCESS_GROUP_TERM_GRACE, child.wait()).await {
-        Ok(Ok(_)) => return,
+    let child_exited = match tokio::time::timeout(PROCESS_GROUP_TERM_GRACE, child.wait()).await {
+        Ok(Ok(_)) => true,
         Ok(Err(err)) => {
             tracing::warn!(error = %err, "failed while waiting for timed-out subprocess");
+            false
         }
-        Err(_) => {}
-    }
+        Err(_) => false,
+    };
     terminate_process_group(child_pid, libc::SIGKILL);
-    if let Err(err) = child.kill().await {
-        tracing::warn!(error = %err, "failed to kill timed-out subprocess");
+    if !child_exited {
+        if let Err(err) = child.kill().await {
+            tracing::warn!(error = %err, "failed to kill timed-out subprocess");
+        }
+        let _ = child.wait().await;
     }
-    let _ = child.wait().await;
 }
 
 fn opencode_sop_semaphore() -> &'static Semaphore {
@@ -199,7 +202,7 @@ mod tests {
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\nsleep 60 &\necho $! > '{}'\nwait\n",
+                "#!/bin/sh\nsh -c 'trap \"\" TERM; sleep 60' &\necho $! > '{}'\nwait\n",
                 child_pid_path.display()
             ),
         )
@@ -209,11 +212,18 @@ mod tests {
             .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&script_path, perms).expect("chmod");
+        let mut cmd = Command::new(&script_path);
+        let child_pid_path_for_wait = child_pid_path.clone();
+        cmd.env(
+            "PATH",
+            std::env::var_os("PATH").expect("PATH must exist for shell fixture"),
+        );
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            run_agent_subprocess(Command::new(&script_path), Duration::from_secs(1)),
-        )
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let run = tokio::spawn(run_agent_subprocess(cmd, Duration::from_secs(1)));
+            wait_for_file(&child_pid_path_for_wait).await;
+            run.await.expect("subprocess runner task should not panic")
+        })
         .await
         .expect("runner must return instead of hanging forever");
 
@@ -229,10 +239,33 @@ mod tests {
             .trim()
             .parse()
             .expect("pid integer");
-        let still_alive = unsafe { libc::kill(child_pid, 0) } == 0;
         assert!(
-            !still_alive,
+            wait_for_process_exit(child_pid).await,
             "hung child process {child_pid} should be reaped"
         );
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_file(path: &std::path::Path) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fixture did not write child pid file: {}", path.display());
+    }
+
+    #[cfg(unix)]
+    async fn wait_for_process_exit(pid: libc::pid_t) -> bool {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
     }
 }

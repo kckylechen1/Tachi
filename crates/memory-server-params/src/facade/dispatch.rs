@@ -102,6 +102,7 @@ pub struct TachiDispatchParams {
         default,
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub max_turns: Option<u32>,
 
     /// Sandbox mode for codex: "workspace-write" | "danger-full-access" | "read-only"
@@ -231,6 +232,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub usefulness_score: Option<f64>,
 
     /// Failure mode when this subagent was unhelpful or wrong
@@ -270,6 +272,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub latency_ms: Option<u64>,
 
     /// Input tokens/context tokens for this subagent if known
@@ -277,6 +280,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub input_tokens: Option<u64>,
 
     /// Output tokens for this subagent if known
@@ -284,6 +288,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub output_tokens: Option<u64>,
 
     /// Cost in tokens for this subagent if known
@@ -291,6 +296,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub cost_tokens: Option<u64>,
 
     /// Cost in USD for this subagent if known
@@ -298,6 +304,7 @@ pub struct TachiSubagentEvalParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub cost_usd: Option<f64>,
 }
 
@@ -333,6 +340,7 @@ pub struct TachiCompleteParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub duration_ms: Option<u64>,
 
     /// Skills used during execution (capability IDs)
@@ -344,6 +352,7 @@ pub struct TachiCompleteParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub cost_tokens: Option<u64>,
 
     /// Cost in USD (if known)
@@ -351,6 +360,7 @@ pub struct TachiCompleteParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub cost_usd: Option<f64>,
 
     /// Quality score 0.0–1.0 (self-reported or computed later)
@@ -358,6 +368,7 @@ pub struct TachiCompleteParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
 
     /// Free-form notes / summary of what was done

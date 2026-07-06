@@ -193,3 +193,177 @@ fn tachi_gh_action_schema_mentions_lifecycle_actions() {
         );
     }
 }
+
+// ─── Numeric params: schema must match string-or-number runtime (#572) ───────
+//
+// Every field using a `coerce::opt_*_from_string_or_number` deserializer accepts
+// numeric strings at runtime, but schemars used to advertise only `integer`/
+// `number`. MCP clients that send numeric strings (which the server accepts)
+// were rejected by schema validation. These tests pin the agreement: the schema
+// must advertise both the numeric type AND `string`.
+
+fn collect_schema_types(schema: &Value, out: &mut Vec<String>) {
+    match schema.get("type") {
+        Some(Value::String(s)) => out.push(s.clone()),
+        Some(Value::Array(arr)) => {
+            for v in arr {
+                if let Value::String(s) = v {
+                    out.push(s.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(arr) = schema.get(key).and_then(|v| v.as_array()) {
+            for sub in arr {
+                collect_schema_types(sub, out);
+            }
+        }
+    }
+}
+
+fn property_schema_types(value: &Value, field: &str) -> Vec<String> {
+    let mut types = Vec::new();
+    if let Some(prop) = value.get("properties").and_then(|p| p.get(field)) {
+        collect_schema_types(prop, &mut types);
+    }
+    types
+}
+
+/// Asserts a numeric-coerce field's schema advertises both `numeric_type`
+/// (`integer` or `number`) and `string`, matching the runtime deserializer.
+fn assert_field_accepts_string_and_number(value: &Value, field: &str, numeric_type: &str) {
+    let types = property_schema_types(value, field);
+    assert!(
+        !types.is_empty(),
+        "{field}: no `type` found in schema property — property may be misnamed"
+    );
+    assert!(
+        types.iter().any(|t| t == "string"),
+        "{field}: schema must accept numeric strings because the runtime deserializer does; \
+         types seen: {types:?}"
+    );
+    assert!(
+        types.iter().any(|t| t == numeric_type),
+        "{field}: schema must still advertise `{numeric_type}`; types seen: {types:?}"
+    );
+}
+
+#[test]
+fn tachi_task_numeric_params_schema_accepts_string_or_number() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(TachiTaskParams))
+        .expect("schema serializes");
+    for field in [
+        "duration_ms",
+        "timeout_secs",
+        "max_turns",
+        "number",
+        "cost_tokens",
+    ] {
+        assert_field_accepts_string_and_number(&value, field, "integer");
+    }
+    for field in ["cost_usd", "quality_score"] {
+        assert_field_accepts_string_and_number(&value, field, "number");
+    }
+}
+
+#[test]
+fn tachi_gh_numeric_params_schema_accepts_string_or_number() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::TachiGhParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&value, "number", "integer");
+    assert_field_accepts_string_and_number(&value, "limit", "integer");
+}
+
+#[test]
+fn tachi_verify_numeric_params_schema_accepts_string_or_number() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::TachiVerifyParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&value, "exit_code", "integer");
+    assert_field_accepts_string_and_number(&value, "limit", "integer");
+}
+
+#[test]
+fn tachi_complete_numeric_params_schema_accepts_string_or_number() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::TachiCompleteParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&value, "duration_ms", "integer");
+    assert_field_accepts_string_and_number(&value, "cost_tokens", "integer");
+    assert_field_accepts_string_and_number(&value, "cost_usd", "number");
+    assert_field_accepts_string_and_number(&value, "quality_score", "number");
+}
+
+#[test]
+fn tachi_save_and_remember_importance_schema_accepts_string_or_number() {
+    let save = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::TachiSaveParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&save, "importance", "number");
+
+    let remember = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::RememberParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&remember, "importance", "number");
+}
+
+#[test]
+fn search_memory_mmr_threshold_schema_accepts_string_or_number() {
+    let value = serde_json::to_value(rmcp::schemars::schema_for!(
+        crate::tool_params::SearchMemoryParams
+    ))
+    .expect("schema serializes");
+    assert_field_accepts_string_and_number(&value, "mmr_threshold", "number");
+}
+
+// ─── Runtime agreement: the deserializer actually accepts numeric strings ─────
+
+#[test]
+fn tachi_task_runtime_accepts_numeric_strings() {
+    let params: TachiTaskParams = serde_json::from_value(json!({
+        "action": "complete",
+        "duration_ms": "12345",
+        "timeout_secs": "30",
+        "cost_tokens": "99",
+        "cost_usd": "1.5",
+        "quality_score": "0.9"
+    }))
+    .expect("runtime accepts numeric strings");
+    assert_eq!(params.duration_ms, Some(12345));
+    assert_eq!(params.timeout_secs, Some(30));
+    assert_eq!(params.cost_tokens, Some(99));
+    assert_eq!(params.cost_usd, Some(1.5));
+    assert_eq!(params.quality_score, Some(0.9));
+}
+
+#[test]
+fn tachi_gh_runtime_accepts_numeric_strings() {
+    let params: crate::tool_params::TachiGhParams = serde_json::from_value(json!({
+        "action": "issue_read",
+        "number": "42",
+        "limit": "5"
+    }))
+    .expect("runtime accepts numeric strings");
+    assert_eq!(params.number, Some(42));
+    assert_eq!(params.limit, Some(5));
+}
+
+#[test]
+fn tachi_verify_runtime_accepts_numeric_strings() {
+    let params: crate::tool_params::TachiVerifyParams = serde_json::from_value(json!({
+        "action": "record",
+        "exit_code": "0",
+        "limit": "3"
+    }))
+    .expect("runtime accepts numeric strings");
+    assert_eq!(params.exit_code, Some(0));
+    assert_eq!(params.limit, Some(3));
+}

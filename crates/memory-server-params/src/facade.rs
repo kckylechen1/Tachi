@@ -473,6 +473,7 @@ pub struct TachiWikiParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub importance: Option<f64>,
     #[serde(default)]
     pub scope: Option<String>,
@@ -556,6 +557,7 @@ pub struct TachiWorkflowParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub wiki_importance: Option<f64>,
     #[serde(default)]
     pub wiki_scope: Option<String>,
