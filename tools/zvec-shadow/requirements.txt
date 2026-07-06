@@ -1,0 +1,8 @@
+# Runtime deps for the zvec shadow sidecar (tachi#683 Phase 0).
+# Versions pinned to what was actually verified working during this spike
+# (macOS arm64, Python 3.14.6, 2026-07-06). No pip package here calls any
+# external paid API; sqlite-vec is a local SQLite extension binary, zvec is
+# the in-process vector library under test.
+zvec==0.5.1
+numpy==2.5.1
+sqlite-vec==0.1.9

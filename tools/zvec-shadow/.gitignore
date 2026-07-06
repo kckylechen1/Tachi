@@ -1,0 +1,13 @@
+# Generated artifacts that embed the operator's REAL private Tachi memory
+# content (query text, ids, summaries pulled straight from a live
+# ~/.tachi/global/memory.db snapshot). Never commit these -- regenerate
+# locally with export_snapshot.py / compare.py instead. See README.md.
+# (FINDINGS-flush.json is NOT excluded: probe_flush.py only ever touches
+# synthetic scratch collections, never real memory content.)
+snapshot*.jsonl
+reports/*.jsonl
+reports/*.md
+!reports/.gitkeep
+
+__pycache__/
+*.pyc
