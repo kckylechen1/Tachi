@@ -106,7 +106,7 @@ fn auto_daemon_disabled() -> bool {
         .unwrap_or(false)
 }
 
-fn stdio_proxy_disabled() -> bool {
+pub(super) fn stdio_proxy_disabled() -> bool {
     std::env::var("TACHI_DISABLE_STDIO_PROXY")
         .map(|value| env_truthy(&value))
         .unwrap_or(false)

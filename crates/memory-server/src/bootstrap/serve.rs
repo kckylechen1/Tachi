@@ -496,6 +496,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         }
     }
 
+    if !cli.daemon && !stdio::stdio_proxy_disabled() {
+        return Err("No compatible Tachi daemon available for stdio proxy. \
+             A stdio serve without the daemon would open the DB directly, \
+             contending for write locks with other processes (#520). \
+             Start a daemon with `tachi --daemon`, or set \
+             TACHI_DISABLE_STDIO_PROXY=1 to force local serve (debugging only)."
+            .into());
+    }
+
     if cli.daemon {
         std::env::set_var("TACHI_DAEMON", "1");
     } else {
