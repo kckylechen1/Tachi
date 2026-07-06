@@ -1,6 +1,6 @@
 ---
 description: Dispatch a task to the codex lane (ACP) via the lanes plugin — replaces /codex:dispatch.
-argument-hint: "[--write] [--background] [--model <model>] [--effort <effort>] [--read-only] <task>"
+argument-hint: "[--write] [--wait] [--model <model>] [--effort <effort>] [--read-only] <task>"
 allowed-tools: Agent
 ---
 
@@ -15,6 +15,6 @@ Argument mapping (resolve these, then pass explicit parameters to the subagent):
 - `--model <model>` → `model` (passed through verbatim; codex maps it via CODEX_CONFIG).
 - `--effort <effort>` → `effort` (codex reasoning effort).
 - Everything that is not a recognized flag is the natural-language `prompt`. Do not forward the flags themselves as prompt text.
-- `--background`: this is an execution flag for you, not for the lane. If present, launch the `lanes:codex` subagent with the `Agent` tool in the background (run_in_background) so the bottom task line tracks it and you are notified on completion. If absent, run it in the foreground and block until it returns.
+- **Background by default**: launch the lane subagent with the `Agent` tool with `run_in_background: true` — the bottom task line tracks it and you are notified on completion; keep working meanwhile. Only if the user passes `--wait` (or explicitly asks to block) run it in the foreground.
 
 Invoke the subagent with an instruction of the form: "Dispatch to your lane. prompt=<task>. read_only=<bool>. worktree=<branch or omit>. model=<model or omit>. effort=<effort or omit>. Follow your relay protocol." Relay the subagent's final result verbatim.
