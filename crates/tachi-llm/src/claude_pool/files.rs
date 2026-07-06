@@ -21,12 +21,34 @@ pub(super) fn sanitize_label(label: &str) -> String {
     if trimmed.chars().count() <= MAX_LABEL_LEN {
         return trimmed.to_string();
     }
-    // Label exceeds the limit: keep a prefix and append a short hash of the
-    // full label so two distinct labels that share the first 48 chars don't
-    // collide on disk.
+    // Label exceeds the limit: keep a readable prefix and append a short hash
+    // of the full label so two distinct labels that share the first 48 chars
+    // don't collide on disk.
     let prefix_len = MAX_LABEL_LEN - HASH_LEN - 1;
-    let prefix: String = trimmed.chars().take(prefix_len).collect();
+    let prefix = readable_truncated_prefix(trimmed, prefix_len);
     format!("{}-{}", prefix, short_hash(label))
+}
+
+fn readable_truncated_prefix(label: &str, max_chars: usize) -> String {
+    let hard_prefix: String = label.chars().take(max_chars).collect();
+    if hard_prefix.chars().count() < max_chars {
+        return hard_prefix.trim_end_matches(['-', '_']).to_string();
+    }
+
+    if let Some((idx, _)) = hard_prefix
+        .char_indices()
+        .rev()
+        .find(|(_, c)| *c == '-' || *c == '_')
+    {
+        let boundary_prefix = hard_prefix[..idx].trim_end_matches(['-', '_']);
+        // Avoid reducing labels like "aaaaaaaa..." to a tiny prefix just
+        // because an early separator exists; fall back to the hard cap there.
+        if boundary_prefix.chars().count() >= max_chars / 2 {
+            return boundary_prefix.to_string();
+        }
+    }
+
+    hard_prefix.trim_end_matches(['-', '_']).to_string()
 }
 
 fn short_hash(s: &str) -> String {

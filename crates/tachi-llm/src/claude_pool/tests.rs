@@ -38,6 +38,21 @@ fn sanitize_label_distinguishes_long_labels_with_shared_prefix() {
 }
 
 #[test]
+fn sanitize_label_truncates_long_prefix_at_segment_boundary() {
+    let safe = sanitize_label("issue-501-architecture-review-backlog-2026-07-05-consolidated-plan");
+
+    assert!(safe.len() <= 48);
+    assert!(
+        safe.starts_with("issue-501-architecture-review-backlog-"),
+        "expected readable whole-segment prefix, got {safe}"
+    );
+    assert!(
+        !safe.starts_with("issue-501-architecture-review-backlog-2-"),
+        "prefix must not hard-cut mid-segment before hash: {safe}"
+    );
+}
+
+#[test]
 fn claude_binary_override_accepts_only_claude_executables() {
     let tmp = tempfile::tempdir().unwrap();
     let claude_path = tmp.path().join("claude");
