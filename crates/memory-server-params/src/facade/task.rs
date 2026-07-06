@@ -137,6 +137,7 @@ pub struct TachiTaskParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub duration_ms: Option<u64>,
     /// [action=complete] Skills actually used. Distinct from dispatch prompt skills.
     #[serde(default)]
@@ -146,18 +147,21 @@ pub struct TachiTaskParams {
         default,
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_integer_from_string_or_number_schema")]
     pub cost_tokens: Option<u64>,
     /// [action=complete] Cost in USD.
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub cost_usd: Option<f64>,
     /// [action=complete] Quality score 0.0-1.0.
     #[serde(
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub quality_score: Option<f64>,
     /// [action=complete] Completion notes or summary.
     #[serde(default)]
@@ -205,6 +209,7 @@ pub struct TachiTaskParams {
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
     #[schemars(
+        schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
         description = "[action=dispatch|wait] Timeout in seconds for the spawned agent (dispatch) or terminal poll loop (wait)."
     )]
     pub timeout_secs: Option<u64>,
@@ -223,6 +228,7 @@ pub struct TachiTaskParams {
         deserialize_with = "crate::coerce::opt_u32_from_string_or_number"
     )]
     #[schemars(
+        schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
         description = "[action=dispatch] Maximum conversation turns for the spawned agent."
     )]
     pub max_turns: Option<u32>,
@@ -282,6 +288,7 @@ pub struct TachiTaskParams {
         deserialize_with = "crate::coerce::opt_u64_from_string_or_number"
     )]
     #[schemars(
+        schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
         description = "GitHub issue/PR number for action='intake', action='link_pr', or action='pr_status' when repo is supplied."
     )]
     pub number: Option<u64>,
@@ -407,7 +414,10 @@ pub struct TachiTaskParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
-    #[schemars(description = "[action=close_loop] Wiki closure importance 0.0-1.0.")]
+    #[schemars(
+        schema_with = "crate::coerce::opt_number_from_string_or_number_schema",
+        description = "[action=close_loop] Wiki closure importance 0.0-1.0."
+    )]
     pub wiki_importance: Option<f64>,
     #[serde(default)]
     #[schemars(description = "[action=close_loop] Wiki closure scope: global or project.")]

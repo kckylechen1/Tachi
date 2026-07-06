@@ -430,8 +430,8 @@ def main():
             stats = json.loads(result_text)
             print(f"Hub total capabilities: {stats.get('total_capabilities', '?')}")
             print(f"By type: {json.dumps(stats.get('by_type', {}))}")
-        except:
-            pass
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            print(f"  warning: could not parse hub_stats response: {exc}", file=sys.stderr)
 
         print(f"\nRegistered: {registered}")
         if args.sync_agent_config:

@@ -101,7 +101,7 @@ pub(crate) async fn save_daily_health_wiki(
 }
 
 pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
-    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    let stripped = tachi_llm::LlmClient::strip_code_fence(raw);
     serde_json::from_str(stripped)
         .or_else(|_| {
             let start = stripped.find('{').unwrap_or(0);
@@ -112,9 +112,11 @@ pub(crate) fn parse_llm_json(raw: &str) -> Result<Value, String> {
             serde_json::from_str(&stripped[start..end])
         })
         .map_err(|e| {
+            // Do NOT embed raw LLM response — it may contain sensitive content
+            // or internal state that should not surface to callers.
             format!(
-                "parse daily health JSON: {e}; raw={}",
-                raw.chars().take(500).collect::<String>()
+                "parse daily health JSON failed: {e}; raw response length={} chars (check server logs for full payload)",
+                raw.len()
             )
         })
 }

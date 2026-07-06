@@ -37,8 +37,24 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run cargo audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit --deny warnings
+
+      - name: Install cargo-nextest
+        # get.nextest.rs is unreachable from this runner's network (DNS blocked);
+        # taiki-e/install-action pulls a prebuilt binary from GitHub Releases.
+        uses: taiki-e/install-action@nextest
+
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        run: cargo nextest run --workspace --locked --profile ci
+
+      - name: Run doc tests
+        run: cargo test --workspace --locked --doc
 
   node:
     name: Node packages
@@ -68,3 +84,7 @@ jobs:
       - name: Build
         working-directory: ${{ matrix.package }}
         run: npm run build
+
+      - name: Run npm audit
+        working-directory: ${{ matrix.package }}
+        run: npm audit --audit-level=high || true

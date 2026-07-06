@@ -108,6 +108,7 @@ pub struct IngestEventParams {
         default,
         deserialize_with = "crate::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "crate::coerce::opt_number_from_string_or_number_schema")]
     pub importance: Option<f64>,
 
     /// Target scope for writes

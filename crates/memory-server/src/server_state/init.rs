@@ -1,17 +1,17 @@
 use super::cache::{ToolDiscovery, DEFAULT_MCP_DISCOVERY_TIMEOUT_MS};
 use super::memory_server::MemoryServer;
-use super::read_pool::{configured_memory_read_pool_size, ReadStorePool};
 use super::runtime::{
-    AgentRuntime, DbScope, EnrichmentRuntime, FoundryRuntime, ProjectDbState, RateLimiter,
-    VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM, ENRICH_CHANNEL_CAPACITY,
+    AgentRuntime, EnrichmentRuntime, FoundryRuntime, ENRICH_CHANNEL_CAPACITY,
     FOUNDRY_CHANNEL_CAPACITY,
 };
+use super::{
+    configured_memory_read_pool_size, DbRuntime, DbScope, ProjectDbState, RateLimiter,
+    ReadStorePool, VaultState, DEFAULT_RATE_LIMIT_BURST, DEFAULT_RATE_LIMIT_RPM,
+};
 use crate::builtins::seed_builtin_capabilities;
-use crate::claude_pool;
 use crate::foundry_runtime_ops::{
     run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
 };
-use crate::llm;
 use crate::mcp_pool::McpClientPool;
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::utils::parse_env_u64;
@@ -45,6 +45,13 @@ fn background_workers_enabled() -> bool {
     }
 }
 
+fn read_bound_agent_id_from_env() -> Option<String> {
+    std::env::var("TACHI_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 impl MemoryServer {
     pub(crate) fn new(
         global_db_path: PathBuf,
@@ -70,52 +77,29 @@ impl MemoryServer {
         let global_read_pool = ReadStorePool::open_read_only(global_db_str, read_pool_size)?;
         let global_vec_available = global_store.vec_available;
 
-        let (
-            project_store,
-            project_read_pool,
-            project_rw_gate,
-            project_db_path,
-            project_vec_available,
-        ) = if let Some(ref p) = project_db_path {
-            let project_db_str = p.to_str().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Project DB path contains invalid UTF-8: {}", p.display()),
-                )
-            })?;
-            // Derive project label from parent directory name
-            // (e.g. ~/.tachi/projects/{name}/memory.db → {name}).
-            let project_label = p
-                .parent()
-                .and_then(|parent| parent.file_name())
-                .and_then(|os| os.to_str())
-                .unwrap_or("project")
-                .to_string();
-            let store = MemoryStore::open_with_label(project_db_str, &project_label)?;
-            let read_pool = ReadStorePool::open_read_only(project_db_str, read_pool_size)?;
-            let v = store.vec_available;
-            (
-                Some(Arc::new(StdMutex::new(store))),
-                Some(read_pool),
-                Some(Arc::new(StdRwLock::new(()))),
-                Some(Arc::new(p.clone())),
-                v,
-            )
+        let project_db_state = if let Some(ref p) = project_db_path {
+            Some(ProjectDbState::open(p.clone(), read_pool_size).map_err(std::io::Error::other)?)
         } else {
-            (None, None, None, None, false)
+            None
         };
 
-        let llm = Arc::new(llm::LlmClient::new_with_vault_db(Some(
+        let llm = Arc::new(tachi_llm::LlmClient::new_with_vault_db(Some(
             global_db_path.as_path(),
         ))?);
         let claude_pool_max = std::env::var("CLAUDE_POOL_MAX_CONCURRENT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(claude_pool::DEFAULT_MAX_CONCURRENT);
-        let claude_pool = Arc::new(claude_pool::ClaudePool::new(claude_pool_max));
+            .unwrap_or(tachi_llm::claude_pool::DEFAULT_MAX_CONCURRENT);
+        let claude_pool = Arc::new(tachi_llm::claude_pool::ClaudePool::new(claude_pool_max));
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let bound_agent_id = read_bound_agent_id_from_env();
+        if bound_agent_id.is_none() {
+            tracing::warn!(
+                "TACHI_AGENT_ID is not set; vault ACL falls back to caller-supplied agent_id"
+            );
+        }
         let mcp_discovery_timeout_ms = match parse_env_u64("MCP_DISCOVERY_TIMEOUT_MS") {
             Some(0) => {
                 eprintln!("MCP_DISCOVERY_TIMEOUT_MS must be >= 1; using 1ms");
@@ -142,38 +126,17 @@ impl MemoryServer {
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
-        // Build hot-swap state before moving project_store into the struct
-        let hot_project_db = Arc::new(StdRwLock::new(
-            match (
-                project_store.as_ref(),
-                project_read_pool.as_ref(),
-                project_rw_gate.clone(),
-                project_db_path.clone(),
-            ) {
-                (Some(store), Some(read_pool), Some(rw_gate), Some(db_path)) => {
-                    Some(ProjectDbState {
-                        store: Arc::clone(store),
-                        read_pool: read_pool.clone(),
-                        rw_gate,
-                        db_path,
-                    })
-                }
-                _ => None,
-            },
-        ));
-
-        let server = Self {
+        let db = DbRuntime {
             global_store: Arc::new(StdMutex::new(global_store)),
             global_read_pool,
-            project_store,
-            project_read_pool,
             global_rw_gate: Arc::new(StdRwLock::new(())),
-            project_rw_gate,
             global_db_path: Arc::new(global_db_path),
-            project_db_path,
             global_vec_available,
-            project_vec_available,
-            hot_project_db,
+            project_db: Arc::new(StdRwLock::new(project_db_state)),
+        };
+
+        let server = Self {
+            db,
             llm,
             claude_pool,
             pipeline_enabled,
@@ -228,10 +191,10 @@ impl MemoryServer {
             })),
             agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
                 agent_profile: None,
-                tool_profile: Some(crate::profiles::default_tool_profile()),
+                tool_profile: Some(tachi_hub::default_tool_profile()),
                 handoff_memos: Vec::new(),
             })),
-            named_project_cache: Arc::new(StdMutex::new(HashMap::new())),
+            bound_agent_id: Arc::new(StdRwLock::new(bound_agent_id)),
         };
 
         if background_workers_enabled() {
@@ -331,6 +294,41 @@ fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::MemoryServer;
+    use chrono::Utc;
+    use memory_core::MemoryEntry;
+    use serde_json::json;
+
+    fn test_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/".to_string(),
+            summary: String::new(),
+            text: "test memory".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_until: None,
+            category: "fact".to_string(),
+            topic: String::new(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+            recall_count: 0,
+            query_diversity: 0,
+            tier: "raw".to_string(),
+        }
+    }
 
     #[test]
     fn memory_server_new_creates_global_and_project_db_parents() {
@@ -345,5 +343,25 @@ mod tests {
         assert!(project_db.parent().expect("project parent").is_dir());
         assert_eq!(server.global_db_path_buf(), global_db);
         assert_eq!(server.project_db_path_buf(), Some(project_db));
+        assert!(server.has_project_db());
+
+        server
+            .with_project_store(|store| {
+                store
+                    .upsert(&test_entry("startup-project-read-visible"))
+                    .map_err(|e| format!("project upsert failed: {e}"))
+            })
+            .expect("startup project writer should be active");
+        let found = server
+            .with_project_store_read(|store| {
+                store
+                    .get("startup-project-read-visible")
+                    .map_err(|e| format!("project read get failed: {e}"))
+            })
+            .expect("startup project read pool should be active");
+        assert_eq!(
+            found.expect("project entry exists").id,
+            "startup-project-read-visible"
+        );
     }
 }

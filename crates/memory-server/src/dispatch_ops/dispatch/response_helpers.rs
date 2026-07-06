@@ -86,3 +86,76 @@ impl Drop for McpCleanup {
         }
     }
 }
+
+// ─── Final dispatch JSON response ────────────────────────────────────────────
+
+pub(super) struct DispatchResponseInputs<'a> {
+    pub(super) dispatch_id: &'a str,
+    pub(super) agent_norm: &'a str,
+    pub(super) profile_payload: &'a Value,
+    pub(super) resolved_profile: &'a ResolvedDispatchProfile,
+    pub(super) credential_reports_json: &'a [Value],
+    pub(super) capability_bundle_card: &'a Value,
+    pub(super) capability_bundle_file: &'a str,
+    pub(super) feedback_rules_trace: &'a Value,
+    pub(super) harness_transport: &'a str,
+    pub(super) harness_server_url: &'a Option<String>,
+    pub(super) host_adapter: &'a Option<String>,
+    pub(super) execution_backend_name: Option<&'static str>,
+    pub(super) execution_backend_metadata: &'a Option<Value>,
+    pub(super) acpx_enabled: bool,
+    pub(super) native_acp_enabled: bool,
+    pub(super) v2: bool,
+    pub(super) plan_duration_ms: Option<u64>,
+    pub(super) params: &'a TachiDispatchParams,
+    pub(super) plan_path: &'a Path,
+    pub(super) prompt_md_path: &'a Path,
+    pub(super) context_md_path: &'a Path,
+    pub(super) trajectory_path: &'a Path,
+    pub(super) workspace_dir: &'a Path,
+}
+
+pub(super) fn build_dispatch_response(
+    inputs: DispatchResponseInputs<'_>,
+) -> Result<String, String> {
+    let response = json!({
+        "dispatch_id": inputs.dispatch_id,
+        "task": {
+            "id": inputs.dispatch_id,
+            "status": { "state": "TASK_STATE_WORKING" },
+        },
+        "agent": inputs.agent_norm,
+        "profile": inputs.profile_payload,
+        "selected_profile": inputs.resolved_profile.selected_profile,
+        "tool_access": inputs.resolved_profile.mcp_access,
+        "dispatch_profile": inputs.resolved_profile.mbit_card,
+        "credentials": inputs.credential_reports_json,
+        "route_explanation": inputs.resolved_profile.route_explanation,
+        "fallback_chain": inputs.resolved_profile.fallback_chain,
+        "issue_ref": inputs.params.issue_ref,
+        "pr_ref": inputs.params.pr_ref,
+        "flow_id": inputs.params.flow_id,
+        "auto_capability_bundle": inputs.resolved_profile.auto_capability_bundle,
+        "capability_bundle": inputs.capability_bundle_card,
+        "capability_bundle_file": inputs.capability_bundle_file,
+        "feedback_rules": inputs.feedback_rules_trace,
+        "harness_transport": inputs.harness_transport,
+        "harness_server_url": inputs.harness_server_url,
+        "host_adapter": inputs.host_adapter,
+        "execution_backend": inputs.execution_backend_name,
+        "acpx": if inputs.acpx_enabled { inputs.execution_backend_metadata.clone() } else { None },
+        "acp_native": if inputs.native_acp_enabled { inputs.execution_backend_metadata.clone() } else { None },
+        "v2": inputs.v2,
+        "plan_review_status": if inputs.v2 { "approved" } else { "n/a" },
+        "duration_ms_plan": inputs.plan_duration_ms,
+        "message": "Task dispatched to background. You are unblocked. Use tachi_task(action='board') to check status.",
+        "suggested_complete_command": suggested_complete_payload(inputs.dispatch_id, inputs.agent_norm, inputs.params),
+        "plan_file": inputs.plan_path.to_string_lossy(),
+        "prompt_file": inputs.prompt_md_path.to_string_lossy(),
+        "context_file": inputs.context_md_path.to_string_lossy(),
+        "trajectory_file": inputs.trajectory_path.to_string_lossy(),
+        "run_dir": inputs.workspace_dir.to_string_lossy(),
+    });
+
+    serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+}

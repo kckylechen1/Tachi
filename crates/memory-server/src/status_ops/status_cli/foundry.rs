@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use memory_core::{get_foundry_config, set_foundry_config, MemoryStore, PerDbConfig};
 use serde_json::json;
 
-use crate::cli::FoundryAction;
 use crate::manifest::Manifest;
+use tachi_bootstrap::cli::FoundryAction;
 
 pub(crate) async fn run_foundry(
     action: FoundryAction,

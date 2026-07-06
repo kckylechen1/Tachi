@@ -1,0 +1,25 @@
+[package]
+name = "tachi-llm"
+version = "1.6.2"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+memory-core = { path = "../memory-core" }
+chrono = { workspace = true }
+dirs = "5.0"
+reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls", "system-proxy"] }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum = "0.7"
+tempfile = "3"

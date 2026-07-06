@@ -105,6 +105,7 @@ pub struct RecallContextParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub min_score: Option<f64>,
 
     /// Optional agent role for sandbox filtering

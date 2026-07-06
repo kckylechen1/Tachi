@@ -14,87 +14,17 @@ pub(crate) fn apply_confidence_reinforcement(
     reinforced_at: &str,
 ) -> Result<(), String> {
     store
-        .connection()
-        .execute(
-            r#"UPDATE memories
-               SET metadata = json_set(
-                   CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
-                   '$.confidence',
-                   min(
-                       1.0,
-                       coalesce(
-                           CAST(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, '$.confidence') AS REAL),
-                           importance
-                       ) + ?1
-                   ),
-                   '$.confidence_reinforced_at', ?2
-               ),
-               updated_at = ?2
-               WHERE id = ?3"#,
-            rusqlite::params![increment, reinforced_at, reinforced_id],
-        )
-        .map_err(|e| format!("update confidence reinforcement: {e}"))?;
-    Ok(())
+        .reinforce_confidence(reinforced_id, increment, reinforced_at)
+        .map_err(|e| format!("update confidence reinforcement: {e}"))
 }
 
 pub(crate) fn collect_reinforcement_candidates(
     store: &MemoryStore,
     entry: &MemoryEntry,
 ) -> Result<Vec<MemoryEntry>, String> {
-    let mut entities = entry
-        .entities
-        .iter()
-        .map(|entity| entity.trim())
-        .filter(|entity| !entity.is_empty())
-        .collect::<Vec<_>>();
-    entities.sort_unstable();
-    entities.dedup();
-    if entities.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut candidate_ids = Vec::new();
-    let mut seen = HashSet::<String>::new();
-    for batch in entities.chunks(200) {
-        let placeholders = (2..batch.len() + 2)
-            .map(|i| format!("?{i}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            r#"SELECT id
-               FROM memories
-               WHERE archived = 0
-                 AND id != ?1
-                 AND EXISTS (
-                     SELECT 1 FROM json_each(memories.entities)
-                     WHERE json_each.value IN ({placeholders})
-                 )
-               ORDER BY timestamp DESC
-               LIMIT {}"#,
-            (batch.len() * 5).clamp(5, 50)
-        );
-        let params = std::iter::once(entry.id.as_str()).chain(batch.iter().copied());
-        let mut stmt = store
-            .connection()
-            .prepare(&sql)
-            .map_err(|e| format!("prepare confidence reinforcement candidates: {e}"))?;
-        let rows = stmt
-            .query_map(rusqlite::params_from_iter(params), |row| {
-                row.get::<_, String>(0)
-            })
-            .map_err(|e| format!("query confidence reinforcement candidates: {e}"))?;
-        for row in rows {
-            let candidate_id =
-                row.map_err(|e| format!("read confidence reinforcement candidate: {e}"))?;
-            if seen.insert(candidate_id.clone()) {
-                candidate_ids.push(candidate_id);
-            }
-        }
-    }
-
-    memory_core::db::fetch_by_ids(store.connection(), &candidate_ids, false)
-        .map(|entries| entries.into_values().collect())
-        .map_err(|e| format!("load confidence reinforcement candidates: {e}"))
+    store
+        .entity_overlap_candidates(&entry.id, &entry.entities)
+        .map_err(|e| format!("collect confidence reinforcement candidates: {e}"))
 }
 
 pub(crate) fn apply_confidence_reinforcement_links(

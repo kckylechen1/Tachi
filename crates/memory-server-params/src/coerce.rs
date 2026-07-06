@@ -1,3 +1,4 @@
+use rmcp::schemars::{self, Schema, SchemaGenerator};
 use serde::de;
 use serde::Deserialize;
 
@@ -96,4 +97,34 @@ where
         }
         _ => Err(de::Error::custom("expected number or string")),
     }
+}
+
+// ─── Schema helpers: advertise string-or-number acceptance ───────────────────
+//
+// The deserialize_with helpers above accept both JSON numbers and numeric
+// strings, but schemars derives the schema from the field type (`Option<u64>`,
+// `Option<f64>`, …) and therefore advertises only `integer`/`number`. MCP
+// clients that send numeric strings — which the server happily accepts — get
+// rejected by schema validation. These helpers emit the matching union schema
+// so the advertised JSON Schema and runtime deserializer agree. They include
+// `null` because every field using them is `Option<T>`.
+
+pub(crate) fn opt_integer_from_string_or_number_schema(_generator: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "integer" },
+            { "type": "string" },
+            { "type": "null" }
+        ]
+    })
+}
+
+pub(crate) fn opt_number_from_string_or_number_schema(_generator: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "anyOf": [
+            { "type": "number" },
+            { "type": "string" },
+            { "type": "null" }
+        ]
+    })
 }

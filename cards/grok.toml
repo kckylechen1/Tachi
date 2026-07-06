@@ -1,0 +1,71 @@
+schema = "tachi-lane-card/v1"
+
+[identity]
+name = "grok"
+vendor = "xai"
+model_id = "grok-composer-2.5-fast"
+transport = "grok-cli" # ~/bin/lane-run grok, --always-approve headless
+roles = ["implementer-fast"]
+
+[hexagon] # seed 2026-07-05
+spec_fidelity = 0.90
+self_report_trust = 0.85 # one slip: reported 9 tests, was 8; goldens themselves all true
+test_discipline = 0.75 # writes discriminating tests when contracted; left 5 functions untested unprompted
+equivalence_refactor = 0.90
+security_competence = 0.70 # good under precise contract (#608 spoofed-merge test); no open-ended security
+speed_cost = 0.95 # fastest lane: 7min for a full slice grok=7min vs sonnet-5=18min same-type
+
+[routing]
+route_to = ["behavior-frozen-refactor-fast", "well-scoped-fix-with-goldens", "shim/tooling-fixes"]
+route_away = ["long-unattended-campaigns (wall-clock timeouts)", "open-ended-design"]
+
+[[failure_modes]]
+signature = "unreported_red_test"
+count = 2
+evidence = ["#528-era R1/R2: secret_redactions break + 5 variant routes found only by leader's full-suite run"]
+counter_clause = "Paste verbatim `test result:` lines or the delivery is incomplete."
+efficacy = "packet-clause EFFECTIVE — cured on the spot (R3 onward all verbatim, honest). Textbook case that prompt-layer CAN work when the clause is checkable."
+
+[[failure_modes]]
+signature = "workspace_loss_on_resume"
+count = 1
+evidence = ["600s wall timeout → resumed in PRIMARY checkout (isolation violation)"]
+counter_clause = "Every resume restates the workspace path; WIP-commit before hitting the wall."
+efficacy = "packet-clause + lane-run confinement footer (structural). Cured."
+
+[[failure_modes]]
+signature = "inherited_base_commit"
+count = 1
+evidence = ["PR #525 CONFLICTING from stale session HEAD"]
+counter_clause = "Worktrees cut fresh from origin/<base> (lane-run does this deterministically now)."
+efficacy = "structural (lane-run owns the cut). Cured."
+
+[constraints.mandatory_clauses]
+all = ["verbatim `test result:` lines", "STOP after PR, never merge"]
+
+[trust]
+self_report = "high" # post-vaccination; minor count slips possible, goldens verifiable
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#591/#592 daily_pipeline SQL sink (slice 1)"
+score = 0.93
+verdict = "7min; goldens all true; discriminating tests; clean STOP; one self-report count slip"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#608 HTTP merge-verify security fix"
+score = 0.92
+verdict = "independent-GET verification per contract; spoofed-merge discriminating test with pre-fix red"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "tachi#609 gh comment --body-file fix"
+score = 0.92
+verdict = "fake-shim discriminating test; opened its own PR via --body-file (didn't step on the same rake)"
+
+[[eval_rows]]
+date = 2026-07-05
+task = "ship contract mode #525 (earlier)"
+score = 0.75
+verdict = "delivered through 2 review rounds; pre-vaccination unreported-red habit surfaced here"

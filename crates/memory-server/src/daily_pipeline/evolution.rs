@@ -209,35 +209,9 @@ fn collect_recent_eval_rows(
     limit: usize,
 ) -> Result<Vec<EvalEvidenceRow>, String> {
     let collect = |store: &mut MemoryStore| -> Result<Vec<EvalEvidenceRow>, String> {
-        let mut stmt = store
-            .connection()
-            .prepare(
-                "SELECT id, path, summary, text, metadata, created_at
-                 FROM memories
-                 WHERE path LIKE '/eval/%'
-                   AND created_at > datetime('now', '-7 day')
-                 ORDER BY created_at DESC
-                 LIMIT ?1",
-            )
-            .map_err(|e| format!("prepare eval evidence query: {e}"))?;
-        let rows = stmt
-            .query_map([limit as i64], |row| {
-                let metadata_raw: String = row.get(4)?;
-                Ok(EvalEvidenceRow {
-                    id: row.get(0)?,
-                    path: row.get(1)?,
-                    summary: row.get(2)?,
-                    text: row.get(3)?,
-                    metadata: serde_json::from_str(&metadata_raw).unwrap_or_else(|_| json!({})),
-                    created_at: row.get(5)?,
-                })
-            })
-            .map_err(|e| format!("query eval evidence: {e}"))?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row.map_err(|e| format!("read eval evidence row: {e}"))?);
-        }
-        Ok(out)
+        store
+            .list_eval_evidence(7, limit, false)
+            .map_err(|e| format!("list eval evidence: {e}"))
     };
 
     let mut rows = server

@@ -36,13 +36,10 @@ mod agent_markdown;
 mod agent_profile_ops;
 mod agent_registry;
 mod arena_ops;
-mod backend_tier;
 mod bootstrap;
 mod builtins;
 mod capability_ops;
 mod capture_gate;
-mod claude_pool;
-mod cli;
 mod cli_client;
 mod complete_ops;
 mod continuity_ops;
@@ -72,10 +69,9 @@ mod gh_safe_merge;
 mod graph_state_ops;
 mod handoff_ops;
 mod hub_cli;
-mod hub_helpers;
 mod hub_ops;
+mod i18n;
 mod kanban;
-mod llm;
 mod manifest;
 mod manifest_audit;
 mod mcp_connection;
@@ -89,7 +85,6 @@ mod orchestrator_ops;
 mod pack_ops;
 mod path_utils;
 mod pipeline_ops;
-mod profiles;
 mod project_db_ops;
 mod prompt_envelope;
 mod prompts;
@@ -99,6 +94,7 @@ mod repair;
 mod rescue;
 mod sandbox_ops;
 mod server_handler;
+mod server_instructions;
 mod server_methods;
 mod shared_defs;
 mod shell_ops;
@@ -120,10 +116,6 @@ mod workflow_closure;
 
 use crate::tool_params::*;
 
-use clap::Parser;
-
-use crate::cli::Cli;
-
 pub(crate) mod server_state;
 pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServer, VaultState};
 
@@ -141,14 +133,11 @@ pub(crate) use server_state::{AgentProfile, CachedVaultKey, DbScope, MemoryServe
 // ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
 
 pub fn run_cli() {
-    let cli = Cli::parse();
-    if let Err(e) = bootstrap::run(cli) {
-        if let Some(exit) = e.downcast_ref::<repair::RepairExit>() {
-            std::process::exit(exit.code());
-        }
-        eprintln!("Fatal: {e}");
-        std::process::exit(1);
-    }
+    tachi_bootstrap::run_cli_with(bootstrap::run, |error| {
+        error
+            .downcast_ref::<repair::RepairExit>()
+            .map(|exit| exit.code())
+    });
 }
 
 #[cfg(test)]

@@ -1,12 +1,17 @@
 use super::{
-    add_edge, archive_memory, delete, fetch_by_ids, gc_tables, get_all, get_edges,
-    get_sandbox_policy, graph_expand, init_schema, insert_tachi_event, list_by_path,
-    list_sandbox_policies, list_tachi_events, list_wiki_duplicate_candidates, normalize_for_write,
-    now_utc_iso, record_access, record_access_with_updates, record_enrichment_failure,
-    register_sqlite_vec, release_event_claim, search_fts, search_symbolic_candidates, search_vec,
-    serialize_f32, set_sandbox_policy, stats, supersede_memory, try_claim_event,
+    add_edge, archive_memory, checkpoint_wal_truncate, collect_daily_health_snapshot,
+    count_chunks_rows, count_distinct_access_days, count_memories_missing_domain,
+    count_memories_rows, count_memories_vec_rows, delete, fetch_by_ids, foundry_job_status_counts,
+    gc_tables, get_all, get_edges, get_sandbox_policy, graph_expand, init_schema,
+    insert_tachi_event, list_by_path, list_eval_evidence,
+    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix, list_sandbox_policies,
+    list_tachi_events, list_wiki_duplicate_candidates, normalize_for_write, now_utc_iso,
+    open_for_wal_checkpoint, open_immutable_readonly, open_raw, promote_memory_to_durable,
+    record_access, record_access_with_updates, record_enrichment_failure, register_sqlite_vec,
+    release_event_claim, schema_version, search_fts, search_symbolic_candidates, search_vec,
+    serialize_f32, set_sandbox_policy, stats, supersede_memory, table_exists, try_claim_event,
     try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, vault_touch_entry, vault_upsert_entry, AccessUpdate,
+    upsert, vault_touch_entry, vault_upsert_entry, AccessUpdate, FoundryJobStatusCounts,
 };
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -18,9 +23,12 @@ use crate::types::{
 };
 
 mod access;
+mod daily_pipeline_ops;
 mod delete_ops;
+mod doctor_probe_ops;
 mod events;
 mod gc;
+mod gc_candidates_ops;
 mod graph;
 mod read_ops;
 mod sandbox_ops;

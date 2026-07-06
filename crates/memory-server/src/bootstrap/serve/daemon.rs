@@ -203,12 +203,7 @@ pub(super) async fn serve_http_daemon(
         });
     }
 
-    let health_payload = serde_json::json!({
-        "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
-        "transport": "http",
-        "mcp": format!("http://{bind_addr}/mcp"),
-    });
+    let health_server = server.clone();
 
     let mut http_config = StreamableHttpServerConfig::default();
     http_config.stateful_mode = true;
@@ -223,11 +218,32 @@ pub(super) async fn serve_http_daemon(
     let router = axum::Router::new()
         .route(
             "/health",
-            axum::routing::get({
-                let health_payload = health_payload.clone();
-                move || {
-                    let health_payload = health_payload.clone();
-                    async move { axum::Json(health_payload) }
+            axum::routing::get(move || {
+                let health_server = health_server.clone();
+                async move {
+                    let db_ok = health_server
+                        .with_global_store_read(|store| {
+                            store.stats(false).map(|_| true).map_err(|e| e.to_string())
+                        })
+                        .is_ok();
+                    let vec_available = health_server.global_vec_available();
+                    let status = if db_ok { "ok" } else { "degraded" };
+                    let code = if db_ok {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    (
+                        code,
+                        axum::Json(serde_json::json!({
+                            "status": status,
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "transport": "http",
+                            "mcp": "streamable-http",
+                            "db_ready": db_ok,
+                            "vec_available": vec_available,
+                        })),
+                    )
                 }
             }),
         )

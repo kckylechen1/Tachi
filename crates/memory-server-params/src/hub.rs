@@ -97,6 +97,7 @@ pub struct DistillTrajectoryParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub importance: Option<f64>,
 
     /// Optional domain. Defaults to TACHI_DOMAIN when present.
@@ -196,6 +197,7 @@ pub struct HubFeedbackParams {
         default,
         deserialize_with = "super::coerce::opt_f64_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_number_from_string_or_number_schema")]
     pub rating: Option<f64>,
 }
 
@@ -294,6 +296,7 @@ pub struct VirtualCapabilityBindParams {
         default,
         deserialize_with = "super::coerce::opt_u32_from_string_or_number"
     )]
+    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
     pub version_pin: Option<u32>,
     /// Whether this binding is active.
     #[serde(default = "default_true")]

@@ -52,15 +52,8 @@ pub(super) fn file_len(path: &Path) -> Option<u64> {
 }
 
 pub(super) fn active_memory_count(path: &Path) -> Option<i64> {
-    let conn =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .ok()?;
-    conn.query_row(
-        "SELECT COUNT(*) FROM memories WHERE archived = 0",
-        [],
-        |row| row.get(0),
-    )
-    .ok()
+    let store = memory_core::MemoryStore::open_read_only(path.to_str()?).ok()?;
+    store.count_active_memories().ok()
 }
 
 pub(super) fn canonical_paths_equal(left: &Path, right: &Path) -> bool {

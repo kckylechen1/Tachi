@@ -69,8 +69,8 @@ pub(crate) async fn handle_gh_comment(
 
     let (mut cmd, token) = build_gh_command(server)?;
     cmd.args([kind, "comment", &params.number.to_string()])
-        .args(["--repo", &params.repo])
-        .args(["--body", &body]);
+        .args(["--repo", &params.repo]);
+    let _body_file = attach_gh_body_file(&mut cmd, &body)?;
 
     let output = run_gh(cmd, &token)?;
     serde_json::to_string(&json!({

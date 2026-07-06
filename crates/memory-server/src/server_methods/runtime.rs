@@ -1,6 +1,6 @@
-use crate::profiles::ToolProfile;
 use crate::server_state::MemoryServer;
 use std::sync::Arc;
+use tachi_hub::ToolProfile;
 
 impl MemoryServer {
     pub(crate) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
@@ -12,10 +12,7 @@ impl MemoryServer {
     }
 
     pub(crate) fn native_tool_visibility(&self) -> Vec<(String, String, bool)> {
-        let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
-            .ok()
-            .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
-            .filter(|patterns| !patterns.is_empty());
+        let env_patterns = crate::server_handler::current_exposed_tool_patterns();
         let profile = self.active_tool_profile();
         let mut tools = self
             .tool_router
@@ -28,8 +25,7 @@ impl MemoryServer {
                     .as_ref()
                     .map(|text| crate::utils::compact_text_line(text.as_ref(), 96))
                     .unwrap_or_default();
-                let visible =
-                    crate::profiles::tool_visible(&name, profile, env_patterns.as_deref());
+                let visible = tachi_hub::tool_visible(&name, profile, env_patterns.as_deref());
                 (name, description, visible)
             })
             .collect::<Vec<_>>();

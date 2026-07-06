@@ -1,4 +1,3 @@
-mod distill_helpers;
 mod distill_job;
 mod enqueue;
 mod forget;
@@ -25,12 +24,6 @@ pub(crate) const SKIP_NO_COHERENT_BUCKET: &str = "no_coherent_bucket";
 /// LLM returned an empty payload (post-trim).
 pub(crate) const SKIP_EMPTY_LLM_OUTPUT: &str = "empty_llm_output";
 
-pub(super) use distill_helpers::{
-    build_foundry_distill_root, collect_coherent_distill_buckets, plan_daily_distill_memory,
-    plan_distill_edges, DailyDistillMemoryInput, FoundryJobMetadata,
-};
-#[cfg(test)]
-pub(super) use distill_helpers::{infer_memory_insight, plan_guide_distill_memory};
 #[cfg(test)]
 pub(super) use enqueue::capture_maintenance_specs;
 pub(super) use enqueue::enqueue_capture_maintenance_jobs;

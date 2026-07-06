@@ -38,6 +38,41 @@ fn verified_eval_row(profile: &str, task_type: crate::agent_eval::TaskType) -> E
     }
 }
 
+fn empty_route_policy_rules() -> RoutePolicyRuleLoadout {
+    RoutePolicyRuleLoadout {
+        namespace: ROUTE_POLICY_RULE_NS,
+        min_samples: tachi_dispatch::MIN_ROUTE_POLICY_RULE_SAMPLES,
+        applied: Vec::new(),
+        skipped: Vec::new(),
+    }
+}
+
+fn recommended_candidates(
+    server: &MemoryServer,
+    risk: &DispatchRisk,
+    rows: &[EvalRow],
+) -> Vec<tachi_dispatch::ProfileCandidate> {
+    tachi_dispatch::recommend_dispatch_profile_candidates(
+        risk,
+        &route_eval_rows(rows),
+        &[],
+        &[],
+        &empty_route_policy_rules(),
+        |profile| profile_weak_against_for_server(server, profile),
+    )
+    .expect("recommend candidates")
+}
+
+fn candidate<'a>(
+    candidates: &'a [tachi_dispatch::ProfileCandidate],
+    profile: &str,
+) -> &'a tachi_dispatch::ProfileCandidate {
+    candidates
+        .iter()
+        .find(|candidate| candidate.profile == profile)
+        .unwrap_or_else(|| panic!("candidate {profile} should be present"))
+}
+
 #[test]
 fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competitor() {
     let server = scoring_test_server();
@@ -66,10 +101,9 @@ fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competito
         failed_eval_row(executor.name),
     ];
 
-    let executor_candidate =
-        score_profile_candidate(&server, executor, &risk, &rows, &[], &[]).expect("executor");
-    let competitor_candidate =
-        score_profile_candidate(&server, competitor, &risk, &[], &[], &[]).expect("competitor");
+    let candidates = recommended_candidates(&server, &risk, &rows);
+    let executor_candidate = candidate(&candidates, executor.name);
+    let competitor_candidate = candidate(&candidates, competitor.name);
 
     assert_eq!(executor_candidate.failure_count, 3);
     assert!(
@@ -106,11 +140,9 @@ fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
         verified_eval_row(executor.name, crate::agent_eval::TaskType::ResearchRequest),
     ];
 
-    let executor_candidate =
-        score_profile_candidate(&server, executor, &risk, &executor_rows, &[], &[])
-            .expect("executor");
-    let explorer_candidate =
-        score_profile_candidate(&server, explorer, &risk, &[], &[], &[]).expect("explorer");
+    let candidates = recommended_candidates(&server, &risk, &executor_rows);
+    let executor_candidate = candidate(&candidates, executor.name);
+    let explorer_candidate = candidate(&candidates, explorer.name);
 
     assert!(
         explorer_candidate.score > executor_candidate.score,
@@ -125,24 +157,19 @@ fn research_request_prefers_read_role_over_executor_even_with_better_eval() {
         task_type: "explain_request".to_string(),
         ..risk.clone()
     };
-    let explain_executor = score_profile_candidate(
-        &server,
-        resolve_dispatch_profile("glm_51_impl").expect("executor"),
-        &explain_risk,
-        &[],
-        &[],
-        &[],
-    )
-    .expect("explain executor");
-    let explain_explorer = score_profile_candidate(
-        &server,
-        resolve_dispatch_profile("deepseek_explore").expect("explorer"),
-        &explain_risk,
-        &[],
-        &[],
-        &[],
-    )
-    .expect("explain explorer");
+    let explain_candidates = recommended_candidates(&server, &explain_risk, &[]);
+    let explain_executor = candidate(
+        &explain_candidates,
+        resolve_dispatch_profile("glm_51_impl")
+            .expect("executor")
+            .name,
+    );
+    let explain_explorer = candidate(
+        &explain_candidates,
+        resolve_dispatch_profile("deepseek_explore")
+            .expect("explorer")
+            .name,
+    );
     assert!(
         explain_explorer.score > explain_executor.score,
         "explain_request must also prefer the explore role ({}) over an executor ({})",

@@ -152,11 +152,10 @@ fn checkpoint_wal_copy(src: &str) -> AutoFixAction {
 
     // Open the COPY read-write and force a TRUNCATE checkpoint.
     let dest_str = dest.to_string_lossy().to_string();
-    let result = match rusqlite::Connection::open(&dest_str) {
+    let result = match memory_core::db::open_for_wal_checkpoint(&dest_str) {
         Ok(conn) => {
-            let _ = conn.busy_timeout(std::time::Duration::from_millis(5_000));
             // Best-effort; ignore returned WAL stats.
-            match conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+            match memory_core::db::checkpoint_wal_truncate(&conn) {
                 Ok(_) => AutoFixAction {
                     path: src.to_string(),
                     action: "checkpoint_wal_copy".to_string(),

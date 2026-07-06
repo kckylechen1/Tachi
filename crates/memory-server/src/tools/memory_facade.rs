@@ -144,7 +144,7 @@ impl MemoryServer {
             "## Tachi tools\nprofile: `{}`\ncount: {}\n\n{}\n\nUse exact names from this list; unknown tool names are treated as not connected/unsupported by some MCP hosts.",
             self.active_tool_profile()
                 .map(|p| p.as_str())
-                .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str()),
+                .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str()),
             visible_tools.len(),
             rows.join("\n")
         ))

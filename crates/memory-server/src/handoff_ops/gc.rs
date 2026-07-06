@@ -9,30 +9,16 @@ pub(crate) fn gc_expired_handoff_memories(
     let cutoff = chrono::Utc::now()
         - chrono::Duration::days(std::cmp::min(max_age_days, i64::MAX as u64) as i64);
 
-    let mut stmt = store
-        .connection()
-        .prepare(
-            "SELECT id, timestamp, metadata, archived
-             FROM memories
-             WHERE category = ?1 AND path LIKE ?2",
-        )
-        .map_err(|e| format!("prepare handoff GC query failed: {e}"))?;
-    let rows = stmt
-        .query_map(("handoff", format!("{HANDOFF_PATH}%")), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-            ))
-        })
+    let candidates = store
+        .list_memories_by_category_and_path_prefix("handoff", &format!("{HANDOFF_PATH}%"))
         .map_err(|e| format!("query expired handoff memories failed: {e}"))?;
 
     let mut ids_to_delete = Vec::new();
-    for row in rows {
-        let (id, timestamp, metadata_json, archived) =
-            row.map_err(|e| format!("read expired handoff candidate failed: {e}"))?;
-        let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
+    for row in candidates {
+        let id = row.id;
+        let timestamp = row.timestamp;
+        let archived = row.archived;
+        let metadata: serde_json::Value = serde_json::from_str(&row.metadata)
             .map_err(|e| format!("parse handoff metadata for '{id}' failed: {e}"))?;
 
         let status = metadata
@@ -50,7 +36,6 @@ pub(crate) fn gc_expired_handoff_memories(
             ids_to_delete.push(id);
         }
     }
-    drop(stmt);
 
     let mut deleted = 0usize;
     for id in ids_to_delete {

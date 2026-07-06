@@ -271,7 +271,9 @@ graph TD
 | Path | What it is |
 |------|------------|
 | `crates/memory-core` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
-| `crates/memory-server` | MCP/CLI binary, profile filtering, Hub routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
+| `crates/tachi-bootstrap` | Shared CLI command contract and startup parsing for the Tachi server binary. |
+| `crates/tachi-hub` | Shared Hub capability policy, skill execution envelope, and security scan rules used by the server/runtime. |
+| `crates/memory-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `packages/tachi-cli` | TypeScript CLI and npm wrapper. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
@@ -441,14 +443,14 @@ Live SQLite files should stay local. Sync encrypted bundles, append-only event l
 # Build release binary
 cargo build --release
 
-# Run all tests
-cargo test --all
+# Run all tests (nextest is what CI runs: per-test timeouts, see .config/nextest.toml)
+cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
 
 # Run the MCP server from source with the standard profile
 cargo run -p memory-server -- --profile standard
 ```
 
-Requires Rust ≥ 1.75. `maturin` and `cargo-watch` are useful for Node binding work and iterative development.
+Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.
 
 ---
 

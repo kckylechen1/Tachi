@@ -1,6 +1,5 @@
 use crate::server_state::MemoryServer;
 use regex::Regex;
-use serde_json::{json, Value};
 
 /// 判断任务卡片状态是否在 DB 中已经解决
 fn is_task_resolved(
@@ -65,35 +64,30 @@ fn is_task_resolved(
         let clean_text = task_text.unwrap_or("").trim();
         let raw_text = raw_task_text.unwrap_or("").trim();
         if !clean_text.is_empty() || !raw_text.is_empty() {
-            let sql = "SELECT id, category, archived, metadata FROM memories WHERE category IN ('kanban', 'handoff') AND (summary = ?1 OR summary = ?2)";
-
             let mut matched = false;
             let query_store = |store: &mut memory_core::MemoryStore| -> Result<bool, String> {
-                let mut stmt = store.connection().prepare(sql).map_err(|e| e.to_string())?;
-                let mut rows = stmt
-                    .query(rusqlite::params![clean_text, raw_text])
+                let cards = store
+                    .task_cards_by_summary(clean_text, raw_text)
                     .map_err(|e| e.to_string())?;
-                while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-                    let archived: bool = row.get(2).map_err(|e| e.to_string())?;
-                    let category: String = row.get(1).map_err(|e| e.to_string())?;
-                    let metadata_str: String = row.get(3).map_err(|e| e.to_string())?;
-                    let metadata: Value = serde_json::from_str(&metadata_str).unwrap_or(json!({}));
-
-                    let mut resolved = archived;
-                    if category == "kanban" {
-                        if let Some(status) = metadata.get("status").and_then(|s| s.as_str()) {
+                for card in cards {
+                    let mut resolved = card.archived;
+                    if card.category == "kanban" {
+                        if let Some(status) = card.metadata.get("status").and_then(|s| s.as_str()) {
                             resolved = resolved || status == "resolved" || status == "expired";
                         }
-                    } else if category == "handoff" {
-                        let has_status = metadata
+                    } else if card.category == "handoff" {
+                        let has_status = card
+                            .metadata
                             .get("status")
                             .and_then(|s| s.as_str())
                             .is_some_and(|status| matches!(status, "acknowledged" | "promoted"));
-                        let is_ack = metadata
+                        let is_ack = card
+                            .metadata
                             .get("acknowledged")
                             .and_then(|a| a.as_bool())
                             .unwrap_or(false);
-                        let has_handoff_ack = metadata
+                        let has_handoff_ack = card
+                            .metadata
                             .get("handoff")
                             .and_then(|h| h.get("acknowledged").and_then(|a| a.as_bool()))
                             .unwrap_or(false);

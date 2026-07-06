@@ -192,15 +192,11 @@ pub(crate) fn spawn_auto_linking(
                     let save_edge_action = |store: &mut MemoryStore| {
                         store.add_edge(&edge).map_err(|e| format!("{}", e))?;
                         if supersedes {
-                            // Close valid_until at supersession time (same invariant as
-                            // db::supersede_memory) so as_of point-in-time recall stops
-                            // returning the superseded fact. COALESCE keeps any explicit
-                            // window intact.
                             store
-                                .connection()
-                                .execute(
-                                    "UPDATE memories SET superseded_by = ?1, updated_at = ?2, valid_until = COALESCE(valid_until, ?2) WHERE id = ?3 AND superseded_by IS NULL",
-                                    rusqlite::params![auto_link_id, now, result.entry.id],
+                                .mark_superseded_closing_validity(
+                                    &result.entry.id,
+                                    &auto_link_id,
+                                    &now,
                                 )
                                 .map_err(|e| format!("{e}"))?;
                         } else if reinforces {

@@ -90,7 +90,7 @@ fn looks_like_api_key_basic_rules() {
 
 #[test]
 fn mcp_server_instructions_requires_end_of_task_save() {
-    let text = super::mcp_server_instructions();
+    let text = crate::server_instructions::mcp_server_instructions();
     assert!(text.contains("action='save'"));
     assert!(text.contains("action='cycle_plan'"));
     assert!(text.contains("agent_end"));

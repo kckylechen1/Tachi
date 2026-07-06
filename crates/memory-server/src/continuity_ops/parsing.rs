@@ -36,7 +36,7 @@ fn confidence_field(value: &Value) -> Option<f64> {
 pub(crate) fn parse_continuity_candidate_batch(
     raw: &str,
 ) -> Result<ContinuityCandidateBatch, String> {
-    let json_str = crate::llm::LlmClient::extract_json_payload(raw)?;
+    let json_str = tachi_llm::LlmClient::extract_json_payload(raw)?;
     let value: Value =
         serde_json::from_str(json_str).map_err(|e| format!("parse continuity JSON: {e}"))?;
     let candidate_values = if let Some(items) = value.get("candidates").and_then(|v| v.as_array()) {
@@ -82,7 +82,7 @@ pub(crate) fn parse_continuity_candidate_batch(
 }
 
 pub(crate) fn parse_continuity_outcome_label(raw: &str) -> Result<ContinuityOutcomeLabel, String> {
-    let json_str = crate::llm::LlmClient::extract_json_payload(raw)?;
+    let json_str = tachi_llm::LlmClient::extract_json_payload(raw)?;
     let value: Value =
         serde_json::from_str(json_str).map_err(|e| format!("parse outcome label JSON: {e}"))?;
     let outcome = SessionOutcomeKind::from_str_opt(string_field(

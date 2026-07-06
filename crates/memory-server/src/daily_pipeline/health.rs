@@ -165,67 +165,34 @@ fn collect_database_stats(target: ManifestDbTarget) -> DatabaseStats {
             return stats;
         }
     };
-    let conn = store.connection();
 
     let result = (|| -> Result<(), String> {
-        stats.total_entries = conn
-            .query_row("SELECT count(*) FROM memories", [], |row| row.get(0))
-            .map_err(|e| format!("count memories: {e}"))?;
-        stats.new_today = conn
-            .query_row(
-                "SELECT count(*) FROM memories WHERE created_at > datetime('now', '-1 day')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("count recent memories: {e}"))?;
-        stats.stale_days = conn
-            .query_row(
-                "SELECT COALESCE(CAST(julianday('now') - julianday(MAX(NULLIF(created_at, ''))) AS INTEGER), 0) FROM memories",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        let mut group_stmt = conn
-            .prepare("SELECT count(*), category, source FROM memories GROUP BY category, source")
-            .map_err(|e| format!("prepare category/source stats: {e}"))?;
-        let group_rows = group_stmt
-            .query_map([], |row| {
-                Ok(CategorySourceCount {
-                    count: row.get(0)?,
-                    category: row.get(1)?,
-                    source: row.get(2)?,
-                })
+        let snapshot = store
+            .collect_daily_health_snapshot()
+            .map_err(|e| format!("collect daily health snapshot: {e}"))?;
+        stats.total_entries = snapshot.total_entries;
+        stats.new_today = snapshot.new_today;
+        stats.stale_days = snapshot.stale_days;
+        stats.groups = snapshot
+            .groups
+            .into_iter()
+            .map(|group| CategorySourceCount {
+                count: group.count,
+                category: group.category,
+                source: group.source,
             })
-            .map_err(|e| format!("query category/source stats: {e}"))?;
-        for row in group_rows {
-            stats
-                .groups
-                .push(row.map_err(|e| format!("read category/source row: {e}"))?);
-        }
-
-        let mut dup_stmt = conn
-            .prepare(
-                "SELECT summary, count(*) FROM memories
-                 WHERE trim(summary) <> ''
-                 GROUP BY summary HAVING count(*) > 1
-                 ORDER BY count(*) DESC LIMIT 20",
-            )
-            .map_err(|e| format!("prepare duplicate stats: {e}"))?;
-        let dup_rows = dup_stmt
-            .query_map([], |row| {
-                Ok(DuplicateSummary {
-                    summary: row.get(0)?,
-                    count: row.get(1)?,
-                })
+            .collect();
+        stats.duplicate_summaries = snapshot
+            .duplicate_summaries
+            .into_iter()
+            .map(|duplicate| DuplicateSummary {
+                summary: duplicate.summary,
+                count: duplicate.count,
             })
-            .map_err(|e| format!("query duplicate stats: {e}"))?;
-        for row in dup_rows {
-            let duplicate = row.map_err(|e| format!("read duplicate row: {e}"))?;
+            .collect();
+        for duplicate in &stats.duplicate_summaries {
             stats.duplicate_count += duplicate.count.saturating_sub(1);
-            stats.duplicate_summaries.push(duplicate);
         }
-
         Ok(())
     })();
 

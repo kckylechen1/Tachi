@@ -63,8 +63,8 @@ pub(crate) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         "by_scope": by_scope,
         "by_category": by_category,
         "vec_available": {
-            "global": server.global_vec_available,
-            "project": server.project_vec_available,
+            "global": server.global_vec_available(),
+            "project": server.project_vec_available(),
         },
         "pipeline_enabled": server.pipeline_enabled,
         "phantom_tools": {

@@ -1,6 +1,4 @@
 use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
-use crate::cli::{Cli, Commands};
-use crate::hub_helpers::should_expose_skill_tool;
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
 use crate::mcp_proxy::filter_mcp_tools_by_permissions;
 use crate::server_state::MemoryServer;
@@ -10,6 +8,8 @@ use memory_core::MemoryStore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tachi_bootstrap::cli::{Cli, Commands};
+use tachi_hub::should_expose_skill_tool;
 
 mod backfill_commands;
 mod background;
@@ -52,6 +52,31 @@ fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Err
     std::fs::create_dir_all(&runtime)?;
     std::env::set_current_dir(&runtime)?;
     Ok(runtime)
+}
+
+fn load_env_files(
+    home: &Path,
+    app_home: &Path,
+    load_project_local_env: bool,
+    git_root: Option<&Path>,
+) {
+    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+
+    if load_project_local_env {
+        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
+        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+
+        if let Ok(cwd) = std::env::current_dir() {
+            let _ = dotenvy::from_path(cwd.join(".env"));
+            if let Some(root) = git_root {
+                if root != cwd.as_path() {
+                    let _ = dotenvy::from_path(root.join(".env"));
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -102,28 +127,12 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
 
-    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
-    let _ = dotenvy::from_path_override(app_home.join("config.env"));
-    // Backward compatibility with old Sigil paths
-    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
-
-    // Project-local dotenv support (non-overriding):
-    // - current working directory .env
-    // - git root .env (if different from cwd)
-    if load_project_local_env {
-        let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
-        let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
-    }
-    if load_project_local_env {
-        if let Ok(cwd) = std::env::current_dir() {
-            let _ = dotenvy::from_path(cwd.join(".env"));
-            if let Some(root) = git_root.as_ref() {
-                if root != &cwd {
-                    let _ = dotenvy::from_path(root.join(".env"));
-                }
-            }
-        }
-    }
+    load_env_files(
+        &home,
+        &app_home,
+        load_project_local_env,
+        git_root.as_deref(),
+    );
 
     // Resolve global DB path
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
@@ -369,7 +378,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     if let Commands::Distill { action } = &command {
-        use crate::cli::DistillAction;
+        use tachi_bootstrap::cli::DistillAction;
         let DistillAction::Run { db } = action;
         let target_project = db
             .clone()
@@ -508,7 +517,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         .clone()
         .or_else(|| std::env::var("TACHI_PROFILE").ok());
     if let Some(raw_profile) = requested_tool_profile.as_deref() {
-        match crate::profiles::parse_tool_profile(raw_profile) {
+        match tachi_hub::parse_tool_profile(raw_profile) {
             Some(profile) => server.set_tool_profile(Some(profile)),
             None => eprintln!(
                 "Ignoring unknown tool profile '{}'; expected observe | remember | coordinate | operate | admin or a compatible host alias",
@@ -554,14 +563,15 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
     eprintln!(
         "Vector search: global={}, project={}",
-        server.global_vec_available, server.project_vec_available
+        server.global_vec_available(),
+        server.project_vec_available()
     );
     eprintln!(
         "Tool surface: {}",
         server
             .active_tool_profile()
             .map(|profile| profile.as_str())
-            .unwrap_or_else(|| crate::profiles::default_tool_profile().as_str())
+            .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str())
     );
 
     if cli.daemon {

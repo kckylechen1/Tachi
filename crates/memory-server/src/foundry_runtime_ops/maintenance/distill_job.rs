@@ -1,9 +1,5 @@
 use super::super::capture::queue_capture_enrichment;
 use super::super::{FoundryMaintenanceItem, FOUNDRY_DISTILL_SOURCE};
-use super::distill_helpers::{
-    build_memory_distill_input, plan_distill_edges, plan_guide_distill_memory,
-    select_memory_distill_bucket,
-};
 use super::store::{with_foundry_store, with_foundry_store_read};
 use super::{
     DistillOutcome, SKIP_EMPTY_LLM_OUTPUT, SKIP_NO_COHERENT_BUCKET, SKIP_NO_SOURCE_ENTRIES,
@@ -12,6 +8,10 @@ use crate::server_state::{DbScope, MemoryServer};
 use chrono::Utc;
 use memory_core::MemoryEntry;
 use serde_json::json;
+use tachi_foundry::{
+    build_memory_distill_input, plan_distill_edges, plan_guide_distill_memory,
+    select_memory_distill_bucket,
+};
 
 pub(super) async fn process_memory_distill_job(
     server: &MemoryServer,

@@ -18,6 +18,7 @@ import asyncio
 import glob
 import json
 import os
+import sqlite3
 import sys
 import time
 from datetime import datetime
@@ -99,15 +100,18 @@ def find_sessions(since: str | None = None, project_filter: str | None = None):
                         "path": path,
                         "project": project_name,
                         "project_dir": project_dir,
-                        "session_id": data.get("sessionId", ""),
+                        # Fall back to the file path when sessionId is absent —
+                        # an empty session_id would collapse every path-less
+                        # session onto one PRIMARY KEY row and drop all but one.
+                        "session_id": data.get("sessionId", "") or path,
                         "start_time": data.get("startTime", ""),
                         "summary": data.get("summary", ""),
                         "msg_count": msg_count,
                         "mtime": mtime,
                     }
                 )
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"  skip session file {path}: {exc}", file=sys.stderr)
 
     return sorted(sessions, key=lambda s: s["mtime"])
 
@@ -269,6 +273,11 @@ async def main():
     parser.add_argument(
         "--limit", type=int, default=0, help="Max sessions to process (0 = all)"
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-process sessions even if already in the progress marker (bypass idempotency guard)",
+    )
     args = parser.parse_args()
 
     sessions = find_sessions(since=args.since, project_filter=args.project)
@@ -280,9 +289,9 @@ async def main():
     print(f"Sessions found: {len(sessions)}", flush=True)
     print(f"Target DB: {db_path}", flush=True)
     print(f"Dry run: {args.dry_run}", flush=True)
-    print(f"Voyage key: {os.environ.get('VOYAGE_API_KEY', '')[:12]}...", flush=True)
+    print(f"Voyage key: {'configured' if os.environ.get('VOYAGE_API_KEY') else 'MISSING'}", flush=True)
     print(
-        f"SiliconFlow key: {os.environ.get('SILICONFLOW_API_KEY', '')[:12]}...",
+        f"SiliconFlow key: {'configured' if os.environ.get('SILICONFLOW_API_KEY') else 'MISSING'}",
         flush=True,
     )
     print(flush=True)
@@ -294,7 +303,34 @@ async def main():
     mem_store = store.get_connection()
     total_saved, total_skipped, total_errors = 0, 0, 0
 
+    # Idempotency guard: track processed sessions so re-runs skip them.
+    # This prevents redundant LLM extraction (Voyage + SiliconFlow API calls)
+    # on sessions that have already been backfilled. Use --force to override.
+    progress_conn = sqlite3.connect(db_path)
+    progress_conn.execute(
+        """CREATE TABLE IF NOT EXISTS backfill_gemini_cli_progress (
+            session_id TEXT PRIMARY KEY,
+            processed_at TEXT NOT NULL,
+            saved INTEGER,
+            skipped INTEGER,
+            errors INTEGER
+        )"""
+    )
+    progress_conn.commit()
+
+    already_done: set[str] = set()
+    if not args.force:
+        for row in progress_conn.execute(
+            "SELECT session_id FROM backfill_gemini_cli_progress"
+        ).fetchall():
+            already_done.add(row[0])
+
+    skipped_done = 0
     for i, sess in enumerate(sessions, 1):
+        if sess["session_id"] in already_done:
+            skipped_done += 1
+            continue
+
         print(
             f"\n[{i}/{len(sessions)}] {sess['project']}/{sess['session_id'][:8]}... "
             f"({sess['msg_count']} msgs, {sess['start_time'][:10]})",
@@ -309,13 +345,22 @@ async def main():
             total_skipped += sk
             total_errors += e
             print(f"  → saved={s}, skipped={sk}, errors={e}", flush=True)
+            progress_conn.execute(
+                "INSERT OR REPLACE INTO backfill_gemini_cli_progress "
+                "(session_id, processed_at, saved, skipped, errors) VALUES (?, ?, ?, ?, ?)",
+                (sess["session_id"], datetime.now().isoformat(), s, sk, e),
+            )
+            progress_conn.commit()
         except Exception as ex:
             print(f"  Session error: {ex}", flush=True)
             total_errors += 1
 
+    progress_conn.close()
+
     print(f"\n=== Done ===", flush=True)
     print(
-        f"Total: {total_saved} saved, {total_skipped} skipped, {total_errors} errors",
+        f"Total: {total_saved} saved, {total_skipped} skipped, {total_errors} errors, "
+        f"{skipped_done} already-done (skipped)",
         flush=True,
     )
 

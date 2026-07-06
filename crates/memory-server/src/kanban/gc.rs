@@ -7,31 +7,18 @@ pub(crate) fn gc_expired_kanban_cards(
 ) -> Result<usize, String> {
     let cutoff = chrono::Utc::now()
         - chrono::Duration::days(std::cmp::min(max_age_days, i64::MAX as u64) as i64);
-    let mut stmt = store
-        .connection()
-        .prepare(
-            "SELECT id, path, category, timestamp, metadata
-             FROM memories
-             WHERE path LIKE ?1",
-        )
-        .map_err(|e| format!("prepare kanban GC query failed: {e}"))?;
-    let rows = stmt
-        .query_map((format!("{KANBAN_PATH_PREFIX}%"),), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
+
+    let candidates = store
+        .list_memories_by_path_prefix(&format!("{KANBAN_PATH_PREFIX}%"))
         .map_err(|e| format!("query expired kanban cards failed: {e}"))?;
 
     let mut ids_to_delete = Vec::new();
-    for row in rows {
-        let (id, path, category, timestamp, metadata_json) =
-            row.map_err(|e| format!("read expired kanban card candidate failed: {e}"))?;
-        let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
+    for row in candidates {
+        let id = row.id;
+        let path = row.path;
+        let category = row.category;
+        let timestamp = row.timestamp;
+        let metadata: serde_json::Value = serde_json::from_str(&row.metadata)
             .map_err(|e| format!("parse kanban card metadata for '{id}' failed: {e}"))?;
 
         // A card is reapable when EITHER:
@@ -68,7 +55,6 @@ pub(crate) fn gc_expired_kanban_cards(
             ids_to_delete.push(id);
         }
     }
-    drop(stmt);
 
     let mut deleted = 0usize;
     for id in ids_to_delete {

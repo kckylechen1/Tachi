@@ -3,12 +3,14 @@ use super::*;
 mod cli;
 mod error;
 mod handler;
+mod http;
 mod parser;
 mod policy;
 
 pub(crate) use cli::CliGhClient;
 pub(in crate::gh_ops) use error::{classify_gh_error, is_no_checks_reported};
 pub(crate) use handler::handle_github_safe_merge;
+pub(crate) use http::gh_client_for_server;
 pub(in crate::gh_ops) use parser::parse_pr_view_json;
 #[cfg(test)]
 pub(in crate::gh_ops) use policy::parse_merge_gate_policy;

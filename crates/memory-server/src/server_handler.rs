@@ -1,4 +1,3 @@
-use crate::hub_helpers::should_expose_mcp_tools;
 use crate::mcp_proxy::{
     filter_mcp_tools_by_permissions, resolve_mcp_tool_exposure, McpToolExposureMode,
 };
@@ -15,12 +14,18 @@ use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::ServerHandler;
 use std::future::Future;
 use std::time::{Duration, Instant};
+use tachi_hub::should_expose_mcp_tools;
 
-fn current_exposed_tool_patterns() -> Option<Vec<String>> {
-    std::env::var("TACHI_EXPOSED_TOOLS")
-        .ok()
-        .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
-        .filter(|patterns| !patterns.is_empty())
+pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
+    static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("TACHI_EXPOSED_TOOLS")
+                .ok()
+                .map(|raw| tachi_hub::parse_tool_patterns_csv(&raw))
+                .filter(|patterns| !patterns.is_empty())
+        })
+        .clone()
 }
 
 fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
@@ -109,7 +114,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(crate::bootstrap::mcp_server_instructions())
+            .with_instructions(crate::server_instructions::mcp_server_instructions())
     }
 
     fn list_tools(
@@ -170,7 +175,7 @@ impl ServerHandler for MemoryServer {
             }
 
             let env_patterns = current_exposed_tool_patterns();
-            tools = crate::profiles::filter_tool_defs(
+            tools = tachi_hub::filter_tool_defs(
                 tools,
                 self.active_tool_profile(),
                 env_patterns.as_deref(),
@@ -200,11 +205,8 @@ impl ServerHandler for MemoryServer {
             let name = params.name.as_ref();
             let env_patterns = current_exposed_tool_patterns();
 
-            let visible = crate::profiles::tool_visible(
-                name,
-                self.active_tool_profile(),
-                env_patterns.as_deref(),
-            );
+            let visible =
+                tachi_hub::tool_visible(name, self.active_tool_profile(), env_patterns.as_deref());
 
             if !visible {
                 return Ok(tool_not_found_result(name));

@@ -6,38 +6,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use crate::llm::{LlmClient, ProviderSecret};
 use crate::status_ops::status_health::API_KEY_DEFS;
 use crate::vault_ops::load_unlocked_api_key_secret_pools;
 use crate::MemoryServer;
-
-pub const VAULT_ALIAS_PREFIX: &str = "vault:";
-
-/// `vault:VOYAGE_API_KEY` → `Some("VOYAGE_API_KEY")`
-pub fn parse_vault_alias(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    trimmed
-        .strip_prefix(VAULT_ALIAS_PREFIX)
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-}
-
-pub fn is_vault_alias(value: &str) -> bool {
-    parse_vault_alias(value).is_some()
-}
-
-/// Recommended config.env line for a provider key stored in Vault.
-pub fn vault_alias_line(env_key: &str) -> String {
-    format!("{env_key}={VAULT_ALIAS_PREFIX}{env_key}")
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MaterializeReport {
-    pub loaded: usize,
-    pub from_vault: usize,
-    pub from_alias: usize,
-    pub env_fallbacks_bypassed: usize,
-}
+pub use tachi_llm::{
+    group_api_key_values_by_configured_rotations, is_vault_alias, parse_rotation_member_name,
+    parse_vault_alias, vault_alias_line, MaterializeReport, VAULT_ALIAS_PREFIX,
+};
+use tachi_llm::{LlmClient, ProviderSecret};
 
 pub(crate) fn provider_env_keys() -> HashSet<String> {
     let mut keys = HashSet::new();
@@ -128,27 +104,6 @@ fn paths_equal(left: &Path, right: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn flatten_pools(pools: &HashMap<String, Vec<ProviderSecret>>) -> HashMap<String, String> {
-    pools
-        .iter()
-        .filter_map(|(name, entries)| {
-            entries
-                .first()
-                .map(|entry| (name.clone(), entry.value.clone()))
-        })
-        .collect()
-}
-
-pub(crate) fn parse_rotation_member_name(name: &str) -> Option<(&str, u32)> {
-    let (prefix, suffix) = name.rsplit_once('_')?;
-    let index = suffix.parse::<u32>().ok()?;
-    if prefix.is_empty() {
-        None
-    } else {
-        Some((prefix, index))
-    }
-}
-
 fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
     let Some(path) = global_db_path.to_str() else {
         return HashSet::new();
@@ -164,99 +119,26 @@ fn rotation_prefixes_from_global_db(global_db_path: &Path) -> HashSet<String> {
         .collect()
 }
 
-fn group_api_key_values_by_configured_rotations(
-    values: Vec<(String, String)>,
-    rotation_prefixes: &HashSet<String>,
-) -> HashMap<String, Vec<ProviderSecret>> {
-    values
-        .into_iter()
-        .fold(HashMap::new(), |mut acc, (name, value)| {
-            if let Some((prefix, _)) = parse_rotation_member_name(&name) {
-                if rotation_prefixes.contains(prefix) {
-                    acc.entry(prefix.to_string())
-                        .or_insert_with(Vec::new)
-                        .push(ProviderSecret {
-                            key_id: name,
-                            value,
-                        });
-                    return acc;
-                }
-            }
-
-            acc.entry(name.clone())
-                .or_insert_with(Vec::new)
-                .push(ProviderSecret {
-                    key_id: name,
-                    value,
-                });
-            acc
-        })
-}
-
 /// Apply Vault + config.env aliases into `LlmClient` without mutating process env.
 pub fn materialize_provider_secrets(
     llm: &LlmClient,
     vault_pools: &HashMap<String, Vec<ProviderSecret>>,
 ) -> Result<MaterializeReport, String> {
-    llm.clear_provider_secrets();
-    let vault_map = flatten_pools(vault_pools);
-    let mut resolved_pools: HashMap<String, Vec<ProviderSecret>> = vault_pools.clone();
-    let mut report = MaterializeReport {
-        from_vault: vault_pools.len(),
-        ..Default::default()
-    };
+    tachi_llm::materialize_provider_secrets(llm, vault_pools, provider_env_keys())
+        .map_err(format_provider_materialization_error)
+}
 
-    let provider_keys = provider_env_keys();
-    for key in provider_keys {
-        let Ok(env_val) = std::env::var(&key) else {
-            continue;
-        };
-        let trimmed = env_val.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some(vault_name) = parse_vault_alias(trimmed) {
-            let pool = vault_pools
-                .get(vault_name)
-                .cloned()
-                .or_else(|| {
-                    vault_map.get(vault_name).cloned().map(|secret| {
-                        vec![ProviderSecret {
-                            key_id: vault_name.to_string(),
-                            value: secret,
-                        }]
-                    })
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "{key}={trimmed} in config.env but Vault secret '{vault_name}' is missing or Vault is locked. \
-                         Run vault_unlock and vault_set, or store the key in Vault as '{vault_name}'."
-                    )
-            })?;
-            resolved_pools.insert(key.clone(), pool);
-            report.from_alias += 1;
-            report.env_fallbacks_bypassed += 1;
-            continue;
-        }
-
-        if vault_map.contains_key(&key) {
-            // Vault wins over duplicate plaintext in env/config.env.
-            report.env_fallbacks_bypassed += 1;
-            continue;
-        }
-
-        resolved_pools.insert(
-            key.clone(),
-            vec![ProviderSecret {
-                key_id: key,
-                value: trimmed.to_string(),
-            }],
-        );
+fn format_provider_materialization_error(err: String) -> String {
+    if (err.starts_with("provider alias ") && err.contains(" could not be resolved from secret "))
+        || (err.starts_with("Config key ") && err.contains("references Vault alias "))
+    {
+        format!(
+            "{err}. The alias came from config.env or process env, but the referenced Vault secret is missing or Vault is locked. \
+             Run vault_unlock and vault_set, or store the key in Vault under the referenced secret name."
+        )
+    } else {
+        err
     }
-
-    report.loaded = llm.set_provider_secret_pools(resolved_pools);
-    Ok(report)
 }
 
 pub fn materialize_for_server(server: &MemoryServer) -> Result<MaterializeReport, String> {
@@ -544,6 +426,23 @@ mod tests {
             Some("vault-secret")
         );
         assert_eq!(std::env::var("OPENAI_API_KEY").as_deref(), Ok("env-secret"));
+    }
+
+    #[test]
+    fn materialize_provider_secrets_formats_missing_alias_remediation() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _env = EnvGuard::set("VOYAGE_API_KEY", "vault:MISSING_VOYAGE");
+        let llm = LlmClient::new().expect("llm client");
+        let err = materialize_provider_secrets(&llm, &HashMap::new())
+            .expect_err("missing alias should fail");
+
+        assert!(err.contains("Config key 'VOYAGE_API_KEY' references Vault alias 'MISSING_VOYAGE'"));
+        assert!(!err.contains("VOYAGE_API_KEY=vault:MISSING_VOYAGE"));
+        assert!(err.contains("secret is missing or Vault is locked"));
+        assert!(err.contains("vault_unlock"));
+        assert!(err.contains("vault_set"));
     }
 
     #[test]

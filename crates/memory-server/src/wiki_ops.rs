@@ -1,4 +1,3 @@
-use crate::hub_helpers::{capability_callable, should_expose_skill_tool};
 use crate::memory_search_ops::search_memory_rows;
 use crate::network_safety::is_private_or_local_ip;
 use crate::server_state::{DbScope, MemoryServer};
@@ -15,6 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
+use tachi_hub::{capability_callable, should_expose_skill_tool};
 use tokio::net::lookup_host;
 
 const WIKI_LOG_MAX_BYTES: usize = 256 * 1024;

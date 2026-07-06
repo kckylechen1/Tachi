@@ -1,10 +1,13 @@
 use super::cache::CachedResult;
 use super::memory_server::MemoryServer;
-use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime, RateLimiter, VaultState};
+use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
+use super::{RateLimiter, VaultState};
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::shared_defs::DeadLetter;
 use crate::utils::{lock_or_recover, read_or_recover, write_or_recover};
 use crate::vault_ops::load_unlocked_env_secrets_for_child_env;
+use memory_core::MemoryStore;
+use memory_server_runtime::{event_db_route, EventDbRoute};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -22,7 +25,7 @@ impl MemoryServer {
 
     #[cfg(test)]
     pub(crate) fn global_read_pool_size_for_tests(&self) -> usize {
-        self.global_read_pool.len()
+        self.db.global_read_pool_size()
     }
 
     pub(crate) fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
@@ -86,20 +89,20 @@ impl MemoryServer {
 
     /// Path to this server's global memory DB (canonicalized at boot).
     pub(crate) fn global_db_path_buf(&self) -> PathBuf {
-        (*self.global_db_path).clone()
+        self.db.global_db_path_buf()
     }
 
     /// Path to this server's project memory DB, when one is bound.
     pub(crate) fn project_db_path_buf(&self) -> Option<PathBuf> {
-        if let Some(state) = self
-            .hot_project_db
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-        {
-            return Some(state.db_path.as_ref().clone());
-        }
-        self.project_db_path.as_ref().map(|p| (**p).clone())
+        self.db.project_db_path_buf()
+    }
+
+    pub(crate) fn global_vec_available(&self) -> bool {
+        self.db.global_vec_available
+    }
+
+    pub(crate) fn project_vec_available(&self) -> bool {
+        self.db.project_vec_available()
     }
 
     pub(crate) fn agent_runtime_read(&self) -> std::sync::RwLockReadGuard<'_, AgentRuntime> {
@@ -108,5 +111,45 @@ impl MemoryServer {
 
     pub(crate) fn agent_runtime_write(&self) -> std::sync::RwLockWriteGuard<'_, AgentRuntime> {
         write_or_recover(&self.agent_runtime, "agent_runtime")
+    }
+
+    pub(crate) fn event_db_route(&self, project: Option<&str>) -> EventDbRoute {
+        event_db_route(project, self.has_project_db())
+    }
+
+    pub(crate) fn with_event_route_store<T>(
+        &self,
+        route: &EventDbRoute,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match route {
+            EventDbRoute::NamedProject(name) => self.with_named_project_store(name, f),
+            EventDbRoute::Project => self.with_project_store(f),
+            EventDbRoute::Global => self.with_global_store(f),
+        }
+    }
+
+    pub(crate) fn with_event_route_store_read<T>(
+        &self,
+        route: &EventDbRoute,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match route {
+            EventDbRoute::NamedProject(name) => self.with_named_project_store_read(name, f),
+            EventDbRoute::Project => self.with_project_store_read(f),
+            EventDbRoute::Global => self.with_global_store_read(f),
+        }
+    }
+
+    pub(crate) fn bound_agent_id(&self) -> Option<String> {
+        read_or_recover(&self.bound_agent_id, "bound_agent_id").clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_bound_agent_id_for_test(&self, agent_id: Option<&str>) {
+        *write_or_recover(&self.bound_agent_id, "bound_agent_id") = agent_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
     }
 }
