@@ -1,0 +1,18 @@
+target-version = "py311"
+extend-exclude = ["skill", "integrations", "packages", ".codegraph"]
+
+[lint]
+select = [
+    "F",       # Pyflakes (unused imports, undefined names, redefined, etc.)
+    "E7",      # pycodestyle errors: syntax, statement
+    "E9",      # pycodestyle errors: runtime/compile
+]
+ignore = [
+    "E701",    # multi-statement on one line (colon) — common in short scripts
+    "E702",    # multiple statements on one line (semicolon) — common in short scripts
+    "E711",    # comparison to None (== None) — pattern used in some legacy scripts
+    "E712",    # comparison to True/False — pattern used in some legacy scripts
+    "E713",    # not in test — readability preference
+    "E714",    # is not test — readability preference
+    "E731",    # lambda assignment — acceptable in short scripts
+]

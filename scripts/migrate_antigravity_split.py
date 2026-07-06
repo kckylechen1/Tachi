@@ -13,11 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sqlite3
 import sys
-from collections import Counter
 from pathlib import Path
 
 TACHI_ROOT = Path.home() / ".tachi"

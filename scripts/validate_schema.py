@@ -3,7 +3,6 @@
 提取并验证 Memory MCP Server 的 JSON Schema
 """
 
-import subprocess
 import json
 import os
 import sys

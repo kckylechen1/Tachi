@@ -64,7 +64,7 @@ def embed_batch(texts: list[str], api_key: str) -> list[list[float]]:
                 continue
             body_text = e.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"Voyage API error {e.code}: {body_text}") from e
-        except urllib.error.URLError as e:
+        except urllib.error.URLError:
             if attempt < 2:
                 time.sleep(2)
                 continue
