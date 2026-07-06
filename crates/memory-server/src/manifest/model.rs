@@ -149,6 +149,61 @@ impl Manifest {
                 .cloned()
                 .or_else(|| prior_notes.get(&f.path).cloned())
                 .unwrap_or_default();
+
+            // #736: for a repo-local `<repo>/.tachi/memory.db` DB, derive the
+            // display/scope_hint identity FRESH from the project root every
+            // refresh, instead of trusting whichever alias directory this
+            // finding happened to be scanned under. `scope_hint_for` just
+            // echoes the literal on-disk alias dir name — if that dir
+            // predates a hash-derivation change (issue #736) or the scan
+            // never reaches a same-named alias at all, the stored hint goes
+            // stale and two dirs for the same DB can display two different
+            // names. Recomputing from the root makes the label a pure
+            // function of the canonical file's identity: one DB, one name,
+            // always current, regardless of alias-dir presence or scan order.
+            //
+            // This also opportunistically reconciles the on-disk alias: if an
+            // older-hash (or otherwise drifted) alias dir exists for this
+            // exact canonical file, adopt the current derived name and retire
+            // the stale one (never touches the repo-local DB itself, never
+            // deletes backup files, never touches a non-symlink alias).
+            let scope_hint = match crate::path_utils::plan_c_project_root_from_local_db(&canon) {
+                Some(project_root) => {
+                    match crate::path_utils::reconcile_plan_c_alias_drift(&canon, &project_root) {
+                        crate::path_utils::PlanCReconcileAction::Skipped { reason } => {
+                            tracing::debug!(
+                                target: "tachi::manifest",
+                                path = %canon_str,
+                                reason,
+                                "Plan C alias drift reconciliation skipped"
+                            );
+                        }
+                        crate::path_utils::PlanCReconcileAction::Reconciled {
+                            ref new_name,
+                            ref retired,
+                        } => {
+                            tracing::info!(
+                                target: "tachi::manifest",
+                                path = %canon_str,
+                                new_name = %new_name,
+                                retired = ?retired,
+                                "Plan C alias identity drift reconciled"
+                            );
+                        }
+                        crate::path_utils::PlanCReconcileAction::NoDrift => {}
+                    }
+                    let current_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
+                        .or_else(|| {
+                            crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
+                        });
+                    match current_name {
+                        Some(name) => format!("project:{name}"),
+                        None => f.scope_hint.clone(),
+                    }
+                }
+                None => f.scope_hint.clone(),
+            };
+
             let entry = DbEntry {
                 path: canon_str.clone(),
                 role,
@@ -158,7 +213,7 @@ impl Manifest {
                 allow_write,
                 last_doctor_at: report.generated_at.clone(),
                 last_classification: f.classification.as_str().to_string(),
-                scope_hint: f.scope_hint.clone(),
+                scope_hint,
                 notes,
             };
             by_canon.insert(canon.clone(), entry);

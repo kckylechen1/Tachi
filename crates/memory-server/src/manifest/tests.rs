@@ -3,6 +3,7 @@ use crate::doctor::{DbClassification, DoctorFinding, DoctorReport, JobBreakdown,
 use std::path::Path;
 use tempfile::tempdir;
 
+mod alias_drift;
 mod gc_flow;
 mod gc_hygiene;
 mod registry;

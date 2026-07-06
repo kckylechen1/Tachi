@@ -12,6 +12,50 @@ use tachi_llm::LlmClient;
 const DEFAULT_BACKFILL_LLM_CONCURRENCY: usize = 4;
 const MAX_BACKFILL_LLM_CONCURRENCY: usize = 32;
 
+/// Total / with-vector counts for `tachi backfill-vectors`'s Total/Missing
+/// report, over "durable" rows.
+///
+/// #736 requirement 3: this MUST use the SAME durable-row predicate `tachi
+/// status`'s vector-coverage warning uses
+/// (`crate::status_ops::RECALL_CACHE_WHERE[_M]`), not a narrower
+/// single-condition `source != 'foundry_recall_rerank_cache'` filter. The two
+/// surfaces previously counted different bases: the narrow filter only
+/// excludes rows whose `source` column is exactly the recall-cache marker
+/// string, while the broad predicate also excludes rows identified by
+/// id/topic/path pattern or a metadata flag. A DB with recall-cache rows
+/// shaped the second way could show, say, 39 missing under `tachi status`
+/// and 0 missing here for the identical file. Sharing the constant makes the
+/// two surfaces agree by construction (see
+/// `bootstrap::backfill::tests::g3_counting_basis_matches_status_recall_cache_predicate`).
+fn durable_vector_counts(
+    store: &MemoryStore,
+    skip_recall_cache: bool,
+) -> Result<(i64, i64), Box<dyn Error>> {
+    if !skip_recall_cache {
+        return Ok(store.vector_stats()?);
+    }
+    let total: i64 = store.connection().query_row(
+        &format!(
+            "SELECT COUNT(*) FROM memories WHERE NOT ({})",
+            crate::status_ops::RECALL_CACHE_WHERE
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    let with_vec: i64 = store.connection().query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories_vec v
+             JOIN memories m ON m.id = v.id
+             WHERE NOT ({})",
+            crate::status_ops::RECALL_CACHE_WHERE_M
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok((total, with_vec))
+}
+
 /// Backfill missing vector embeddings for a given DB.
 pub(super) async fn run_backfill_vectors(
     db_path: &PathBuf,
@@ -20,8 +64,6 @@ pub(super) async fn run_backfill_vectors(
     dry_run: bool,
     include_cache: bool,
 ) -> Result<(), Box<dyn Error>> {
-    const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
-
     let db_str = db_path.to_str().ok_or_else(|| {
         IoError::new(
             ErrorKind::InvalidInput,
@@ -31,24 +73,7 @@ pub(super) async fn run_backfill_vectors(
 
     let store = MemoryStore::open(db_str)?;
     let skip_recall_cache = !include_cache;
-    let (total, with_vec) = if skip_recall_cache {
-        let total: i64 = store.connection().query_row(
-            "SELECT COUNT(*) FROM memories WHERE source != ?1",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
-            |r| r.get(0),
-        )?;
-        let with_vec: i64 = store.connection().query_row(
-            "SELECT COUNT(DISTINCT v.id)
-             FROM memories_vec v
-             JOIN memories m ON m.id = v.id
-             WHERE m.source != ?1",
-            [FOUNDRY_RECALL_CACHE_SOURCE],
-            |r| r.get(0),
-        )?;
-        (total, with_vec)
-    } else {
-        store.vector_stats()?
-    };
+    let (total, with_vec) = durable_vector_counts(&store, skip_recall_cache)?;
     let missing = total - with_vec;
 
     println!("DB:      {}", db_path.display());
@@ -443,4 +468,69 @@ pub(super) async fn run_backfill_fts(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::durable_vector_counts;
+    use memory_core::MemoryStore;
+    use rusqlite::params;
+
+    fn insert_memory(store: &MemoryStore, id: &str, source: &str, topic: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories (
+                    id, path, summary, text, importance, timestamp, category, topic,
+                    keywords, entities, source, scope, archived,
+                    created_at, updated_at, access_count, revision, metadata
+                 ) VALUES (?1, '/p', '', 'body', 0.5, ?2, 'fact', ?3,
+                           '[]', '[]', ?4, 'project', 0,
+                           ?2, ?2, 0, 1, '{}')",
+                params![id, now, topic, source],
+            )
+            .expect("insert memory");
+    }
+
+    /// G3 (counting basis): a row shaped like recall-cache content by `topic`
+    /// (not by the literal `source` marker string) must be excluded from the
+    /// durable-row basis by BOTH `tachi status`'s vector-coverage warning
+    /// and `tachi backfill-vectors`'s Total/Missing counters — the two
+    /// surfaces must agree on what "durable" means. Before #736's fix,
+    /// `durable_vector_counts` only excluded rows whose `source` column was
+    /// exactly `'foundry_recall_rerank_cache'`; a row shaped like recall
+    /// cache in every OTHER way (topic here) slipped through as a "missing"
+    /// durable row, while `tachi status`'s broader predicate already
+    /// excluded it — the two surfaces counted different bases for the
+    /// identical DB.
+    #[test]
+    fn g3_counting_basis_matches_status_recall_cache_predicate() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = dir.path().join("g3.db");
+        let store = MemoryStore::open(db_path.to_str().unwrap()).expect("open store");
+
+        // Durable row: source unrelated to recall cache, no vector -> must
+        // always count as 1 missing.
+        insert_memory(&store, "durable-1", "manual", "note");
+
+        // Recall-cache-shaped row identified by `topic`, not by `source` ->
+        // must be excluded from the durable basis (matches
+        // `status_ops::db_probe::RECALL_CACHE_WHERE`'s `topic = 'recall_rerank_cache'`
+        // arm), even though its `source` is NOT the literal marker string
+        // the pre-fix narrow filter checked.
+        insert_memory(&store, "cache-1", "auto", "recall_rerank_cache");
+
+        let (total, with_vec) = durable_vector_counts(&store, true).expect("durable_vector_counts");
+        let missing = total - with_vec;
+
+        assert_eq!(
+            total, 1,
+            "the recall-cache-shaped row must not count toward the durable total"
+        );
+        assert_eq!(
+            missing, 1,
+            "only the genuinely durable row is missing a vector"
+        );
+    }
 }
