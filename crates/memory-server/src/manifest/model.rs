@@ -136,20 +136,6 @@ impl Manifest {
                 );
                 continue;
             }
-            let role = classify_role(f);
-            let owner = derive_owner(&f.scope_hint);
-            let allow_write = matches!(
-                f.classification,
-                DbClassification::Healthy | DbClassification::WalOrphan
-            );
-            // Prefer prior notes keyed under either the old (pre-canonicalize)
-            // path or the canonical path.
-            let notes = prior_notes
-                .get(&canon_str)
-                .cloned()
-                .or_else(|| prior_notes.get(&f.path).cloned())
-                .unwrap_or_default();
-
             // #736: for a repo-local `<repo>/.tachi/memory.db` DB, derive the
             // display/scope_hint identity FRESH from the project root every
             // refresh, instead of trusting whichever alias directory this
@@ -162,36 +148,15 @@ impl Manifest {
             // function of the canonical file's identity: one DB, one name,
             // always current, regardless of alias-dir presence or scan order.
             //
-            // This also opportunistically reconciles the on-disk alias: if an
-            // older-hash (or otherwise drifted) alias dir exists for this
-            // exact canonical file, adopt the current derived name and retire
-            // the stale one (never touches the repo-local DB itself, never
-            // deletes backup files, never touches a non-symlink alias).
+            // This is a PURE in-memory relabel: it reads the project root
+            // path and re-derives the name, but never creates, deletes, or
+            // moves any alias directory or symlink. A plain `tachi status` /
+            // `doctor` / `manifest refresh` must not mutate the filesystem.
+            // Physical alias-dir retirement (adopting the new-name dir,
+            // retiring drifted old-hash dirs) is a separate `--fix`-gated
+            // operation tracked in #743.
             let scope_hint = match crate::path_utils::plan_c_project_root_from_local_db(&canon) {
                 Some(project_root) => {
-                    match crate::path_utils::reconcile_plan_c_alias_drift(&canon, &project_root) {
-                        crate::path_utils::PlanCReconcileAction::Skipped { reason } => {
-                            tracing::debug!(
-                                target: "tachi::manifest",
-                                path = %canon_str,
-                                reason,
-                                "Plan C alias drift reconciliation skipped"
-                            );
-                        }
-                        crate::path_utils::PlanCReconcileAction::Reconciled {
-                            ref new_name,
-                            ref retired,
-                        } => {
-                            tracing::info!(
-                                target: "tachi::manifest",
-                                path = %canon_str,
-                                new_name = %new_name,
-                                retired = ?retired,
-                                "Plan C alias identity drift reconciled"
-                            );
-                        }
-                        crate::path_utils::PlanCReconcileAction::NoDrift => {}
-                    }
                     let current_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
                         .or_else(|| {
                             crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
@@ -203,6 +168,25 @@ impl Manifest {
                 }
                 None => f.scope_hint.clone(),
             };
+
+            // FIX-D (#736): derive role/owner from the CORRECTED scope hint,
+            // not the stale one on the finding. Otherwise a repo-local DB
+            // whose stored hint drifted to an old-hash name would show a
+            // `project:*` scope but `DbRole::Unknown` — a fresh mismatch this
+            // relabel would introduce. Scope and role must agree.
+            let role = classify_role(&scope_hint, &f.path);
+            let owner = derive_owner(&scope_hint);
+            let allow_write = matches!(
+                f.classification,
+                DbClassification::Healthy | DbClassification::WalOrphan
+            );
+            // Prefer prior notes keyed under either the old (pre-canonicalize)
+            // path or the canonical path.
+            let notes = prior_notes
+                .get(&canon_str)
+                .cloned()
+                .or_else(|| prior_notes.get(&f.path).cloned())
+                .unwrap_or_default();
 
             let entry = DbEntry {
                 path: canon_str.clone(),
@@ -355,15 +339,22 @@ fn should_record(f: &DoctorFinding) -> bool {
     class_ok && schema_ok
 }
 
-fn classify_role(f: &DoctorFinding) -> DbRole {
-    let s = f.scope_hint.as_str();
+/// Classify a DB's role from its scope hint and path.
+///
+/// Takes the scope hint as an explicit argument (rather than reading it off
+/// the `DoctorFinding`) so callers can pass the #736-corrected scope hint —
+/// a repo-local DB whose stored hint drifted to an old-hash name must end up
+/// with a role consistent with its CURRENT `project:*` label, not
+/// `DbRole::Unknown`.
+fn classify_role(scope_hint: &str, path: &str) -> DbRole {
+    let s = scope_hint;
     if s == "global" {
         DbRole::Global
     } else if s.starts_with("project:") {
         DbRole::Project
     } else if s.starts_with("openclaw-agent") {
         DbRole::Agent
-    } else if f.path.contains("/foundry/") || f.path.contains("/foundry.db") {
+    } else if path.contains("/foundry/") || path.contains("/foundry.db") {
         DbRole::Foundry
     } else if s.starts_with("antigravity") {
         // Antigravity DB is rescued in branch #6 → routed under projects/. Mark as project for now.

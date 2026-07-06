@@ -1,11 +1,15 @@
 //! #736 goldens: Plan C alias identity drift after the #692 casefold-hash
-//! change. G1 (drift reconcile) and G2 (single identity) below.
+//! change. The user-visible symptom (`tachi status` labels a DB with the
+//! stale old-hash name while briefing binds the current derived name) is
+//! fixed ENTIRELY by an in-memory `scope_hint` label recompute in
+//! `populate_from_doctor`. This PR deliberately does NOT mutate the
+//! filesystem — physical alias-dir retirement is split to #743.
 //!
-//! G3 (counting basis) lives in `bootstrap::backfill::tests` next to the
-//! code it pins. G4 (legacy alias resolution stays intact) is not a new
-//! test — it is the pre-existing `plan_c_dir_name_sanitizes_spaces` /
-//! `plan_c_dir_name_case_distinct_on_case_sensitive_fs` family in
-//! `path_utils/tests.rs`, left unmodified and re-run in the same gate.
+//! G-relabel below pins that decision: the label flips to the new name
+//! WHILE both on-disk alias dirs are left untouched. G-role pins FIX-D
+//! (scope and role must agree). G3 (counting basis) lives in
+//! `bootstrap::backfill::tests`. G4 (legacy alias resolution stays intact)
+//! is the pre-existing `path_utils/tests.rs` suite, left unmodified.
 
 use super::*;
 
@@ -24,16 +28,17 @@ fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
     }
 }
 
-/// G1 (drift reconcile): a repo-local DB has an OLD-hash alias dir (symlink)
-/// and a manifest label under that old name — the live #736 shape. Running
-/// the reconciliation surface (`populate_from_doctor`, which `tachi doctor`
-/// and `tachi manifest refresh` both call) must: adopt a single alias under
-/// the NEW derived name resolving to the same canonical file, update the
-/// manifest label, retire the old-name orphan, and leave the canonical data
-/// file byte-identical. A backup file living in the old alias dir must never
-/// be deleted.
+/// G-relabel: the real live-machine 3-alias shape — a legacy un-hashed
+/// `sigil`-style alias dir AND an old-hash `Sigil-94c144a9`-style alias dir
+/// (both symlinking the same repo-local DB), and NO new-derived-name dir.
+/// After `populate_from_doctor` (what `tachi status`/`doctor`/`manifest
+/// refresh` all drive), the manifest label for that DB must be the CURRENT
+/// derived name, AND — critically — the filesystem must be untouched: both
+/// existing alias dirs still present, and no new-name dir created. This pins
+/// the scope-reduction decision (label recompute only, zero filesystem
+/// mutation) and would FAIL on the pre-rework head, which retired the dirs.
 #[test]
-fn g1_alias_drift_reconciles_old_hash_alias_to_new_derived_name() {
+fn g_relabel_flips_label_without_touching_filesystem() {
     with_env_lock(|| {
         let tmp = tempfile::tempdir().expect("tmp");
         let saved_home = std::env::var_os("TACHI_HOME");
@@ -45,48 +50,52 @@ fn g1_alias_drift_reconciles_old_hash_alias_to_new_derived_name() {
         std::env::remove_var("TACHI_APP_HOME");
 
         // Repo-local canonical DB — the real data, never moved by this fix.
-        let repo = tmp.path().join("Drift_Repo");
+        let repo = tmp.path().join("Sigil");
         let local_db = repo.join(".tachi/memory.db");
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical-bytes").expect("write local db");
         let local_db = std::fs::canonicalize(&local_db).expect("canonicalize local db");
 
-        // Simulate a pre-existing alias dir under an OLD (pre-derivation-
-        // change) hash name, symlinked to the repo-local DB — exactly the
-        // live-machine shape in #736's Symptom section.
-        let old_name = "Drift_Repo-oldhash00";
-        let old_dir = tachi_home.join("projects").join(old_name);
-        std::fs::create_dir_all(&old_dir).expect("old alias dir");
+        // Legacy un-hashed alias dir (`sigil`), symlinked to the repo-local DB.
+        let legacy_name =
+            crate::path_utils::plan_c_legacy_dir_name_from_root(&repo).expect("legacy name");
+        let legacy_dir = tachi_home.join("projects").join(&legacy_name);
+        std::fs::create_dir_all(&legacy_dir).expect("legacy alias dir");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&local_db, old_dir.join("memory.db"))
-            .expect("old alias symlink");
-        // A migration-backup sibling in the OLD alias dir — must survive.
-        let backup_name = "memory.db.migration-bak.20260706T135027";
-        std::fs::write(old_dir.join(backup_name), b"backup-bytes").expect("write backup");
+        std::os::unix::fs::symlink(&local_db, legacy_dir.join("memory.db"))
+            .expect("legacy alias symlink");
 
+        // Old-hash alias dir (pre-#692 derivation), symlinked to the same DB.
+        let old_hash_name = "Sigil-94c144a9";
+        let old_hash_dir = tachi_home.join("projects").join(old_hash_name);
+        std::fs::create_dir_all(&old_hash_dir).expect("old-hash alias dir");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&local_db, old_hash_dir.join("memory.db"))
+            .expect("old-hash alias symlink");
+
+        // The CURRENT derived name has no alias dir on disk (exactly the #736
+        // symptom: briefing binds `Sigil-<newhash>`, nothing exists there).
         let new_name =
             crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current derived name");
-        assert_ne!(new_name, old_name, "test fixture must simulate real drift");
+        assert_ne!(new_name, legacy_name);
+        assert_ne!(new_name, old_hash_name);
         let new_dir = tachi_home.join("projects").join(&new_name);
-        assert!(
-            !new_dir.exists(),
-            "pre-fix state: the new-hash alias must not exist yet"
-        );
+        assert!(!new_dir.exists(), "precondition: no new-name dir yet");
 
-        // Manifest before reconciliation: single entry, scanned via the OLD
-        // alias path and labeled under the OLD name (as a doctor run 3 days
-        // before a derivation change would have recorded it).
+        // Manifest before: single entry, scanned via the OLD-hash alias path
+        // and labeled under the OLD-hash name.
         let mut m = Manifest::empty();
         let report = mk_report(vec![mk_finding(
-            &old_dir.join("memory.db").to_string_lossy(),
+            &old_hash_dir.join("memory.db").to_string_lossy(),
             DbClassification::Healthy,
-            &format!("project:{old_name}"),
+            &format!("project:{old_hash_name}"),
         )]);
 
-        // --- run the reconciliation surface ---
+        // --- run the surface that status/doctor/manifest-refresh all use ---
         m.populate_from_doctor(&report);
 
-        assert_eq!(m.dbs.len(), 1, "single canonical identity, not two rows");
+        // Label flips to the CURRENT derived name.
+        assert_eq!(m.dbs.len(), 1);
         assert_eq!(
             m.dbs[0].scope_hint,
             format!("project:{new_name}"),
@@ -94,29 +103,22 @@ fn g1_alias_drift_reconciles_old_hash_alias_to_new_derived_name() {
         );
         assert_eq!(m.dbs[0].path, local_db.to_string_lossy());
 
-        // New-name alias now exists and resolves to the same canonical file.
+        // CRITICAL: the filesystem is UNTOUCHED. Both existing alias dirs and
+        // their symlinks survive; no new-name dir is created.
         assert!(
-            new_dir.join("memory.db").is_symlink(),
-            "new-derived-name alias must be created"
+            legacy_dir.join("memory.db").is_symlink(),
+            "legacy alias must survive (requirement 4)"
         );
-        assert_eq!(
-            std::fs::canonicalize(new_dir.join("memory.db")).expect("canon new alias"),
-            local_db
+        assert!(
+            old_hash_dir.join("memory.db").is_symlink(),
+            "old-hash alias must survive — no filesystem retirement in this PR"
+        );
+        assert!(
+            !new_dir.exists(),
+            "a plain status/refresh must NOT create the new-name alias dir (that is #743, --fix-gated)"
         );
 
-        // Old-name alias's symlink is retired (directory holds only a
-        // backup file now, so it is not removed outright — but it no longer
-        // resolves as a live alias).
-        assert!(
-            std::fs::symlink_metadata(old_dir.join("memory.db")).is_err(),
-            "old-name alias symlink must be retired"
-        );
-        assert!(
-            old_dir.join(backup_name).exists(),
-            "backup files are NEVER deleted by this fix"
-        );
-
-        // Canonical data file is untouched, byte-identical.
+        // Canonical data file untouched, byte-identical.
         assert_eq!(
             std::fs::read(&local_db).expect("read canonical"),
             b"canonical-bytes"
@@ -128,14 +130,18 @@ fn g1_alias_drift_reconciles_old_hash_alias_to_new_derived_name() {
     });
 }
 
-/// G2 (single identity): BOTH an old-name and the new-derived-name alias
-/// already exist on disk (both symlinking the same canonical file) before
-/// reconciliation runs. The status/coverage scan (driven off `manifest.dbs`)
-/// must report the DB exactly once, labeled with the derived (new) name —
-/// never the old one, regardless of which alias the scan happens to reach
-/// first.
+/// G-role (FIX-D): a repo-local DB whose stored scope_hint is NOT
+/// project-shaped must still end up with BOTH the corrected `project:<new>`
+/// scope AND a role consistent with it (`DbRole::Project`) — never a
+/// `project:*`-scope-with-`Unknown`-role mismatch. We feed a finding whose
+/// stored hint is `tachi-other` — what `scope_hint_for` returns for a
+/// repo-local `.tachi/memory.db` reached via its own scan root rather than a
+/// `projects/<name>/` alias. Pre-FIX-D, `role` was classified from that
+/// stale hint and came out `Unknown` while the recomputed scope became
+/// `project:<new>`; with FIX-D role is recomputed from the corrected scope
+/// and agrees.
 #[test]
-fn g2_single_identity_when_both_old_and_new_alias_exist() {
+fn g_role_scope_and_role_agree_after_relabel() {
     with_env_lock(|| {
         let tmp = tempfile::tempdir().expect("tmp");
         let saved_home = std::env::var_os("TACHI_HOME");
@@ -146,7 +152,7 @@ fn g2_single_identity_when_both_old_and_new_alias_exist() {
         std::env::remove_var("SIGIL_HOME");
         std::env::remove_var("TACHI_APP_HOME");
 
-        let repo = tmp.path().join("Both_Alias_Repo");
+        let repo = tmp.path().join("Role_Repo");
         let local_db = repo.join(".tachi/memory.db");
         std::fs::create_dir_all(local_db.parent().unwrap()).expect("local parent");
         std::fs::write(&local_db, b"canonical-bytes").expect("write local db");
@@ -154,47 +160,32 @@ fn g2_single_identity_when_both_old_and_new_alias_exist() {
 
         let new_name =
             crate::path_utils::plan_c_dir_name_from_root(&repo).expect("current derived name");
-        let new_dir = tachi_home.join("projects").join(&new_name);
-        std::fs::create_dir_all(&new_dir).expect("new alias dir");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&local_db, new_dir.join("memory.db"))
-            .expect("new alias symlink");
 
-        let old_name = "Both_Alias_Repo-oldhash00";
-        let old_dir = tachi_home.join("projects").join(old_name);
-        std::fs::create_dir_all(&old_dir).expect("old alias dir");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&local_db, old_dir.join("memory.db"))
-            .expect("old alias symlink");
-
-        // Report the OLD-name alias FIRST — pre-fix, by_canon's
-        // "first-finding-wins" dedup would have kept the OLD name's
-        // scope_hint as the surviving (only) manifest entry's label.
-        let report = mk_report(vec![
-            mk_finding(
-                &old_dir.join("memory.db").to_string_lossy(),
-                DbClassification::Healthy,
-                &format!("project:{old_name}"),
-            ),
-            mk_finding(
-                &new_dir.join("memory.db").to_string_lossy(),
-                DbClassification::Healthy,
-                &format!("project:{new_name}"),
-            ),
-        ]);
-
+        // Repo-local DB reached via its own scan root: `scope_hint_for`
+        // returns "tachi-other" (NOT project-shaped) for such a path.
         let mut m = Manifest::empty();
+        let report = mk_report(vec![mk_finding(
+            &local_db.to_string_lossy(),
+            DbClassification::Healthy,
+            "tachi-other",
+        )]);
+
         m.populate_from_doctor(&report);
 
-        assert_eq!(
-            m.dbs.len(),
-            1,
-            "the same canonical file must be reported exactly once"
-        );
+        assert_eq!(m.dbs.len(), 1);
         assert_eq!(
             m.dbs[0].scope_hint,
             format!("project:{new_name}"),
-            "label must be the derived NEW name even though the OLD-name finding was scanned first"
+            "scope must be recomputed to the current project name"
+        );
+        assert_eq!(
+            m.dbs[0].role,
+            DbRole::Project,
+            "role must agree with the project scope (no project-scope-with-Unknown-role)"
+        );
+        assert_eq!(
+            m.dbs[0].owner, "tachi",
+            "owner must be recomputed from the corrected scope"
         );
 
         restore_env("TACHI_HOME", saved_home);
