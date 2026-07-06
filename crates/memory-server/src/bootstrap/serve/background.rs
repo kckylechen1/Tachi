@@ -1,39 +1,49 @@
 use super::*;
+use tokio_util::sync::CancellationToken;
 
-pub(super) fn spawn_idle_connection_cleanup(server: &MemoryServer) {
-    // Spawn idle connection cleanup task
-    {
-        let pool = server.pool.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                for key in pool.remove_idle_connections(Instant::now()) {
-                    eprintln!("Idle cleanup: disconnecting '{}'", key);
+pub(super) fn spawn_idle_connection_cleanup(
+    server: &MemoryServer,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let pool = server.pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    for key in pool.remove_idle_connections(Instant::now()) {
+                        eprintln!("Idle cleanup: disconnecting '{}'", key);
+                    }
                 }
             }
-        });
-    }
+        }
+    })
 }
 
-pub(super) fn spawn_wal_checkpoint(server: &MemoryServer) {
-    // Spawn periodic WAL TRUNCATE checkpoint task. SQLite's default PASSIVE
-    // auto-checkpoint merges WAL frames into the DB but never shrinks the `-wal`
-    // file; a write burst — or long-lived readers blocking truncation — lets it
-    // balloon (observed: a 25 MB orphaned WAL on a busy agent DB, causing slow
-    // reads and lock contention). A periodic TRUNCATE reclaims it when readers
-    // are quiet. Cadence via TACHI_WAL_CHECKPOINT_SECS (default 300s, min 30s;
-    // set 0 to disable).
-    {
-        let ckpt_secs = parse_env_u64("TACHI_WAL_CHECKPOINT_SECS").unwrap_or(300);
-        if ckpt_secs > 0 {
-            let ckpt_secs = ckpt_secs.max(30);
-            let ckpt_server = server.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(ckpt_secs));
-                interval.tick().await; // consume the immediate first tick
-                loop {
-                    interval.tick().await;
+/// Periodic WAL TRUNCATE checkpoint. SQLite's default PASSIVE auto-checkpoint
+/// merges WAL frames into the DB but never shrinks the `-wal` file; a write
+/// burst — or long-lived readers blocking truncation — lets it balloon
+/// (observed: a 25 MB orphaned WAL on a busy agent DB, causing slow reads and
+/// lock contention). Cadence via `TACHI_WAL_CHECKPOINT_SECS` (default 300s,
+/// min 30s; set 0 to disable).
+pub(super) fn spawn_wal_checkpoint(
+    server: &MemoryServer,
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let ckpt_secs = parse_env_u64("TACHI_WAL_CHECKPOINT_SECS").unwrap_or(300);
+    if ckpt_secs == 0 {
+        return tokio::spawn(async {});
+    }
+    let ckpt_secs = ckpt_secs.max(30);
+    let ckpt_server = server.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(ckpt_secs));
+        interval.tick().await; // consume the immediate first tick
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
                     if let Err(e) = ckpt_server.with_global_store(|store| {
                         store.checkpoint_wal_truncate().map_err(|e| e.to_string())
                     }) {
@@ -46,8 +56,6 @@ pub(super) fn spawn_wal_checkpoint(server: &MemoryServer) {
                             eprintln!("[wal] project checkpoint skipped: {e}");
                         }
                     }
-                    // Named-project DBs under this home (e.g. hyperion, wiki)
-                    // accumulate WAL too — checkpoint each that exists.
                     for name in crate::path_utils::list_named_projects() {
                         if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
                             store.checkpoint_wal_truncate().map_err(|e| e.to_string())
@@ -56,9 +64,9 @@ pub(super) fn spawn_wal_checkpoint(server: &MemoryServer) {
                         }
                     }
                 }
-            });
+            }
         }
-    }
+    })
 }
 
 pub(super) fn spawn_background_gc(
@@ -66,54 +74,29 @@ pub(super) fn spawn_background_gc(
     gc_enabled: bool,
     gc_initial_delay_secs: u64,
     gc_interval_secs: u64,
-) {
-    if gc_enabled {
-        eprintln!(
-            "Background GC enabled (initial_delay={}s, interval={}s)",
-            gc_initial_delay_secs, gc_interval_secs
-        );
-        let gc_server = server.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(gc_initial_delay_secs)).await;
-            let mut interval = tokio::time::interval(Duration::from_secs(gc_interval_secs));
-            loop {
-                interval.tick().await;
-                eprintln!("[gc] Running scheduled garbage collection...");
-                match gc_server.with_global_store(|store: &mut MemoryStore| {
-                    let mut gc = store
-                        .gc_tables(&memory_core::GcConfig::default())
-                        .map_err(|e| format!("{e}"))?;
-                    let kanban_deleted =
-                        gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-                    let foundry_deleted =
-                        memory_core::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-                    if let Some(object) = gc.as_object_mut() {
-                        object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-                        object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-                    }
-                    // Auto-archive stale memories (configurable via MEMORY_GC_STALE_DAYS env var)
-                    let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(90);
-                    match store.archive_stale_memories(stale_days) {
-                        Ok(archived) => {
-                            if archived > 0 {
-                                eprintln!("[gc] Archived {} stale memories", archived);
-                            }
-                            if let Some(object) = gc.as_object_mut() {
-                                object.insert("memories_archived".into(), json!(archived));
-                            }
-                        }
-                        Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
-                    }
-                    Ok(gc)
-                }) {
-                    Ok(result) => eprintln!("[gc] Global DB: {}", result),
-                    Err(e) => eprintln!("[gc] Global DB error: {}", e),
-                }
-                if gc_server.has_project_db() {
-                    match gc_server.with_project_store(|store: &mut MemoryStore| {
+    shutdown: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    if !gc_enabled {
+        eprintln!("Background GC disabled");
+        return tokio::spawn(async {});
+    }
+    eprintln!(
+        "Background GC enabled (initial_delay={}s, interval={}s)",
+        gc_initial_delay_secs, gc_interval_secs
+    );
+    let gc_server = server.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_secs(gc_initial_delay_secs)) => {}
+        }
+        let mut interval = tokio::time::interval(Duration::from_secs(gc_interval_secs));
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    eprintln!("[gc] Running scheduled garbage collection...");
+                    match gc_server.with_global_store(|store: &mut MemoryStore| {
                         let mut gc = store
                             .gc_tables(&memory_core::GcConfig::default())
                             .map_err(|e| format!("{e}"))?;
@@ -125,7 +108,6 @@ pub(super) fn spawn_background_gc(
                             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
                         }
-                        // Auto-archive stale memories (configurable via MEMORY_GC_STALE_DAYS env var)
                         let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
                             .ok()
                             .and_then(|v| v.parse().ok())
@@ -133,10 +115,7 @@ pub(super) fn spawn_background_gc(
                         match store.archive_stale_memories(stale_days) {
                             Ok(archived) => {
                                 if archived > 0 {
-                                    eprintln!(
-                                        "[gc] Archived {} stale memories (project)",
-                                        archived
-                                    );
+                                    eprintln!("[gc] Archived {} stale memories", archived);
                                 }
                                 if let Some(object) = gc.as_object_mut() {
                                     object.insert("memories_archived".into(), json!(archived));
@@ -146,15 +125,50 @@ pub(super) fn spawn_background_gc(
                         }
                         Ok(gc)
                     }) {
-                        Ok(result) => eprintln!("[gc] Project DB: {}", result),
-                        Err(e) => eprintln!("[gc] Project DB error: {}", e),
+                        Ok(result) => eprintln!("[gc] Global DB: {}", result),
+                        Err(e) => eprintln!("[gc] Global DB error: {}", e),
+                    }
+                    if gc_server.has_project_db() {
+                        match gc_server.with_project_store(|store: &mut MemoryStore| {
+                            let mut gc = store
+                                .gc_tables(&memory_core::GcConfig::default())
+                                .map_err(|e| format!("{e}"))?;
+                            let kanban_deleted =
+                                gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+                            let foundry_deleted =
+                                memory_core::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+                            if let Some(object) = gc.as_object_mut() {
+                                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+                                object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+                            }
+                            let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
+                                .ok()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or(90);
+                            match store.archive_stale_memories(stale_days) {
+                                Ok(archived) => {
+                                    if archived > 0 {
+                                        eprintln!(
+                                            "[gc] Archived {} stale memories (project)",
+                                            archived
+                                        );
+                                    }
+                                    if let Some(object) = gc.as_object_mut() {
+                                        object.insert("memories_archived".into(), json!(archived));
+                                    }
+                                }
+                                Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
+                            }
+                            Ok(gc)
+                        }) {
+                            Ok(result) => eprintln!("[gc] Project DB: {}", result),
+                            Err(e) => eprintln!("[gc] Project DB error: {}", e),
+                        }
                     }
                 }
             }
-        });
-    } else {
-        eprintln!("Background GC disabled");
-    }
+        }
+    })
 }
 
 pub(super) fn run_startup_integrity_checks(
@@ -367,5 +381,70 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
         });
     } else {
         eprintln!("Distill scheduler: DISABLED (no project DB available)");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_server() -> (tempfile::TempDir, MemoryServer) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let global_db = tmp.path().join("global.db");
+        let server = MemoryServer::new(global_db, None).expect("server");
+        (tmp, server)
+    }
+
+    #[tokio::test]
+    async fn idle_cleanup_exits_on_shutdown_cancel() {
+        let (_tmp, server) = make_server();
+        let shutdown = CancellationToken::new();
+        let handle = spawn_idle_connection_cleanup(&server, shutdown.clone());
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("idle cleanup task did not exit within 2s after shutdown")
+            .expect("task panicked");
+    }
+
+    #[tokio::test]
+    async fn wal_checkpoint_exits_on_shutdown_cancel() {
+        let (_tmp, server) = make_server();
+        let shutdown = CancellationToken::new();
+        let handle = spawn_wal_checkpoint(&server, shutdown.clone());
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("wal checkpoint task did not exit within 2s after shutdown")
+            .expect("task panicked");
+    }
+
+    #[tokio::test]
+    async fn background_gc_exits_on_shutdown_cancel_during_initial_delay() {
+        let (_tmp, server) = make_server();
+        let shutdown = CancellationToken::new();
+        let handle = spawn_background_gc(
+            &server,
+            true,
+            3600,
+            3600,
+            shutdown.clone(),
+        );
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("background gc task did not exit within 2s after shutdown")
+            .expect("task panicked");
+    }
+
+    #[tokio::test]
+    async fn background_gc_returns_noop_handle_when_disabled() {
+        let (_tmp, server) = make_server();
+        let shutdown = CancellationToken::new();
+        let handle = spawn_background_gc(&server, false, 0, 1, shutdown);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("disabled gc handle should complete immediately")
+            .expect("task panicked");
     }
 }
