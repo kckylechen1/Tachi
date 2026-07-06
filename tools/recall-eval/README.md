@@ -35,6 +35,8 @@ the escape-gate comparison column.
 | `run_matrix.py` | Drives the variant matrix via `recall_simulate` → `reports/matrix.local.jsonl` + `reports/aggregates.md`. |
 | `attribute_misses.py` | Classifies each baseline miss to M1/M2_heuristic/M3_heuristic/OTHER (M1 counterfactually proven, M2/M3 are heuristics -- no config knob to re-run) → `reports/attribution.{local.jsonl,md}`. |
 | `zvec_column.py` | Fires the same cases at the zvec-shadow sidecar for a comparison column → `reports/zvec_column.{local.jsonl,md}`. |
+| `build_adversarial_cases.py` | Assembles adversarial (paraphrase / cjk_partial / cross_doc / hard_mixed) cases from the gitignored hand-authored seed `adversarial_seed.local.json`, re-validating every id against the live default-retrievable pool → `cases.adversarial.local.json`. |
+| `flip_report.py` | Mechanical per-case flip aggregation between two matrix variants (hit→miss / miss→hit / rank worsened-improved-unchanged, per slice) from `reports/matrix.local.jsonl` → stdout + `reports/flips.md`. Aggregate-only output; makes PR-body flip claims reproducible. |
 | `mcp_client.py` | Shared streamable-HTTP MCP client (single source of truth for the transport). |
 
 ### `build_cases.py`
