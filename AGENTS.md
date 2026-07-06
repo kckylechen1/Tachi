@@ -1,7 +1,9 @@
-# AGENTS.md — backend-agent injection kernel (DRAFT — pending adjudication)
+# AGENTS.md — backend-agent injection kernel
 
-> **Status: DRAFT, subordinate to and generated from [`docs/engineering/architecture/dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md).**
-> This file is a thin injection surface: backend agents (codex etc.) auto-read it into their prompt at turn zero, so it inlines ONLY the non-negotiables an executing lane must obey. The doctrine body — tiering, card ontology, the closed loop, the porting guide — lives in exactly one kernel, the canon doc. If this file and the canon doc disagree, the canon doc wins. **The leader adjudicates whether this file ships; until then it is a proposal, not law.**
+> **Subordinate to and generated from [`docs/engineering/architecture/dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md)** (owner-ratified 2026-07-06).
+> This file is a thin injection surface: backend agents (codex etc.) auto-read it into their prompt at turn zero, so it inlines ONLY the non-negotiables an executing lane must obey. The doctrine body — tiering, card ontology, the closed loop, the porting guide — lives in exactly one kernel, the canon doc. If this file and the canon doc disagree, the canon doc wins.
+>
+> **Relationship to per-vendor constitutions:** this is the repo-scoped execution kernel that every backend lane reads, whatever its vendor. A vendor with its own global constitution (e.g. codex's `~/.codex/AGENTS.md`) composes with this file — that constitution already declares repo-specific rules authoritative in the repo's own AGENTS.md, so where they overlap they agree, and this file is authoritative for repo-scoped execution. Lanes without a rich constitution (grok, opencode, droid) rely on this file alone.
 
 You are an executing lane in a dispatch loop. Obey these; everything else is in the canon doc.
 
@@ -25,6 +27,7 @@ You are an executing lane in a dispatch loop. Obey these; everything else is in 
 - **Never weaken a frozen assertion.** If a golden cannot pass, **STOP and report** — a faithfully-executed flawed spec is the spec author's bug, not yours to "fix" by softening the spec.
 - Do-not-touch zones are sealed *except* that "consistency fixes may be unlocked by adjudication" — flag, do not silently edit.
 - Content fields are **atomic**: kept whole or dropped whole, never truncated. No flat magic numbers — thresholds are per-action, named, provisional.
+- **Any guard you add names the invariant it protects and confirms the blocked operation actually threatens it** — check both sides of the read/write asymmetry before it ships. A write-guard that also blocks reads (which the invariant doesn't require) is over-reach (the #733 guard locked out cross-library reads for two days, #737).
 - A **deviation is flagged for adjudication, never self-ratified.**
 
 ## STOP / never-Closes / never-merge
