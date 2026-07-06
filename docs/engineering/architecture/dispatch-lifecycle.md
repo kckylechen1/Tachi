@@ -68,7 +68,7 @@ A T2 packet is a frozen leaf issue. Its body is the single text both implementer
 8. **The verification list enumerates EVERY CI gate of the repo** (fmt, clippy `-D warnings`, full suite, gitleaks/audit) — a gate absent from the spec is a post-merge surprise.
 9. **No flat magic numbers** — size/limit thresholds are per-action, named, marked provisional, and calibrated from telemetry later.
 10. **Changing a shared response/behavior surface: enumerate ALL entry routes and legacy params FIRST** (a single global keep-list once broke five variant routes while every targeted suite stayed green).
-11. **Every dispatch AND every resume restates the workspace law** — worktree cut from a leader-verified base SHA (never the primary checkout), the shared-or-isolated `CARGO_TARGET_DIR` decision, and the report contract (verbatim `test result:` lines or the delivery is incomplete).
+11. **Every dispatch AND every resume restates the workspace law** — worktree cut from a leader-verified base SHA (never the primary checkout), the shared-or-isolated `CARGO_TARGET_DIR` decision, and the report contract (verbatim `test result:` lines or the delivery is incomplete). Shared `CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` is a speed path, not a correctness guarantee: concurrent same-crate worktrees can collide on metadata-hashed test binaries and produce phantom failures. Reviewer/discrimination runs for the crate under review use an isolated target dir when another lane may be building the same crate, or the packet explicitly states why shared target reuse is safe.
 12. **Leaf issues ARE the spec** — frozen at dispatch time, issue body = single source, carrying the `Execution:` lane marker.
 
 ### 2.4 Lane selection under the cross-vendor law

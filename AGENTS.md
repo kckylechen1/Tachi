@@ -10,7 +10,7 @@ You are an executing lane in a dispatch loop. Obey these; everything else is in 
 ## Workspace law (restated every dispatch AND every resume)
 
 - Work in a **worktree cut from the leader-verified base SHA** given in the packet — never the primary checkout, never a base you fetched/derived yourself (no-network sandboxes make "cut from origin/main" a lie).
-- Before any `cargo`: `export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` (or the isolated target the packet names — the packet states which).
+- Before any `cargo`: `export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target` (or the isolated target the packet names — the packet states which). The shared target is a speed path, not a correctness guarantee: concurrent same-crate worktrees can collide on metadata-hashed test binaries and produce phantom failures. Use an isolated target dir for reviewer/discrimination runs when another lane may be building the same crate.
 - **Never touch another agent's dirty or untracked files.** Reconcile by commit tree, not by branch name.
 
 ## Report contract (a delivery missing any of these is INCOMPLETE)
