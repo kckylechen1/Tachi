@@ -6,6 +6,11 @@
 cases.local.json
 cases*.local.json
 
+# Hand-authored adversarial seed (tachi#708 follow-up): pairs real memory ids
+# with paraphrased query text, so it carries the same real content as the
+# cases it builds. Never committed.
+adversarial_seed.local.json
+
 # All report artifacts -- detail (.local.jsonl) AND aggregate .md this round
 # (a human摘 the aggregate numbers into the umbrella issue by hand).
 reports/*.jsonl
