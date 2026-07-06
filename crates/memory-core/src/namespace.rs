@@ -7,6 +7,38 @@ use crate::types::MemoryEntry;
 
 pub const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
+/// SQL predicate for rows that belong to the non-durable recall-cache
+/// namespace. Keep this aligned with [`is_recall_cache_entry`].
+pub const RECALL_CACHE_SQL_WHERE: &str = r#"
+    id = 'foundry_recall_rerank_cache'
+    OR id LIKE 'foundry:recall-cache:%'
+    OR source = 'foundry_recall_rerank_cache'
+    OR topic = 'foundry_recall_rerank_cache'
+    OR topic = 'recall_rerank_cache'
+    OR path = '/recall-cache'
+    OR path LIKE '%/recall-cache'
+    OR path LIKE '%/recall-cache/%'
+    OR path LIKE '%foundry_recall_rerank_cache%'
+    OR COALESCE(json_extract(metadata, '$.recall_rerank_cache'), 0) = 1
+    OR COALESCE(json_extract(metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
+"#;
+
+/// Same predicate as [`RECALL_CACHE_SQL_WHERE`], `m.`-qualified for queries
+/// that join `memories AS m` against another table.
+pub const RECALL_CACHE_SQL_WHERE_M: &str = r#"
+    m.id = 'foundry_recall_rerank_cache'
+    OR m.id LIKE 'foundry:recall-cache:%'
+    OR m.source = 'foundry_recall_rerank_cache'
+    OR m.topic = 'foundry_recall_rerank_cache'
+    OR m.topic = 'recall_rerank_cache'
+    OR m.path = '/recall-cache'
+    OR m.path LIKE '%/recall-cache'
+    OR m.path LIKE '%/recall-cache/%'
+    OR m.path LIKE '%foundry_recall_rerank_cache%'
+    OR COALESCE(json_extract(m.metadata, '$.recall_rerank_cache'), 0) = 1
+    OR COALESCE(json_extract(m.metadata, '$.cache_key'), '') = 'foundry_recall_rerank_cache'
+"#;
+
 fn metadata_bool(entry: &MemoryEntry, key: &str) -> bool {
     entry
         .metadata
@@ -46,6 +78,7 @@ pub fn is_recall_cache_entry(entry: &MemoryEntry) -> bool {
     entry
         .source
         .eq_ignore_ascii_case(FOUNDRY_RECALL_CACHE_SOURCE)
+        || entry.id.eq_ignore_ascii_case(FOUNDRY_RECALL_CACHE_SOURCE)
         || entry
             .topic
             .eq_ignore_ascii_case(FOUNDRY_RECALL_CACHE_SOURCE)
