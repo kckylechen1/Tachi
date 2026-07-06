@@ -18,14 +18,25 @@ For every baseline miss (expected id NOT in top-k) we measure:
 Classification (single primary bucket, priority order):
   M1  OR-fallback coverage recovers the target into top-10
       -> the FTS all-or-nothing / CJK-blocked fallback was the block.
+      This bucket IS counterfactually proven: or_fallback_055 is a real
+      RecallConfig knob and we re-ran the case under it.
   OTHER  target absent even from top-100 under baseline
-      -> not a candidate; unexplained by M1/M2/M3 (candidate starvation /
-         server-side filter -- the §6 "fourth mechanism" watch).
-  M3  target IS a top-100 candidate AND enough /wiki rows outrank it that
-      removing them would lift it into top-10 (wiki_above >= wide_rank-10).
-  M2  target IS a top-100 candidate but ranked out of top-10 with no wiki
-      explanation -> RRF k=60 rank-flattening pushed a real candidate below
-      the cut (the rrf_k fix that Phase A cannot vary -- see run_matrix).
+      -> not a candidate; unexplained by M1/M2_heuristic/M3_heuristic
+         (candidate starvation / server-side filter -- the §6 "fourth
+         mechanism" watch).
+  M3_heuristic  target IS a top-100 candidate AND enough /wiki rows outrank
+      it that removing them would lift it into top-10
+      (wiki_above >= wide_rank-10). NO COUNTERFACTUAL SUPPORT: the wiki
+      quality-multiplier has no config knob to dial down and re-run, so this
+      is a proximity heuristic (wiki rows crowd the target out), not a
+      measured "wiki boost -1.0" experiment. Treat as a hypothesis, not proof.
+  M2_heuristic  target IS a top-100 candidate but ranked out of top-10 with
+      no wiki explanation -> attributed by elimination to RRF k=60
+      rank-flattening. NO COUNTERFACTUAL SUPPORT: rrf_k has no RecallConfig
+      knob (see run_matrix.py), so we never actually ran the case at a lower
+      rrf_k and observed it climb into top-10. This bucket is "everything
+      left over once M1/M3_heuristic/OTHER are ruled out," not a measured
+      mechanism -- do not treat its count as proof RRF is the fix.
 
 Outputs (gitignored -- detail keyed by case name, aggregates privacy-clean):
   * reports/attribution.local.jsonl -- per-miss detail.
@@ -74,14 +85,20 @@ def _wiki_above(case_report: dict) -> int | None:
 
 
 def classify(or_fb_rank, fts_rank, wide_rank, wiki_above) -> str:
+    """Return the bucket label. M1 is counterfactually proven (or_fallback_055
+    is a real config knob we re-ran the case under). M2_heuristic and
+    M3_heuristic carry NO counterfactual support -- rrf_k and the wiki boost
+    both lack a RecallConfig knob to dial down and re-run (see run_matrix.py's
+    rrf_k_10 UNAVAILABLE row), so those two labels are proximity heuristics,
+    not measured mechanisms. See module docstring for the full caveat."""
     if or_fb_rank is not None:
         return "M1"
     if wide_rank is None:
         return "OTHER"
     gap = wide_rank - 10  # rows the target must climb to enter top-10
     if wiki_above is not None and wiki_above > 0 and wiki_above >= gap:
-        return "M3"
-    return "M2"
+        return "M3_heuristic"
+    return "M2_heuristic"
 
 
 def run(cases: list[dict], top_k: int, url: str) -> tuple[dict, list[dict]]:
@@ -115,7 +132,7 @@ def run(cases: list[dict], top_k: int, url: str) -> tuple[dict, list[dict]]:
     wide_idx = _case_report_index(wide.get("variants", [{}])[0])
 
     detail: list[dict] = []
-    buckets: dict[str, int] = {"M1": 0, "M2": 0, "M3": 0, "OTHER": 0}
+    buckets: dict[str, int] = {"M1": 0, "M2_heuristic": 0, "M3_heuristic": 0, "OTHER": 0}
     per_slice: dict[str, dict[str, int]] = {}
     for c in misses:
         name = c.get("name")
@@ -127,7 +144,7 @@ def run(cases: list[dict], top_k: int, url: str) -> tuple[dict, list[dict]]:
         bucket = classify(or_fb_rank, fts_rank, wide_rank, wiki_above)
         buckets[bucket] += 1
         s = slice_of.get(name, "unsliced")
-        d = per_slice.setdefault(s, {"M1": 0, "M2": 0, "M3": 0, "OTHER": 0})
+        d = per_slice.setdefault(s, {"M1": 0, "M2_heuristic": 0, "M3_heuristic": 0, "OTHER": 0})
         d[bucket] += 1
         detail.append({
             "name": name, "slice": s, "bucket": bucket,
@@ -155,27 +172,35 @@ def write_reports(summary: dict, detail: list[dict], out_dir: str) -> tuple[str,
 
     lines: list[str] = []
     lines.append("# Recall-eval miss attribution (aggregates)\n")
-    lines.append("Counterfactual attribution of BASELINE misses. Aggregate counts "
+    lines.append("Attribution of BASELINE misses. Only M1 is counterfactually proven "
+                 "(or_fallback_055 is a real config knob, re-run and observed). "
+                 "M2_heuristic and M3_heuristic have NO counterfactual support -- rrf_k "
+                 "and the wiki boost have no config knob to dial down and re-run (see "
+                 "run_matrix.py's rrf_k_10 UNAVAILABLE row), so those two labels are "
+                 "proximity heuristics, not measured mechanisms. Aggregate counts "
                  "only; per-miss detail in attribution.local.jsonl (gitignored).\n")
     lines.append(f"- cases: {summary.get('case_count')}")
     lines.append(f"- baseline misses: {summary.get('baseline_misses')}\n")
     buckets = summary.get("buckets", {})
     lines.append("| mechanism | misses |")
     lines.append("|---|---|")
-    for b in ("M1", "M2", "M3", "OTHER"):
+    for b in ("M1", "M2_heuristic", "M3_heuristic", "OTHER"):
         lines.append(f"| {b} | {buckets.get(b, 0)} |")
     lines.append("")
     per_slice = summary.get("per_slice", {})
     if per_slice:
-        lines.append("| slice | M1 | M2 | M3 | OTHER |")
+        lines.append("| slice | M1 | M2_heuristic | M3_heuristic | OTHER |")
         lines.append("|---|---|---|---|---|")
         for s in sorted(per_slice):
             d = per_slice[s]
-            lines.append(f"| {s} | {d['M1']} | {d['M2']} | {d['M3']} | {d['OTHER']} |")
+            lines.append(f"| {s} | {d['M1']} | {d['M2_heuristic']} | {d['M3_heuristic']} | {d['OTHER']} |")
         lines.append("")
-    lines.append("Legend: M1=FTS all-or-nothing (OR-fallback recovers); "
-                 "M2=RRF k=60 rank-flatten (candidate present, ranked out); "
-                 "M3=wiki ×1.15 crowding; OTHER=absent from top-100 (candidate starvation).")
+    lines.append("Legend: M1=FTS all-or-nothing (OR-fallback recovers, COUNTERFACTUALLY "
+                 "PROVEN); M2_heuristic=RRF k=60 rank-flatten heuristic (candidate "
+                 "present, ranked out, NO counterfactual -- rrf_k has no config knob); "
+                 "M3_heuristic=wiki ×1.15 crowding heuristic (NO counterfactual -- wiki "
+                 "boost has no config knob); OTHER=absent from top-100 (candidate "
+                 "starvation).")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return jsonl_path, md_path

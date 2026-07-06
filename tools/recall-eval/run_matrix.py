@@ -14,7 +14,16 @@ Matrix (architecture doc §4.4):
                             Recorded as UNAVAILABLE rather than faked; testing it
                             requires promoting rrf_k to a real config knob first.
   * enable_rerank=true   -- separate pass (rerank is request-global, not per
-                            variant), baseline config.
+                            variant), baseline config. recall_simulate's
+                            response exposes per-variant rerank policy counts
+                            (memory-server/src/facade_memory_ops/
+                            recall_simulate_ops/runner.rs:184-187, populated
+                            from crates/memory-server/src/memory_search_ops/
+                            rerank.rs's SearchRerankPolicy), so this pass
+                            reports how many cases actually got `applied` vs
+                            `not_needed` / `score_gap_too_wide` / `fallback` /
+                            `skipped_exact_token` -- not just that the request
+                            carried enable_rerank=true.
 
 Outputs (both gitignored -- matrix detail carries real ids/queries):
   * reports/matrix.local.jsonl  -- one line per variant, full per-case detail.
@@ -109,6 +118,22 @@ def run(cases: list[dict], top_k: int, url: str) -> tuple[list[dict], list[dict]
     rr_current = rep_rr.get("variants", [{}])[0]
     agg_rr = aggregate(rr_current, smap)
     agg_rr["name"] = "enable_rerank"
+    # CP3: prove rerank actually participated in ranking, not just that the
+    # request carried enable_rerank=true. recall_simulate exposes a per-variant
+    # rerank.policy_counts map (runner.rs build_recall_simulation_report ->
+    # run_variant, backed by SearchRerankPolicy in memory_search_ops/rerank.rs).
+    # Read it straight through -- if it's ever missing (kernel response shape
+    # change), record UNAVAILABLE rather than silently reporting zero counts.
+    rerank_block = rr_current.get("rerank")
+    if isinstance(rerank_block, dict) and "policy_counts" in rerank_block:
+        agg_rr["rerank_policy_counts"] = dict(rerank_block["policy_counts"])
+    else:
+        # Defensive only -- confirmed present as of this writing (runner.rs
+        # run_variant always emits "rerank": {"policy_counts": {...}}). If a
+        # future kernel response shape drops it, fail loud in the report
+        # instead of silently claiming rerank participated.
+        agg_rr["rerank_policy_counts"] = None
+        agg_rr["rerank_policy_status"] = "UNAVAILABLE_IN_RESPONSE"
     aggregates.append(agg_rr)
     detail.append({"variant": "enable_rerank", "config_env": {},
                    "cases": rr_current.get("cases", [])})
@@ -172,6 +197,19 @@ def write_reports(aggregates: list[dict], detail: list[dict], out_dir: str) -> t
             lines.append(f"> **{a['name']}**: {a['warning']}")
         if a.get("config_env"):
             lines.append(f"> `{a['name']}` config_env: `{json.dumps(a['config_env'])}`")
+        if a["name"] == "enable_rerank":
+            counts = a.get("rerank_policy_counts")
+            if counts is not None:
+                cell = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+                lines.append(
+                    f"> `enable_rerank` policy counts (proves rerank actually "
+                    f"participated, not just that the request carried "
+                    f"enable_rerank=true): {cell or 'none'}")
+            else:
+                lines.append(
+                    "> `enable_rerank` RERANK_POLICY: UNAVAILABLE_IN_RESPONSE "
+                    "(kernel gap -- recall_simulate did not return a "
+                    "rerank.policy_counts field; see README)")
     lines.append("")
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -204,6 +242,13 @@ def main() -> int:
         else:
             print(f"  {a['name']:16s} hit@10={a['hits']}/{a['n']} "
                   f"recall={a['recall_at_k']} mrr={a['mrr']}")
+        if a["name"] == "enable_rerank":
+            counts = a.get("rerank_policy_counts")
+            if counts is not None:
+                cell = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+                print(f"    RERANK_POLICY: {cell or 'none'}")
+            else:
+                print("    RERANK_POLICY: UNAVAILABLE_IN_RESPONSE (kernel gap)")
     return 0
 
 

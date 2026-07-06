@@ -4,8 +4,8 @@ Phase A tooling for the Recall Quality Architecture (`docs/engineering/
 architecture/recall-quality-architecture.md`, tachi#708). Pure Python, **zero
 kernel code**. It measures hybrid recall quality on the operator's *real*
 memory corpus by driving the live daemon's `recall_simulate` facade, and
-attributes misses to the doc's failure mechanisms (M1/M2/M3) so Phase B/C/D
-scope is decided by numbers, not intuition.
+attributes misses to the doc's failure mechanisms (M1 proven, M2/M3 heuristic)
+so Phase B/C/D scope is decided by numbers, not intuition.
 
 Companion: `tools/zvec-shadow/` (the fair-corpus FTS BM25 sidecar, PR #700) —
 this toolchain reuses its default-retrievability predicate and its sidecar as
@@ -33,7 +33,7 @@ the escape-gate comparison column.
 |---|---|
 | `build_cases.py` | Read-only export from the live DB → ~40 stratified labeled cases → `cases.local.json`. |
 | `run_matrix.py` | Drives the variant matrix via `recall_simulate` → `reports/matrix.local.jsonl` + `reports/aggregates.md`. |
-| `attribute_misses.py` | Classifies each baseline miss to M1/M2/M3/OTHER by counterfactual probing → `reports/attribution.{local.jsonl,md}`. |
+| `attribute_misses.py` | Classifies each baseline miss to M1/M2_heuristic/M3_heuristic/OTHER (M1 counterfactually proven, M2/M3 are heuristics -- no config knob to re-run) → `reports/attribution.{local.jsonl,md}`. |
 | `zvec_column.py` | Fires the same cases at the zvec-shadow sidecar for a comparison column → `reports/zvec_column.{local.jsonl,md}`. |
 | `mcp_client.py` | Shared streamable-HTTP MCP client (single source of truth for the transport). |
 
@@ -75,7 +75,16 @@ Variant matrix (architecture doc §4.4):
 - `or_fallback_055` — `or_fallback_fts_score_factor = 0.55` (the M1 fix).
 - `fts_heavier` — reweights the default + events/notes groups toward FTS.
 - `enable_rerank` — a **separate pass** (rerank is request-global, not
-  per-variant), baseline config.
+  per-variant), baseline config. `recall_simulate` exposes a per-variant
+  `rerank.policy_counts` map (`crates/memory-server/src/facade_memory_ops/
+  recall_simulate_ops/runner.rs:184-187`, backed by `SearchRerankPolicy` in
+  `crates/memory-server/src/memory_search_ops/rerank.rs:9-30`), so this row
+  reports how many cases actually got `applied` vs `not_needed` /
+  `score_gap_too_wide` / `fallback` / `skipped_exact_token` — proof rerank
+  participated in ranking, not just that the request carried
+  `enable_rerank=true`. If a future kernel response shape drops that field,
+  the aggregate prints `RERANK_POLICY: UNAVAILABLE_IN_RESPONSE (kernel gap)`
+  instead of silently claiming rerank ran.
 - `rrf_k_10` — **UNAVAILABLE, recorded not faked.** `rrf_k` is a hardcoded
   local constant in `scorer.rs` (`let rrf_k = 60.0;`), *not* a `RecallConfig`
   field, so `recall_simulate` variants cannot reach it. Measuring it requires
@@ -102,16 +111,27 @@ what Phase B/C/D need to know anyway. Per baseline miss:
 - `wide_rank` — rank under baseline config at `top_k=100` (candidate visibility).
 - `wiki_above` — `/wiki` rows outranking the target inside that top-100.
 
-Buckets (single primary, priority order):
+Buckets (single primary, priority order). **Only M1 is counterfactually
+proven** — `or_fallback_055` is a real `RecallConfig` knob, so the case is
+actually re-run under it and observed to climb into top-10. `rrf_k` and the
+wiki quality-multiplier have **no config knob** to dial down and re-run
+(`rrf_k` is a hardcoded local constant in `scorer.rs`; see `run_matrix.py`'s
+`rrf_k_10` UNAVAILABLE row), so `M2_heuristic` and `M3_heuristic` are
+proximity heuristics inferred by elimination, not measured mechanisms — treat
+their counts as hypotheses for Phase B/C/D scoping, not proof of which fix
+to make:
 
 - **M1** — OR-fallback recovers the target into top-10 → FTS all-or-nothing /
-  CJK-blocked fallback was the block.
+  CJK-blocked fallback was the block. Counterfactually proven.
 - **OTHER** — target absent even from top-100 → candidate starvation / filter
   misfire (the doc §6 "fourth mechanism" watch).
-- **M3** — target is a top-100 candidate and enough `/wiki` rows outrank it that
-  removing them lifts it into top-10 (`wiki_above >= wide_rank - 10`).
-- **M2** — target is a top-100 candidate but ranked out with no wiki
-  explanation → RRF k=60 rank-flattening (the fix run_matrix can't vary).
+- **M3_heuristic** — target is a top-100 candidate and enough `/wiki` rows
+  outrank it that removing them would lift it into top-10
+  (`wiki_above >= wide_rank - 10`). No counterfactual: the wiki boost was
+  never actually dialed down and re-run.
+- **M2_heuristic** — target is a top-100 candidate but ranked out with no wiki
+  explanation → attributed by elimination to RRF k=60 rank-flattening. No
+  counterfactual: `rrf_k` was never actually lowered and re-run.
 
 ```
 python3 attribute_misses.py --cases cases.local.json
