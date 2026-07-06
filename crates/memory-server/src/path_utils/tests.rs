@@ -273,3 +273,53 @@ fn plan_c_dir_name_is_stable_for_same_root() {
     assert_eq!(suffix.len(), 8);
     assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()), "{suffix}");
 }
+
+/// Regression for issue #493: on case-insensitive filesystems (macOS APFS,
+/// Windows NTFS default) `std::fs::canonicalize` resolves symlinks and
+/// `.`/`..` but does NOT fold letter case, so the same repo addressed with
+/// different casing (`/Users/x/Desktop/Repo` vs `/Users/x/desktop/repo`)
+/// derived two distinct stable-hash suffixes — splitting the project
+/// identity and intermittently breaking strict resolver paths. The Plan C
+/// alias rule now case-folds the canonical path before hashing on those
+/// platforms, so case-only spelling differences map to one stable alias.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn plan_c_dir_name_case_stable_on_case_insensitive_fs() {
+    // Non-existent paths keep canonicalize on its fallback branch (the raw
+    // input), so the result is deterministic regardless of the test host.
+    let upper = Path::new("/Users/plan_c/Quant_Analyzer_2026");
+    let lower = Path::new("/Users/plan_c/quant_analyzer_2026");
+    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
+    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
+    let (_, suffix_upper) = name_upper.rsplit_once('-').expect("upper suffix");
+    let (_, suffix_lower) = name_lower.rsplit_once('-').expect("lower suffix");
+    assert_eq!(
+        suffix_upper, suffix_lower,
+        "stable-hash suffix must be identical for case-only path differences"
+    );
+    // The basename is intentionally NOT folded (preserves legacy casing and
+    // existing assertions); under case-insensitive FS semantics the two alias
+    // names still denote the same directory.
+    assert_eq!(
+        name_upper.to_lowercase(),
+        name_lower.to_lowercase(),
+        "alias must be equal under case-insensitive FS semantics"
+    );
+}
+
+/// On case-sensitive filesystems (Linux, etc.) case-only path differences are
+/// genuinely different paths and must keep producing distinct alias
+/// identities. Guards against accidentally globalizing the case-fold beyond
+/// the case-insensitive-FS rule.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[test]
+fn plan_c_dir_name_case_distinct_on_case_sensitive_fs() {
+    let upper = Path::new("/tmp/plan_c/Repo");
+    let lower = Path::new("/tmp/plan_c/repo");
+    let name_upper = plan_c_dir_name_from_root(upper).expect("upper name");
+    let name_lower = plan_c_dir_name_from_root(lower).expect("lower name");
+    assert_ne!(
+        name_upper, name_lower,
+        "case-sensitive platforms must not collapse case-only paths into one alias"
+    );
+}
