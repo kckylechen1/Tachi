@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Quick Navigation
 
 - [Unreleased](#unreleased)
+- [1.6.4](#164---2026-07-06) — multi-project daemon stdio repair
 - [1.6.3](#163---2026-07-06) — recall quality overhaul and kernel reliability
 - [1.6.2](#162---2026-07-05) — release drift and CI guardrails
 - [1.6.1](#161---2026-06-29) — Homebrew daemon startup and tap automation
@@ -39,6 +40,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [1.6.4] - 2026-07-06 — multi-project daemon stdio repair
+
+Patch release for restoring project-directory MCP sessions after the 1.6.3
+stdio daemon proxy dogfood exposed the global-only daemon compatibility gap.
+
+### Changed
+
+- Stdio MCP proxying now treats project-bound sessions as pure transport to the
+  resident daemon: the adapter validates the fixed project binding, refuses
+  cross-project overrides, and injects the bound project only where project
+  defaulting is required.
+- The daemon runtime lazily attaches project databases on demand, keeping one
+  resident daemon as the owner of global and project DB files instead of
+  spawning direct project writers from each agent session.
+
+### Fixed
+
+- Project-directory stdio sessions can reuse a global-only daemon without
+  fataling on incompatible scope, while still writing to the correct project DB.
+- Project-bound reads now merge global plus project results, so global memories
+  no longer disappear when a session carries an explicit project binding.
+- Project-bound delete and archive calls try the project DB first and then fall
+  back to global, preserving the pre-proxy behavior for global IDs.
 
 ## [1.6.3] - 2026-07-06 — recall quality overhaul and kernel reliability
 
