@@ -22,6 +22,7 @@ async fn safe_merge_persists_status_and_event_when_flow_id_supplied() {
         MergeStrategy::Squash,
         true,
         Some(flow),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -73,6 +74,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         MergeStrategy::Squash,
         true,
         Some("flow_pending-safe-merge"),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -96,6 +98,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         MergeStrategy::Squash,
         false,
         Some("flow_blocked-safe-merge"),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -128,6 +131,7 @@ async fn safe_merge_persists_pending_blocked_and_merged_flow_events() {
         MergeStrategy::Squash,
         false,
         Some("flow_merged-safe-merge"),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -174,6 +178,7 @@ async fn safe_merge_persists_observed_merged_pr_without_overwriting_it_blocked()
         MergeStrategy::Squash,
         true,
         Some(flow),
+        &[],
         MergeGatePolicy::strict(),
     )
     .await
@@ -212,6 +217,7 @@ async fn safe_merge_rejects_invalid_flow_id() {
         MergeStrategy::Squash,
         true,
         Some("../escape"),
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -229,6 +235,7 @@ async fn safe_merge_propagates_pr_view_not_found() {
         MergeStrategy::Squash,
         true,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await

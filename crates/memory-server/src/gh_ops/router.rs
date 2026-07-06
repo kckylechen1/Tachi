@@ -77,15 +77,13 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         "pr_comment" => {
-            let number = params
-                .number
-                .ok_or("pr_comment requires 'number' parameter (PR number)")?;
+            let target = resolve_tachi_gh_pr_target(&params, "pr_comment")?;
             handle_gh_comment(
                 server,
                 "pr",
                 GhCommentParams {
-                    repo: required_repo(&params, "pr_comment")?,
-                    number,
+                    repo: target.repo,
+                    number: target.number,
                     body: params.body,
                     dry_run: params.dry_run.unwrap_or(false),
                 },
@@ -104,38 +102,34 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         "pr_read" => {
-            let number = params.number.ok_or("pr_read requires 'number' parameter")?;
+            let target = resolve_tachi_gh_pr_target(&params, "pr_read")?;
             handle_gh_pr_read(
                 server,
                 GhPrReadParams {
-                    repo: required_repo(&params, "pr_read")?,
-                    pr_number: number,
+                    repo: target.repo,
+                    pr_number: target.number,
                 },
             )
             .await
         }
         "pr_comments" => {
-            let number = params
-                .number
-                .ok_or("pr_comments requires 'number' parameter (PR number)")?;
+            let target = resolve_tachi_gh_pr_target(&params, "pr_comments")?;
             handle_gh_pr_comments(
                 server,
                 GhPrCommentsParams {
-                    repo: required_repo(&params, "pr_comments")?,
-                    pr_number: number,
+                    repo: target.repo,
+                    pr_number: target.number,
                 },
             )
             .await
         }
         "pr_review_digest" => {
-            let number = params
-                .number
-                .ok_or("pr_review_digest requires 'number' parameter (PR number)")?;
+            let target = resolve_tachi_gh_pr_target(&params, "pr_review_digest")?;
             handle_gh_pr_review_digest(
                 server,
                 GhPrCommentsParams {
-                    repo: required_repo(&params, "pr_review_digest")?,
-                    pr_number: number,
+                    repo: target.repo,
+                    pr_number: target.number,
                 },
                 params.author_filter,
                 params.write_digest.unwrap_or(true),
@@ -143,23 +137,21 @@ pub(crate) async fn handle_tachi_gh(
             .await
         }
         "safe_merge" => {
-            let number = params
-                .number
-                .ok_or("safe_merge requires 'number' parameter (PR number)")?;
+            let target = resolve_tachi_gh_pr_target(&params, "safe_merge")?;
             let strategy = parse_merge_strategy(params.merge_strategy.as_deref())?;
             let policy = merge_gate_policy_from_params(
                 params.merge_policy.as_deref(),
                 params.allow_umbrella_close,
             )?;
             let client = gh_client_for_server(server)?;
-            let repo = required_repo(&params, "safe_merge")?;
             handle_github_safe_merge(
                 &client,
-                &repo,
-                number,
+                &target.repo,
+                target.number,
                 strategy,
                 effective_safe_merge_dry_run(params.confirm, params.dry_run),
                 params.flow_id.as_deref(),
+                &params.tests_run,
                 policy,
             )
             .await
@@ -191,6 +183,7 @@ pub(crate) async fn handle_tachi_gh(
                 MergeStrategy::Squash,
                 true,
                 task_params.flow_id.as_deref(),
+                &[],
                 policy,
             )
             .await
@@ -225,6 +218,33 @@ fn required_repo(params: &TachiGhParams, action: &str) -> Result<String, String>
         .ok_or_else(|| format!("{action} requires 'repo' in owner/repo format"))
 }
 
+fn resolve_tachi_gh_pr_target(
+    params: &TachiGhParams,
+    action: &str,
+) -> Result<crate::task_lifecycle::GithubTarget, String> {
+    if let (Some(repo), Some(number)) = (
+        params
+            .repo
+            .as_deref()
+            .map(str::trim)
+            .filter(|repo| !repo.is_empty()),
+        params.number,
+    ) {
+        return Ok(crate::task_lifecycle::GithubTarget {
+            repo: repo.to_string(),
+            number,
+        });
+    }
+    if let Some(pr_ref) = params.pr_ref.as_deref() {
+        if let Some(target) = crate::task_lifecycle::parse_pr_ref(pr_ref) {
+            return Ok(target);
+        }
+    }
+    Err(format!(
+        "{action} requires either repo+number or pr_ref='owner/repo#123' / GitHub PR URL"
+    ))
+}
+
 fn lifecycle_task_params(
     params: &TachiGhParams,
 ) -> Result<crate::tool_params::TachiTaskParams, String> {
@@ -245,4 +265,36 @@ fn normalize_gh_response(action: &str, raw: &str) -> Result<String, String> {
             .or_insert_with(|| Value::String(action.to_string()));
     }
     serde_json::to_string(&value).map_err(|err| format!("serialize normalized gh response: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(value: Value) -> TachiGhParams {
+        serde_json::from_value(value).expect("params")
+    }
+
+    #[test]
+    fn pr_target_accepts_pr_ref_without_repo_or_number() {
+        let params = params(json!({
+            "action": "safe_merge",
+            "pr_ref": "owner/repo#42"
+        }));
+        let target = resolve_tachi_gh_pr_target(&params, "safe_merge").expect("target");
+        assert_eq!(target.repo, "owner/repo");
+        assert_eq!(target.number, 42);
+    }
+
+    #[test]
+    fn pr_target_keeps_repo_number_alias() {
+        let params = params(json!({
+            "action": "safe_merge",
+            "repo": "owner/repo",
+            "number": 42
+        }));
+        let target = resolve_tachi_gh_pr_target(&params, "safe_merge").expect("target");
+        assert_eq!(target.repo, "owner/repo");
+        assert_eq!(target.number, 42);
+    }
 }

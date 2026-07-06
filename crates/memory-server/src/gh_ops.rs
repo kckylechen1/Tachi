@@ -6,10 +6,10 @@ use crate::gh_safe_merge::{
 use crate::shell_ops::{append_github_event, merge_github_status, run_dir_for_flow_id};
 use crate::tool_params::{
     GhCommentParams, GhIssueCreateParams, GhIssueListParams, GhIssueReadParams, GhPrCommentsParams,
-    GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams,
+    GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams, TachiVerifyParams,
 };
 use crate::vault_ops::read_unlocked_vault_secret;
-use crate::verify_ops::evaluate_verification_gate;
+use crate::verify_ops::{evaluate_verification_gate, record_items as record_verification_items};
 use crate::MemoryServer;
 use async_trait::async_trait;
 use serde_json::{json, Value};

@@ -9,7 +9,7 @@ pub struct TachiGhParams {
     /// Repository in "owner/repo" format. Required for GitHub primitive actions; lifecycle actions may infer from issue_ref/pr_ref/flow_id.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Issue or PR number (required for issue_read, pr_read, pr_comments, pr_review_digest, safe_merge when repo is supplied)
+    /// Issue number, or PR number when paired with repo. PR actions also accept pr_ref.
     #[serde(
         default,
         deserialize_with = "super::coerce::opt_u64_from_string_or_number"
@@ -59,7 +59,7 @@ pub struct TachiGhParams {
     /// GitHub issue ref for lifecycle actions, e.g. owner/repo#123 or URL. Contract-mode ship emits `Refs <issue_ref>` in the generated PR body when set.
     #[serde(default)]
     pub issue_ref: Option<String>,
-    /// GitHub PR ref for lifecycle actions, e.g. owner/repo#123 or URL.
+    /// GitHub PR ref, e.g. owner/repo#123 or URL. Accepted by PR actions including pr_read, pr_comment, pr_comments, pr_review_digest, safe_merge, and lifecycle actions.
     #[serde(default)]
     pub pr_ref: Option<String>,
     /// Branch name to record in pr_handoff lifecycle artifacts.
@@ -68,7 +68,7 @@ pub struct TachiGhParams {
     /// Evidence references used by pr_handoff lifecycle artifacts.
     #[serde(default)]
     pub evidence_refs: Vec<String>,
-    /// Verification commands used by pr_handoff lifecycle artifacts and contract-mode ship PR body (`## Tested` section).
+    /// Verification commands used by pr_handoff lifecycle artifacts, contract-mode ship PR body (`## Tested` section), and safe_merge local verification recording when no ledger exists.
     #[serde(default)]
     pub tests_run: Vec<String>,
     /// Merge gate policy mode: permissive | standard | strict. Defaults to standard.

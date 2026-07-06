@@ -12,6 +12,7 @@ async fn safe_merge_dry_run_ready_does_not_call_pr_merge() {
         MergeStrategy::Squash,
         true,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -57,6 +58,7 @@ async fn safe_merge_ready_executes_merge_when_not_dry_run() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -91,6 +93,7 @@ async fn safe_merge_observes_already_merged_pr_without_blocking() {
         MergeStrategy::Squash,
         true,
         None,
+        &[],
         MergeGatePolicy::strict(),
     )
     .await
@@ -127,6 +130,7 @@ async fn safe_merge_reports_head_sha_mismatch_from_merge_client() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -148,6 +152,7 @@ async fn safe_merge_blocked_does_not_call_pr_merge_even_when_not_dry_run() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -172,6 +177,7 @@ async fn safe_merge_pending_emits_checks_polled() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
@@ -202,6 +208,7 @@ async fn safe_merge_skipped_checks_waits_and_labels_check_state() {
         MergeStrategy::Squash,
         false,
         None,
+        &[],
         MergeGatePolicy::standard(),
     )
     .await
