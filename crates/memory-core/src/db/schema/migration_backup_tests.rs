@@ -14,7 +14,8 @@ fn open_without_label_also_backs_up_before_migration() {
 
     {
         let conn = Connection::open(&db_path).expect("open");
-        conn.execute_batch("CREATE TABLE legacy(x)").expect("create");
+        conn.execute_batch("CREATE TABLE legacy(x)")
+            .expect("create");
     }
     std::fs::write(migration_marker_path(&db_path), "0.0.0:0").expect("stale marker");
 
@@ -23,11 +24,7 @@ fn open_without_label_also_backs_up_before_migration() {
     let backup_exists = std::fs::read_dir(tmp.path())
         .expect("read dir")
         .filter_map(|e| e.ok())
-        .any(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .contains("migration-bak")
-        });
+        .any(|e| e.file_name().to_string_lossy().contains("migration-bak"));
     assert!(
         backup_exists,
         "MemoryStore::open (path_validation=false) must create a backup before migrating"
