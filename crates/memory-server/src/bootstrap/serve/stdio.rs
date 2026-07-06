@@ -823,6 +823,24 @@ mod tests {
             .unwrap_or_else(|err| panic!("tool result json: {err}; text={text:?}"))
     }
 
+    fn assert_search_section_rows_are_objects(parsed: &serde_json::Value) {
+        let sections = parsed["sections"].as_array().unwrap_or_else(|| {
+            panic!("search JSON should contain sections array: {parsed:#}");
+        });
+        for section in sections {
+            let section_name = section["name"].as_str().unwrap_or("<unnamed>");
+            let rows = section["rows"].as_array().unwrap_or_else(|| {
+                panic!("section {section_name} rows should be an array: {section:#}");
+            });
+            for row in rows {
+                assert!(
+                    row.is_object(),
+                    "section {section_name} contains non-object row: row={row:#} parsed={parsed:#}"
+                );
+            }
+        }
+    }
+
     fn assert_tool_ok(result: &rmcp::model::CallToolResult) {
         assert!(
             !result.is_error.unwrap_or(false),
@@ -1150,6 +1168,122 @@ mod tests {
                 text.contains("project-proxy-search-e2e"),
                 "proxied search lost bound project row: {text}"
             );
+
+            (ct, daemon_task)
+        });
+
+        ct.cancel();
+        rt.block_on(daemon_task).expect("daemon task");
+        restore_env("TACHI_HOME", saved_home);
+        restore_env("SIGIL_HOME", saved_sigil);
+        restore_env("TACHI_APP_HOME", saved_app);
+    }
+
+    #[test]
+    fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("TACHI_HOME");
+        let saved_sigil = std::env::var_os("SIGIL_HOME");
+        let saved_app = std::env::var_os("TACHI_APP_HOME");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tachi_home = temp.path().join("home");
+        let global = tachi_home.join("global/memory.db");
+        let project_name = "Sigil-proxy-row-shape-e2e";
+        let project = tachi_home
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
+        std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+        std::env::set_var("TACHI_HOME", &tachi_home);
+        std::env::remove_var("SIGIL_HOME");
+        std::env::remove_var("TACHI_APP_HOME");
+        seed_project_db(&tachi_home, &project);
+
+        let rt = test_runtime();
+        let (ct, daemon_task) = rt.block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+            let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+            let proxy = StdioProxyServer {
+                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
+                app_home: tachi_home.clone(),
+                global_db_path: global.clone(),
+                project_db_path: Some(project.clone()),
+                client_project: Some(project_name.to_string()),
+            };
+
+            for (id, scope, summary) in [
+                (
+                    "global-proxy-row-shape-e2e",
+                    "global",
+                    "global PROXYROWSHAPE row",
+                ),
+                (
+                    "project-proxy-row-shape-e2e",
+                    "project",
+                    "project PROXYROWSHAPE row",
+                ),
+            ] {
+                let result = call_tool_via_stdio_proxy(
+                    proxy.clone(),
+                    "tachi_memory",
+                    serde_json::Map::from_iter([
+                        ("action".to_string(), serde_json::json!("save")),
+                        ("id".to_string(), serde_json::json!(id)),
+                        (
+                            "text".to_string(),
+                            serde_json::json!(format!("{summary} lossless text")),
+                        ),
+                        ("summary".to_string(), serde_json::json!(summary)),
+                        (
+                            "path".to_string(),
+                            serde_json::json!("/tests/stdio-proxy-row-shape-e2e"),
+                        ),
+                        ("category".to_string(), serde_json::json!("fact")),
+                        ("scope".to_string(), serde_json::json!(scope)),
+                        ("force".to_string(), serde_json::json!(true)),
+                    ]),
+                )
+                .await
+                .unwrap_or_else(|err| panic!("seed {id}: {err}"));
+                assert_tool_ok(&result);
+            }
+
+            let search_args = |i: usize| {
+                serde_json::Map::from_iter([
+                    ("action".to_string(), serde_json::json!("search")),
+                    ("query".to_string(), serde_json::json!("PROXYROWSHAPE")),
+                    ("scope".to_string(), serde_json::json!("memory")),
+                    ("top_k".to_string(), serde_json::json!(10 + i)),
+                    ("format".to_string(), serde_json::json!("json")),
+                ])
+            };
+            let calls = (0..32)
+                .map(|i| call_tool_via_stdio_proxy(proxy.clone(), "tachi_memory", search_args(i)));
+            let results = futures::future::join_all(calls).await;
+
+            for result in results {
+                let result = result.expect("proxied tachi_memory search should succeed");
+                assert_tool_ok(&result);
+                let parsed = first_text_json(&result);
+                assert_search_section_rows_are_objects(&parsed);
+                let text = parsed.to_string();
+                assert!(
+                    text.contains("global-proxy-row-shape-e2e"),
+                    "proxied search lost global row: {parsed:#}"
+                );
+                assert!(
+                    text.contains("project-proxy-row-shape-e2e"),
+                    "proxied search lost bound project row: {parsed:#}"
+                );
+            }
+
+            let runtime = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
+                .await
+                .expect("runtime_info should succeed");
+            assert_tool_ok(&runtime);
 
             (ct, daemon_task)
         });
