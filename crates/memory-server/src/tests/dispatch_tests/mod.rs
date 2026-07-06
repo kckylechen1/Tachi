@@ -7,6 +7,7 @@ mod acp_transport;
 mod completion_eval;
 mod prompt_credentials_board;
 mod recommend_policy;
+mod signature_evidence;
 mod workflow_artifacts;
 
 fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {

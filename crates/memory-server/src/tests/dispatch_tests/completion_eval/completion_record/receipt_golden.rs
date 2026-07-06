@@ -57,6 +57,7 @@ async fn g4_complete_default_omits_subagent_notes_sentinel() {
             scope: Some("global".to_string()),
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("complete");
@@ -114,6 +115,7 @@ async fn g4_complete_receipt_with_pr_ref_omits_echo() {
             scope: Some("global".to_string()),
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("complete with pr_ref");

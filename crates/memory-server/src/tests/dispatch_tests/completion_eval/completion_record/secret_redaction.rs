@@ -63,6 +63,7 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
             scope: Some("project".to_string()),
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("tachi_complete should succeed");

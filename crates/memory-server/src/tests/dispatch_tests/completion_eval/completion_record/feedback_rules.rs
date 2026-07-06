@@ -34,6 +34,7 @@ async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
             scope: None,
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("completion should succeed");

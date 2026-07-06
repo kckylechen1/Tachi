@@ -342,6 +342,9 @@ pub(crate) async fn handle_tachi_complete(
     };
     pipeline_status["dispatch_completion_link"] = dispatch_completion_link;
 
+    pipeline_status["signature_recording"] =
+        crate::signature_evidence::record_complete_signatures(server, &params);
+
     pipeline_status["post_complete_hooks"] = run_lesson_post_complete_hook(
         server,
         &params,

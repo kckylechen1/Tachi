@@ -37,6 +37,7 @@ async fn tachi_task_proposals_project_card_weakness_and_demotion_targets() {
                 scope: Some("project".to_string()),
                 project: None,
                 format: None,
+                signatures: Vec::new(),
             }))
             .await
             .expect("seed card risk eval row");

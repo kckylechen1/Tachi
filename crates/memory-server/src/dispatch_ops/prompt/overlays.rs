@@ -1,5 +1,8 @@
+use chrono::Utc;
+
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
+use tachi_dispatch::{SignatureEvidenceRow, COUNTER_CLAUSE_TOP_N};
 
 pub(super) fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRouting) -> String {
     let intent = route.intent;
@@ -44,6 +47,111 @@ pub(super) fn render_task_route_overlay(route: &crate::copilot_ops::TaskBriefRou
     }
 
     lines.join("\n")
+}
+
+/// Resolve the `(role_class, vendor)` lane for a dispatch, or `None` when it is
+/// not derivable or the vendor is `unknown` (which never receives projection).
+fn resolve_vaccination_lane(params: &TachiDispatchParams) -> Option<(String, String)> {
+    let profile_def = params
+        .profile
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .and_then(crate::dispatch_profile::resolve_dispatch_profile);
+    let backend = params
+        .agent
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| profile_def.map(|p| p.backend.to_string()))?;
+    let model = params
+        .model
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| profile_def.and_then(|p| p.model).map(str::to_string));
+    let vendor = tachi_dispatch::normalize_vendor(&backend, model.as_deref());
+    if vendor == "unknown" {
+        return None;
+    }
+    let role_source = profile_def.map(|p| p.role.to_string()).or_else(|| {
+        params
+            .stage
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+    })?;
+    let role = tachi_dispatch::dispatch_role_class(&role_source)?;
+    Some((role.to_string(), vendor))
+}
+
+/// Format the vaccination-clause lines. Isolated from IO so the storage-failure
+/// guard (frozen decision 3) is unit-testable: an `Err` load yields an empty
+/// section and a logged warning — never a blocked or failed dispatch.
+fn vaccination_overlay_lines(
+    rows: Result<Vec<SignatureEvidenceRow>, String>,
+    trust: Result<Option<&'static str>, String>,
+    now_epoch: i64,
+    role: &str,
+    vendor: &str,
+) -> Vec<String> {
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!(
+                "[dispatch] signature projection skipped for lane {role}/{vendor} (packet assembles without vaccination clauses): {err}"
+            );
+            return Vec::new();
+        }
+    };
+    let clauses = tachi_dispatch::project_counter_clauses(&rows, now_epoch, COUNTER_CLAUSE_TOP_N);
+    let trust = trust.unwrap_or_else(|err| {
+        eprintln!("[dispatch] self_report_trust skipped for vendor {vendor}: {err}");
+        None
+    });
+    if clauses.is_empty() && trust.is_none() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        "## Frozen-spec vaccination clauses".to_string(),
+        format!(
+            "- lane: {role}/{vendor} (auto-projected from adjudicated failures; ACT-R-decayed, top {COUNTER_CLAUSE_TOP_N})"
+        ),
+    ];
+    if let Some(trust) = trust {
+        lines.push(format!(
+            "- self_report_trust: {trust} — independently re-verify this vendor's self-reported CI/gate output before trusting it."
+        ));
+    }
+    for clause in clauses {
+        let severity = serde_json::to_value(clause.severity)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+        lines.push(format!(
+            "- [{severity}] {}: {}",
+            clause.signature, clause.counter_clause
+        ));
+    }
+    lines
+}
+
+/// Project the vendor-keyed counter-clauses for this dispatch's `(role, vendor)`
+/// lane into the packet's frozen-spec section. Returns `None` when the lane is
+/// not derivable or there is nothing to inject. Projection failure is swallowed
+/// (frozen decision 3): the packet always assembles.
+pub(super) fn render_vendor_vaccination_overlay(
+    server: &MemoryServer,
+    params: &TachiDispatchParams,
+) -> Option<String> {
+    let (role, vendor) = resolve_vaccination_lane(params)?;
+    let rows = crate::signature_evidence::rows_for_lane(server, &role, &vendor);
+    let trust = crate::signature_evidence::self_report_trust_for_vendor(server, &vendor);
+    let lines = vaccination_overlay_lines(rows, trust, Utc::now().timestamp(), &role, &vendor);
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 pub(super) fn render_dispatch_profile_overlay(
@@ -185,4 +293,49 @@ pub(super) fn render_dispatch_profile_overlay(
     }
     lines.push("- completion_report: report files changed, tests run, blockers, and any unavailable MCP/GitHub context explicitly.".to_string());
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn g4_storage_error_yields_empty_section_not_a_failure() {
+        // A simulated storage failure during projection must degrade to an empty
+        // section (packet assembles) — never propagate an error (frozen decision 3).
+        let lines = vaccination_overlay_lines(
+            Err("simulated store failure".to_string()),
+            Ok(None),
+            0,
+            "implementer",
+            "glm",
+        );
+        assert!(
+            lines.is_empty(),
+            "storage error must produce no clauses: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn trust_error_is_swallowed_but_clauses_still_project() {
+        // If only the trust lookup errors, clauses still project and the packet
+        // assembles without the trust line.
+        let now = chrono::Utc::now().timestamp();
+        let rows = vec![SignatureEvidenceRow {
+            kind: tachi_dispatch::SignatureRowKind::Signature,
+            signature: "fake_security_fix".to_string(),
+            severity: Some(tachi_dispatch::Severity::High),
+            evidence_ref: None,
+            recorded_at_epoch: now,
+        }];
+        let lines = vaccination_overlay_lines(
+            Ok(rows),
+            Err("trust lookup failed".to_string()),
+            now,
+            "implementer",
+            "glm",
+        );
+        assert!(lines.iter().any(|l| l.contains("fake_security_fix")));
+        assert!(!lines.iter().any(|l| l.contains("self_report_trust")));
+    }
 }

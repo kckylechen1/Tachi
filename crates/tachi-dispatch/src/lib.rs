@@ -9,6 +9,7 @@ pub mod policy;
 mod profiles;
 mod registry;
 mod routing;
+pub mod signatures;
 
 pub mod eval;
 pub use launcher::{
@@ -45,4 +46,10 @@ pub use routing::{
     AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
     RouteEvalRow, RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord,
     RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore, SkippedRoutePolicyRule,
+};
+pub use signatures::{
+    dispatch_role_class, normalize_vendor, project_counter_clauses, self_report_trust,
+    signature_def, ProjectedCounterClause, Severity, SignatureDef, SignatureEvidenceRow,
+    SignatureRowKind, ACT_R_ACTIVATION_FLOOR, ACT_R_DECAY_RATE, ACT_R_MIN_AGE_DAYS,
+    COUNTER_CLAUSE_TOP_N, ERROR_SIGNATURE_TAXONOMY,
 };

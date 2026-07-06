@@ -13,7 +13,9 @@ use serde_json::{json, Value};
 
 use self::completion::dispatch_can_self_complete;
 use self::context::{compact_example_text, prompt_row_text};
-use self::overlays::{render_dispatch_profile_overlay, render_task_route_overlay};
+use self::overlays::{
+    render_dispatch_profile_overlay, render_task_route_overlay, render_vendor_vaccination_overlay,
+};
 use self::skills::render_skill_invocation_contract;
 
 const UNTRUSTED_OPEN: &str = "<untrusted_content>";
@@ -52,6 +54,13 @@ pub(crate) async fn assemble_prompt_with_trace(
         || params.flow_id.is_some()
     {
         parts.push(render_dispatch_profile_overlay(server, params));
+    }
+
+    // Vendor-keyed vaccination clauses fire on the (role, vendor) lane whether or
+    // not a named profile is set, so a codex-as-implementer packet carries them
+    // even though only a glm implementer profile exists today (#735).
+    if let Some(overlay) = render_vendor_vaccination_overlay(server, params) {
+        parts.push(overlay);
     }
 
     let feedback_rules = crate::feedback_rule_ops::applicable_feedback_rules(

@@ -516,6 +516,11 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
     }
 
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
+    match crate::signature_evidence::seed_signature_taxonomy_evidence(&server) {
+        Ok(true) => eprintln!("[signatures] seeded 2026-07-05 error-signature taxonomy evidence"),
+        Ok(false) => {}
+        Err(err) => eprintln!("[signatures] taxonomy evidence seed skipped: {err}"),
+    }
     let recovered = crate::dispatch_ops::recover_orphaned_dispatch_runs();
     if !recovered.is_empty() {
         eprintln!(

@@ -57,6 +57,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             scope: Some("project".to_string()),
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("tachi_complete should succeed");
@@ -371,6 +372,7 @@ async fn tachi_complete_accepts_stringified_trajectory_array() {
             scope: Some("global".to_string()),
             project: None,
             format: None,
+            signatures: Vec::new(),
         }))
         .await
         .expect("tachi_complete should accept stringified trajectory");

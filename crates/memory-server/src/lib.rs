@@ -98,6 +98,7 @@ mod server_instructions;
 mod server_methods;
 mod shared_defs;
 mod shell_ops;
+mod signature_evidence;
 mod skill_chain_ops;
 mod skill_policy;
 mod status_ops;
