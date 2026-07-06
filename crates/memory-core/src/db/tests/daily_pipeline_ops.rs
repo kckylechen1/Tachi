@@ -91,46 +91,6 @@ fn collect_daily_health_snapshot_aggregates_groups_and_duplicates() {
 }
 
 #[test]
-fn truth_maintenance_prune_stale_archives_only_matching_rows() {
-    let mut conn = make_conn();
-    let mut stale = make_entry("stale", "stale memory");
-    stale.importance = 0.5;
-    stale.retention_policy = None;
-    stale.access_count = 0;
-    stale.timestamp = "2020-01-01T00:00:00Z".into();
-    upsert(&mut conn, &stale, false).unwrap();
-    conn.execute(
-        "UPDATE memories SET created_at = ?1 WHERE id = 'stale'",
-        params!["2020-01-01T00:00:00Z"],
-    )
-    .unwrap();
-
-    let mut durable = make_entry("durable", "durable memory");
-    durable.importance = 0.5;
-    durable.retention_policy = Some("durable".into());
-    durable.access_count = 0;
-    durable.timestamp = "2020-01-01T00:00:00Z".into();
-    upsert(&mut conn, &durable, false).unwrap();
-    conn.execute(
-        "UPDATE memories SET created_at = ?1 WHERE id = 'durable'",
-        params!["2020-01-01T00:00:00Z"],
-    )
-    .unwrap();
-
-    let pruned = truth_maintenance_prune_stale(&conn).expect("prune stale");
-    assert_eq!(pruned, 1);
-
-    let archived: i64 = conn
-        .query_row(
-            "SELECT archived FROM memories WHERE id = 'stale'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(archived, 1);
-}
-
-#[test]
 fn promote_memory_to_durable_updates_retention_fields() {
     let mut conn = make_conn();
     let entry = make_entry("promote-me", "promote candidate");

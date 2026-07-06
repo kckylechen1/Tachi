@@ -134,20 +134,6 @@ pub fn collect_daily_health_snapshot(
     })
 }
 
-pub fn truth_maintenance_prune_stale(conn: &Connection) -> Result<usize, MemoryError> {
-    let affected = conn.execute(
-        "UPDATE memories
-         SET archived = 1, updated_at = datetime('now')
-         WHERE archived = 0
-           AND COALESCE(retention_policy, '') NOT IN ('permanent', 'pinned', 'durable')
-           AND importance < 0.70
-           AND access_count = 0
-           AND julianday(COALESCE(NULLIF(created_at, ''), timestamp)) < julianday('now', '-60 days')",
-        [],
-    )?;
-    Ok(affected)
-}
-
 pub fn count_active_memories(conn: &Connection) -> Result<i64, MemoryError> {
     conn.query_row(
         "SELECT COUNT(*) FROM memories WHERE archived = 0",
@@ -164,20 +150,6 @@ pub fn count_consolidated_active_memories(conn: &Connection) -> Result<i64, Memo
         |row| row.get(0),
     )
     .map_err(MemoryError::from)
-}
-
-pub fn truth_maintenance_self_heal_promote_raw(conn: &Connection) -> Result<usize, MemoryError> {
-    let affected = conn.execute(
-        "UPDATE memories
-         SET tier = 'consolidated', updated_at = datetime('now')
-         WHERE archived = 0
-           AND tier = 'raw'
-           AND recall_count >= 3
-           AND query_diversity >= 3
-           AND COALESCE(retention_policy, '') NOT IN ('ephemeral')",
-        [],
-    )?;
-    Ok(affected)
 }
 
 pub fn list_memory_ids_needing_embedding(

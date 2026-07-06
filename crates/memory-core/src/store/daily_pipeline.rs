@@ -20,16 +20,8 @@ impl MemoryStore {
         db::collect_daily_health_snapshot(&self.conn)
     }
 
-    pub fn truth_maintenance_prune_stale(&self) -> Result<usize, MemoryError> {
-        db::truth_maintenance_prune_stale(&self.conn)
-    }
-
     pub fn count_consolidated_active_memories(&self) -> Result<i64, MemoryError> {
         db::count_consolidated_active_memories(&self.conn)
-    }
-
-    pub fn truth_maintenance_self_heal_promote_raw(&self) -> Result<usize, MemoryError> {
-        db::truth_maintenance_self_heal_promote_raw(&self.conn)
     }
 
     pub fn list_memory_ids_needing_embedding(
