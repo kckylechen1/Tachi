@@ -460,9 +460,9 @@ def main():
         if stderr_out:
             # Only show last few lines of stderr
             lines = stderr_out.strip().split("\n")
-            relevant = [l for l in lines[-8:] if not l.startswith("[gc]")]
+            relevant = [line for line in lines[-8:] if not line.startswith("[gc]")]
             if relevant:
-                print(f"\n--- Server log ---")
+                print("\n--- Server log ---")
                 print("\n".join(relevant))
 
 

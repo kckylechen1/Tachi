@@ -20,7 +20,6 @@ import json
 import os
 import sqlite3
 import sys
-import time
 from datetime import datetime
 
 # Inject SIGIL's mcp/ into path so we can reuse extractor + embedding + store
@@ -285,7 +284,7 @@ async def main():
         sessions = sessions[: args.limit]
 
     db_path = os.environ["MEMORY_DB_PATH"]
-    print(f"=== Gemini CLI → SIGIL Backfill ===", flush=True)
+    print("=== Gemini CLI → SIGIL Backfill ===", flush=True)
     print(f"Sessions found: {len(sessions)}", flush=True)
     print(f"Target DB: {db_path}", flush=True)
     print(f"Dry run: {args.dry_run}", flush=True)
@@ -357,7 +356,7 @@ async def main():
 
     progress_conn.close()
 
-    print(f"\n=== Done ===", flush=True)
+    print("\n=== Done ===", flush=True)
     print(
         f"Total: {total_saved} saved, {total_skipped} skipped, {total_errors} errors, "
         f"{skipped_done} already-done (skipped)",
