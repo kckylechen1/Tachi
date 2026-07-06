@@ -810,14 +810,11 @@ fn golden_corpus_recall_order_is_deterministic() {
     }
 }
 
-/// VARIANT HOOK — documents that `or_fallback` is a live per-call lever that is
-/// OFF by default today. The assertion is on the FTS *channel score* (a
-/// deterministic value, unlike rank): a partial-coverage target scores 0 through
-/// the FTS channel under the default config and a positive score once the
-/// eval-calibrated 0.55 factor turns the OR fallback on. When Phase B flips the
-/// default, the `== 0.0` branch here starts to fail — that is the intended
-/// witness of the behavior change, not a regression, and this test is updated
-/// then.
+/// VARIANT HOOK — documents that `or_fallback` is a live per-call lever and
+/// that tachi#708 Gate 1 intentionally turned the factory default on. The
+/// assertion is on the FTS *channel score* (a deterministic value, unlike
+/// rank): a partial-coverage target scores 0 when explicitly disabled and a
+/// positive score under the default eval-calibrated 0.55 factor.
 #[test]
 fn golden_corpus_or_fallback_override_is_a_live_lever() {
     let mut conn = setup();
@@ -846,24 +843,22 @@ fn golden_corpus_or_fallback_override_is_a_live_lever() {
             .expect("symbolic candidates keep the partial-coverage target in the pool")
     };
 
-    // Guard the assumption this test witnesses.
-    assert_eq!(RecallConfig::default().or_fallback_fts_score_factor, 0.0);
-
-    // Default: conjunctive-only FTS → the target has no FTS-channel signal.
+    // Explicit off: conjunctive-only FTS → the target has no FTS-channel signal.
     assert_eq!(
-        fts_channel_score(None),
+        fts_channel_score(Some(RecallConfig {
+            or_fallback_fts_score_factor: 0.0,
+            ..RecallConfig::default()
+        })),
         0.0,
-        "default config keeps the conjunctive-AND precision (OR fallback OFF)"
+        "or_fallback=0.0 keeps the conjunctive-AND precision"
     );
 
-    // or_fallback=0.55: coverage is rewarded, the target now carries FTS signal.
-    let tuned = RecallConfig {
-        or_fallback_fts_score_factor: 0.55,
-        ..RecallConfig::default()
-    };
+    // tachi#708 Gate 1: default 0.55 rewards coverage with no mechanical harm
+    // on the adversarial corpus (0 hit→miss, 1 miss→hit, 30 unchanged).
+    assert_eq!(RecallConfig::default().or_fallback_fts_score_factor, 0.55);
     assert!(
-        fts_channel_score(Some(tuned)) > 0.0,
-        "per-call or_fallback=0.55 should give the partial-coverage target FTS signal"
+        fts_channel_score(None) > 0.0,
+        "default or_fallback=0.55 should give the partial-coverage target FTS signal"
     );
 }
 

@@ -9,7 +9,9 @@ const DEFAULT_RAW_HALF_LIFE_DAYS: f64 = 30.0;
 const DEFAULT_CONSOLIDATED_HALF_LIFE_DAYS: f64 = 60.0;
 const DEFAULT_PATTERN_HALF_LIFE_DAYS: f64 = 30_000.0;
 const DEFAULT_ID_LIKE_EXACT_MATCH_BOOST: f64 = 12.0;
-const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.0;
+// Provisional tachi#708 Phase B calibration. Gate 1 mechanical readout on the
+// adversarial corpus: 0 hit→miss, 1 miss→hit, 30 unchanged.
+const DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR: f64 = 0.55;
 const DEFAULT_OR_FALLBACK_FTS_MAX_TERMS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -327,6 +329,8 @@ mod tests {
             config.id_like_exact_match_boost,
             DEFAULT_ID_LIKE_EXACT_MATCH_BOOST
         );
+        // tachi#708 Gate 1 intentionally changed the factory default from
+        // off to the provisional 0.55 coverage channel.
         assert_eq!(
             config.or_fallback_fts_score_factor,
             DEFAULT_OR_FALLBACK_FTS_SCORE_FACTOR
