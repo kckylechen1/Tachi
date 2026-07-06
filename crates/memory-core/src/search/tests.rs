@@ -11,6 +11,7 @@ mod access;
 mod baseline;
 mod config;
 mod expansion;
+mod golden_corpus;
 mod graph;
 mod noise;
 mod supersession;
