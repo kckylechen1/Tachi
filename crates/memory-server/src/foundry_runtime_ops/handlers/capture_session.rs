@@ -273,6 +273,10 @@ pub(crate) async fn handle_capture_session(
         .iter()
         .map(|entry| entry.text.clone())
         .collect::<Vec<_>>();
+    let texts: Vec<_> = texts
+        .iter()
+        .map(|t| crate::memory_search_ops::scrub_secrets(t).0)
+        .collect();
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
         Err(err) => {

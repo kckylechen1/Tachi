@@ -11,7 +11,8 @@ pub(in crate::foundry_runtime_ops::recall_cache) async fn search_rows_for_recall
 ) -> Result<Vec<serde_json::Value>, String> {
     if let Some(db_path) = item.db_path.as_ref() {
         if params.query_vec.is_none() {
-            match server.llm.embed_voyage(&params.query, "query").await {
+            let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
+            match server.llm.embed_voyage(&scrubbed_query, "query").await {
                 Ok(query_vec) => params.query_vec = Some(query_vec),
                 Err(e) => {
                     tracing::warn!(

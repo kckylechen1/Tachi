@@ -112,6 +112,10 @@ pub(crate) async fn embed_and_write_batch(
         .iter()
         .map(|(_, text, summary, _)| embedding_input(text, summary))
         .collect();
+    let texts: Vec<String> = texts
+        .iter()
+        .map(|t| crate::memory_search_ops::scrub_secrets(t).0)
+        .collect();
 
     let vecs = llm
         .embed_voyage_batch(&texts, "document")
